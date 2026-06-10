@@ -18,6 +18,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+from alpaca.data.enums import Adjustment
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
     StockBarsRequest,
@@ -104,8 +105,11 @@ def backfill_bars() -> None:
         total = 0
         for i in range(0, len(symbols), CHUNK):
             chunk = symbols[i : i + CHUNK]
+            # split+dividend adjusted, so multi-day returns/labels aren't corrupted
+            # by splits or ex-div gaps (Alpaca defaults to raw/unadjusted).
             request = StockBarsRequest(
-                symbol_or_symbols=chunk, timeframe=TimeFrame.Minute, start=start, end=end
+                symbol_or_symbols=chunk, timeframe=TimeFrame.Minute,
+                start=start, end=end, adjustment=Adjustment.ALL,
             )
             barset = data_client.get_stock_bars(request)
             with conn.cursor() as cur:
