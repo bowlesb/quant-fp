@@ -51,7 +51,9 @@ services:
         condition: service_healthy
 
   scheduler:
-    build: ./services/scheduler
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
     <<: *common
     environment:
       SYMBOLS: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"

@@ -31,3 +31,9 @@ why.
   (monorepo build context). Verified rich, sane aggregates landing live.
 - Wrote docs/RESEARCH.md: 40-item ML-approaches backlog organized by ring and a
   first experiment wave to exercise the full gauntlet once Phase 2/3 infra exists.
+- Freed 2.1TB on SSD (deleted regenerable carved files after proving 15/25
+  byte-identical re-extraction from sdb; kept curated extracts + recovery scripts;
+  sdb/sda untouched). SSD now 2.6TB free; backfill unblocked.
+- Built universe construction (quantlib.universe + scheduler): screened 12,722
+  tradable equities, selected exactly 1,000 most-liquid (price>$5, ADV$>$10M;
+  cut at ~$161M ADV) into universe_membership for the day. 8 tests pass.

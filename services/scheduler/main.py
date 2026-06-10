@@ -12,8 +12,14 @@ from datetime import date, datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import psycopg
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetCalendarRequest
+from alpaca.trading.enums import AssetClass, AssetStatus
+from alpaca.trading.requests import GetAssetsRequest, GetCalendarRequest
+
+from quantlib.universe import SymbolStats, select_universe
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
@@ -43,6 +49,66 @@ trading = TradingClient(
     os.environ["ALPACA_SECRET_KEY"],
     paper=(os.environ.get("MODE", "paper") == "paper"),
 )
+data_client = StockHistoricalDataClient(
+    os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
+)
+
+UNIVERSE_LOOKBACK_DAYS = int(os.environ.get("UNIVERSE_LOOKBACK_DAYS", "20"))
+UNIVERSE_MAX_SYMBOLS = int(os.environ.get("UNIVERSE_MAX_SYMBOLS", "1000"))
+UNIVERSE_CHUNK = 400
+
+
+def tradable_equities() -> list[str]:
+    """Active, tradable US common equities on major exchanges (no OTC)."""
+    assets = trading.get_all_assets(
+        GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+    )
+    keep_exchanges = {"NASDAQ", "NYSE", "ARCA", "AMEX", "BATS"}
+    return sorted(
+        asset.symbol
+        for asset in assets
+        if asset.tradable
+        and str(getattr(asset.exchange, "value", asset.exchange)) in keep_exchanges
+        and "/" not in asset.symbol
+    )
+
+
+def fetch_symbol_stats(symbols: list[str], start: date) -> list[SymbolStats]:
+    """Daily-bar ADV($) and latest close per symbol over the lookback window."""
+    stats: list[SymbolStats] = []
+    for i in range(0, len(symbols), UNIVERSE_CHUNK):
+        chunk = symbols[i : i + UNIVERSE_CHUNK]
+        request = StockBarsRequest(
+            symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start
+        )
+        barset = data_client.get_stock_bars(request)
+        for symbol, bars in barset.data.items():
+            if not bars:
+                continue
+            adv = sum(bar.close * bar.volume for bar in bars) / len(bars)
+            stats.append(SymbolStats(symbol=symbol, price=bars[-1].close, adv_dollar=adv))
+        logger.info("universe stats: %d/%d symbols processed", min(i + UNIVERSE_CHUNK, len(symbols)), len(symbols))
+    return stats
+
+
+def build_universe(conn: psycopg.Connection, trade_date: date) -> int:
+    symbols = tradable_equities()
+    logger.info("universe: %d tradable equities to screen", len(symbols))
+    stats = fetch_symbol_stats(symbols, trade_date - timedelta(days=UNIVERSE_LOOKBACK_DAYS * 2))
+    chosen = select_universe(stats, max_symbols=UNIVERSE_MAX_SYMBOLS)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM universe_membership WHERE trade_date = %s", (trade_date,))
+        for stat in chosen:
+            cur.execute(
+                """
+                INSERT INTO universe_membership
+                    (trade_date, symbol, in_universe, adv_dollar, price)
+                VALUES (%s,%s,TRUE,%s,%s)
+                """,
+                (trade_date, stat.symbol, stat.adv_dollar, stat.price),
+            )
+    logger.info("universe %s: selected %d symbols", trade_date, len(chosen))
+    return len(chosen)
 
 
 def coerce_time(value: object) -> dtime:
@@ -146,9 +212,25 @@ def main() -> None:
     while True:
         try:
             run_daily_job()
+            maybe_build_universe()
         except (psycopg.Error, ValueError, KeyError) as exc:
             logger.error("daily job error: %s", exc)
         time.sleep(LOOP_SECONDS)
+
+
+def maybe_build_universe() -> None:
+    """Build today's universe once per day (skip if already present)."""
+    today = datetime.now(timezone.utc).date()
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM universe_membership WHERE trade_date = %s",
+                (today,),
+            )
+            row = cur.fetchone()
+            if row and row[0] > 0:
+                return
+        build_universe(conn, today)
 
 
 if __name__ == "__main__":

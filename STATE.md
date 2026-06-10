@@ -54,9 +54,11 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
       quote_agg_1m, trades_raw (30-day rolling). Verified live: realistic signed
       volume, ~1-4 bps spreads, ~11k raw trades/min across 10 symbols.
 - [x] **docs/RESEARCH.md** — 40-item ML-approaches backlog (rings 1–4 + methodology).
+- [x] **Universe construction** in scheduler: screens ~12.7k tradable equities by
+      price>$5 and ADV$>$10M, keeps the most-liquid ≤1,000 into universe_membership
+      (point-in-time, per trade_date). Pure selection in quantlib.universe (tested);
+      runs once/day. Spread filter is a later refinement.
 - [ ] News stream → news table (lower priority; collection-now-model-later).
-- [ ] Universe construction: nightly liquid ~1,000-symbol screen + point-in-time
-      membership in universe_membership.
 - [ ] Backfiller: 6yr REST bars/trades → DB through quantlib (same code path).
 - [ ] Nightly streamed-vs-REST validation job (the Phase 1 gate).
 - [ ] Scale live ingestion from 10 → ~1,000 symbols (batched async writes).
