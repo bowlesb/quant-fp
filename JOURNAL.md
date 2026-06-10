@@ -37,3 +37,12 @@ why.
 - Built universe construction (quantlib.universe + scheduler): screened 12,722
   tradable equities, selected exactly 1,000 most-liquid (price>$5, ADV$>$10M;
   cut at ~$161M ADV) into universe_membership for the day. 8 tests pass.
+- Built backfiller (REST bars -> source='backfill') + validate-bars gate.
+  FINDING (2026-06-10): streamed vs same-day REST bars match 99.76% on OHLC,
+  95% incl. volume; all mismatches are tiny late-corrections (volume ±1 print,
+  sub-cent closes). Real-time bars are built just before late prints settle, so
+  REST (post-consolidation) differs slightly. IMPLICATION: treat source='backfill'
+  as authoritative for training/features; source='stream' is what we trade on live.
+  This is a real, bounded source of train/serve skew to track — exactly why the
+  schema keeps both sources. Official gate number should be measured on a fully
+  settled prior day, not same-day.

@@ -59,8 +59,16 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
       (point-in-time, per trade_date). Pure selection in quantlib.universe (tested);
       runs once/day. Spread filter is a later refinement.
 - [ ] News stream → news table (lower priority; collection-now-model-later).
-- [ ] Backfiller: 6yr REST bars/trades → DB through quantlib (same code path).
-- [ ] Nightly streamed-vs-REST validation job (the Phase 1 gate).
+- [x] **Backfiller** (`services/backfiller`, run-on-demand tool) + **validate-bars**
+      gate. Verified: backfilled today's 10 symbols (4,736 bars, source='backfill')
+      and compared to streamed — 99.76% OHLC / 95% incl. volume; mismatches are
+      benign late-corrections (±1 print). Finding logged in JOURNAL: treat backfill
+      as authoritative for training; stream is for live trading.
+      Run: `docker compose --profile tools run --rm backfiller backfill-bars|validate-bars`.
+- [ ] Validate on a fully-settled prior day for the official ≥99.9% gate number.
+- [ ] Backfill trade/quote AGGREGATES through quantlib (the parity-on-real-data
+      proof) + extend validation to aggregates.
+- [ ] 6-year historical backfill across the universe (disk now available).
 - [ ] Scale live ingestion from 10 → ~1,000 symbols (batched async writes).
 - Prereq for backfill: free SSD headroom (move recovered files off — task #3,
   awaiting Ben's OK to wipe sdb).
