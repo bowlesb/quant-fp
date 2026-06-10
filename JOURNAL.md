@@ -78,6 +78,23 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- DATA PROBE BATTERY (now scripts/data_probes.sql; run + extend every cycle):
+  - Integrity: 0 violations across 11 invariants (OHLC ordering, vwap range, signs,
+    grid, imbalance bounds). Clean.
+  - Independent cross-check WIN: our trade_agg.n_trades vs bars.trade_count correlate
+    0.9982 (98.4% within 5%) — validates the tick aggregation from an independent source.
+  - Extreme 1-min returns (139 >50%, max 785%): ALL gap-spanning (prev_ts Mar 31 →
+    ts Jun 3). Benign artifact of the temporary April/May backfill hole; self-resolves
+    as the manager fills months. Not bad data.
+  - REAL FINDING — extended hours + session_open bug: 19.5% of bars are outside RTH
+    (13:30-20:00 UTC); earliest bar/day is ~00:00/09:00 UTC. So the feature builder's
+    session_open (= first calendar-day bar) is a premarket/overnight price, NOT the
+    09:30 ET open → gap_from_open (and RTH assumptions) are WRONG. FIX in the panel
+    rebuild: restrict features/labels to RTH and define session_open as first RTH bar
+    (also consider timestamp-based feature lookups vs positional, which assume
+    contiguous minutes). Added to top priorities.
+  - Panel is 94-99% NaN for key features (data thinness + micro only on 10-symbol
+    subset) — confirms unfit for modeling; reinforces "read nothing off it yet."
 - CRITIC AGENT (wake red-team) findings + my decisions:
   - #1 (ACCEPTED, top priority): survivorship/point-in-time-universe leakage — the
     historical feature AND label builders use universe of max(trade_date) applied to

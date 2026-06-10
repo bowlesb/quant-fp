@@ -41,6 +41,11 @@ continuation; doesn't wait to be asked.
       via quantlib.universe), then make build_feature_store/build_labels select per-date
       membership and demean labels within that date's universe. Rebuild the panel.
       Reason: current builders use max(trade_date) universe → survivorship bias.
+- [ ] **Same rebuild: RTH + session_open fix (probe-flagged bug).** 19.5% of bars are
+      extended-hours; session_open currently = first calendar-day bar (premarket/
+      overnight), not the 09:30 ET open → gap_from_open wrong. Restrict features/labels
+      to RTH (13:30-20:00 UTC); session_open = first RTH bar. Consider timestamp-based
+      feature lookups (positional offsets assume contiguous minutes).
 - [ ] Automate nightly validate-bars on the prior SETTLED day in the scheduler
       (closes the Phase-1 parity gate honestly; needs ≥1 settled stream day — earliest
       tomorrow).

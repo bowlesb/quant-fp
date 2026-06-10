@@ -108,6 +108,29 @@ no pending build task, do NOT sit idle — do useful research toward the mission
 Honesty rule still applies: a quick experiment that says "this doesn't work" is a
 real result worth logging — don't fish for false positives.
 
+## Data probing (Ben's directive — the MOST important thing while collecting data)
+
+As data accumulates, continuously probe it and sanity-check it — **creatively and
+from many angles.** Do NOT run a few checks, see green, and declare it OK. Every
+cycle, run the battery in `scripts/data_probes.sql` AND invent at least one NEW way
+to look at the data you haven't tried. A false sense of clean data is how a false
+edge gets built.
+
+Diversity menu (rotate + extend, don't just rerun the same set):
+- **Integrity invariants:** OHLC ordering, vwap∈[low,high], positive close/volume,
+  on-grid timestamps, imbalance∈[-1,1], non-negative spreads.
+- **Independent cross-checks:** our trade_agg.n_trades vs bars.trade_count;
+  streamed vs REST-backfill OHLCV; aggregate parity (live vs recompute).
+- **Distributional:** per-feature NaN rate + variance (catch dead/constant feats),
+  return/spread/volume distributions, tails, outliers, per-symbol vs cross-section.
+- **Temporal/coverage:** trading-day coverage vs calendar, bars/day per symbol,
+  largest gaps, ingestion latency (ingested_at−ts), RTH vs extended-hours split.
+- **Relational sanity:** do features relate to labels in plausible (not absurd)
+  ways; is session_open the real RTH open; are corporate actions adjusted.
+- **Adversarial:** assume the data is subtly wrong and try to prove it. What would
+  a bug look like, and does a query reveal it?
+Log anomalies in JOURNAL with diagnosis; fix real bugs; extend the probe script.
+
 ## Grafana dashboards (Ben's directive)
 
 Add graphs **one at a time**, and make sure Ben understands each before adding the
