@@ -25,8 +25,14 @@ continuation; doesn't wait to be asked.
       view** (feature_vectors ⨝ labels) created (`db/init/02_views.sql`).
 - [x] Priority-E sanity look logged (short-horizon reversal signature visible but
       statistically meaningless on 1 day — see JOURNAL).
-- [ ] **Build features+labels on source='backfill' once the 7-day backfill finishes**
-      → the real multi-day universe panel for modeling.
+- [x] Grafana graph #1: "Ingestion — Live Coverage" (symbols/min) at
+      http://192.168.1.32:3001 (anonymous viewer). Add more ONE AT A TIME w/ Ben.
+- [x] ML advisor proposal folded into docs/RESEARCH.md (first-wave E0-E4; cheap wins
+      = vol-scale label + signed-volume z-scores; leakage canary + deflated Sharpe).
+- [x] Data-quality fix: backfiller now requests split+div-adjusted bars (was raw).
+- [ ] Re-run the 7-day (and deep) backfill with adjustment once current run finishes.
+- [ ] **Build features+labels on source='backfill' once backfill finishes** → the
+      real multi-day universe panel for modeling.
 - [x] asset_metadata (Alpaca exchange + shortable/borrow/fractionable flags),
       refreshed daily by scheduler. Universe: 939/1000 shortable — short leg must
       filter to shortable (wire into Phase 4 portfolio construction).
