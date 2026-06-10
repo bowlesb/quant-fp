@@ -66,10 +66,14 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
       as authoritative for training; stream is for live trading.
       Run: `docker compose --profile tools run --rm backfiller backfill-bars|validate-bars`.
 - [ ] Validate on a fully-settled prior day for the official ≥99.9% gate number.
-- [ ] Backfill trade/quote AGGREGATES through quantlib (the parity-on-real-data
-      proof) + extend validation to aggregates.
-- [ ] 6-year historical backfill across the universe (disk now available).
-- [ ] Scale live ingestion from 10 → ~1,000 symbols (batched async writes).
+- [x] **Backfill trade/quote AGGREGATES through quantlib + validate** (parity on
+      real data). Verified: trade_agg 95.2% within 2% (mean rel diff 0.7%),
+      quote_agg spread 100% match, over 63 overlapping minutes. Same quantlib code
+      on live ticks vs historical REST ticks → matching microstructure features.
+      Run: `... backfiller backfill-aggs` / `validate-aggs`.
+- [ ] Scale live ingestion from 10 → ~1,000 symbols (batched async writes; control
+      raw-tick volume). Then verify ≥99.5% capture + <5s latency at full load.
+- [ ] 6-year historical backfill across the universe (disk now available; long job).
 - Prereq for backfill: free SSD headroom (move recovered files off — task #3,
   awaiting Ben's OK to wipe sdb).
 

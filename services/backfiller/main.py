@@ -18,8 +18,21 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import (
+    StockBarsRequest,
+    StockQuotesRequest,
+    StockTradesRequest,
+)
 from alpaca.data.timeframe import TimeFrame
+
+from quantlib.aggregates import (
+    QuoteTick,
+    TickState,
+    TradeTick,
+    aggregate_quotes,
+    aggregate_trades,
+    bucket_minute,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backfiller")
@@ -53,6 +66,19 @@ def universe_symbols(conn: psycopg.Connection) -> list[str]:
         return [row[0] for row in cur.fetchall()]
 
 
+def resolve_window() -> tuple[datetime, datetime]:
+    start = datetime.fromisoformat(
+        os.environ.get("BACKFILL_START", datetime.now(timezone.utc).date().isoformat())
+    ).replace(tzinfo=timezone.utc)
+    end_env = os.environ.get("BACKFILL_END")
+    end = (
+        datetime.fromisoformat(end_env).replace(tzinfo=timezone.utc)
+        if end_env
+        else datetime.now(timezone.utc) - timedelta(minutes=1)
+    )
+    return start, end
+
+
 def resolve_symbols(conn: psycopg.Connection) -> list[str]:
     env = os.environ.get("BACKFILL_SYMBOLS", "").strip()
     if env.lower() == "universe":
@@ -63,15 +89,7 @@ def resolve_symbols(conn: psycopg.Connection) -> list[str]:
 
 
 def backfill_bars() -> None:
-    start = datetime.fromisoformat(
-        os.environ.get("BACKFILL_START", datetime.now(timezone.utc).date().isoformat())
-    ).replace(tzinfo=timezone.utc)
-    end_env = os.environ.get("BACKFILL_END")
-    end = (
-        datetime.fromisoformat(end_env).replace(tzinfo=timezone.utc)
-        if end_env
-        else datetime.now(timezone.utc) - timedelta(minutes=1)
-    )
+    start, end = resolve_window()
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
         symbols = resolve_symbols(conn)
         logger.info("backfilling bars for %d symbols, %s .. %s", len(symbols), start, end)
@@ -95,6 +113,131 @@ def backfill_bars() -> None:
                         total += 1
             logger.info("backfilled through %d/%d symbols (%d bars)", min(i + CHUNK, len(symbols)), len(symbols), total)
         logger.info("backfill complete: %d bars inserted (source=backfill)", total)
+
+
+TRADE_AGG_SQL = """
+INSERT INTO trade_agg_1m
+    (symbol, ts, signed_volume, buy_volume, sell_volume, large_print_cnt,
+     trade_intensity, median_size, p95_size, n_trades, source)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'backfill')
+ON CONFLICT (symbol, ts, source) DO NOTHING
+"""
+QUOTE_AGG_SQL = """
+INSERT INTO quote_agg_1m
+    (symbol, ts, mean_spread_bps, median_spread_bps, mean_bid_size, mean_ask_size,
+     quote_imbalance, n_quotes, source)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'backfill')
+ON CONFLICT (symbol, ts, source) DO NOTHING
+"""
+
+
+def backfill_aggregates() -> None:
+    """Backfill per-minute trade & quote aggregates from historical ticks through
+    the SAME quantlib functions the live ingestor uses. Parity by construction."""
+    start, end = resolve_window()
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+        symbols = resolve_symbols(conn)
+        logger.info("backfilling aggregates for %d symbols, %s .. %s", len(symbols), start, end)
+        for symbol in symbols:
+            trades_resp = data_client.get_stock_trades(
+                StockTradesRequest(symbol_or_symbols=symbol, start=start, end=end)
+            )
+            quotes_resp = data_client.get_stock_quotes(
+                StockQuotesRequest(symbol_or_symbols=symbol, start=start, end=end)
+            )
+            trade_ticks = trades_resp.data.get(symbol, [])
+            quote_ticks = quotes_resp.data.get(symbol, [])
+
+            trades_by_min: dict[int, list[TradeTick]] = {}
+            for trade in trade_ticks:
+                minute = bucket_minute(trade.timestamp.timestamp())
+                trades_by_min.setdefault(minute, []).append(
+                    TradeTick(trade.timestamp.timestamp(), float(trade.price), float(trade.size))
+                )
+            quotes_by_min: dict[int, list[QuoteTick]] = {}
+            for quote in quote_ticks:
+                minute = bucket_minute(quote.timestamp.timestamp())
+                quotes_by_min.setdefault(minute, []).append(
+                    QuoteTick(
+                        quote.timestamp.timestamp(),
+                        float(quote.bid_price), float(quote.ask_price),
+                        float(quote.bid_size), float(quote.ask_size),
+                    )
+                )
+
+            state = TickState()
+            with conn.cursor() as cur:
+                for minute in sorted(trades_by_min):
+                    agg = aggregate_trades(trades_by_min[minute], state)
+                    ts = datetime.fromtimestamp(minute, tz=timezone.utc)
+                    cur.execute(
+                        TRADE_AGG_SQL,
+                        (symbol, ts, agg.signed_volume, agg.buy_volume, agg.sell_volume,
+                         agg.large_print_cnt, agg.trade_intensity, agg.median_size,
+                         agg.p95_size, agg.n_trades),
+                    )
+                for minute in sorted(quotes_by_min):
+                    qagg = aggregate_quotes(quotes_by_min[minute])
+                    ts = datetime.fromtimestamp(minute, tz=timezone.utc)
+                    cur.execute(
+                        QUOTE_AGG_SQL,
+                        (symbol, ts, qagg.mean_spread_bps, qagg.median_spread_bps,
+                         qagg.mean_bid_size, qagg.mean_ask_size, qagg.quote_imbalance,
+                         qagg.n_quotes),
+                    )
+            logger.info(
+                "%s: %d trades -> %d trade-min, %d quotes -> %d quote-min",
+                symbol, len(trade_ticks), len(trades_by_min),
+                len(quote_ticks), len(quotes_by_min),
+            )
+    logger.info("aggregate backfill complete")
+
+
+def validate_aggregates() -> None:
+    """Compare stream vs backfill trade/quote aggregates on overlapping minutes.
+    Some divergence is expected (live buffers can miss late/early ticks, and the
+    tick-rule state seeds differently mid-window) — we quantify it rather than
+    assume it away."""
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*),
+                   count(*) FILTER (WHERE abs(s.n_trades - b.n_trades)
+                                          <= GREATEST(2, 0.02 * b.n_trades)),
+                   avg(CASE WHEN b.n_trades > 0
+                            THEN abs(s.n_trades - b.n_trades)::float / b.n_trades END)
+            FROM trade_agg_1m s
+            JOIN trade_agg_1m b ON b.symbol=s.symbol AND b.ts=s.ts
+            WHERE s.source='stream' AND b.source='backfill'
+            """
+        )
+        total, close, mean_rel = cur.fetchone()
+        if total:
+            logger.info(
+                "trade_agg: %d overlapping min | within 2%%/2-trade: %.1f%% | mean rel n_trades diff %.3f",
+                total, 100.0 * close / total, mean_rel or 0.0,
+            )
+        else:
+            logger.warning("no overlapping trade_agg to validate")
+
+        cur.execute(
+            """
+            SELECT count(*),
+                   count(*) FILTER (WHERE abs(s.mean_spread_bps - b.mean_spread_bps)
+                                          <= GREATEST(0.5, 0.1 * b.mean_spread_bps))
+            FROM quote_agg_1m s
+            JOIN quote_agg_1m b ON b.symbol=s.symbol AND b.ts=s.ts
+            WHERE s.source='stream' AND b.source='backfill'
+            """
+        )
+        qtotal, qclose = cur.fetchone()
+        if qtotal:
+            logger.info(
+                "quote_agg: %d overlapping min | spread within 10%%/0.5bps: %.1f%%",
+                qtotal, 100.0 * qclose / qtotal,
+            )
+        else:
+            logger.warning("no overlapping quote_agg to validate")
 
 
 def validate_bars() -> None:
@@ -148,6 +291,10 @@ def main() -> None:
         backfill_bars()
     elif command == "validate-bars":
         validate_bars()
+    elif command == "backfill-aggs":
+        backfill_aggregates()
+    elif command == "validate-aggs":
+        validate_aggregates()
     else:
         raise SystemExit(f"unknown command: {command}")
 
