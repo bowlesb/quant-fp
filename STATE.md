@@ -21,11 +21,16 @@ continuation; doesn't wait to be asked.
       cross-sectional excess return vs universe median at fwd_30m / fwd_60m, gap-safe
       timestamp lookup, 5 unit tests. Verified sane (cross-sections median-centered,
       ~20bps std). Overnight horizon = later refinement.
-- [ ] Scale feature + label computation to the full universe (needs universe bars
-      from the running backfill; microstructure NaN for non-subset symbols is fine).
-- [ ] Build training-data export (feature_vectors ⨝ labels) for modeling.
-- [ ] Accumulate more history before modeling is statistically meaningful (~1 day so far).
-- [ ] Then Phase 3: walk-forward LightGBM + honest backtest (first edge kill-gate).
+- [x] Universe-wide features (30,970) + labels computed for today; **training_data
+      view** (feature_vectors ⨝ labels) created (`db/init/02_views.sql`).
+- [x] Priority-E sanity look logged (short-horizon reversal signature visible but
+      statistically meaningless on 1 day — see JOURNAL).
+- [ ] **Build features+labels on source='backfill' once the 7-day backfill finishes**
+      → the real multi-day universe panel for modeling.
+- [ ] Collect supporting data (corporate actions/splits, earnings calendar, sector
+      maps) — idle-time info-gathering toward the goal.
+- [ ] Then Phase 3: walk-forward LightGBM + honest backtest (first edge kill-gate)
+      — only once the panel has real time depth.
 
 ## Current status
 

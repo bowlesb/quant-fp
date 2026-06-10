@@ -55,3 +55,16 @@ why.
   FEATURE replay-equivalence = 100% identical (stream vs historical recompute).
   Feature-level train/serve skew eliminated by construction. Cleanup: removed dead
   services/status scaffold + unused webhook config.
+- Phase 3 prep: forward-return cross-sectional labels (quantlib/labels). Built
+  universe features (30,970) + labels for today; created training_data view
+  (feature_vectors JOIN labels). Panel currently lopsided: broad breadth (998
+  symbols) at ~1-2 timestamps + deep time on the 10-symbol subset, because
+  full-universe stream bars only span ~31min so far. Real panel needs the 7-day
+  backfill built on source='backfill'.
+- PRIORITY-E SANITY LOOK (NOT an edge claim): per-feature Pearson corr vs fwd_30m
+  on n=2339 rows from ~51 same-day timestamps. Recent-return features correlate
+  NEGATIVELY with forward return (ret_15m -0.27, rel_ret_30m -0.23, ret_30m -0.15)
+  = short-horizon reversal signature, directionally as hoped. vol_30m +0.36 likely
+  a within-cross-section volatility artifact. CAVEAT: single day, overlapping/
+  autocorrelated obs, one regime, Pearson not rank-IC — statistically meaningless;
+  pipeline-sanity only. Defer real IC to multi-day universe panel from backfill.
