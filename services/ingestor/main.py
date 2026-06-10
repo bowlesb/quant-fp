@@ -30,11 +30,13 @@ from quantlib.aggregates import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("ingestor")
 
-SYMBOLS = [
+DEFAULT_SYMBOLS = "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
+# Trades/quotes are far higher volume than bars; subscribe them only for this
+# subset to keep a single ingestor process healthy. Bars are streamed for the
+# whole universe. Expand TRADE_QUOTE_SYMBOLS as we sharded/optimize ingestion.
+TQ_SYMBOLS = [
     s.strip().upper()
-    for s in os.environ.get(
-        "SYMBOLS", "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
-    ).split(",")
+    for s in os.environ.get("TRADE_QUOTE_SYMBOLS", DEFAULT_SYMBOLS).split(",")
     if s.strip()
 ]
 FEED = os.environ.get("ALPACA_DATA_FEED", "sip").lower()
@@ -86,6 +88,23 @@ def get_conn() -> psycopg.Connection:
     if _conn is None or _conn.closed:
         _conn = psycopg.connect(**DB_KWARGS, autocommit=True)
     return _conn
+
+
+def load_bar_symbols() -> list[str]:
+    """Bars are streamed for the whole current universe; fall back to the default
+    set if the universe hasn't been built yet."""
+    try:
+        with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT symbol FROM universe_membership WHERE trade_date = "
+                "(SELECT max(trade_date) FROM universe_membership) ORDER BY symbol"
+            )
+            symbols = [row[0] for row in cur.fetchall()]
+        if symbols:
+            return symbols
+    except psycopg.Error as exc:
+        logger.warning("could not load universe, using default symbols: %s", exc)
+    return [s.strip().upper() for s in DEFAULT_SYMBOLS.split(",")]
 
 
 def flush_minute(conn: psycopg.Connection, symbol: str, minute_epoch: int) -> None:
@@ -180,14 +199,18 @@ async def on_quote(quote) -> None:  # type: ignore[no-untyped-def]
 
 
 def main() -> None:
-    logger.info("ingestor starting: %d symbols, feed=%s", len(SYMBOLS), FEED)
+    bar_symbols = load_bar_symbols()
+    logger.info(
+        "ingestor starting: bars for %d symbols, trades/quotes for %d, feed=%s",
+        len(bar_symbols), len(TQ_SYMBOLS), FEED,
+    )
     feed_enum = DataFeed.SIP if FEED == "sip" else DataFeed.IEX
     stream = StockDataStream(
         os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], feed=feed_enum
     )
-    stream.subscribe_bars(on_bar, *SYMBOLS)
-    stream.subscribe_trades(on_trade, *SYMBOLS)
-    stream.subscribe_quotes(on_quote, *SYMBOLS)
+    stream.subscribe_bars(on_bar, *bar_symbols)
+    stream.subscribe_trades(on_trade, *TQ_SYMBOLS)
+    stream.subscribe_quotes(on_quote, *TQ_SYMBOLS)
     stream.run()
 
 

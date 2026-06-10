@@ -46,3 +46,7 @@ why.
   This is a real, bounded source of train/serve skew to track — exactly why the
   schema keeps both sources. Official gate number should be measured on a fully
   settled prior day, not same-day.
+- Aggregate parity validated on real data: trade_agg 95.2% within 2% (mean rel
+  diff 0.7%), quote_agg spread 100% over 63 overlapping minutes.
+- Scaled live bar ingestion to the full universe: confirmed 951 distinct symbols
+  streaming bars in a 90s window. Trades/quotes kept on the liquid 10 subset.

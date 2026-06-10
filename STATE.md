@@ -71,8 +71,12 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
       quote_agg spread 100% match, over 63 overlapping minutes. Same quantlib code
       on live ticks vs historical REST ticks → matching microstructure features.
       Run: `... backfiller backfill-aggs` / `validate-aggs`.
-- [ ] Scale live ingestion from 10 → ~1,000 symbols (batched async writes; control
-      raw-tick volume). Then verify ≥99.5% capture + <5s latency at full load.
+- [x] **Scaled live bar ingestion to the full universe**: ingestor loads ~1,000
+      symbols from universe_membership and streams bars for all; trades/quotes stay
+      on the liquid 10-symbol subset (TRADE_QUOTE_SYMBOLS) to keep one process
+      healthy and bound raw-tick volume. (Sharded/batched ingestion for full-universe
+      trades/quotes is a later optimization.)
+- [ ] Watch capture rate / latency at full bar load over a day (coverage panel).
 - [ ] 6-year historical backfill across the universe (disk now available; long job).
 - Prereq for backfill: free SSD headroom (move recovered files off — task #3,
   awaiting Ben's OK to wipe sdb).

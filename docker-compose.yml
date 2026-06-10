@@ -35,7 +35,9 @@ services:
       dockerfile: services/ingestor/Dockerfile
     <<: *common
     environment:
-      SYMBOLS: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
+      # Bars stream for the whole universe (loaded from DB); trades/quotes only
+      # for this liquid subset to keep one process healthy.
+      TRADE_QUOTE_SYMBOLS: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
     depends_on:
       timescaledb:
         condition: service_healthy
