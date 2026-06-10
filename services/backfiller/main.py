@@ -30,7 +30,7 @@ from quantlib.aggregates import (
     bucket_minute,
 )
 from quantlib.barsource import fetch_and_store_bars
-from quantlib.features import is_rth
+from quantlib.features import is_rth, on_cadence
 from quantlib.featurestore import build_feature_store, load_membership
 from quantlib.labels import (
     LABEL_HORIZONS,
@@ -346,10 +346,13 @@ def build_labels() -> None:
             }
             # Pivot to per-ts cross-sections, then demean by the universe median.
             all_ts = {ts for series in fwd_by_symbol.values() for ts in series}
+            cadence = int(os.environ["FEATURE_CADENCE_MIN"]) if os.environ.get("FEATURE_CADENCE_MIN") else None
             rows = []
             for ts in all_ts:
                 if ts > end:
                     continue
+                if cadence is not None and not on_cadence(ts, cadence):
+                    continue                   # match the feature panel's cadence
                 members = membership.get(ts.date()) if membership else None
                 section = {
                     symbol: fwd[ts]

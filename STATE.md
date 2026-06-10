@@ -11,10 +11,14 @@ Get the whole loop running once — backfill → train → deploy → paper-trad
 even with a trivial model, to SEE E2E in action; then improve each piece. First run is
 PLUMBING VALIDATION, not edge (don't trust its IC/P&L — thin panel, known caveats).
 Slice steps:
-1. [in progress] Rebuild panel over all 51 dates (per-date demean) so it's trainable.
-2. [ ] Train a first LightGBM on the panel; save the model.
+1. [x] Panel rebuilt over 51 dates (PIT, 30-min cadence): 662,954 feature vectors +
+       570,481 fwd_30m labels.
+2. [x] Trained first LightGBM via the harness: REAL rank-IC 0.0205 (NW t 2.98), CANARY
+       0.0022 (clean = pipeline sound, no leakage). Model at models/model_fwd_30m.txt.
+       NOT edge (t<4, thin panel, no costs, residual survivorship) — plumbing validated.
 3. [ ] model-server: load model, score live feature_vectors each minute -> predictions.
 4. [ ] executor: read latest predictions -> trivial L/S basket (paper), reconcile.
+   (gate the REAL edge claim later: t>=4, after-cost, deflated, settled parity.)
 Keep the harness gates for the REAL run later; this slice is to validate the pipeline.
 
 ## Phase 2 progress

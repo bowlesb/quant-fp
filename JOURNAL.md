@@ -78,6 +78,17 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- E2E TRAIN STEP WORKS (2026-06-10): panel rebuilt over 51 dates (662,954 feature
+  vectors, PIT, 30-min cadence) + labels (570,481 fwd_30m). First LightGBM trained
+  through the leakage-checked harness: panel 570,481 rows/18 feats/661 timestamps;
+  REAL mean rank-IC=0.0205, NW t=2.98 (535 test ts); CANARY (within-group shuffle)
+  rank-IC=0.0022 ≈ 0. Model saved to ./models/model_fwd_30m.txt.
+  HONEST READ — NOT AN EDGE CLAIM: t=2.98 < our t≥4 gate; thin 51-day panel; residual
+  survivorship; NO cost model; settled-day parity gate still open; no multiple-testing
+  deflation. The VALUE here is that the canary is clean while real IC is positive →
+  the pipeline (backfill→panel→train→IC) is sound and not leaking. This is the E2E
+  "train" step working, to be trusted as plumbing, not alpha. NEXT: model-server
+  (score live → predictions) + executor (predictions → trivial L/S paper basket).
 - E2E REFRAME (Ben, 2026-06-10): with real-time/backfill parity proven, prioritize the
   THIN END-TO-END vertical slice — backfill→train→deploy→paper-trade→reconcile — to SEE
   it run, even trivially (plumbing validation, NOT edge). Strategy reaffirmed: cross-
