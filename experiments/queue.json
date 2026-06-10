@@ -1,0 +1,12 @@
+[
+  {"id": "E0_raw_18", "hypothesis": "Baseline: regression on raw fwd_30m excess, all 18 features. Reproduces the trainer result; reference point.",
+   "horizon": "fwd_30m", "label": "raw", "features": "all"},
+  {"id": "E0p_rank_18", "hypothesis": "Rank label should align loss with how we trade (deciles) and be fat-tail robust; expect >= raw IC.",
+   "horizon": "fwd_30m", "label": "rank", "features": "all"},
+  {"id": "E0p_rank_13", "hypothesis": "Drop the 5 micro features (identity-leak risk); 13-feature universe set. Should hold IC while removing leakage.",
+   "horizon": "fwd_30m", "label": "rank", "features": "nomicro"},
+  {"id": "E_raw_13", "hypothesis": "Regression on 13 non-micro features; isolates whether micro columns were carrying (leaked) signal.",
+   "horizon": "fwd_30m", "label": "raw", "features": "nomicro"},
+  {"id": "LONGSHOT_60m_rank_13", "hypothesis": "For-fun long shot: does the 60m horizon rank model show anything different? (sparse 60m labels expected; exploratory).",
+   "horizon": "fwd_60m", "label": "rank", "features": "nomicro"}
+]

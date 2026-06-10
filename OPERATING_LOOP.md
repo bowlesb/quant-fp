@@ -40,11 +40,26 @@ quality over speed: a false edge is worse than no edge.
      Production Eng) and parity-verified (coordinate with QA); long vs short, order
      types, combining signals with Alpaca bracket orders. The brains behind using the
      infra to make money. Treat ML quality as separable from infra but plan the path.
-   - **4) Production Engineer:** keep the lights on — real-time data collection, live
-     API calls, concurrency, performance, extensibility, maintainability. Fix prod
-     issues; plan for the next market day (e.g. a no-data day); evaluate framework/
-     language choices as the system evolves. Hates tech debt, outdated patterns,
-     duplicated/unconsolidated code; keeps a clear mental model of prod vs test code.
+     **ALWAYS RUNNING BACKGROUND EXPERIMENTS (Ben's directive):** the Modeller keeps a
+     QUEUE of experiments running continuously in the `experimenter` service (its own
+     Docker, with the 3090 GPU available) on the data we collect — curious and
+     UNATTACHED, aiming to run FAR more experiments than it would ever suggest for the
+     production path, to see "what performance can these features / this approach get,
+     what surprises me?". Every experiment (code, config, hypothesis, result, learning)
+     is logged clearly and historically in `docs/EXPERIMENTS.md` + `experiments/`. In
+     addition, **2–4 times a day it queues one deliberately "random"/more-complex/long-
+     shot idea** ("just for fun"), fully logged. Production candidates are a tiny,
+     gated subset of all this exploration; the rest is learning, never wasted.
+   - **4) Production Engineer + ARCHITECT:** keep the lights on — real-time collection,
+     live API calls, concurrency, performance, extensibility, maintainability. Fix prod
+     issues; plan for the next market day (e.g. a no-data day). Hates tech debt, outdated
+     patterns, duplicated/unconsolidated code; keeps a clear prod-vs-test mental model.
+     **ALSO THE ARCHITECT (Ben's directive):** beyond keeping today's system running,
+     think BIG-PICTURE about how the system should EVOLVE over time, and make the
+     architectural-evolution decisions periodically — when the project's lifecycle stage
+     makes it appropriate (framework/language choices, service decomposition, data model,
+     scaling strategy, what to consolidate or rebuild). Not every wake — but proactively
+     raise and decide these as the project matures.
 
    Run this panel continuously — every wake, all angles. (This subsumes the old single
    "critic".)

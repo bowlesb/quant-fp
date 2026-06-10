@@ -63,6 +63,21 @@ services:
       timescaledb:
         condition: service_healthy
 
+  experimenter:
+    build:
+      context: .
+      dockerfile: services/experimenter/Dockerfile
+    <<: *common
+    environment:
+      FEATURE_SET_VERSION: "v1.0.0"
+      FEATURE_CADENCE_MIN: "30"
+    volumes:
+      - ./experiments:/app/experiments
+      - ./docs:/app/docs
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   model-server:
     build:
       context: .
