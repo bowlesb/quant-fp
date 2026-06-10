@@ -38,6 +38,16 @@ services:
       timescaledb:
         condition: service_healthy
 
+  executor:
+    build: ./services/executor
+    <<: *common
+    environment:
+      HELLO_SYMBOL: "SPY"
+      HELLO_QTY: "1"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   dashboard:
     build: ./services/dashboard
     <<: *common
