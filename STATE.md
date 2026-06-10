@@ -63,7 +63,12 @@ continuation; doesn't wait to be asked.
       EXECUTION as a first-class track.
 - [x] Hands-on Alpaca paper exploration + execution doc seed (`docs/EXECUTION.md`):
       4x margin, shorting enabled, market orders queue when closed (foot-gun), etc.
-- [ ] Deep Alpaca API reference (research agent running) -> merge into docs/EXECUTION.md.
+- [x] Deep Alpaca API reference merged into docs/EXECUTION.md (order types/TIF,
+      shorting/ETB, lifecycle+trade_updates+reconcile, wash-trade/no-long+short/BP-
+      reserve foot-guns, marketable-limit cross-1-tick, EOD LOC flatten, paper-vs-live,
+      L/S basket design, 16-row stress-test matrix).
+- [ ] AUDIT executor for fields Alpaca REMOVES 2026-07-06 (pattern_day_trader,
+      daytrading_buying_power, daytrade_count) before live.
 - [ ] Build a TRIVIAL paper strategy NOW (small long/short basket, marketable limits,
       EOD flatten) to exercise signal→order→fill→reconcile end-to-end — not gated on data.
 - [ ] Execution stress tests vs paper (order types, partials, cancel races, rate-limit
