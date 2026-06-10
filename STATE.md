@@ -54,9 +54,18 @@ continuation; doesn't wait to be asked.
       and demean labels within each date's universe; then rebuild the source='backfill'
       panel. (Decision pending: 13 non-micro features for the full universe vs keep 18
       w/ NaN — micro is subset-only at ~98% NaN universe-wide.)
-- [ ] Modeling-harness skeleton (purged/embargoed walk-forward LightGBM rank + rank-IC
-      + shuffle-label canary), gated on synthetic fixtures. Critic nudge: build this
-      soon, don't keep polishing the panel.
+- [x] **Modeling-harness mechanics built** (`quantlib/backtest.py`): purged/embargoed
+      walk-forward (purge by label horizon in market time), within-timestamp Spearman
+      rank-IC, within-group shuffle-label canary, Newey-West deflated t-stat. 6 trap
+      fixtures pass (26 tests total). Model-pluggable; LightGBM slots in later.
+- [ ] **NEXT (critic-ordered): wire per-date demean + v1.1.0 13-feature set, then
+      rebuild the panel over ALL 51 universe dates as a background job** (loop
+      universe_membership.trade_date; demean labels within each date's universe; drop
+      the 5 micro features). The panel currently has only 1 date — depth is the blocker.
+- [ ] Plug LightGBM into the harness; run on the rebuilt panel (only report IC after
+      the shuffle canary is green AND the t-stat is deflated).
+- [ ] KNOWN-OPEN (don't bury): residual survivorship (delisted names absent); Phase-1
+      parity gate never formally passed on a settled day; nightly auto-validate unwired.
 - [ ] Automate nightly validate-bars on the prior SETTLED day in the scheduler
       (closes the Phase-1 parity gate honestly; needs ≥1 settled stream day — earliest
       tomorrow).

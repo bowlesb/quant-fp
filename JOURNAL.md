@@ -78,6 +78,27 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- CRITIC #4 (wake red-team) — verdict ON-TRACK; findings + actions:
+  - [SEQUENCING] Build the HARNESS FIRST on synthetic fixtures (zero dep on the real
+    panel; reveals the panel's required shape; another panel pass first = polishing
+    trap). DONE: quantlib/backtest.py — walk_forward_folds (purge by label horizon in
+    market time), per_timestamp_ic (within-cross-section Spearman, averaged — never
+    pooled), shuffle_within_groups canary, newey_west_tstat (deflates overlapping-
+    label autocorrelation). 6 trap-fixture tests (leaky-straddle purge, cross-ts-only
+    IC~0, real-signal IC, within-group canary kills IC, NW). 26 tests pass. Model is
+    pluggable (stub in tests; LightGBM later).
+  - [HIGH] Panel has only 1 date despite 51 universe dates — the rebuild must LOOP all
+    51 dates (1->~50); that depth is what unblocks Phase 3, not better demeaning alone.
+  - [13 vs 18] DECIDED 13: micro is 99.7% NaN universe-wide; LightGBM could learn the
+    NaN-pattern as a symbol-identity proxy = leakage into a cross-sectional ranker.
+    Drop micro for the universe model; version as v1.1.0 (new feature_sets row); keep
+    micro as a liquid-subset enrichment. Implement at panel rebuild.
+  - [RESIDUAL RISK, logged honestly — NOT closed] build_universe_history screens only
+    symbols present in today's backfill, so truly-delisted names are still absent =
+    residual survivorship (smaller than the original bug; acceptable for 90d but real).
+  - [OPEN GATE, keep visible] Phase-1 streamed-vs-REST >=99.9% parity gate has never
+    formally passed on a settled day (only 1 stream day; 99.76% is same-day/suggestive).
+    Nightly auto-validate not yet wired. Don't let Phase 3 momentum bury this.
 - CRITIC #3 (wake red-team) — verdict ADJUST; findings + actions:
   - [HIGH] Breadth premise stale: breadth is now UNIFORM (989-1000/weekday back to
     Mar 9; only Saturdays are junk). So the "breadth gate" is trivial (weekday +
