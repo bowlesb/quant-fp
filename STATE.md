@@ -11,15 +11,18 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
 ### Done
 - Repo structure + git init.
 - `ARCHITECTURE.md` (committed design, source of truth).
-- TimescaleDB schema (`db/init/01_schema.sql`).
-- `docker-compose.yml` with TimescaleDB + Prometheus + Grafana.
+- TimescaleDB schema (`db/init/01_schema.sql`) — verified: 14 tables, 7 hypertables.
+- `docker-compose.yml` with TimescaleDB + dashboard + Prometheus + Grafana.
 - `.env` with Alpaca **paper** keys (gitignored); `.env.example` committed.
+- **Dashboard** (`services/dashboard`) live on the LAN at http://192.168.1.32:8088 —
+  renders STATE.md/JOURNAL.md progress + live DB health, auto-refresh 30s. This is
+  how Ben monitors (no Discord/Telegram/tunnel; Claude reads DB directly in-session).
 
 ### In progress / next
-- [ ] Bring up TimescaleDB, apply schema, verify tables (this is the immediate next check).
-- [ ] Ingestor service: Alpaca websocket → bars_1m for a small symbol set → DB.
-- [ ] Status endpoint (`/status.json`) + daily report job.
+- [ ] Ingestor service: Alpaca SIP websocket → bars_1m for a small symbol set → DB.
+      (Requires stopping the legacy Edgar streamer first — single Alpaca websocket.)
 - [ ] Hello-world loop: one paper order/day, logged fill, reconciliation.
+- [ ] Scheduler: daily coverage report + reconciliation job.
 
 ## Known constraints / decisions
 - Deploy target: this Intel box. TimescaleDB host port **5433**, Grafana **3001**,

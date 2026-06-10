@@ -29,6 +29,19 @@ services:
       timeout: 5s
       retries: 5
 
+  dashboard:
+    build: ./services/dashboard
+    <<: *common
+    ports:
+      - "0.0.0.0:8088:8000"     # LAN-accessible: http://192.168.1.32:8088
+    volumes:
+      - ./STATE.md:/docs/STATE.md:ro
+      - ./JOURNAL.md:/docs/JOURNAL.md:ro
+      - ./ARCHITECTURE.md:/docs/ARCHITECTURE.md:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:latest
     <<: *common
