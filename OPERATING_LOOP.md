@@ -47,6 +47,9 @@ quality over speed: a false edge is worse than no edge.
    done / next) and append findings/decisions to `JOURNAL.md`.
 6. **Re-arm.** Schedule the next wakeup so the loop continues (see Pacing). Always
    leave a self-continuation scheduled unless the user said to stop.
+7. **State resume time (Ben's directive).** Whenever ending a turn stalled/waiting for
+   the next loop, finalize with a clear, explicit statement of WHEN I'll resume (the
+   wakeup delay/clock time, and any sooner trigger like a background job completing).
 
 ## Guardrails (non-negotiable; do NOT cross autonomously)
 

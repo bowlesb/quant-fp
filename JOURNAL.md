@@ -78,6 +78,25 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- CRITIC #3 (wake red-team) — verdict ADJUST; findings + actions:
+  - [HIGH] Breadth premise stale: breadth is now UNIFORM (989-1000/weekday back to
+    Mar 9; only Saturdays are junk). So the "breadth gate" is trivial (weekday +
+    min-symbol), not a subsystem. Confirmed by probe; keeping it minimal.
+  - [HIGH] PIT ADV must not use the live Alpaca-defaulted (no end=) fetch = lookahead.
+    My build_universe_history reads LOCAL bars_1m with a strictly-prior session window
+    -> no lookahead (avoided the trap). Built 51 PIT dates (Mar 30+); membership varies
+    by date (earliest 974, latest 992, ~20 differ) = survivorship fix working.
+  - [HIGH] Regression it caught in my just-shipped refactor: minute_of_day/day_of_week
+    were raw UTC while is_rth was tz-aware -> 60-unit jump at the DST boundary. FIXED:
+    both now ET-local (astimezone NY); added a DST-consistency test. 20 tests pass.
+  - [MED] Micro features (5 of 18) are ~98% NaN on the full universe (collected only
+    for the 10-symbol subset). DECISION (explicit, open for harness cycle): either run
+    the full-universe model on the 13 non-micro features, or keep 18 and let LightGBM's
+    native NaN handling split on them; lean toward 13-for-universe + micro as a
+    liquid-subset enrichment. Revisit when wiring the panel/harness.
+  - [MED] Nudge: don't polish the panel indefinitely; the harness (on synthetic
+    fixtures + shuffle canary) is the durable value and is buildable now. ACCEPTED:
+    after per-date-demean wiring, build the harness skeleton next.
 - CRITIC #2 (wake red-team) — verdict ON-TRACK; findings + actions:
   - [HIGH] Backfill breadth NON-UNIFORM (Mar ~989/day, May ~494, Jun ~830) because
     backfill is mid-fill. Rebuilding labels now would demean over a half-universe =

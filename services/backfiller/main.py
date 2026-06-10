@@ -38,6 +38,7 @@ from quantlib.labels import (
     forward_return_series,
     horizon_name,
 )
+from quantlib.universe import SymbolStats, select_universe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backfiller")
@@ -61,6 +62,66 @@ def universe_symbols(conn: psycopg.Connection) -> list[str]:
             "(SELECT max(trade_date) FROM universe_membership) ORDER BY symbol"
         )
         return [row[0] for row in cur.fetchall()]
+
+
+UNIVERSE_ADV_LOOKBACK = 20      # trading sessions of trailing ADV
+UNIVERSE_MAX_SYMBOLS = 1000
+
+
+def build_universe_history() -> None:
+    """Reconstruct point-in-time universe_membership per historical trade_date by
+    screening from TRAILING (strictly-prior) daily ADV — no lookahead. A date is
+    only built if it has >= UNIVERSE_ADV_LOOKBACK prior sessions of data.
+
+    Caveat (documented): we can only screen symbols we have bars for (today's
+    backfilled universe), so truly-delisted names aren't recovered; but per-date
+    screening removes the worst survivorship bias (a name that was a penny/illiquid
+    stock on date D is excluded from D's universe even if liquid today)."""
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
+        # Daily dollar-volume and last close per symbol per session (RTH).
+        cur.execute(
+            """SELECT symbol, ts::date AS d,
+                      sum(close*volume) AS dollar_vol,
+                      (array_agg(close ORDER BY ts DESC))[1] AS last_close
+               FROM bars_1m
+               WHERE source='backfill' AND ts::time>='13:30' AND ts::time<'20:00'
+               GROUP BY symbol, ts::date"""
+        )
+        daily: dict[str, list[tuple]] = {}
+        all_days: set = set()
+        for symbol, day, dollar_vol, last_close in cur.fetchall():
+            daily.setdefault(symbol, []).append((day, float(dollar_vol or 0), float(last_close)))
+            all_days.add(day)
+        for symbol in daily:
+            daily[symbol].sort()
+        sessions = sorted(all_days)
+
+        built = 0
+        for idx in range(UNIVERSE_ADV_LOOKBACK, len(sessions)):
+            trade_date = sessions[idx]
+            window = set(sessions[idx - UNIVERSE_ADV_LOOKBACK:idx])  # strictly prior
+            stats = []
+            for symbol, rows in daily.items():
+                prior = [(dv, close) for (day, dv, close) in rows if day in window]
+                if len(prior) < UNIVERSE_ADV_LOOKBACK // 2:    # need enough history
+                    continue
+                adv = sum(dv for dv, _ in prior) / len(prior)
+                price = prior[-1][1]
+                stats.append(SymbolStats(symbol=symbol, price=price, adv_dollar=adv))
+            chosen = select_universe(stats, max_symbols=UNIVERSE_MAX_SYMBOLS)
+            cur.execute("DELETE FROM universe_membership WHERE trade_date=%s", (trade_date,))
+            for stat in chosen:
+                cur.execute(
+                    """INSERT INTO universe_membership
+                           (trade_date, symbol, in_universe, adv_dollar, price)
+                       VALUES (%s,%s,TRUE,%s,%s)""",
+                    (trade_date, stat.symbol, stat.adv_dollar, stat.price),
+                )
+            built += 1
+            if built % 10 == 0:
+                logger.info("universe-history: built %d dates (latest %s, %d symbols)",
+                            built, trade_date, len(chosen))
+        logger.info("universe-history complete: %d trade_dates", built)
 
 
 def resolve_window() -> tuple[datetime, datetime]:
@@ -394,6 +455,8 @@ def main() -> None:
         validate_features()
     elif command == "build-labels":
         build_labels()
+    elif command == "build-universe-history":
+        build_universe_history()
     else:
         raise SystemExit(f"unknown command: {command}")
 

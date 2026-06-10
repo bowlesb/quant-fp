@@ -45,10 +45,18 @@ continuation; doesn't wait to be asked.
       featurestore filters bars+market to RTH (session_open = first RTH bar); features.py
       uses timestamp-based gap/session-safe lookups; label price series filtered to RTH
       (forward returns RTH-to-RTH). 19 tests pass.
-- [ ] **Breadth gate (critic-flagged): do NOT rebuild the trainable panel until the
-      backfill is complete AND per-date symbol breadth is uniform** (skip/flag
-      under-covered dates). May ~494/day, Jun ~830/day right now (mid-fill).
-- [ ] Per-date point-in-time universe demean (still pending; pairs with breadth gate).
+- [x] Backfill complete to 90d; breadth UNIFORM (989-1000/weekday back to Mar 9).
+      Breadth gate = trivial (weekday + min-symbol), not a subsystem.
+- [x] DST regression fixed: minute_of_day/day_of_week now ET-local (were raw UTC).
+- [x] **Point-in-time universe history built** (51 dates, strictly-prior ADV from local
+      bars, no lookahead; membership varies by date). `backfiller build-universe-history`.
+- [ ] Wire build_feature_store + build_labels to select per-date universe_membership
+      and demean labels within each date's universe; then rebuild the source='backfill'
+      panel. (Decision pending: 13 non-micro features for the full universe vs keep 18
+      w/ NaN — micro is subset-only at ~98% NaN universe-wide.)
+- [ ] Modeling-harness skeleton (purged/embargoed walk-forward LightGBM rank + rank-IC
+      + shuffle-label canary), gated on synthetic fixtures. Critic nudge: build this
+      soon, don't keep polishing the panel.
 - [ ] Automate nightly validate-bars on the prior SETTLED day in the scheduler
       (closes the Phase-1 parity gate honestly; needs ≥1 settled stream day — earliest
       tomorrow).

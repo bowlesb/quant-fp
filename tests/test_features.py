@@ -66,8 +66,21 @@ def test_gap_and_calendar() -> None:
     ctx = FeatureContext(symbol="X", ts=bars[-1].ts, bars=bars, session_open=100.0)
     feats = compute_features(ctx)
     assert abs(feats["gap_from_open"] - 0.02) < 1e-12
-    assert feats["day_of_week"] == float(BASE.weekday())
-    assert feats["minute_of_day"] == float(bars[-1].ts.hour * 60 + bars[-1].ts.minute)
+    # last bar = BASE+1min = 2026-06-10 14:31 UTC = 10:31 ET (Wednesday)
+    assert feats["day_of_week"] == 2.0
+    assert feats["minute_of_day"] == float(10 * 60 + 31)
+
+
+def test_calendar_is_dst_consistent() -> None:
+    """The 09:30 ET open must map to the same minute_of_day in winter and summer."""
+    def mod(ts: datetime) -> float:
+        bars = [BarRow(ts=ts, open=100, high=100, low=100, close=100, volume=1, vwap=100)]
+        return compute_features(
+            FeatureContext(symbol="X", ts=ts, bars=bars, session_open=100.0)
+        )["minute_of_day"]
+    est_open = datetime(2026, 3, 2, 14, 30, tzinfo=timezone.utc)   # 09:30 EST
+    edt_open = datetime(2026, 6, 10, 13, 30, tzinfo=timezone.utc)  # 09:30 EDT
+    assert mod(est_open) == mod(edt_open) == float(9 * 60 + 30)
 
 
 def test_returns_are_gap_safe_timestamp_based() -> None:

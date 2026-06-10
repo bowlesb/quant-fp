@@ -139,9 +139,11 @@ def compute_features(ctx: FeatureContext) -> dict[str, float]:
         else math.nan
     )
 
-    # Calendar (point-in-time from ctx.ts; UTC). Market open features use session.
-    features["minute_of_day"] = float(ctx.ts.hour * 60 + ctx.ts.minute)
-    features["day_of_week"] = float(ctx.ts.weekday())
+    # Calendar in market-local (ET) time so the same session moment maps to the same
+    # value across the DST boundary (raw UTC would shift these by 60 mid-panel).
+    local = ctx.ts.astimezone(_NY)
+    features["minute_of_day"] = float(local.hour * 60 + local.minute)
+    features["day_of_week"] = float(local.weekday())
 
     # Microstructure (pass-through of the minute's aggregates, already parity-tested)
     features["trade_imbalance"] = ctx.trade_imbalance
