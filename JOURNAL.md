@@ -14,3 +14,7 @@ why.
   ~1,000-symbol liquid universe; LightGBM; paper-first with statistical gates.
   Rationale in `ARCHITECTURE.md`.
 - Started Phase 0 foundation.
+- Tore down legacy Edgar Docker stack (containers/networks removed, data volumes
+  preserved) to free the single Alpaca data websocket. Old code/data left on disk.
+- Ingestor live on SIP feed; verified bars_1m persistence end-to-end for 10 symbols.
+  Confirmed the account already has SIP (Algo Trader Plus) entitlement.

@@ -18,11 +18,17 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
   renders STATE.md/JOURNAL.md progress + live DB health, auto-refresh 30s. This is
   how Ben monitors (no Discord/Telegram/tunnel; Claude reads DB directly in-session).
 
+- **Ingestor** (`services/ingestor`) live: Alpaca **SIP** websocket → `bars_1m`,
+  10 liquid symbols, source='stream'. Verified end-to-end (SIP→DB→dashboard).
+  SIP entitlement (Algo Trader Plus) confirmed active on the account.
+- **Legacy Edgar Docker stack torn down** (`docker compose down`, volumes kept);
+  only the `quant` stack runs now, freeing the single Alpaca data websocket.
+
 ### In progress / next
-- [ ] Ingestor service: Alpaca SIP websocket → bars_1m for a small symbol set → DB.
-      (Requires stopping the legacy Edgar streamer first — single Alpaca websocket.)
-- [ ] Hello-world loop: one paper order/day, logged fill, reconciliation.
-- [ ] Scheduler: daily coverage report + reconciliation job.
+- [ ] Executor + hello-world loop: one paper order/day, logged fill, reconciliation
+      against Alpaca /positions.
+- [ ] Scheduler: daily coverage report + 5-min reconciliation job.
+- [ ] Then Phase 1: scale ingestor to ~1,000-symbol universe + add trades/quotes/news.
 
 ## Known constraints / decisions
 - Deploy target: this Intel box. TimescaleDB host port **5433**, Grafana **3001**,
