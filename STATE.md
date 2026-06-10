@@ -58,10 +58,23 @@ continuation; doesn't wait to be asked.
       walk-forward (purge by label horizon in market time), within-timestamp Spearman
       rank-IC, within-group shuffle-label canary, Newey-West deflated t-stat. 6 trap
       fixtures pass (26 tests total). Model-pluggable; LightGBM slots in later.
-- [ ] **NEXT (critic-ordered): wire per-date demean + v1.1.0 13-feature set, then
-      rebuild the panel over ALL 51 universe dates as a background job** (loop
-      universe_membership.trade_date; demean labels within each date's universe; drop
-      the 5 micro features). The panel currently has only 1 date — depth is the blocker.
+### EXECUTION track (Ben flagged it was neglected — now first-class, parallel)
+- [x] OPERATING_LOOP + memory: proactivity / parallel-workstreams + overnight menu +
+      EXECUTION as a first-class track.
+- [x] Hands-on Alpaca paper exploration + execution doc seed (`docs/EXECUTION.md`):
+      4x margin, shorting enabled, market orders queue when closed (foot-gun), etc.
+- [ ] Deep Alpaca API reference (research agent running) -> merge into docs/EXECUTION.md.
+- [ ] Build a TRIVIAL paper strategy NOW (small long/short basket, marketable limits,
+      EOD flatten) to exercise signal→order→fill→reconcile end-to-end — not gated on data.
+- [ ] Execution stress tests vs paper (order types, partials, cancel races, rate-limit
+      backoff, shortability fails, market-closed); market-open scenarios at RTH.
+
+### PIPELINE track (critic #5 wiring guidance logged in JOURNAL — do at panel rebuild)
+- [ ] **Wire per-date demean + v1.1.0 13-feature set, then rebuild panel over ALL 51
+      dates (background)**. Heed critic #5: labels need set_version/recompute-per-version
+      (training_data joins on symbol,ts only); per-date outer loop; NW lag = overlap in
+      timestamps; LightGBM native-NaN (don't fill); don't bump FEATURE_SET_VERSION
+      constant until rebuild proven (resets live replay-equivalence). Panel = 1 date now.
 - [ ] Plug LightGBM into the harness; run on the rebuilt panel (only report IC after
       the shuffle canary is green AND the t-stat is deflated).
 - [ ] KNOWN-OPEN (don't bury): residual survivorship (delisted names absent); Phase-1

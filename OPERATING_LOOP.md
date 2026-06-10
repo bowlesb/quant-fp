@@ -89,6 +89,38 @@ quality over speed: a false edge is worse than no edge.
 **E. Side experiments + information-gathering (only when A–D are genuinely satisfied
    and there's nothing else to do).** See below. This keeps idle cycles productive.
 
+## Proactivity & parallel workstreams (Ben's directive — think of these unprompted)
+
+Do NOT tunnel on a single track (e.g. the data/modeling pipeline) while obvious
+high-value work sits untouched. Every few cycles, and especially when idle or about
+to repeat similar work, STEP BACK and ask: *what valuable workstream are we
+neglecting?* The platform → working-system goal has several tracks that can advance
+in PARALLEL and mostly don't depend on each other:
+- **Data/parity** (ingestion, backfill, probes).
+- **Features/labels/universe** (the panel).
+- **Modeling/backtest harness.**
+- **EXECUTION & Alpaca API mastery** ← was under-attended; treat as a first-class
+  track. Deeply learn the trading API's nooks and crannies (order types, brackets/
+  OCO/OTO, TIF, extended-hours, fractional, shorting mechanics + locate/HTB, partial
+  fills, order lifecycle & websocket trade updates, rate limits, account/margin,
+  wash-trade and PDT-era rules, paper-vs-live differences). STRESS-TEST it. And
+  **start placing trivial paper trades NOW** (a small basket / simple rotation) to
+  exercise signal→order→fill→reconcile end-to-end — we do NOT wait for the full
+  dataset to begin trading trivially; trivial algos get upgraded later. This de-risks
+  Phases 4-6, which the model-first focus had starved.
+- **Ops/observability, tests, docs.**
+If we've been idle or repeating, picking up a neglected track IS the proactive move —
+don't wait to be told.
+
+## Overnight / market-closed work menu
+
+When the market is closed, prefer the compute- and API-heavy work that doesn't need
+live ticks: run/extend backfills and panel rebuilds; ML investigations & queued
+experiments; Alpaca **execution API exploration + stress testing**; build and
+dry-run trivial paper strategies (orders queue / validate even when closed; full
+fills are tested at next open); refactors, tests, docs. Market-open hours are for
+live execution stress tests (fills, partials, brackets firing).
+
 ## Idle work: experiments & information-gathering (priority E)
 
 When the system is healthy, clean, tech-debt-managed, and well-tested, and there's

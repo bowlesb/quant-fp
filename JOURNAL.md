@@ -78,6 +78,32 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- PROACTIVITY CORRECTION (Ben, 2026-06-10): I tunneled on the data/modeling pipeline
+  and neglected EXECUTION. Market-close at 20:00 UTC observed + verified (332 syms
+  post-close = extended-hours stragglers, not a fault). Ben: be proactive about
+  neglected high-value tracks (esp. overnight); dig into the Alpaca API; stress-test
+  it; start trivial paper trades now. ACTIONS: OPERATING_LOOP + memory updated with a
+  proactivity/parallel-workstreams directive + overnight menu + EXECUTION as a
+  first-class track. Launched a deep Alpaca-execution research agent. Hands-on paper
+  exploration (see docs/EXECUTION.md): 4x margin, shorting enabled, market orders QUEUE
+  (ACCEPTED) when closed (foot-gun), limit ext-hours rests as NEW, cancel_orders clean.
+- CRITIC #5 (pipeline track — logged for when I do the panel rebuild, did NOT act this
+  cycle since pivoting to execution):
+  - BLOCKER-1: `labels` has no set_version and `training_data` joins on (symbol,ts)
+    only — coexisting v1.0.0/v1.1.0 will cross-contaminate; the LightGBM runner MUST
+    pin set_version, and the rebuild must RECOMPUTE labels (don't reuse 1-date labels);
+    label VALUE depends on which universe demeaned it, which the schema can't encode.
+  - BLOCKER-2: build_labels/build_features still demean over a static set — wire the
+    per-date outer loop (members per date; feature rows only for members; demean each
+    ts within that date's members). Avoid O(dates×symbols×bars).
+  - BLOCKER-3: Newey-West `lag` must equal the label overlap in TIMESTAMPS (e.g. 30
+    for fwd_30m on 1-min grid); thin ~50-date panel => canary/t are pipeline checks,
+    not validation. Verify 30m label near 15:30 ET resolves within-session or NaN.
+  - NaN policy: let LightGBM handle native NaN; do NOT fill (NaN density vs time-of-day
+    could fake edge); shuffle canary is the arbiter.
+  - Don't bump the FEATURE_SET_VERSION module constant until the per-date rebuild is
+    proven (it would flip the live feature-computer to 13-vectors and reset replay-
+    equivalence to 0 overlap); make the 13-feature vector a stable subset/prefix order.
 - CRITIC #4 (wake red-team) — verdict ON-TRACK; findings + actions:
   - [SEQUENCING] Build the HARNESS FIRST on synthetic fixtures (zero dep on the real
     panel; reveals the panel's required shape; another panel pass first = polishing
