@@ -81,6 +81,26 @@ why.
 - STANDING 4-ROLE TEAM established (Ben, 2026-06-10): every wake = Manager(me) +
   parallel QA / Modeller / Production-Engineer specialists on the shared state; manager
   synthesizes + executes. OPERATING_LOOP step 0 rewritten.
+- TEAM/PRODUCTION-ENGINEER report (synthesis):
+  - P0: model-server live loop has NEVER run a real cadence in prod (up outside RTH);
+    the live source='live' path runs for the first time at the open. Smoke-test it.
+  - P0: executor still hello-world; doesn't read predictions (the known last piece).
+    PE recommendation: VALIDATE live scoring first, build/trade executor second — don't
+    wire an untested signal to orders the same day. (Manager: build executor with a
+    DRY-RUN mode first — compute+log basket, no submit — then enable submit once proven.)
+  - P0: ship the deferred 13-feature v1.1.0 to kill the micro-NaN identity-leak (live
+    universe scoring currently feeds 975 NaN-micro rows into the 18-feat model).
+  - P1: **TimescaleDB compression NOT working — 0/74 bars_1m chunks compressed** despite
+    policy; DB 6.8GB growing ~185k bars/day. DISK TIME-BOMB; fix before raising backfill
+    target. Also no retention on feature_vectors.
+  - P1: backfill-manager hammering DB (113% CPU) with repeated near-empty current-month
+    passes; THROTTLE/PAUSE during RTH so the open burst isn't starved of I/O.
+  - P2: build_feature_store calls register_feature_set 992× in the loop + N+1 queries —
+    hoist register out; batch bar loads. model-server load_membership keys on today's
+    UTC date -> if scheduler hasn't written today's universe pre-open, falls back to the
+    51-date UNION (wrong universe) — ensure scheduler writes today's membership pre-open.
+  - P2: no stale-data auto-halt (ARCHITECTURE rule #6) — implement before any real basket.
+  - GOOD: real-time/backfill parity is genuinely shared code (the system's best property).
 - TEAM/MODELLER report (synthesis):
   - Panel shape: FAT cross-section (~928 names × 612 on-cadence ts = 568k rows) but
     THIN time (51 days). Drives everything: sign-consistency across folds is the only
