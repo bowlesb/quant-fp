@@ -37,11 +37,20 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
   data_quality_daily; dashboard shows a Coverage panel. (First partial day reads
   low % because we started mid-session; full days from start onward read ~100%.)
 
-### Phase 0 status: all services built & verified. Remaining for the gate:
-- [ ] Accumulate ~5 clean trading days of coverage.
-- [ ] Unattended reboot-survival check (compose `restart: unless-stopped` set;
-      verify the stack auto-resumes after a host reboot).
-- [ ] Then Phase 1: scale ingestor to ~1,000-symbol universe + add trades/quotes/news.
+### Phase 0 status: all 7 services built, healthy, and survive teardown/restart.
+- Reboot survival: Docker enabled on boot + `restart: unless-stopped` on every
+  service; full `compose down && up` verified — data persisted (bars 110→120, no
+  loss), all services returned healthy. Prom/Grafana data moved to named volumes
+  (bind-mount permission fix). Executor made idempotent across DB resets (broker
+  is source of truth for "ordered today") and order errors no longer crash-loop.
+- Remaining for the gate: accumulate ~5 clean trading days of coverage. A true
+  host-reboot test can be run anytime (low risk) — say the word.
+
+### Next: Phase 1
+- Scale ingestor to the ~1,000-symbol liquid universe (nightly screen + point-in-
+  time membership), add trades/quotes/news streams + per-minute aggregates, 6yr
+  REST backfill, and nightly streamed-vs-REST validation.
+- Prereq: free SSD headroom (move recovered files off — task #3, awaiting Ben).
 
 ## Known constraints / decisions
 - Deploy target: this Intel box. TimescaleDB host port **5433**, Grafana **3001**,

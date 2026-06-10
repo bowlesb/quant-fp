@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 
 import psycopg
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
@@ -51,12 +52,23 @@ def db() -> psycopg.Connection:
 
 
 def already_ordered_today(conn: psycopg.Connection, day: str) -> bool:
+    """True if today's hello order exists in our DB or already at the broker.
+
+    Checking the broker too keeps us idempotent across DB resets: Alpaca enforces
+    unique client_order_id, so a date-keyed id must not be resubmitted.
+    """
+    client_order_id = f"hello-{day}"
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM orders_log WHERE client_order_id = %s",
-            (f"hello-{day}",),
+            "SELECT 1 FROM orders_log WHERE client_order_id = %s", (client_order_id,)
         )
-        return cur.fetchone() is not None
+        if cur.fetchone() is not None:
+            return True
+    try:
+        trading.get_order_by_client_id(client_order_id)
+        return True
+    except APIError:
+        return False
 
 
 def place_hello_order(conn: psycopg.Connection, day: str) -> None:
@@ -191,7 +203,7 @@ def main() -> None:
                 if clock.is_open and not already_ordered_today(conn, day):
                     place_hello_order(conn, day)
                 reconcile(conn)
-        except (psycopg.Error, ValueError, KeyError) as exc:
+        except (psycopg.Error, APIError, ValueError, KeyError) as exc:
             logger.error("cycle error: %s", exc)
         time.sleep(LOOP_SECONDS)
 
