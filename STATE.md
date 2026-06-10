@@ -17,9 +17,14 @@ continuation; doesn't wait to be asked.
 - [x] **On-real-data feature replay-equivalence: 100% identical** (stream vs
       historical-recompute). Phase 2 technical heart proven — no feature-level
       train/serve skew. Refactored shared logic into quantlib/featurestore.py.
-- [ ] Build labels (forward excess returns vs universe; 30m + overnight) — needed
-      for training. Keep strictly post-feature-time (no leakage).
-- [ ] Accumulate more history (backfill running) before modeling is meaningful.
+- [x] **Forward-return labels** (`quantlib/labels.py` + `backfiller build-labels`):
+      cross-sectional excess return vs universe median at fwd_30m / fwd_60m, gap-safe
+      timestamp lookup, 5 unit tests. Verified sane (cross-sections median-centered,
+      ~20bps std). Overnight horizon = later refinement.
+- [ ] Scale feature + label computation to the full universe (needs universe bars
+      from the running backfill; microstructure NaN for non-subset symbols is fine).
+- [ ] Build training-data export (feature_vectors ⨝ labels) for modeling.
+- [ ] Accumulate more history before modeling is statistically meaningful (~1 day so far).
 - [ ] Then Phase 3: walk-forward LightGBM + honest backtest (first edge kill-gate).
 
 ## Current status

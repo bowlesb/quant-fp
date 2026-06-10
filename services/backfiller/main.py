@@ -12,6 +12,7 @@ uses) is the next step; bars parity is validated first.
 Usage: python main.py <command>   (config via env, see below)
 """
 import logging
+import math
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,12 @@ from quantlib.aggregates import (
     bucket_minute,
 )
 from quantlib.featurestore import build_feature_store
+from quantlib.labels import (
+    LABEL_HORIZONS,
+    cross_sectional_excess,
+    forward_return_series,
+    horizon_name,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backfiller")
@@ -254,6 +261,64 @@ def build_features() -> None:
         logger.info("feature build complete: %d vectors", total)
 
 
+def build_labels() -> None:
+    """Compute forward cross-sectional excess-return labels for the universe over
+    [start, end] and write them to the labels table. Uses the same bar source as
+    features for consistency."""
+    start, end = resolve_window()
+    bar_source = os.environ.get("FEATURE_BAR_SOURCE", "stream")
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+        symbols = resolve_symbols(conn)
+        logger.info("building labels for %d symbols, %s..%s, horizons=%s",
+                    len(symbols), start, end, LABEL_HORIZONS)
+        # close-by-ts per symbol (extend past `end` so forward windows resolve)
+        closes: dict[str, dict[datetime, float]] = {}
+        with conn.cursor() as cur:
+            for symbol in symbols:
+                cur.execute(
+                    """SELECT ts, close FROM bars_1m
+                       WHERE symbol=%s AND source=%s AND ts>=%s
+                         AND ts<=%s + make_interval(mins => %s) ORDER BY ts""",
+                    (symbol, bar_source, start, end, max(LABEL_HORIZONS)),
+                )
+                series = {row[0]: row[1] for row in cur.fetchall()}
+                if series:
+                    closes[symbol] = series
+
+        total = 0
+        for horizon in LABEL_HORIZONS:
+            name = horizon_name(horizon)
+            fwd_by_symbol = {
+                symbol: forward_return_series(series, horizon)
+                for symbol, series in closes.items()
+            }
+            # Pivot to per-ts cross-sections, then demean by the universe median.
+            all_ts = {ts for series in fwd_by_symbol.values() for ts in series}
+            rows = []
+            for ts in all_ts:
+                if ts > end:
+                    continue
+                section = {
+                    symbol: fwd[ts]
+                    for symbol, fwd in fwd_by_symbol.items()
+                    if ts in fwd
+                }
+                excess = cross_sectional_excess(section)
+                for symbol, value in excess.items():
+                    if not math.isnan(value):
+                        rows.append((symbol, ts, name, value))
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO labels (symbol, ts, horizon, value)
+                       VALUES (%s,%s,%s,%s)
+                       ON CONFLICT (symbol, ts, horizon) DO UPDATE SET value=EXCLUDED.value""",
+                    rows,
+                )
+            total += len(rows)
+            logger.info("%s: %d labels", name, len(rows))
+        logger.info("label build complete: %d labels", total)
+
+
 def validate_features() -> None:
     """Replay-equivalence at the feature level: live (source='stream') vs
     recomputed (source='historical') feature_vectors must be identical."""
@@ -345,6 +410,8 @@ def main() -> None:
         build_features()
     elif command == "validate-features":
         validate_features()
+    elif command == "build-labels":
+        build_labels()
     else:
         raise SystemExit(f"unknown command: {command}")
 
