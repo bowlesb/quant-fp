@@ -29,6 +29,12 @@ Slice steps:
 - [ ] (B data-integrity) rebuild = DELETE-then-insert (QA-P0 stale today rows); is_rth in
       build_universe_history (QA-P2 DST); builders default backfill (QA-P2); fix
       training_data view horizon/version (QA-P1).
+- [!] MODELLER FINDING (do not bury): the 0.0205 IC is a CALENDAR ARTIFACT — drop
+      day_of_week/minute_of_day and IC collapses to ~0 (DIAG_nocalendar_11). Price-only
+      cross-sectional features have ~zero standalone within-ts signal. => need BETTER
+      FEATURES (cross-sectional daily momentum, reversal interactions, order-flow needing
+      universe-wide trade/quote streaming, overnight structure) + time depth. Don't treat
+      0.02 as edge. Experimenter continues; next: lambdarank, 60m-raw, momentum features.
 - [ ] (C modeling, not open-blocking) exclude ETFs from universe + re-rank; 13-feature
       v1.1.0 (kills micro identity-leak); recompute today's panel; rank-label E0' baseline;
       overnight model = destination.
