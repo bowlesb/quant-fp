@@ -26,3 +26,33 @@ Append-only history of all experiments (the Modeller's exploration). IC is vs th
 
 ## Ops note: experimenter writes host files as root -> run it as host uid (fix next cycle).
 | 2026-06-10T22:12:57+00:00 | E_raw_13_imp | fwd_30m | raw | 13 | 570481 | 0.02052 | 2.976 | -0.00107 | (A) Re-run raw/13 WITH gain importances to diagnose WHICH features carry the signal — start of feature-improvement work. |
+| 2026-06-10T22:13:13+00:00 | E_60m_raw_13 | fwd_60m | raw | 13 | 519724 | 0.01195 | 1.338 | 0.00012 | Fair 60m comparison: RAW label, 13 features (vs the earlier 60m-rank long-shot). Does a longer horizon help raw regression? |
+| 2026-06-10T22:14:16+00:00 | DIAG_nocalendar_11 | fwd_30m | raw | 11 | 570481 | -0.00426 | -0.537 | -0.00389 | (A) Importances show calendar features (day_of_week, minute_of_day) rank high, but they're constant within a cross-section so can't discriminate names. Drop calendar+micro (11 features): if within-ts IC survives, the signal is real cross-sectional; if it collapses, the IC was a time-of-day artifact. |
+
+## CRITICAL FINDING (Modeller, 2026-06-10) — the IC was a CALENDAR ARTIFACT
+
+Feature-importance diagnosis on raw/13 showed the top gain features are
+gap_from_open, day_of_week, vwap_dev, minute_of_day, ret_5m. But day_of_week and
+minute_of_day are CONSTANT within each cross-section (same for every name at a ts),
+so they cannot discriminate names. Diagnostic DIAG_nocalendar_11 (drop calendar):
+
+  raw/13 (with calendar):  IC  0.0205  t  2.98
+  raw/11 (no calendar):    IC -0.0043  t -0.54   <-- IC COLLAPSES
+
+=> The entire apparent 0.0205 IC was driven by calendar features the model used as
+regime conditioners (time-of-day/day-of-week x feature interactions), over a THIN
+51-day panel — almost certainly overfit, and NOT tradeable as a cross-sectional name
+ranker (you can't rank names by day_of_week). The price-only cross-sectional features
+have ~ZERO standalone within-ts signal right now.
+
+IMPLICATIONS (reshape the modeling path):
+- Do NOT treat the 0.0205 IC as edge — it's a calendar/regime artifact (canary is
+  clean, so not leakage; it's thin-panel regime overfit). Honest baseline IC of the
+  PRICE features alone ~ 0.
+- The team's instinct is confirmed: we need BETTER FEATURES. Modeller (B): invent +
+  collect new signals — cross-sectional daily momentum, short-horizon reversal
+  interactions, order-flow (needs universe-wide trade/quote streaming = Production Eng),
+  late-session/overnight structure. Price-at-30min alone isn't enough.
+- Re-evaluate calendar features: keep them only as explicit regime CONDITIONERS with
+  enough time depth to trust (250+ days), not as the source of "signal".
+- Strengthens the case to accumulate time depth AND to pursue the overnight horizon.

@@ -76,7 +76,13 @@ def run_queue() -> int:
         if exp["id"] in finished:
             continue
         horizon = exp.get("horizon", "fwd_30m")
-        feature_idx = list(range(NOMICRO_FEATURES)) if exp.get("features") == "nomicro" else None
+        # named subsets of the 18-feature v1.0.0 vector (indices 0..17):
+        #   nomicro   = drop micro (keep 0..12)
+        #   nocalendar= drop micro + minute_of_day(11) + day_of_week(12) -> keep 0..10
+        feature_idx = {
+            "nomicro": list(range(13)),
+            "nocalendar": list(range(11)),
+        }.get(exp.get("features"))
         logger.info("running experiment %s (%s, %s, %s)", exp["id"], horizon, exp.get("label"), exp.get("features"))
         try:
             with psycopg.connect(**DB_KWARGS) as conn:

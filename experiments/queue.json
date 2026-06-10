@@ -1,17 +1,58 @@
 [
-  {"id": "E0_raw_18", "hypothesis": "Baseline: regression on raw fwd_30m excess, all 18 features. Reproduces the trainer result; reference point.",
-   "horizon": "fwd_30m", "label": "raw", "features": "all"},
-  {"id": "E0p_rank_18", "hypothesis": "Rank label should align loss with how we trade (deciles) and be fat-tail robust; expect >= raw IC.",
-   "horizon": "fwd_30m", "label": "rank", "features": "all"},
-  {"id": "E0p_rank_13", "hypothesis": "Drop the 5 micro features (identity-leak risk); 13-feature universe set. Should hold IC while removing leakage.",
-   "horizon": "fwd_30m", "label": "rank", "features": "nomicro"},
-  {"id": "E_raw_13", "hypothesis": "Regression on 13 non-micro features; isolates whether micro columns were carrying (leaked) signal.",
-   "horizon": "fwd_30m", "label": "raw", "features": "nomicro"},
-  {"id": "LONGSHOT_60m_rank_13", "hypothesis": "For-fun long shot: does the 60m horizon rank model show anything different? (sparse 60m labels expected; exploratory).",
-   "horizon": "fwd_60m", "label": "rank", "features": "nomicro"},
-
-  {"id": "E_raw_13_imp", "hypothesis": "(A) Re-run raw/13 WITH gain importances to diagnose WHICH features carry the signal — start of feature-improvement work.",
-   "horizon": "fwd_30m", "label": "raw", "features": "nomicro"},
-  {"id": "E_60m_raw_13", "hypothesis": "Fair 60m comparison: RAW label, 13 features (vs the earlier 60m-rank long-shot). Does a longer horizon help raw regression?",
-   "horizon": "fwd_60m", "label": "raw", "features": "nomicro"}
+  {
+    "id": "E0_raw_18",
+    "hypothesis": "Baseline: regression on raw fwd_30m excess, all 18 features. Reproduces the trainer result; reference point.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "all"
+  },
+  {
+    "id": "E0p_rank_18",
+    "hypothesis": "Rank label should align loss with how we trade (deciles) and be fat-tail robust; expect >= raw IC.",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": "all"
+  },
+  {
+    "id": "E0p_rank_13",
+    "hypothesis": "Drop the 5 micro features (identity-leak risk); 13-feature universe set. Should hold IC while removing leakage.",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": "nomicro"
+  },
+  {
+    "id": "E_raw_13",
+    "hypothesis": "Regression on 13 non-micro features; isolates whether micro columns were carrying (leaked) signal.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "nomicro"
+  },
+  {
+    "id": "LONGSHOT_60m_rank_13",
+    "hypothesis": "For-fun long shot: does the 60m horizon rank model show anything different? (sparse 60m labels expected; exploratory).",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": "nomicro"
+  },
+  {
+    "id": "E_raw_13_imp",
+    "hypothesis": "(A) Re-run raw/13 WITH gain importances to diagnose WHICH features carry the signal \u2014 start of feature-improvement work.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "nomicro"
+  },
+  {
+    "id": "E_60m_raw_13",
+    "hypothesis": "Fair 60m comparison: RAW label, 13 features (vs the earlier 60m-rank long-shot). Does a longer horizon help raw regression?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": "nomicro"
+  },
+  {
+    "id": "DIAG_nocalendar_11",
+    "hypothesis": "(A) Importances show calendar features (day_of_week, minute_of_day) rank high, but they're constant within a cross-section so can't discriminate names. Drop calendar+micro (11 features): if within-ts IC survives, the signal is real cross-sectional; if it collapses, the IC was a time-of-day artifact.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "nocalendar"
+  }
 ]
