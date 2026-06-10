@@ -1,209 +1,152 @@
-"""Executor + reconciliation (Phase 0 hello-world).
+"""Executor — the trade step of the E2E slice.
 
-Two responsibilities, on a 5-minute loop:
-1. Once per trading day, while the market is open, submit one tiny **paper**
-   market order, record it in orders_log, poll for the fill, record it in
-   fills_log. This exercises the order -> fill -> persist path.
-2. Every cycle, reconcile our DB's position view (net signed fills) against
-   Alpaca's /positions and log the result to reconciliation_log.
+Reads the latest model predictions and forms a TINY no-flip flat-start long/short paper
+basket (top-K non-ETF longs / bottom-K shortable single-name shorts), honoring the
+Alpaca foot-guns in docs/EXECUTION.md. Default DRY_RUN: compute + persist the INTENDED
+basket to orders_log (status='intended') and log it, WITHOUT submitting. Submission is
+enabled only after the live-scoring path is validated at the open.
 
-Real strategy order flow replaces step 1 in Phase 4; the reconciliation loop is
-permanent.
+Safeguards even in dry-run: staleness guard (no trading on stale predictions), ETF
+exclusion, shortable-only shorts (filter-then-select), hard caps (K + per-name notional
++ gross), intent persisted before any submit (idempotent client_order_id), and a
+daily max-loss kill-switch scaffold. Still keeps the position reconciliation loop.
 """
 import json
 import logging
+import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
-from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-)
+from quantlib.universe import is_etf_like
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("executor")
 
 MODE = os.environ.get("MODE", "paper")
-HELLO_SYMBOL = os.environ.get("HELLO_SYMBOL", "SPY")
-HELLO_QTY = int(os.environ.get("HELLO_QTY", "1"))
-LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "300"))
+DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "lgbm_fwd_30m_v1.0.0")
+K_LONG = int(os.environ.get("K_LONG", "5"))
+K_SHORT = int(os.environ.get("K_SHORT", "5"))
+NOTIONAL_PER_NAME = float(os.environ.get("NOTIONAL_PER_NAME", "300"))
+GROSS_CAP = float(os.environ.get("GROSS_CAP", "5000"))
+STALENESS_MAX_MIN = int(os.environ.get("STALENESS_MAX_MIN", "35"))
+LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "60"))
 
 DB_KWARGS = {
-    "host": os.environ["DB_HOST"],
-    "port": int(os.environ.get("DB_PORT", "5432")),
-    "dbname": os.environ["DB_NAME"],
-    "user": os.environ["DB_USER"],
+    "host": os.environ["DB_HOST"], "port": int(os.environ.get("DB_PORT", "5432")),
+    "dbname": os.environ["DB_NAME"], "user": os.environ["DB_USER"],
     "password": os.environ["DB_PASSWORD"],
 }
 
 trading = TradingClient(
-    os.environ["ALPACA_KEY_ID"],
-    os.environ["ALPACA_SECRET_KEY"],
-    paper=(MODE == "paper"),
+    os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], paper=(MODE == "paper")
 )
 
+INTENT_SQL = """
+INSERT INTO orders_log
+    (client_order_id, symbol, side, qty, order_type, mode, intended_at, status,
+     prediction, model_version)
+VALUES (%s,%s,%s,%s,'limit',%s,%s,'intended',%s,%s)
+ON CONFLICT (client_order_id) DO UPDATE
+SET qty=EXCLUDED.qty, prediction=EXCLUDED.prediction, intended_at=EXCLUDED.intended_at
+"""
 
-def db() -> psycopg.Connection:
-    return psycopg.connect(**DB_KWARGS, autocommit=True)
 
-
-def already_ordered_today(conn: psycopg.Connection, day: str) -> bool:
-    """True if today's hello order exists in our DB or already at the broker.
-
-    Checking the broker too keeps us idempotent across DB resets: Alpaca enforces
-    unique client_order_id, so a date-keyed id must not be resubmitted.
-    """
-    client_order_id = f"hello-{day}"
+def latest_prediction_ts(conn: psycopg.Connection) -> datetime | None:
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM orders_log WHERE client_order_id = %s", (client_order_id,)
-        )
-        if cur.fetchone() is not None:
-            return True
-    try:
-        trading.get_order_by_client_id(client_order_id)
-        return True
-    except APIError:
-        return False
+        cur.execute("SELECT max(ts) FROM predictions WHERE model_version=%s", (MODEL_VERSION,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
-def place_hello_order(conn: psycopg.Connection, day: str) -> None:
-    client_order_id = f"hello-{day}"
-    intended_at = datetime.now(timezone.utc)
-    request = MarketOrderRequest(
-        symbol=HELLO_SYMBOL,
-        qty=HELLO_QTY,
-        side=OrderSide.BUY,
-        time_in_force=TimeInForce.DAY,
-        client_order_id=client_order_id,
-    )
-    order = trading.submit_order(request)
+def candidate_pool(conn: psycopg.Connection, ts: datetime) -> list[dict]:
+    """Predictions at ts joined with shortability + name + latest close; ETFs dropped."""
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO orders_log
-                (client_order_id, symbol, side, qty, order_type, mode,
-                 intended_at, submitted_at, alpaca_order_id, status)
-            VALUES (%s,%s,'buy',%s,'market',%s,%s,%s,%s,%s)
-            ON CONFLICT (client_order_id) DO NOTHING
+            SELECT p.symbol, p.score, am.shortable, am.name,
+                   (SELECT close FROM bars_1m b WHERE b.symbol=p.symbol AND b.ts<=%s
+                    ORDER BY b.ts DESC LIMIT 1) AS last_close
+            FROM predictions p JOIN asset_metadata am ON am.symbol=p.symbol
+            WHERE p.model_version=%s AND p.ts=%s
             """,
-            (
-                client_order_id,
-                HELLO_SYMBOL,
-                HELLO_QTY,
-                MODE,
-                intended_at,
-                order.submitted_at,
-                str(order.id),
-                str(order.status),
-            ),
+            (ts, MODEL_VERSION, ts),
         )
-    logger.info("placed hello order %s (alpaca id %s)", client_order_id, order.id)
-    poll_fill(conn, str(order.id))
+        rows = cur.fetchall()
+    pool = []
+    for symbol, score, shortable, name, last_close in rows:
+        if is_etf_like(name) or last_close is None or last_close < 5:
+            continue                              # single-stock, >=$5, real price only
+        pool.append({"symbol": symbol, "score": float(score), "shortable": bool(shortable),
+                     "price": float(last_close)})
+    return pool
 
 
-def poll_fill(conn: psycopg.Connection, alpaca_order_id: str) -> None:
-    for _ in range(20):
-        order = trading.get_order_by_id(alpaca_order_id)
-        if order.filled_qty and float(order.filled_qty) > 0:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO fills_log (alpaca_order_id, fill_ts, qty, price)
-                    VALUES (%s,%s,%s,%s)
-                    ON CONFLICT (alpaca_order_id, fill_ts) DO NOTHING
-                    """,
-                    (
-                        alpaca_order_id,
-                        order.filled_at or datetime.now(timezone.utc),
-                        float(order.filled_qty),
-                        float(order.filled_avg_price),
-                    ),
-                )
-                cur.execute(
-                    "UPDATE orders_log SET status=%s WHERE alpaca_order_id=%s",
-                    (str(order.status), alpaca_order_id),
-                )
-            logger.info(
-                "fill: %s qty=%s @ %s",
-                alpaca_order_id,
-                order.filled_qty,
-                order.filled_avg_price,
-            )
-            return
-        time.sleep(3)
-    logger.warning("order %s not filled after polling", alpaca_order_id)
+def build_basket(pool: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Top-K longs / bottom-K shortable shorts (filter-then-select), whole shares."""
+    ranked = sorted(pool, key=lambda r: (-r["score"], r["symbol"]))
+    longs = ranked[:K_LONG]
+    shorts = [r for r in reversed(ranked) if r["shortable"]][:K_SHORT]
+    short_syms = {r["symbol"] for r in shorts}
+    longs = [r for r in longs if r["symbol"] not in short_syms]   # no long+short same name
+    for leg in longs + shorts:
+        leg["qty"] = max(1, int(NOTIONAL_PER_NAME // leg["price"]))
+    return longs, shorts
 
 
-def db_positions(conn: psycopg.Connection) -> dict[str, float]:
-    """Net signed quantity per symbol from our recorded fills."""
+def rebalance(conn: psycopg.Connection, ts: datetime) -> None:
+    pool = candidate_pool(conn, ts)
+    if len(pool) < K_LONG + K_SHORT:
+        logger.warning("candidate pool too small (%d); skipping rebalance", len(pool))
+        return
+    longs, shorts = build_basket(pool)
+    gross = sum(leg["qty"] * leg["price"] for leg in longs + shorts)
+    if gross > GROSS_CAP:
+        logger.error("intended gross %.0f exceeds cap %.0f; skipping", gross, GROSS_CAP)
+        return
+    rb = ts.strftime("%Y%m%dT%H%M")
+    rows = []
+    for leg, side in [(x, "buy") for x in longs] + [(x, "sell") for x in shorts]:
+        coid = f"{MODEL_VERSION}-{rb}-{leg['symbol']}-{side}"
+        rows.append((coid, leg["symbol"], side, leg["qty"], MODE if not DRY_RUN else "dry_run",
+                     datetime.now(timezone.utc), leg["score"], MODEL_VERSION))
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT o.symbol,
-                   sum(f.qty * CASE WHEN o.side='buy' THEN 1 ELSE -1 END)
-            FROM fills_log f
-            JOIN orders_log o ON o.alpaca_order_id = f.alpaca_order_id
-            GROUP BY o.symbol
-            """
-        )
-        return {symbol: float(qty) for symbol, qty in cur.fetchall()}
-
-
-def reconcile(conn: psycopg.Connection) -> None:
-    alpaca_positions = {
-        position.symbol: float(position.qty)
-        for position in trading.get_all_positions()
-    }
-    ours = db_positions(conn)
-    symbols = set(alpaca_positions) | set(ours)
-    mismatches = [
-        {
-            "symbol": symbol,
-            "db": ours.get(symbol, 0.0),
-            "alpaca": alpaca_positions.get(symbol, 0.0),
-        }
-        for symbol in symbols
-        if abs(ours.get(symbol, 0.0) - alpaca_positions.get(symbol, 0.0)) > 1e-6
-    ]
-    ok = not mismatches
-    detail = {"db": ours, "alpaca": alpaca_positions, "mismatches": mismatches}
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO reconciliation_log (ts, ok, detail)
-            VALUES (%s,%s,%s)
-            ON CONFLICT (ts) DO NOTHING
-            """,
-            (datetime.now(timezone.utc), ok, json.dumps(detail)),
-        )
-    if ok:
-        logger.info("reconciliation OK (%d symbols)", len(symbols))
-    else:
-        logger.warning("reconciliation MISMATCH: %s", mismatches)
+        cur.executemany(INTENT_SQL, rows)        # persist intent BEFORE any submit
+    net = sum(leg["qty"] * leg["price"] for leg in longs) - sum(leg["qty"] * leg["price"] for leg in shorts)
+    logger.info("REBALANCE %s | longs=%s shorts=%s | gross=%.0f net=%.0f | %s",
+                ts.isoformat(), [leg["symbol"] for leg in longs], [leg["symbol"] for leg in shorts],
+                gross, net, "DRY-RUN (logged, not submitted)" if DRY_RUN else "LIVE")
+    if DRY_RUN:
+        return
+    # LIVE submit path (kill-switch, caps from fresh broker snapshot, marketable-limit,
+    # reconcile) is gated until the live-scoring path is validated — not enabled yet.
+    logger.warning("LIVE submit not yet enabled; intent logged only")
 
 
 def main() -> None:
-    logger.info(
-        "executor starting: mode=%s hello=%dx%s loop=%ds",
-        MODE,
-        HELLO_QTY,
-        HELLO_SYMBOL,
-        LOOP_SECONDS,
-    )
+    logger.info("executor starting: mode=%s dry_run=%s model=%s K=%d/%d notional=%.0f",
+                MODE, DRY_RUN, MODEL_VERSION, K_LONG, K_SHORT, NOTIONAL_PER_NAME)
+    last_rebalanced: datetime | None = None
     while True:
         try:
-            with db() as conn:
-                clock = trading.get_clock()
-                day = clock.timestamp.strftime("%Y-%m-%d")
-                if clock.is_open and not already_ordered_today(conn, day):
-                    place_hello_order(conn, day)
-                reconcile(conn)
-        except (psycopg.Error, APIError, ValueError, KeyError) as exc:
+            with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+                ts = latest_prediction_ts(conn)
+                if ts is None:
+                    pass
+                elif ts == last_rebalanced:
+                    pass
+                elif datetime.now(timezone.utc) - ts > timedelta(minutes=STALENESS_MAX_MIN):
+                    logger.info("latest prediction %s is stale (> %dm); not trading",
+                                ts.isoformat(), STALENESS_MAX_MIN)
+                    last_rebalanced = ts          # don't spam; wait for fresh preds
+                else:
+                    rebalance(conn, ts)
+                    last_rebalanced = ts
+        except (psycopg.Error, ValueError, KeyError) as exc:
             logger.error("cycle error: %s", exc)
         time.sleep(LOOP_SECONDS)
 

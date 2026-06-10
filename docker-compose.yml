@@ -43,11 +43,16 @@ services:
         condition: service_healthy
 
   executor:
-    build: ./services/executor
+    build:
+      context: .
+      dockerfile: services/executor/Dockerfile
     <<: *common
     environment:
-      HELLO_SYMBOL: "SPY"
-      HELLO_QTY: "1"
+      DRY_RUN: "true"                 # compute + log intended basket; do NOT submit
+      MODEL_VERSION: "lgbm_fwd_30m_v1.0.0"
+      K_LONG: "5"
+      K_SHORT: "5"
+      NOTIONAL_PER_NAME: "300"
     depends_on:
       timescaledb:
         condition: service_healthy
