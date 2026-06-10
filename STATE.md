@@ -16,8 +16,13 @@ Slice steps:
 2. [x] Trained first LightGBM via the harness: REAL rank-IC 0.0205 (NW t 2.98), CANARY
        0.0022 (clean = pipeline sound, no leakage). Model at models/model_fwd_30m.txt.
        NOT edge (t<4, thin panel, no costs, residual survivorship) — plumbing validated.
-3. [ ] model-server: load model, score live feature_vectors each minute -> predictions.
-4. [ ] executor: read latest predictions -> trivial L/S basket (paper), reconcile.
+3. [x] **model-server live** (`services/model-server`): each 30-min cadence in RTH,
+       computes live features for the universe via the SAME featurestore code, scores
+       with model_fwd_30m, writes ranked predictions (10 deciles). Verified: scored 977
+       symbols on a known RTH minute. Idles until the 09:30 ET open (no fresh bars now).
+4. [ ] **executor: read latest predictions -> TINY L/S paper basket** (top-K longs /
+       bottom-K shortable shorts), honor EXECUTION foot-guns, monitor fills, reconcile,
+       EOD flatten. THE LAST E2E PIECE — build before the open to run the full loop live.
    (gate the REAL edge claim later: t>=4, after-cost, deflated, settled parity.)
 Keep the harness gates for the REAL run later; this slice is to validate the pipeline.
 

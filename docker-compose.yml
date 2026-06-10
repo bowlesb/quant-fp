@@ -63,6 +63,20 @@ services:
       timescaledb:
         condition: service_healthy
 
+  model-server:
+    build:
+      context: .
+      dockerfile: services/model-server/Dockerfile
+    <<: *common
+    environment:
+      MODEL_HORIZON: "fwd_30m"
+      FEATURE_CADENCE_MIN: "30"
+    volumes:
+      - ./models:/models:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   feature-computer:
     build:
       context: .
