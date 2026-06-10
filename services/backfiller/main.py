@@ -30,6 +30,7 @@ from quantlib.aggregates import (
     bucket_minute,
 )
 from quantlib.barsource import fetch_and_store_bars
+from quantlib.features import is_rth
 from quantlib.featurestore import build_feature_store
 from quantlib.labels import (
     LABEL_HORIZONS,
@@ -260,7 +261,9 @@ def build_labels() -> None:
                          AND ts<=%s + make_interval(mins => %s) ORDER BY ts""",
                     (symbol, bar_source, start, end, max(LABEL_HORIZONS)),
                 )
-                series = {row[0]: row[1] for row in cur.fetchall()}
+                # RTH-only: forward returns are session close-to-close, never
+                # anchored in or reaching across the thin extended-hours tape.
+                series = {row[0]: row[1] for row in cur.fetchall() if is_rth(row[0])}
                 if series:
                     closes[symbol] = series
 

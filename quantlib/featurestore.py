@@ -22,6 +22,7 @@ from quantlib.features import (
     BarRow,
     FeatureContext,
     feature_vector,
+    is_rth,
 )
 
 WARMUP = timedelta(minutes=70)        # enough history for the 60m features
@@ -91,17 +92,19 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
     """Compute and insert feature_vectors for symbols over [start, end]. Returns
     the number of vectors written."""
     register_feature_set(conn)
-    market = load_bars(conn, MARKET_SYMBOL, bar_source, start, end)
+    # Regular-hours only: drop extended-hours bars so returns/vol windows and
+    # session_open reflect the real session (09:30-16:00 ET), not premarket prints.
+    market = [bar for bar in load_bars(conn, MARKET_SYMBOL, bar_source, start, end) if is_rth(bar.ts)]
     market_ts = [bar.ts for bar in market]
     total = 0
     for symbol in symbols:
-        bars = load_bars(conn, symbol, bar_source, start, end)
+        bars = [bar for bar in load_bars(conn, symbol, bar_source, start, end) if is_rth(bar.ts)]
         if not bars:
             continue
         micro = load_micro(conn, symbol, start, end)
         session_open: dict[object, float] = {}
         for bar in bars:
-            session_open.setdefault(bar.ts.date(), bar.open)
+            session_open.setdefault(bar.ts.date(), bar.open)   # first RTH bar = the open
         rows = []
         for i, bar in enumerate(bars):
             if bar.ts < start or bar.ts > end:

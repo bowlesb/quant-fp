@@ -11,7 +11,23 @@ from quantlib.features import (
     FeatureContext,
     compute_features,
     feature_vector,
+    is_rth,
 )
+
+
+def test_is_rth_handles_dst() -> None:
+    # 14:00 UTC = 09:00 ET (pre-open) in both DST regimes -> not RTH
+    assert not is_rth(datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc))   # 09:00 EDT
+    # EDT (summer): RTH is 13:30-20:00 UTC
+    assert is_rth(datetime(2026, 6, 10, 13, 30, tzinfo=timezone.utc))      # 09:30 EDT open
+    assert is_rth(datetime(2026, 6, 10, 19, 59, tzinfo=timezone.utc))      # 15:59 EDT
+    assert not is_rth(datetime(2026, 6, 10, 20, 0, tzinfo=timezone.utc))   # 16:00 EDT close
+    # EST (winter, e.g. early March before DST 2026-03-08): RTH shifts to 14:30-21:00 UTC
+    assert not is_rth(datetime(2026, 3, 2, 13, 30, tzinfo=timezone.utc))   # 08:30 EST premarket
+    assert is_rth(datetime(2026, 3, 2, 14, 30, tzinfo=timezone.utc))       # 09:30 EST open
+    assert is_rth(datetime(2026, 3, 2, 20, 30, tzinfo=timezone.utc))       # 15:30 EST, still RTH
+    assert not is_rth(datetime(2026, 3, 2, 21, 0, tzinfo=timezone.utc))    # 16:00 EST close
+
 
 BASE = datetime(2026, 6, 10, 14, 30, tzinfo=timezone.utc)
 
@@ -52,6 +68,24 @@ def test_gap_and_calendar() -> None:
     assert abs(feats["gap_from_open"] - 0.02) < 1e-12
     assert feats["day_of_week"] == float(BASE.weekday())
     assert feats["minute_of_day"] == float(bars[-1].ts.hour * 60 + bars[-1].ts.minute)
+
+
+def test_returns_are_gap_safe_timestamp_based() -> None:
+    """A missing minute must make the affected return NaN, not silently use a
+    further-back bar (the positional-lookup bug)."""
+    # bars at minutes 0,1,2,3,4 then a gap, then 10 (all within RTH)
+    closes = [100, 101, 102, 103, 104]
+    bars = [
+        BarRow(ts=BASE + timedelta(minutes=i), open=c, high=c, low=c, close=c,
+               volume=1000, vwap=c)
+        for i, c in enumerate(closes)
+    ]
+    bars.append(BarRow(ts=BASE + timedelta(minutes=10), open=110, high=110, low=110,
+                       close=110, volume=1000, vwap=110))
+    ctx = FeatureContext(symbol="X", ts=bars[-1].ts, bars=bars, session_open=100.0)
+    feats = compute_features(ctx)
+    # 5-min return from minute 10 needs minute-5 bar, which doesn't exist -> NaN
+    assert math.isnan(feats["ret_5m"])
 
 
 def test_replay_equivalence() -> None:

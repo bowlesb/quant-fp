@@ -15,9 +15,22 @@ Bump FEATURE_SET_VERSION whenever the set changes.
 import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 FEATURE_SET_VERSION = "v1.0.0"
+
+_NY = ZoneInfo("America/New_York")
+_RTH_OPEN = dtime(9, 30)
+_RTH_CLOSE = dtime(16, 0)
+
+
+def is_rth(ts: datetime) -> bool:
+    """True if ts falls in the US regular trading session (09:30-16:00 ET).
+    Converts to America/New_York so it's correct across DST (a fixed UTC window
+    would be off by an hour for part of the year)."""
+    local = ts.astimezone(_NY).timetz()
+    return _RTH_OPEN <= local.replace(tzinfo=None) < _RTH_CLOSE
 
 RETURN_WINDOWS = [5, 15, 30, 60]
 VOL_WINDOWS = [30, 60]
@@ -51,62 +64,74 @@ class FeatureContext:
     quote_imbalance: float = math.nan
 
 
-def _closes(bars: list[BarRow]) -> list[float]:
-    return [bar.close for bar in bars]
+def _contiguous_run(values_by_ts: dict[datetime, float], ts: datetime, window: int) -> list[float]:
+    """Values for the contiguous minute run ending at ts: [ts-window .. ts], reset
+    on any gap so the result never spans a missing minute or a session boundary
+    (with RTH-only bars, the prior session's minutes simply aren't present)."""
+    run: list[float] = []
+    for offset in range(window, -1, -1):
+        value = values_by_ts.get(ts - timedelta(minutes=offset))
+        run = run + [value] if value is not None else []
+    return run
 
 
-def _ret(closes: list[float], k: int) -> float:
-    if len(closes) <= k or closes[-1 - k] == 0:
-        return math.nan
-    return closes[-1] / closes[-1 - k] - 1.0
+def _ret_ts(close_by_ts: dict[datetime, float], ts: datetime, k: int) -> float:
+    """k-minute return by timestamp lookup (gap/session-safe): NaN unless the bar
+    exactly k minutes earlier exists."""
+    base = close_by_ts.get(ts - timedelta(minutes=k))
+    current = close_by_ts.get(ts)
+    if base and current and base > 0:
+        return current / base - 1.0
+    return math.nan
 
 
-def _realized_vol(closes: list[float], window: int) -> float:
-    if len(closes) <= window:
-        return math.nan
-    recent = closes[-(window + 1):]
+def _realized_vol_ts(close_by_ts: dict[datetime, float], ts: datetime, window: int) -> float:
+    run = _contiguous_run(close_by_ts, ts, window)
     log_returns = [
-        math.log(recent[i] / recent[i - 1])
-        for i in range(1, len(recent))
-        if recent[i] > 0 and recent[i - 1] > 0
+        math.log(run[i] / run[i - 1])
+        for i in range(1, len(run))
+        if run[i] > 0 and run[i - 1] > 0
     ]
     if len(log_returns) < 2:
         return math.nan
     return statistics.stdev(log_returns)
 
 
-def _volume_zscore(bars: list[BarRow], window: int) -> float:
-    if len(bars) <= window:
+def _volume_zscore_ts(vol_by_ts: dict[datetime, float], ts: datetime, window: int) -> float:
+    current = vol_by_ts.get(ts)
+    prior = _contiguous_run(vol_by_ts, ts - timedelta(minutes=1), window - 1)
+    if current is None or len(prior) < 2:
         return math.nan
-    prior = [bar.volume for bar in bars[-(window + 1):-1]]
-    if len(prior) < 2:
-        return math.nan
-    mean = statistics.mean(prior)
     spread = statistics.stdev(prior)
     if spread == 0:
         return math.nan
-    return (bars[-1].volume - mean) / spread
+    return (current - statistics.mean(prior)) / spread
 
 
 def compute_features(ctx: FeatureContext) -> dict[str, float]:
-    """Compute the v1 feature dict for ctx. Keys match FEATURE_NAMES."""
-    closes = _closes(ctx.bars)
+    """Compute the v1 feature dict for ctx. Keys match FEATURE_NAMES.
+
+    All history lookups are by TIMESTAMP (not list position), so gaps and session
+    boundaries never silently shorten or stretch a window — assumes ctx.bars is the
+    symbol's RTH bar series ending at ctx.ts."""
+    close_by_ts = {bar.ts: bar.close for bar in ctx.bars}
+    vol_by_ts = {bar.ts: bar.volume for bar in ctx.bars}
     latest = ctx.bars[-1]
     features: dict[str, float] = {}
 
     for window in RETURN_WINDOWS:
-        features[f"ret_{window}m"] = _ret(closes, window)
+        features[f"ret_{window}m"] = _ret_ts(close_by_ts, ctx.ts, window)
     for window in VOL_WINDOWS:
-        features[f"vol_{window}m"] = _realized_vol(closes, window)
+        features[f"vol_{window}m"] = _realized_vol_ts(close_by_ts, ctx.ts, window)
 
-    features["vol_z_30"] = _volume_zscore(ctx.bars, 30)
+    features["vol_z_30"] = _volume_zscore_ts(vol_by_ts, ctx.ts, 30)
     features["vwap_dev"] = (latest.close / latest.vwap - 1.0) if latest.vwap else math.nan
     features["range_pct"] = (latest.high - latest.low) / latest.close if latest.close else math.nan
     features["gap_from_open"] = (latest.close / ctx.session_open - 1.0) if ctx.session_open else math.nan
 
     # Market-relative (vs SPY): excess of this symbol's 30m return over market's.
-    market_closes = _closes(ctx.market_bars)
-    market_ret_30m = _ret(market_closes, 30)
+    market_close_by_ts = {bar.ts: bar.close for bar in ctx.market_bars}
+    market_ret_30m = _ret_ts(market_close_by_ts, ctx.ts, 30)
     own_ret_30m = features["ret_30m"]
     features["rel_ret_30m"] = (
         own_ret_30m - market_ret_30m

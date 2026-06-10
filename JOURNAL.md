@@ -78,7 +78,32 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- CRITIC #2 (wake red-team) — verdict ON-TRACK; findings + actions:
+  - [HIGH] Backfill breadth NON-UNIFORM (Mar ~989/day, May ~494, Jun ~830) because
+    backfill is mid-fill. Rebuilding labels now would demean over a half-universe =
+    fresh bias. ACTION: do NOT rebuild the trainable panel until backfill is complete
+    AND per-date breadth is uniform; add a breadth gate (skip/flag under-covered dates).
+    Also: the "near-empty days" (Mar7/21, May16) are SATURDAYS with stray extended-
+    hours bars — RTH filtering drops them.
+  - [HIGH] Both bugs confirmed (universe_membership has only 1 date; session_open off
+    premarket). Fixes correct.
+  - [MED] RTH must apply to LABELS too, and feature lookups must be TIMESTAMP-based
+    (positional crosses sessions). ACCEPTED + DONE this cycle (see below).
+  - Loop overhead acceptable; critic paying off (found these). Don't let critic+probes
+    be the only thing a cheap wake does.
+  ACTIONS TAKEN: (1) is_rth() — DST-correct (America/New_York), tested; (2) featurestore
+  filters bars+market to RTH, session_open = first RTH bar; (3) features.py rewritten
+  to TIMESTAMP-based gap/session-safe lookups (ret/vol/volume-z), tested incl. a gap
+  case; (4) label builder filters price series to RTH (forward returns RTH-to-RTH,
+  never crossing the session). 19 tests pass. STILL PENDING (panel rebuild, gated on
+  backfill-complete + uniform breadth): per-date point-in-time universe + breadth gate.
+  Note: existing feature_vectors are now mixed old(positional)/new(timestamp); will be
+  fully recomputed in the panel rebuild.
 - DATA PROBE BATTERY (now scripts/data_probes.sql; run + extend every cycle):
+  Cycle-2 new angles: ingestion latency ~1-4s after bar close (beats <5s target);
+  flat-bar rate 7.84% RTH (acceptable tail); RTH bars/symbol-day avg 367/390 with a
+  thin tail (min 2 = partial-listing/thin names). Gap-spanning extremes 139->44 as
+  backfill fills.
   - Integrity: 0 violations across 11 invariants (OHLC ordering, vwap range, signs,
     grid, imbalance bounds). Clean.
   - Independent cross-check WIN: our trade_agg.n_trades vs bars.trade_count correlate
