@@ -16,18 +16,38 @@ quality over speed: a false edge is worse than no edge.
 
 ## The loop (run every wake)
 
-0. **Dispatch an independent critic agent (background).** At the START of every
-   wake, launch a background subagent (general-purpose) that red-teams my current
-   direction. Give it: (a) the high-level goal/mission (below), (b) my CURRENT
-   sub-goal in one sentence, (c) instructions to read `STATE.md`, `JOURNAL.md` tail,
-   `ARCHITECTURE.md`, `OPERATING_LOOP.md`, and `git -C /home/ben/quant log --oneline -15`
-   to judge the actual trajectory. Its job: poke holes — am I on track? Is this the
-   RIGHT focus given project state and the A-E ladder? Am I drifting, over-
-   engineering, doing premature/low-value work, missing a bug/risk, or building off
-   the critical path? It returns a prioritized critique + a verdict (on-track /
-   adjust / off-track) + the single most important next thing. When it completes,
-   **incorporate its valid points honestly** (and push back in JOURNAL on ones I
-   disagree with, with reasons). Don't rubber-stamp my own plan.
+0. **Convene the standing 4-role team (Ben's directive — EVERY wake).** Operate as a
+   team that examines the SHARED STATE (`STATE.md`, `JOURNAL.md`, `ARCHITECTURE.md`,
+   the code, and the live DB) from all angles and takes coordinated action. I am the
+   **Engineering Manager**; at the start of every wake I launch the three specialists
+   as PARALLEL background subagents (read-only — they analyze and recommend; the
+   manager executes, to avoid concurrent-edit conflicts). Each reads the shared state
+   and returns a prioritized, agenda-specific report with concrete recommended actions.
+   I synthesize all three + my own manager view into the execution plan, act on the
+   highest-value items (sequencing to avoid conflicts), update `STATE.md` (the shared
+   plan), and log decisions/disagreements in `JOURNAL.md`.
+
+   - **1) Engineering Manager (me):** own the execution plan and ensure it's followed.
+     Where are we vs the overall goal and timeline? On track? Using time as effectively
+     as possible? Which specialists to invoke and how, given the lifecycle stage? What
+     are we NOT doing enough of given where we're going? Decide priorities; sequence work.
+   - **2) Data QA Tester:** hunt for holes in data collection + storage — timestamps &
+     time semantics, NaN/Inf, formats, DB storage/partitioning patterns, parity
+     (backfill vs real-time) problems that fly under the radar. Run random/proactive
+     queries to test things not yet scrutinized; intentionally try to break our data.
+   - **3) Modeller:** strategize the ML approach — what to try next and in what order;
+     "if X works → …, if Y fails → …"; which features must be stored (coordinate with
+     Production Eng) and parity-verified (coordinate with QA); long vs short, order
+     types, combining signals with Alpaca bracket orders. The brains behind using the
+     infra to make money. Treat ML quality as separable from infra but plan the path.
+   - **4) Production Engineer:** keep the lights on — real-time data collection, live
+     API calls, concurrency, performance, extensibility, maintainability. Fix prod
+     issues; plan for the next market day (e.g. a no-data day); evaluate framework/
+     language choices as the system evolves. Hates tech debt, outdated patterns,
+     duplicated/unconsolidated code; keeps a clear mental model of prod vs test code.
+
+   Run this panel continuously — every wake, all angles. (This subsumes the old single
+   "critic".)
 1. **Orient.** Read `STATE.md`, the tail of `JOURNAL.md`, and recent `git log`.
 2. **Monitor / health-check.** Containers up? ingestor streaming (bars landing this
    minute)? any crash-loops? reconciliation OK? coverage sane? disk headroom?

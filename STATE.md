@@ -20,10 +20,21 @@ Slice steps:
        computes live features for the universe via the SAME featurestore code, scores
        with model_fwd_30m, writes ranked predictions (10 deciles). Verified: scored 977
        symbols on a known RTH minute. Idles until the 09:30 ET open (no fresh bars now).
-4. [ ] **executor: read latest predictions -> TINY L/S paper basket** (top-K longs /
-       bottom-K shortable shorts), honor EXECUTION foot-guns, monitor fills, reconcile,
-       EOD flatten. THE LAST E2E PIECE — build before the open to run the full loop live.
-   (gate the REAL edge claim later: t>=4, after-cost, deflated, settled parity.)
+4a. [ ] **CRITICAL-PATH FIX FIRST: exclude leveraged/inverse ETFs/ETNs from the universe**
+        (and the executor candidate pool) + re-rank. Current tails are SOXL/SQQQ/VXX etc.
+        — invalid for single-stock cross-sectional L/S. Add is_etf_like to asset_metadata;
+        exclude in universe builders + executor. (Queue: re-rank universe; panel rebuild
+        for modeling later.)
+4b. [ ] **executor: read latest predictions -> TINY no-flip flat-start L/S paper basket**
+        — top-K non-ETF longs / bottom-K SHORTABLE single-name shorts (filter-then-select);
+        hard caps + kill-switch bound from a FRESH broker snapshot before submit; persist
+        kill flag across restart; INSERT intent before submit (idempotent); staleness guard
+        (reject preds >~1 cadence old); marketable-limit whole-share; REST reconcile; EOD
+        flatten. Day-1 = NO flips, NO trade_updates stream, NO brackets/cancel-replace.
+4c. [ ] model-server: deterministic secondary sort (symbol) on score ties.
+4d. [ ] MONITORING dashboard panels: predictions, open orders, positions, intraday P&L.
+    (gate the REAL edge claim later: t>=4, after-cost, deflated, settled parity.)
+    Team specialists (QA/Modeller/Prod) running — synthesize before the big build.
 Keep the harness gates for the REAL run later; this slice is to validate the pipeline.
 
 ## Phase 2 progress

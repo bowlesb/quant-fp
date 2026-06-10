@@ -78,6 +78,35 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- STANDING 4-ROLE TEAM established (Ben, 2026-06-10): every wake = Manager(me) +
+  parallel QA / Modeller / Production-Engineer specialists on the shared state; manager
+  synthesizes + executes. OPERATING_LOOP step 0 rewritten.
+- EXECUTOR RED-TEAM (verdict ADJUST) — P0 CATCH that reprioritizes:
+  - **Universe is polluted with leveraged/inverse ETFs/ETNs.** Top model "longs" =
+    SOXL(3X)/KORU(3X)/TECL(3X)/IRE(2X)…; "shorts" = SQQQ/VXX/UVXY/SOXS. The screen
+    (price>$5, ADV$>$10M) doesn't exclude ETFs, and leveraged products dominate both
+    tails of a momentum-ish model. First basket would trade 3X ETFs/VIX ETNs — invalid
+    for single-stock cross-sectional L/S AND for plumbing validation. FIX (critical
+    path, BEFORE executor): exclude ETF/ETN/leveraged products from the universe (and
+    the executor candidate pool); re-rank. ~55 such names in today's universe.
+  - Shortability: filter-then-SELECT shorts (walk up from rank N to K ETB single-names),
+    not select-then-drop (which unbalances the short leg). 17/39 top/bottom-20 not ETB.
+  - Caps/kill-switch must bind BEFORE submit from a FRESH broker snapshot (/account +
+    /positions + open-order BP reserve); persist a kill flag that survives restart.
+  - Idempotency: INSERT intent (pending) BEFORE submit, UPDATE with alpaca id after
+    (current code submits then inserts — a crash desyncs DB vs broker). Deterministic
+    client_order_id (rebalance_date,symbol,side,leg,attempt).
+  - Day-1 = NO-FLIP, flat-start basket (sidesteps no-long+short-same-symbol + wash-trade
+    + flip-sequencing). REST polling is enough to reconcile a tiny flat-start run;
+    trade_updates stream NOT required day-1; brackets/cancel-replace/ext-hours NOT day-1.
+  - Staleness guard: reject predictions older than ~1 cadence (only stale 19:00 preds now).
+  - model-server: argsort is unstable on tie clusters -> add deterministic secondary
+    sort (symbol); executor skips rebalance if scores degenerate (std~0 / all-NaN row).
+- MANAGER assessment: E2E deploy done; executor is the last piece (~13h to open). On
+  track, but the ETF/universe-quality issue means UNIVERSE DEFINITION needs hardening
+  (we were under-attending universe quality). Priorities: (1) exclude ETFs + re-rank,
+  (2) build executor w/ the safeguards above (no-flip day-1), (3) monitoring panels.
+  Synthesize QA/Modeller/Prod reports (running) before the big build.
 - E2E TRAIN STEP WORKS (2026-06-10): panel rebuilt over 51 dates (662,954 feature
   vectors, PIT, 30-min cadence) + labels (570,481 fwd_30m). First LightGBM trained
   through the leakage-checked harness: panel 570,481 rows/18 feats/661 timestamps;
