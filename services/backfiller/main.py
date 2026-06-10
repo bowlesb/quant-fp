@@ -18,14 +18,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import psycopg
-from alpaca.data.enums import Adjustment
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import (
-    StockBarsRequest,
-    StockQuotesRequest,
-    StockTradesRequest,
-)
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.requests import StockQuotesRequest, StockTradesRequest
 
 from quantlib.aggregates import (
     QuoteTick,
@@ -35,6 +29,7 @@ from quantlib.aggregates import (
     aggregate_trades,
     bucket_minute,
 )
+from quantlib.barsource import fetch_and_store_bars
 from quantlib.featurestore import build_feature_store
 from quantlib.labels import (
     LABEL_HORIZONS,
@@ -57,14 +52,6 @@ DB_KWARGS = {
 data_client = StockHistoricalDataClient(
     os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
 )
-
-CHUNK = 200
-BAR_SQL = """
-INSERT INTO bars_1m (symbol, ts, open, high, low, close, volume, vwap, trade_count, source)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'backfill')
-ON CONFLICT (symbol, ts, source) DO NOTHING
-"""
-
 
 def universe_symbols(conn: psycopg.Connection) -> list[str]:
     with conn.cursor() as cur:
@@ -98,33 +85,14 @@ def resolve_symbols(conn: psycopg.Connection) -> list[str]:
 
 
 def backfill_bars() -> None:
+    """One-shot bar backfill over [start, end] using the shared (adjusted, upsert)
+    helper — same code the continuous backfill-manager uses."""
     start, end = resolve_window()
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
         symbols = resolve_symbols(conn)
         logger.info("backfilling bars for %d symbols, %s .. %s", len(symbols), start, end)
-        total = 0
-        for i in range(0, len(symbols), CHUNK):
-            chunk = symbols[i : i + CHUNK]
-            # split+dividend adjusted, so multi-day returns/labels aren't corrupted
-            # by splits or ex-div gaps (Alpaca defaults to raw/unadjusted).
-            request = StockBarsRequest(
-                symbol_or_symbols=chunk, timeframe=TimeFrame.Minute,
-                start=start, end=end, adjustment=Adjustment.ALL,
-            )
-            barset = data_client.get_stock_bars(request)
-            with conn.cursor() as cur:
-                for symbol, bars in barset.data.items():
-                    for bar in bars:
-                        cur.execute(
-                            BAR_SQL,
-                            (
-                                symbol, bar.timestamp, bar.open, bar.high, bar.low,
-                                bar.close, int(bar.volume), bar.vwap, bar.trade_count,
-                            ),
-                        )
-                        total += 1
-            logger.info("backfilled through %d/%d symbols (%d bars)", min(i + CHUNK, len(symbols)), len(symbols), total)
-        logger.info("backfill complete: %d bars inserted (source=backfill)", total)
+        total = fetch_and_store_bars(data_client, conn, symbols, start, end)
+        logger.info("backfill complete: %d bars upserted (source=backfill)", total)
 
 
 TRADE_AGG_SQL = """

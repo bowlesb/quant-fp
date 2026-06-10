@@ -30,8 +30,13 @@ continuation; doesn't wait to be asked.
 - [x] ML advisor proposal folded into docs/RESEARCH.md (first-wave E0-E4; cheap wins
       = vol-scale label + signed-volume z-scores; leakage canary + deflated Sharpe).
 - [x] Data-quality fix: backfiller now requests split+div-adjusted bars (was raw).
-- [ ] Re-run the 7-day (and deep) backfill with adjustment once current run finishes.
-- [ ] **Build features+labels on source='backfill' once backfill finishes** → the
+- [x] **backfill-manager** (always-on service): self-maintains bar history to a
+      target depth (BACKFILL_TARGET_DAYS, currently 90; raise toward 6yr later).
+      Walks month windows oldest-first, adjusted bars, resumable via backfill_windows,
+      idempotent upsert, rate-limited. Shared fetch in quantlib/barsource.py (reused
+      by the one-shot backfiller). Replaces the manual hand-launched backfill.
+- [ ] Let history accumulate toward target; raise target once proven stable.
+- [ ] **Build features+labels on source='backfill'** over the accumulated panel →
       real multi-day universe panel for modeling.
 - [x] asset_metadata (Alpaca exchange + shortable/borrow/fractionable flags),
       refreshed daily by scheduler. Universe: 939/1000 shortable — short leg must

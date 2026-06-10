@@ -52,6 +52,17 @@ services:
       timescaledb:
         condition: service_healthy
 
+  backfill-manager:
+    build:
+      context: .
+      dockerfile: services/backfill-manager/Dockerfile
+    <<: *common
+    environment:
+      BACKFILL_TARGET_DAYS: "90"     # raise toward ~2200 (6yr) once proven
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   feature-computer:
     build:
       context: .
