@@ -1,8 +1,20 @@
 # STATE — read this first
 
-**Phase:** 0 (Foundation & Skeleton) — in progress
+**Phase:** Phase 1 ~done; Phase 2 (feature engine) in progress
 **Mode:** paper
 **Last updated:** 2026-06-10
+**Operating mode:** autonomous maintainer loop — see `OPERATING_LOOP.md`. Self-schedules
+continuation; doesn't wait to be asked.
+
+## Phase 2 progress
+- [x] `quantlib/features.py` — v1 18-feature set, point-in-time, feature-level
+      replay-equivalence test (12 tests pass total).
+- [x] **Historical feature-store builder** (`backfiller build-features`): computes
+      feature_vectors from stored bars + aggregates via quantlib.features, registers
+      feature_set v1.0.0. Verified: 300 vectors for 5 symbols, all features sane.
+- [ ] Live feature-computer (compute feature_vectors each minute from live context).
+- [ ] On-real-data replay-equivalence: live vs recomputed feature_vectors must match.
+- [ ] Then Phase 3: walk-forward LightGBM + honest backtest (first edge kill-gate).
 
 ## Current status
 
