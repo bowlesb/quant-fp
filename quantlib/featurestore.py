@@ -23,10 +23,21 @@ from quantlib.features import (
     FeatureContext,
     feature_vector,
     is_rth,
+    on_cadence,
 )
 
 WARMUP = timedelta(minutes=70)        # enough history for the 60m features
 MARKET_SYMBOL = "SPY"
+
+
+def load_membership(conn: psycopg.Connection) -> dict[object, set[str]]:
+    """Point-in-time universe membership as {trade_date: {symbols}}."""
+    membership: dict[object, set[str]] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT trade_date, symbol FROM universe_membership WHERE in_universe")
+        for trade_date, symbol in cur.fetchall():
+            membership.setdefault(trade_date, set()).add(symbol)
+    return membership
 
 
 def register_feature_set(conn: psycopg.Connection) -> None:
@@ -88,9 +99,12 @@ def load_micro(conn: psycopg.Connection, symbol: str,
 
 def build_feature_store(conn: psycopg.Connection, symbols: list[str],
                         start: datetime, end: datetime, bar_source: str,
-                        source_label: str) -> int:
-    """Compute and insert feature_vectors for symbols over [start, end]. Returns
-    the number of vectors written."""
+                        source_label: str,
+                        membership: dict[object, set[str]] | None = None,
+                        cadence_minutes: int | None = None) -> int:
+    """Compute and insert feature_vectors for symbols over [start, end]. If
+    `membership` is given (point-in-time {date: {symbols}}), a (symbol, ts) row is
+    emitted only when the symbol is in that date's universe. Returns vectors written."""
     register_feature_set(conn)
     # Regular-hours only: drop extended-hours bars so returns/vol windows and
     # session_open reflect the real session (09:30-16:00 ET), not premarket prints.
@@ -109,6 +123,10 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
         for i, bar in enumerate(bars):
             if bar.ts < start or bar.ts > end:
                 continue
+            if membership is not None and symbol not in membership.get(bar.ts.date(), set()):
+                continue                       # point-in-time: only members of this date
+            if cadence_minutes is not None and not on_cadence(bar.ts, cadence_minutes):
+                continue                       # only emit at rebalance cadence
             m_idx = bisect_right(market_ts, bar.ts)
             micro_vals = micro.get(bar.ts, {})
             ctx = FeatureContext(

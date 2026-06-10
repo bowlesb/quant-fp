@@ -32,6 +32,12 @@ def is_rth(ts: datetime) -> bool:
     local = ts.astimezone(_NY).timetz()
     return _RTH_OPEN <= local.replace(tzinfo=None) < _RTH_CLOSE
 
+
+def on_cadence(ts: datetime, cadence_minutes: int) -> bool:
+    """True if ts lands on the rebalance cadence (ET clock minutes divisible by
+    cadence; e.g. cadence 30 -> :00 and :30 each hour)."""
+    return ts.astimezone(_NY).minute % cadence_minutes == 0
+
 RETURN_WINDOWS = [5, 15, 30, 60]
 VOL_WINDOWS = [30, 60]
 

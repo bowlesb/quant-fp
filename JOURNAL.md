@@ -78,6 +78,18 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- E2E REFRAME (Ben, 2026-06-10): with real-time/backfill parity proven, prioritize the
+  THIN END-TO-END vertical slice — backfill→train→deploy→paper-trade→reconcile — to SEE
+  it run, even trivially (plumbing validation, NOT edge). Strategy reaffirmed: cross-
+  sectional ML ranking (long top decile / short bottom decile), LightGBM. ACTIONS this
+  cycle: wired per-date point-in-time membership into build_feature_store + build_labels
+  (emit feature rows only for that date's members; demean labels within each date's
+  cross-section — completes the survivorship fix); added a rebalance CADENCE
+  (FEATURE_CADENCE_MIN, ET-clock) so the panel is ~640k rows at 30-min cadence instead
+  of ~19M at every minute. Kicked off the full panel rebuild (PIT, backfill bars,
+  30-min cadence, all 51 dates) as a background job. NEXT: rebuild labels, train a first
+  LightGBM, model-server -> live predictions, executor -> trivial L/S paper basket.
+  (Keeping 18-feature v1.0.0 for the first E2E; 13-feature v1.1.0 refinement noted.)
 - PROACTIVITY CORRECTION (Ben, 2026-06-10): I tunneled on the data/modeling pipeline
   and neglected EXECUTION. Market-close at 20:00 UTC observed + verified (332 syms
   post-close = extended-hours stragglers, not a fault). Ben: be proactive about

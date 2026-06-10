@@ -6,6 +6,17 @@
 **Operating mode:** autonomous maintainer loop — see `OPERATING_LOOP.md`. Self-schedules
 continuation; doesn't wait to be asked.
 
+## >>> PRIORITY: thin END-TO-END vertical slice (Ben's directive 2026-06-10) <<<
+Get the whole loop running once — backfill → train → deploy → paper-trade → reconcile —
+even with a trivial model, to SEE E2E in action; then improve each piece. First run is
+PLUMBING VALIDATION, not edge (don't trust its IC/P&L — thin panel, known caveats).
+Slice steps:
+1. [in progress] Rebuild panel over all 51 dates (per-date demean) so it's trainable.
+2. [ ] Train a first LightGBM on the panel; save the model.
+3. [ ] model-server: load model, score live feature_vectors each minute -> predictions.
+4. [ ] executor: read latest predictions -> trivial L/S basket (paper), reconcile.
+Keep the harness gates for the REAL run later; this slice is to validate the pipeline.
+
 ## Phase 2 progress
 - [x] `quantlib/features.py` — v1 18-feature set, point-in-time, feature-level
       replay-equivalence test (12 tests pass total).

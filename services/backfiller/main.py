@@ -31,7 +31,7 @@ from quantlib.aggregates import (
 )
 from quantlib.barsource import fetch_and_store_bars
 from quantlib.features import is_rth
-from quantlib.featurestore import build_feature_store
+from quantlib.featurestore import build_feature_store, load_membership
 from quantlib.labels import (
     LABEL_HORIZONS,
     cross_sectional_excess,
@@ -295,10 +295,15 @@ def build_features() -> None:
     start, end = resolve_window()
     bar_source = os.environ.get("FEATURE_BAR_SOURCE", "stream")
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
-        symbols = resolve_symbols(conn)
-        logger.info("building features for %d symbols, %s..%s (bar source=%s)",
-                    len(symbols), start, end, bar_source)
-        total = build_feature_store(conn, symbols, start, end, bar_source, "historical")
+        membership = load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        symbols = (
+            sorted({s for members in membership.values() for s in members})
+            if membership else resolve_symbols(conn)
+        )
+        cadence = int(os.environ["FEATURE_CADENCE_MIN"]) if os.environ.get("FEATURE_CADENCE_MIN") else None
+        logger.info("building features for %d symbols, %s..%s (src=%s, pit=%s, cadence=%s)",
+                    len(symbols), start, end, bar_source, membership is not None, cadence)
+        total = build_feature_store(conn, symbols, start, end, bar_source, "historical", membership, cadence)
         logger.info("feature build complete: %d vectors", total)
 
 
@@ -309,9 +314,13 @@ def build_labels() -> None:
     start, end = resolve_window()
     bar_source = os.environ.get("FEATURE_BAR_SOURCE", "stream")
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
-        symbols = resolve_symbols(conn)
-        logger.info("building labels for %d symbols, %s..%s, horizons=%s",
-                    len(symbols), start, end, LABEL_HORIZONS)
+        membership = load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        symbols = (
+            sorted({s for members in membership.values() for s in members})
+            if membership else resolve_symbols(conn)
+        )
+        logger.info("building labels for %d symbols, %s..%s, horizons=%s, pit=%s",
+                    len(symbols), start, end, LABEL_HORIZONS, membership is not None)
         # close-by-ts per symbol (extend past `end` so forward windows resolve)
         closes: dict[str, dict[datetime, float]] = {}
         with conn.cursor() as cur:
@@ -341,11 +350,13 @@ def build_labels() -> None:
             for ts in all_ts:
                 if ts > end:
                     continue
+                members = membership.get(ts.date()) if membership else None
                 section = {
                     symbol: fwd[ts]
                     for symbol, fwd in fwd_by_symbol.items()
-                    if ts in fwd
+                    if ts in fwd and (members is None or symbol in members)
                 }
+                # demean within THIS date's universe cross-section (point-in-time)
                 excess = cross_sectional_excess(section)
                 for symbol, value in excess.items():
                     if not math.isnan(value):
