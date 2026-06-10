@@ -26,3 +26,8 @@ why.
 - Phase 0 service set complete: timescaledb, ingestor, executor, scheduler,
   dashboard, prometheus, grafana. Remaining for gate = clean-days accumulation +
   reboot-survival check.
+- Built shared `quantlib` aggregation library (parity cornerstone) with a
+  live-vs-batch parity test; extended ingestor to trades/quotes via quantlib
+  (monorepo build context). Verified rich, sane aggregates landing live.
+- Wrote docs/RESEARCH.md: 40-item ML-approaches backlog organized by ring and a
+  first experiment wave to exercise the full gauntlet once Phase 2/3 infra exists.

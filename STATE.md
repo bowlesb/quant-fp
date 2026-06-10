@@ -46,11 +46,22 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
 - Remaining for the gate: accumulate ~5 clean trading days of coverage. A true
   host-reboot test can be run anytime (low risk) — say the word.
 
-### Next: Phase 1
-- Scale ingestor to the ~1,000-symbol liquid universe (nightly screen + point-in-
-  time membership), add trades/quotes/news streams + per-minute aggregates, 6yr
-  REST backfill, and nightly streamed-vs-REST validation.
-- Prereq: free SSD headroom (move recovered files off — task #3, awaiting Ben).
+### Phase 1: in progress
+- [x] **Shared `quantlib` aggregation library** (the parity cornerstone): per-minute
+      trade & quote aggregates, pure/deterministic, with a live-vs-batch parity
+      test (`make test`, 5 passing). Both ingestor and (future) backfiller call it.
+- [x] **Ingestor extended** to trades + quotes via quantlib → trade_agg_1m,
+      quote_agg_1m, trades_raw (30-day rolling). Verified live: realistic signed
+      volume, ~1-4 bps spreads, ~11k raw trades/min across 10 symbols.
+- [x] **docs/RESEARCH.md** — 40-item ML-approaches backlog (rings 1–4 + methodology).
+- [ ] News stream → news table (lower priority; collection-now-model-later).
+- [ ] Universe construction: nightly liquid ~1,000-symbol screen + point-in-time
+      membership in universe_membership.
+- [ ] Backfiller: 6yr REST bars/trades → DB through quantlib (same code path).
+- [ ] Nightly streamed-vs-REST validation job (the Phase 1 gate).
+- [ ] Scale live ingestion from 10 → ~1,000 symbols (batched async writes).
+- Prereq for backfill: free SSD headroom (move recovered files off — task #3,
+  awaiting Ben's OK to wipe sdb).
 
 ## Known constraints / decisions
 - Deploy target: this Intel box. TimescaleDB host port **5433**, Grafana **3001**,

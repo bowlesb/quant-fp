@@ -30,7 +30,9 @@ services:
       retries: 5
 
   ingestor:
-    build: ./services/ingestor
+    build:
+      context: .
+      dockerfile: services/ingestor/Dockerfile
     <<: *common
     environment:
       SYMBOLS: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
