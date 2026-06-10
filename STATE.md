@@ -20,6 +20,22 @@ Slice steps:
        computes live features for the universe via the SAME featurestore code, scores
        with model_fwd_30m, writes ranked predictions (10 deciles). Verified: scored 977
        symbols on a known RTH minute. Idles until the 09:30 ET open (no fresh bars now).
+### TEAM-SYNTHESIZED PLAN (Manager, all 4 roles). Open = VALIDATE live scoring, not trade.
+- [x] (A safety) model-server: membership date-guard (latest single date, not union) +
+      deterministic tie-break (symbol). backfill-manager: throttle during RTH.
+- [ ] (A) EXECUTOR in DRY-RUN: predictions -> tiny no-flip basket, exclude ETFs +
+      shortable-only shorts + staleness guard; LOG intended orders, NO submit. Enable
+      submit only after the live-scoring path is confirmed at the open.
+- [ ] (B data-integrity) rebuild = DELETE-then-insert (QA-P0 stale today rows); is_rth in
+      build_universe_history (QA-P2 DST); builders default backfill (QA-P2); fix
+      training_data view horizon/version (QA-P1).
+- [ ] (C modeling, not open-blocking) exclude ETFs from universe + re-rank; 13-feature
+      v1.1.0 (kills micro identity-leak); recompute today's panel; rank-label E0' baseline;
+      overnight model = destination.
+- [ ] (D ops) fix TimescaleDB compression (0/74 chunks); feature_vectors retention;
+      register_feature_set hoist + N+1; stale-data auto-halt.
+
+#### (superseded detail below — folded into the team plan above)
 4a. [ ] **CRITICAL-PATH FIX FIRST: exclude leveraged/inverse ETFs/ETNs from the universe**
         (and the executor candidate pool) + re-rank. Current tails are SOXL/SQQQ/VXX etc.
         — invalid for single-stock cross-sectional L/S. Add is_etf_like to asset_metadata;

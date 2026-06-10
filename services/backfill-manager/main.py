@@ -8,7 +8,8 @@ months to work through — no code change.
 import logging
 import os
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import psycopg
 from alpaca.data.historical import StockHistoricalDataClient
@@ -109,9 +110,23 @@ def run_once() -> bool:
     return False
 
 
+_NY = ZoneInfo("America/New_York")
+
+
+def is_market_hours() -> bool:
+    """Roughly RTH (09:30-16:00 ET, Mon-Fri) — when we throttle so the live open
+    burst (ingestion + universe scoring) isn't starved of DB I/O."""
+    now = datetime.now(timezone.utc).astimezone(_NY)
+    return now.weekday() < 5 and dtime(9, 30) <= now.timetz().replace(tzinfo=None) < dtime(16, 0)
+
+
 def main() -> None:
     logger.info("backfill-manager starting: target=%d days", TARGET_DAYS)
     while True:
+        if is_market_hours():
+            logger.info("market hours: throttling backfill, idling %ds", IDLE_SECONDS)
+            time.sleep(IDLE_SECONDS)
+            continue
         try:
             did_work = run_once()
         except (psycopg.Error, KeyError, ValueError) as exc:

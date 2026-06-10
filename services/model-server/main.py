@@ -54,8 +54,15 @@ def target_minute() -> datetime:
 
 def score_minute(conn: psycopg.Connection, minute: datetime) -> int:
     membership = load_membership(conn)
-    members = sorted(membership.get(datetime.now(timezone.utc).date(), set())) or \
-        sorted({s for m in membership.values() for s in m})
+    today = datetime.now(timezone.utc).date()
+    if today in membership:
+        members = sorted(membership[today])
+    elif membership:
+        latest = max(membership)               # a single date, NOT the union of all dates
+        members = sorted(membership[latest])
+        logger.warning("no universe_membership for %s; using latest %s", today, latest)
+    else:
+        members = []
     # Compute live feature vectors for this minute (source='live') via shared code.
     build_feature_store(conn, members, minute, minute, "stream", "live", membership, CADENCE_MIN)
     with conn.cursor() as cur:
@@ -70,8 +77,10 @@ def score_minute(conn: psycopg.Connection, minute: datetime) -> int:
     symbols = [r[0] for r in rows]
     X = np.array([[float(v) if v is not None else math.nan for v in r[1]] for r in rows], dtype=float)
     scores = booster.predict(X)
-    order = np.argsort(-scores)                       # best score = rank 0
     n = len(scores)
+    # deterministic ranking: break score ties by symbol (argsort alone is unstable on
+    # the many tie clusters, so ranks wouldn't be reproducible run-to-run)
+    order = sorted(range(n), key=lambda i: (-float(scores[i]), symbols[i]))
     with conn.cursor() as cur:
         for rank, idx in enumerate(order):
             decile = min(9, int(rank * 10 / n))

@@ -81,6 +81,39 @@ why.
 - STANDING 4-ROLE TEAM established (Ben, 2026-06-10): every wake = Manager(me) +
   parallel QA / Modeller / Production-Engineer specialists on the shared state; manager
   synthesizes + executes. OPERATING_LOOP step 0 rewritten.
+- TEAM/QA-TESTER report (synthesis):
+  - P0: TODAY's (2026-06-10) feature rows have minute_of_day/day_of_week in UTC (stale
+    from a pre-DST-fix build) mixed under the SAME set_version as correct rows, and are
+    in training_data. ROOT CAUSE: feature_vectors upsert is ON CONFLICT DO NOTHING, so
+    the rebuild couldn't overwrite today's pre-existing stale rows. FIX: rebuilds must
+    DELETE-then-insert (or upsert) for a (date,source,version); recompute today.
+  - P1: training_data joins on (symbol,ts) only; labels has 2 horizons + no set_version
+    -> 662k vectors fan out to 1.09M rows (2x). The TRAINER filters horizon+set_version
+    (so training is fine), but the VIEW is a foot-gun — fix it (filter horizon).
+  - P2: feature/label builders default bar_source='stream' -> make 'backfill' default
+    for historical builds (stream exists only 1 day).
+  - P2: build_universe_history uses a HARDCODED UTC window '13:30-20:00' (DST-fragile)
+    instead of is_rth() -> biases winter-date universe screening. FIX: use is_rth.
+  - P3: micro 99.9% NaN (confirmed); vol_z_30 unwinsorized fat tail (-519..+17524).
+  - GOOD: integrity clean; stream-vs-backfill parity excellent (100% close, 99.41% vol);
+    latency healthy. Suggested new probes (calendar-ET, view fan-out, compression) — add.
+
+- ===== MANAGER 4-ROLE SYNTHESIS & PRIORITIZED PLAN =====
+  Reframe (PE): the OPEN is primarily VALIDATING the live-scoring path, not first live
+  trading. ML quality is separate (Ben). So:
+  A. OPEN-CRITICAL / SAFETY (do before open): model-server membership date-guard (no
+     union fallback) + deterministic tie-break; throttle backfill-manager during RTH;
+     EXECUTOR in DRY-RUN (compute+log basket, no submit) reading predictions, excluding
+     ETFs + shortable-only shorts + staleness guard. Validates predictions->basket safely.
+  B. DATA-INTEGRITY (quick, prevents corruption): rebuild = DELETE-then-insert (QA-P0);
+     build_universe_history use is_rth (QA-P2); builders default backfill (QA-P2); fix
+     training_data view (QA-P1).
+  C. MODELING QUALITY (next cycles, NOT open-blocking): exclude ETFs from universe +
+     re-rank; ship 13-feature v1.1.0 (kills micro identity-leak per Modeller+PE+QA);
+     recompute today's panel; rank-label E0' baseline; overnight model is the destination.
+  D. OPS HYGIENE: fix TimescaleDB compression (0/74 chunks, disk time-bomb); feature_
+     vectors retention; register_feature_set hoist + N+1; stale-data auto-halt.
+  Executing A (safety) now; B/C/D queued in priority order.
 - TEAM/PRODUCTION-ENGINEER report (synthesis):
   - P0: model-server live loop has NEVER run a real cadence in prod (up outside RTH);
     the live source='live' path runs for the first time at the open. Smoke-test it.
