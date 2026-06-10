@@ -75,6 +75,25 @@ def collect_metrics() -> dict[str, Any]:
                 metrics["last_reconciliation"] = (
                     {"ok": recon[0], "ts": recon[1].isoformat()} if recon else None
                 )
+
+                cur.execute(
+                    """
+                    SELECT trade_date, symbol, received_minutes, expected_minutes
+                    FROM data_quality_daily
+                    WHERE trade_date = (SELECT max(trade_date) FROM data_quality_daily)
+                    ORDER BY symbol
+                    """
+                )
+                metrics["coverage"] = [
+                    {
+                        "date": r[0].isoformat(),
+                        "symbol": r[1],
+                        "received": r[2],
+                        "expected": r[3],
+                        "pct": round(100.0 * r[2] / r[3], 1) if r[3] else 0.0,
+                    }
+                    for r in cur.fetchall()
+                ]
     except psycopg.Error as exc:
         metrics["error"] = str(exc)
     return metrics
@@ -116,6 +135,21 @@ def dashboard() -> str:
         f"{'OK' if recon['ok'] else 'MISMATCH'} @ {recon['ts']}"
     )
 
+    coverage = metrics.get("coverage", [])
+    if coverage:
+        cov_rows = "".join(
+            f"<tr><td>{c['symbol']}</td><td class='num'>{c['received']}/{c['expected']}</td>"
+            f"<td class='num'>{c['pct']}%</td></tr>"
+            for c in coverage
+        )
+        cov_html = (
+            f"<h2 style='margin-top:0;font-size:15px;'>Coverage ({coverage[0]['date']})</h2>"
+            f"<table><thead><tr><th>symbol</th><th class='num'>bars</th>"
+            f"<th class='num'>coverage</th></tr></thead><tbody>{cov_rows}</tbody></table>"
+        )
+    else:
+        cov_html = "<h2 style='margin-top:0;font-size:15px;'>Coverage</h2><p class='muted'>no coverage data yet</p>"
+
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Quant Dashboard</title>
 <meta http-equiv="refresh" content="30">
@@ -140,10 +174,13 @@ def dashboard() -> str:
 <header><h1>Quant Trading System &nbsp; {db_badge}</h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
-  <div class="card" style="margin-bottom:24px;">
-    <h2 style="margin-top:0;font-size:15px;">Data health</h2>
-    <table><thead><tr><th>table</th><th class="num">rows</th><th>latest</th></tr></thead>
-    <tbody>{rows_html}</tbody></table>
+  <div class="grid" style="margin-bottom:24px;">
+    <div class="card">
+      <h2 style="margin-top:0;font-size:15px;">Data health</h2>
+      <table><thead><tr><th>table</th><th class="num">rows</th><th>latest</th></tr></thead>
+      <tbody>{rows_html}</tbody></table>
+    </div>
+    <div class="card">{cov_html}</div>
   </div>
   <div class="grid">
     <div class="card doc">{render_doc("STATE.md")}</div>

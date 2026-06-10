@@ -29,11 +29,18 @@ Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
   Verified: 1-share SPY filled @730.52, recorded; reconciliation works and flagged
   a stray DLTR(1) paper position left over from the old Edgar system.
 
-### In progress / next
-- [ ] Decide baseline: flatten stray paper positions (DLTR) so reconciliation is
-      green, OR leave as-is. (Awaiting Ben — it's account state.)
-- [ ] Scheduler: daily coverage report job + reboot-survival check.
-- [ ] Phase 0 gate: 5 clean days, unattended reboot survival, daily report.
+- **Paper account reset to clean baseline** (Ben approved): all positions flattened,
+  open orders cancelled, test order/fill/recon rows truncated. DB and broker now
+  agree from zero; executor re-establishes a consistent daily order each cycle.
+- **Scheduler** (`services/scheduler`) live: computes per-symbol coverage
+  (received vs expected 1-min bars) for the current/last session into
+  data_quality_daily; dashboard shows a Coverage panel. (First partial day reads
+  low % because we started mid-session; full days from start onward read ~100%.)
+
+### Phase 0 status: all services built & verified. Remaining for the gate:
+- [ ] Accumulate ~5 clean trading days of coverage.
+- [ ] Unattended reboot-survival check (compose `restart: unless-stopped` set;
+      verify the stack auto-resumes after a host reboot).
 - [ ] Then Phase 1: scale ingestor to ~1,000-symbol universe + add trades/quotes/news.
 
 ## Known constraints / decisions

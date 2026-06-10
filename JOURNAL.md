@@ -18,3 +18,11 @@ why.
   preserved) to free the single Alpaca data websocket. Old code/data left on disk.
 - Ingestor live on SIP feed; verified bars_1m persistence end-to-end for 10 symbols.
   Confirmed the account already has SIP (Algo Trader Plus) entitlement.
+- Executor + reconciliation live; hello-world paper order verified; reconciliation
+  caught a stray DLTR paper position from the old system.
+- Reset paper account to clean baseline (flattened positions, cancelled orders,
+  truncated test order/fill/recon rows). Ben approved.
+- Scheduler live computing data_quality_daily coverage; dashboard shows it.
+- Phase 0 service set complete: timescaledb, ingestor, executor, scheduler,
+  dashboard, prometheus, grafana. Remaining for gate = clean-days accumulation +
+  reboot-survival check.
