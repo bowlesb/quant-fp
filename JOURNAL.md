@@ -68,6 +68,19 @@ why.
   a within-cross-section volatility artifact. CAVEAT: single day, overlapping/
   autocorrelated obs, one regime, Pearson not rank-IC — statistically meaningless;
   pipeline-sanity only. Defer real IC to multi-day universe panel from backfill.
+- ML side-exploration (subagent, side work — does NOT divert from platform build):
+  concrete first-wave plan folded into docs/RESEARCH.md. Key takeaways: best
+  cost/latency fits are the OVERNIGHT book and order-flow-CONFIRMED intraday
+  continuation; reversal is real but the short book's blowup risk (gate w/ news +
+  vol). Two cheapest high-leverage wins: vol-scale the label, add cross-sectional
+  signed-volume z-scores + rank transforms. Must-dos: shuffle-label leakage canary,
+  embargo ≥ max(label,lookback), session-aware overnight purge, in-fold scaling,
+  deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
+  Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
+  vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- Health-check note: the "symbols streaming in last 90s" probe can transiently read
+  0 in the gap between minute close and bar delivery (~up to 60s); use a 2-3min
+  window. Verified ingestor healthy (latest bar always ~1min old).
 - Info-gathering (priority E): added asset_metadata (Alpaca: exchange + shortable/
   easy-to-borrow/fractionable), refreshed daily by scheduler (13,852 symbols).
   Finding: of the 1,000-symbol universe, 939 are shortable/easy-to-borrow, 983

@@ -123,11 +123,51 @@ Same features, change what we predict. Often worth more than new features.
 
 ---
 
-## Suggested first experiment wave (once Phase 2/3 infra is live)
+## First experiment wave (advisor proposal, 2026-06-10)
 
-A small, high-prior batch to exercise the whole harness end-to-end:
-- E1: overnight horizon + residual label + reversal/order-flow features + LightGBM.
-- E2: same but 30m horizon (expect worse after-cost — calibrates the cost model).
-- E3: ElasticNet baseline on E1's features (overfit floor).
-- E4: E1 gated by cross-sectional dispersion (Ring 1b).
-Each runs through the full gauntlet; verdicts + deflated significance to JOURNAL.
+From a scoped research exploration tailored to our platform (SIP bars, second-scale
+latency, ~$100k, cross-sectional decile L/S). Run only once we have data depth +
+the modeling harness; each experiment gates the next; all after-cost, point-in-time
+universe, purged+embargoed walk-forward.
+
+**Best cost/latency fits to target first:** (C) overnight close→open drift (holding
+period dwarfs our latency, amortizes spread — highest weight), and (B) intraday
+continuation *confirmed by order flow* (signed-volume z-score, large prints). (A)
+short-horizon reversal is real but is where the short book blows up — gate it with
+news + vol regime. (E) quote imbalance is a cost/feasibility signal, NOT standalone
+alpha at our latency.
+
+**Two cheapest high-leverage changes** (do these before adding features): (1)
+**vol-scale the label** (excess return / realized vol) so the model ranks alpha not
+volatility; (2) add **cross-sectional signed-volume z-scores** + per-timestamp rank
+transforms of continuous features.
+
+**Validation must-dos (encode in the harness):**
+- **Shuffle-label leakage canary** — a shuffled-label run must give IC≈0; if not, STOP.
+- Embargo ≥ max(label horizon, feature lookback) — for 30m label + 60m features, ≥90m.
+- Session-aware purging for the overnight label (don't let intraday test features
+  use post-label data; respect day boundaries).
+- Per-fold / per-timestamp standardization only (no full-sample scalers).
+- Deflated Sharpe by trial count; a one-touch lockbox (recent 6–12mo) at the very end.
+- Prefer IC stability (mean/std, sign consistency across folds) over peak IC.
+
+**Concrete wave (E0 first — it's the gate):**
+- **E0 baseline + leakage audit:** v1 features, LightGBM pointwise on vol-scaled 30m
+  excess, per-ts standardized, embargo ≥90m. PASS = mean OOS IC>0, sign-consistent
+  ≥80% folds, AND shuffle-label canary ≈0. (Most important run in the wave.)
+- **E1 label engineering:** sweep {raw, vol-scaled, rank} × {regression, lambdarank}.
+  PASS = best beats E0 after-cost IC by ≥0.005 with deflated Sharpe still ≥1.
+- **E2 order-flow features:** add signed-volume z (5/15/30m), vol-normalized returns,
+  rank transforms, late-day flow. PASS = +0.005 after-cost IC vs E1, new features
+  carry real SHAP weight; report long/short IC separately.
+- **E3 overnight book (own model):** label = vol-scaled overnight excess; late-day +
+  close-vs-VWAP + distance-to-close features; session-aware purge. PASS = standalone
+  after-cost Sharpe≥1, IC≥0.02 t≥4; check decile-overlap <~0.6 vs 30m (non-redundant).
+- **E4 news as a gate (not signal):** suppress reversion shorts into fresh news.
+  PASS = equal/better short-book IC with materially lower left-tail/drawdown.
+
+**Explicitly NOT in wave 1:** triple-barrier labels, NLP sentiment embeddings,
+sequence/deep models, quote-imbalance-as-primary — low EV at our latency or high
+overfit surface before the baseline is proven clean.
+
+Full distilled rationale + feature tiers in JOURNAL (2026-06-10 advisor entry).
