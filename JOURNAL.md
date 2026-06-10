@@ -351,3 +351,46 @@ why.
   Finding: of the 1,000-symbol universe, 939 are shortable/easy-to-borrow, 983
   fractionable. IMPLICATION: the short leg must be restricted to shortable names
   (~61 excluded) — wire this into portfolio construction in Phase 4.
+
+- ===== TEAM CYCLE (Modeller + Production-Engineer/Architect + QA, 2026-06-10 evening) =====
+  E2E LOOP CLOSED (dry-run): executor reads predictions -> valid no-flip L/S basket
+  (single stocks, ETF-excluded, shortable shorts) logged not submitted. Staleness guard
+  works. Also fixed: TimescaleDB compression (68/74 chunks; DB 6.8GB->2.7GB), added
+  model-server STALE-DATA halt + executor SCORE-DEGENERACY guard.
+  PRODUCTION ENGINEER/ARCHITECT:
+   - Live scoring works at open (5.2s/977 symbols, well within cadence); membership guard
+     healthy. CAVEAT: first 1-2 cadences (9:30/10:00 ET) have NaN 60m features -> off-
+     distribution; don't trust early prints. Biggest lights-on risk = no stale-data halt
+     (ADDED). Compression was just un-run policy (FIXED).
+   - Tech debt: backfill-manager re-fetches the WHOLE current month every ~4min (wasteful,
+     DB-churn) -> make incremental [last_seen,now]; experimenter writes root-owned host
+     files -> add user:uid; batch the ~4k round-trips in build_feature_store later.
+   - ARCHITECT DECISION (record): commit to a SHARDED trade/quote ingestion tier (N shard
+     processes, same quantlib code for parity) BEFORE the 6yr backfill + order-flow
+     features. The modeling roadmap is BLOCKED on universe-wide microstructure (micro 98%
+     NaN because trades/quotes only stream for 10 symbols). Keep raw ticks short-retention;
+     keep 6yr of AGGREGATES (compressed), not raw ticks. Mind the single-Alpaca-socket
+     constraint. Do NOT refactor the live-builder pattern (it's the parity crown jewel).
+  QA (new findings):
+   - P0: feature-computer wrote UTC-calendar 'stream' rows (stale pre-DST code, 81%); and
+     today's 'historical' panel has 4,477 UTC-contaminated rows reaching training_data
+     (insert-not-replace). FIX: rebuild = DELETE-then-insert; purge contaminated stream/
+     today-historical rows; add a serving-path ET assertion.
+   - P1: PREDICTIONS ARE SCORE-DEGENERATE (80% within 1bp of 0; 243 symbols share one
+     score) -> deciles decided by alphabetical tie-break, not signal. Consistent with the
+     calendar-artifact (~no real signal). Executor degeneracy guard ADDED; current preds
+     non-tradeable.
+   - P2: 14 non-member rows (leveraged/derived tickers) leak into training_data -> hard-
+     filter per-date members + exclude derived tickers.
+   - CLEARED: day_of_week ET-correct; per-ts demean exact (median 0); no Inf; view not key-dup.
+  MODELLER: price-only features have ~0 cross-sectional signal (honest baseline IC~0). The
+   one swing = cross-sectional DAILY MOMENTUM (mom_1/3/5/10d + _rel vs SPY = 8 feats,
+   computable from stored bars, 22 pre-panel warmup days available) -> store via shared
+   featurestore (parity), bump v1.1.0. research.py needs lambdarank + vol_scaled label
+   paths (queue keys set_version/model/device not yet read). Keep calendar only as regime
+   conditioners (default experiments to nocalendar). Binding constraint = 51 days, not features.
+  MANAGER NEXT (priority): (data) DELETE-then-insert rebuild + recompute today + purge UTC
+   stream rows + PIT member/derived-ticker filter; (modeling) momentum features v1.1.0 +
+   research.py lambdarank/vol_scaled; (ops) backfill incremental current-month + experimenter
+   uid; (architect) design the sharded trade/quote ingestion tier. Open = VALIDATE scoring,
+   executor stays DRY-RUN. Honesty: predictions are not tradeable signal yet.

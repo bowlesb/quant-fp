@@ -34,6 +34,7 @@ K_SHORT = int(os.environ.get("K_SHORT", "5"))
 NOTIONAL_PER_NAME = float(os.environ.get("NOTIONAL_PER_NAME", "300"))
 GROSS_CAP = float(os.environ.get("GROSS_CAP", "5000"))
 STALENESS_MAX_MIN = int(os.environ.get("STALENESS_MAX_MIN", "35"))
+MIN_SCORE_SEP = float(os.environ.get("MIN_SCORE_SEP", "0.0005"))
 LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "60"))
 
 DB_KWARGS = {
@@ -104,6 +105,14 @@ def rebalance(conn: psycopg.Connection, ts: datetime) -> None:
         logger.warning("candidate pool too small (%d); skipping rebalance", len(pool))
         return
     longs, shorts = build_basket(pool)
+    # score-degeneracy guard (QA): a thin-panel model can output near-constant scores,
+    # so the decile cut is decided by alphabetical tie-break, not signal. Refuse to
+    # form a basket unless the long/short tails are actually separated.
+    sep = (min(leg["score"] for leg in longs) - max(leg["score"] for leg in shorts)) if (longs and shorts) else 0.0
+    if sep < MIN_SCORE_SEP:
+        logger.warning("scores degenerate (long/short separation %.6f < %.6f); basket would be "
+                       "tie-break noise — skipping rebalance", sep, MIN_SCORE_SEP)
+        return
     gross = sum(leg["qty"] * leg["price"] for leg in longs + shorts)
     if gross > GROSS_CAP:
         logger.error("intended gross %.0f exceeds cap %.0f; skipping", gross, GROSS_CAP)

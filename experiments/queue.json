@@ -54,5 +54,19 @@
     "horizon": "fwd_30m",
     "label": "raw",
     "features": "nocalendar"
+  },
+  {
+    "id": "E_60m_raw_nocal",
+    "hypothesis": "Modeller: 60m raw, no-calendar (11 feats). Does ANY price signal survive at the longer horizon without the calendar crutch?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": "nocalendar"
+  },
+  {
+    "id": "E_30m_rank_nocal",
+    "hypothesis": "Modeller: rank label, no-calendar 11 feats. Honest within-ts cross-sectional test of price features under a trading-aligned-ish loss.",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": "nocalendar"
   }
 ]

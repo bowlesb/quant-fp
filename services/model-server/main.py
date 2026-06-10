@@ -97,10 +97,19 @@ def main() -> None:
             minute = target_minute()
             if minute != last_scored and minute.astimezone(timezone.utc).minute % CADENCE_MIN == 0:
                 with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
-                    n = score_minute(conn, minute)
-                if n:
-                    logger.info("scored %d symbols for %s", n, minute.isoformat())
-                last_scored = minute
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT max(ts) FROM bars_1m WHERE source='stream'")
+                        latest_bar = cur.fetchone()[0]
+                    # stale-data auto-halt: don't score off missing/stale bars
+                    if latest_bar is None or (minute - latest_bar) > timedelta(minutes=2 * CADENCE_MIN):
+                        logger.warning("stale data (latest stream bar %s vs target %s); not scoring",
+                                       latest_bar, minute.isoformat())
+                        last_scored = minute
+                    else:
+                        n = score_minute(conn, minute)
+                        if n:
+                            logger.info("scored %d symbols for %s", n, minute.isoformat())
+                        last_scored = minute
         except (psycopg.Error, KeyError, ValueError) as exc:
             logger.error("cycle error: %s", exc)
         time.sleep(LOOP_SECONDS)

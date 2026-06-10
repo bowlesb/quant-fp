@@ -56,3 +56,5 @@ IMPLICATIONS (reshape the modeling path):
 - Re-evaluate calendar features: keep them only as explicit regime CONDITIONERS with
   enough time depth to trust (250+ days), not as the source of "signal".
 - Strengthens the case to accumulate time depth AND to pursue the overnight horizon.
+| 2026-06-10T22:42:26+00:00 | E_60m_raw_nocal | fwd_60m | raw | 11 | 519724 | 0.00527 | 0.624 | 0.00179 | Modeller: 60m raw, no-calendar (11 feats). Does ANY price signal survive at the longer horizon without the calendar crutch? |
+| 2026-06-10T22:42:44+00:00 | E_30m_rank_nocal | fwd_30m | rank | 11 | 570481 | 0.00211 | 0.264 | 0.00576 | Modeller: rank label, no-calendar 11 feats. Honest within-ts cross-sectional test of price features under a trading-aligned-ish loss. |
