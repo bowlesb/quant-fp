@@ -50,3 +50,8 @@ why.
   diff 0.7%), quote_agg spread 100% over 63 overlapping minutes.
 - Scaled live bar ingestion to the full universe: confirmed 951 distinct symbols
   streaming bars in a 90s window. Trades/quotes kept on the liquid 10 subset.
+- Phase 2: built v1 feature engine (quantlib/features, 18 features) + historical
+  feature-store builder + live feature-computer, sharing quantlib/featurestore.
+  FEATURE replay-equivalence = 100% identical (stream vs historical recompute).
+  Feature-level train/serve skew eliminated by construction. Cleanup: removed dead
+  services/status scaffold + unused webhook config.

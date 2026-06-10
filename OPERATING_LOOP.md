@@ -57,10 +57,41 @@ quality over speed: a false edge is worse than no edge.
   (refactors, tests, docs, backtest research) or idle cheaply.
 - A user message always interrupts and takes priority over the timer.
 
-## Task priority (when choosing what to do)
+## Task priority (STRICT order — satisfy each before spending time on the next)
 
-1. Fix anything broken (health).
-2. Unblock/advance the current phase gate.
-3. Hardening + tests + data-quality for what already exists.
-4. Cleanup/reorganization/documentation.
-5. Forward research/improvements from `docs/RESEARCH.md` (once infra supports them).
+**A. Correctness & uptime — always first.** No errors; system running well: all
+   containers healthy (no crash-loops), bars landing every minute, reconciliation
+   OK, validation gates green, disk headroom fine. If anything is broken or
+   degraded, fixing it preempts everything else.
+**B. No dead/expired code.** Remove old, unused, or superseded code, configs, files,
+   services, and dependencies. Nothing should linger "just in case."
+**C. Tech debt / rebuild.** Refactor toward clean architecture: reduce duplication
+   (shared `quantlib`), simplify, keep services small and consistent. Re-build
+   things properly rather than patching.
+**D. Test coverage.** Enough tests to catch problems before they ship — parity/replay
+   tests, unit tests for new logic, data-quality checks. Add tests for any gap that
+   could hide a regression or a silent data bug.
+**E. Side experiments + information-gathering (only when A–D are genuinely satisfied
+   and there's nothing else to do).** See below. This keeps idle cycles productive.
+
+## Idle work: experiments & information-gathering (priority E)
+
+When the system is healthy, clean, tech-debt-managed, and well-tested, and there's
+no pending build task, do NOT sit idle — do useful research toward the mission:
+
+- **Run experiments on the data we have.** What predicts forward returns and what
+  doesn't? Which features carry signal, which are noise? Do quick, honest analyses
+  (IC of features vs forward returns, feature distributions, regime differences).
+  Let findings *inform the overall approach* — log them in `JOURNAL.md` and feed
+  `docs/RESEARCH.md`. Apply the same anti-self-deception discipline (out-of-sample,
+  multiple-testing awareness) even for quick looks.
+- **Collect information sources that would help the high-level goal.** Think about
+  what data would improve the system and acquire/wire it up when idle, e.g.:
+  corporate actions (splits/dividends) for correct adjustment, an earnings/event
+  calendar, sector/industry mappings for cross-sectional grouping, additional
+  history depth, index-membership data. Prefer sources already available via Alpaca
+  or free/public APIs; respect the guardrails before spending or external calls.
+- Record what was tried and learned so it compounds, never just discard it.
+
+Honesty rule still applies: a quick experiment that says "this doesn't work" is a
+real result worth logging — don't fish for false positives.

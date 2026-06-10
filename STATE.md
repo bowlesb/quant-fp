@@ -12,8 +12,14 @@ continuation; doesn't wait to be asked.
 - [x] **Historical feature-store builder** (`backfiller build-features`): computes
       feature_vectors from stored bars + aggregates via quantlib.features, registers
       feature_set v1.0.0. Verified: 300 vectors for 5 symbols, all features sane.
-- [ ] Live feature-computer (compute feature_vectors each minute from live context).
-- [ ] On-real-data replay-equivalence: live vs recomputed feature_vectors must match.
+- [x] **Live feature-computer** (`services/feature-computer`): computes
+      feature_vectors (source='stream') each minute via shared quantlib.featurestore.
+- [x] **On-real-data feature replay-equivalence: 100% identical** (stream vs
+      historical-recompute). Phase 2 technical heart proven — no feature-level
+      train/serve skew. Refactored shared logic into quantlib/featurestore.py.
+- [ ] Build labels (forward excess returns vs universe; 30m + overnight) — needed
+      for training. Keep strictly post-feature-time (no leakage).
+- [ ] Accumulate more history (backfill running) before modeling is meaningful.
 - [ ] Then Phase 3: walk-forward LightGBM + honest backtest (first edge kill-gate).
 
 ## Current status

@@ -52,6 +52,17 @@ services:
       timescaledb:
         condition: service_healthy
 
+  feature-computer:
+    build:
+      context: .
+      dockerfile: services/feature-computer/Dockerfile
+    <<: *common
+    environment:
+      FEATURE_SYMBOLS: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   scheduler:
     build:
       context: .
