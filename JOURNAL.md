@@ -68,3 +68,8 @@ why.
   a within-cross-section volatility artifact. CAVEAT: single day, overlapping/
   autocorrelated obs, one regime, Pearson not rank-IC — statistically meaningless;
   pipeline-sanity only. Defer real IC to multi-day universe panel from backfill.
+- Info-gathering (priority E): added asset_metadata (Alpaca: exchange + shortable/
+  easy-to-borrow/fractionable), refreshed daily by scheduler (13,852 symbols).
+  Finding: of the 1,000-symbol universe, 939 are shortable/easy-to-borrow, 983
+  fractionable. IMPLICATION: the short leg must be restricted to shortable names
+  (~61 excluded) — wire this into portfolio construction in Phase 4.

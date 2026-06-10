@@ -91,6 +91,49 @@ def fetch_symbol_stats(symbols: list[str], start: date) -> list[SymbolStats]:
     return stats
 
 
+def refresh_asset_metadata(conn: psycopg.Connection) -> int:
+    """Upsert per-symbol Alpaca asset metadata (exchange + shortable/borrow flags)."""
+    assets = trading.get_all_assets(
+        GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+    )
+    rows = [
+        (
+            asset.symbol, asset.name,
+            str(getattr(asset.exchange, "value", asset.exchange)),
+            asset.tradable, asset.marginable, asset.shortable,
+            asset.easy_to_borrow, asset.fractionable,
+        )
+        for asset in assets
+    ]
+    with conn.cursor() as cur:
+        cur.executemany(
+            """INSERT INTO asset_metadata
+                   (symbol, name, exchange, tradable, marginable, shortable,
+                    easy_to_borrow, fractionable, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now())
+               ON CONFLICT (symbol) DO UPDATE SET
+                   name=EXCLUDED.name, exchange=EXCLUDED.exchange,
+                   tradable=EXCLUDED.tradable, marginable=EXCLUDED.marginable,
+                   shortable=EXCLUDED.shortable, easy_to_borrow=EXCLUDED.easy_to_borrow,
+                   fractionable=EXCLUDED.fractionable, updated_at=now()""",
+            rows,
+        )
+    logger.info("asset_metadata refreshed: %d symbols", len(rows))
+    return len(rows)
+
+
+def maybe_refresh_asset_metadata() -> None:
+    """Refresh once per day (or if empty)."""
+    today = datetime.now(timezone.utc).date()
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT max(updated_at)::date FROM asset_metadata")
+            row = cur.fetchone()
+            if row and row[0] == today:
+                return
+        refresh_asset_metadata(conn)
+
+
 def build_universe(conn: psycopg.Connection, trade_date: date) -> int:
     symbols = tradable_equities()
     logger.info("universe: %d tradable equities to screen", len(symbols))
@@ -213,6 +256,7 @@ def main() -> None:
         try:
             run_daily_job()
             maybe_build_universe()
+            maybe_refresh_asset_metadata()
         except (psycopg.Error, ValueError, KeyError) as exc:
             logger.error("daily job error: %s", exc)
         time.sleep(LOOP_SECONDS)

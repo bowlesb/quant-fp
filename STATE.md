@@ -27,8 +27,12 @@ continuation; doesn't wait to be asked.
       statistically meaningless on 1 day — see JOURNAL).
 - [ ] **Build features+labels on source='backfill' once the 7-day backfill finishes**
       → the real multi-day universe panel for modeling.
-- [ ] Collect supporting data (corporate actions/splits, earnings calendar, sector
-      maps) — idle-time info-gathering toward the goal.
+- [x] asset_metadata (Alpaca exchange + shortable/borrow/fractionable flags),
+      refreshed daily by scheduler. Universe: 939/1000 shortable — short leg must
+      filter to shortable (wire into Phase 4 portfolio construction).
+- [ ] Collect more supporting data (corporate actions/splits for adjustment,
+      earnings calendar, GICS sector maps — sector needs a non-Alpaca source, e.g.
+      the existing FMP key) — idle-time info-gathering.
 - [ ] Then Phase 3: walk-forward LightGBM + honest backtest (first edge kill-gate)
       — only once the panel has real time depth.
 
