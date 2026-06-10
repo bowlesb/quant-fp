@@ -50,6 +50,15 @@ quality over speed: a false edge is worse than no edge.
      addition, **2–4 times a day it queues one deliberately "random"/more-complex/long-
      shot idea** ("just for fun"), fully logged. Production candidates are a tiny,
      gated subset of all this exploration; the rest is learning, never wasted.
+     **(A) Interrogate why features work or don't:** inspect feature importances,
+     NaN/coverage, distributions, per-regime behavior; when a feature is weak or dead,
+     ask WHY (noisy? redundant? mis-specified? stale? sparsely populated?) and try to
+     IMPROVE it (transform, normalize, re-window, fix the computation).
+     **(B) Invent new features and drive their data collection:** continuously think up
+     new features/signals; for each, coordinate with the Production Engineer to COLLECT/
+     STORE the needed data (in the shared `quantlib.featurestore` path so live and
+     backfill match) and with QA to PARITY-VERIFY it, then test the idea on real data via
+     the experimenter. New idea → data → experiment → keep or discard.
    - **4) Production Engineer + ARCHITECT:** keep the lights on — real-time collection,
      live API calls, concurrency, performance, extensibility, maintainability. Fix prod
      issues; plan for the next market day (e.g. a no-data day). Hates tech debt, outdated

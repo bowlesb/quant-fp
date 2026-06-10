@@ -90,6 +90,11 @@ def run_experiment(X, y, ts, *, label="raw", feature_idx=None, params=None,
     shuffled = shuffle_within_groups(list(y), ts, seed)
     canary = evaluate(transform(shuffled))
     lag = max(1, horizon_minutes // cadence_min)
+    # Feature importances (gain) from a model on the full panel — lets the Modeller
+    # interrogate WHICH features carry signal (and which are dead weight).
+    full = lgb.train(params, lgb.Dataset(Xs, label=np.asarray(transform(y), dtype=float)),
+                     num_boost_round=num_rounds)
+    importances = [round(float(v), 1) for v in full.feature_importance(importance_type="gain")]
     return {
         "mean_ic": round(mean_ic(real), 5),
         "nw_t": round(newey_west_tstat(real, lag), 3),
@@ -98,4 +103,5 @@ def run_experiment(X, y, ts, *, label="raw", feature_idx=None, params=None,
         "n_rows": int(len(y)),
         "n_features": int(Xs.shape[1]),
         "label": label,
+        "gain_importance": importances,
     }

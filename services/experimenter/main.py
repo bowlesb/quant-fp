@@ -88,6 +88,11 @@ def run_queue() -> int:
                     X, y, ts, label=exp.get("label", "raw"), feature_idx=feature_idx,
                     horizon_minutes=HORIZON_MIN.get(horizon, 30), cadence_min=CADENCE_MIN,
                 )
+                imp = result.get("gain_importance")
+                if imp:                         # used features are a prefix of names
+                    used = names[:len(imp)]
+                    top = sorted(zip(used, imp), key=lambda kv: -kv[1])[:5]
+                    result["top_features"] = [f"{n}:{v}" for n, v in top]
         except (psycopg.Error, ValueError, KeyError) as exc:
             result = {"error": f"{type(exc).__name__}: {exc}"}
         record = {

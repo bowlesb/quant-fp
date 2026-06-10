@@ -8,5 +8,10 @@
   {"id": "E_raw_13", "hypothesis": "Regression on 13 non-micro features; isolates whether micro columns were carrying (leaked) signal.",
    "horizon": "fwd_30m", "label": "raw", "features": "nomicro"},
   {"id": "LONGSHOT_60m_rank_13", "hypothesis": "For-fun long shot: does the 60m horizon rank model show anything different? (sparse 60m labels expected; exploratory).",
-   "horizon": "fwd_60m", "label": "rank", "features": "nomicro"}
+   "horizon": "fwd_60m", "label": "rank", "features": "nomicro"},
+
+  {"id": "E_raw_13_imp", "hypothesis": "(A) Re-run raw/13 WITH gain importances to diagnose WHICH features carry the signal — start of feature-improvement work.",
+   "horizon": "fwd_30m", "label": "raw", "features": "nomicro"},
+  {"id": "E_60m_raw_13", "hypothesis": "Fair 60m comparison: RAW label, 13 features (vs the earlier 60m-rank long-shot). Does a longer horizon help raw regression?",
+   "horizon": "fwd_60m", "label": "raw", "features": "nomicro"}
 ]

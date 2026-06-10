@@ -25,3 +25,4 @@ Append-only history of all experiments (the Modeller's exploration). IC is vs th
   cross-sectional momentum features; a GPU torch long-shot.
 
 ## Ops note: experimenter writes host files as root -> run it as host uid (fix next cycle).
+| 2026-06-10T22:12:57+00:00 | E_raw_13_imp | fwd_30m | raw | 13 | 570481 | 0.02052 | 2.976 | -0.00107 | (A) Re-run raw/13 WITH gain importances to diagnose WHICH features carry the signal — start of feature-improvement work. |
