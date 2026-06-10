@@ -81,6 +81,40 @@ why.
 - STANDING 4-ROLE TEAM established (Ben, 2026-06-10): every wake = Manager(me) +
   parallel QA / Modeller / Production-Engineer specialists on the shared state; manager
   synthesizes + executes. OPERATING_LOOP step 0 rewritten.
+- TEAM/MODELLER report (synthesis):
+  - Panel shape: FAT cross-section (~928 names × 612 on-cadence ts = 568k rows) but
+    THIN time (51 days). Drives everything: sign-consistency across folds is the only
+    trustworthy stat at this depth; no Sharpe claim until ~250+ days.
+  - Most valuable next: E0′ = RANK label (within-ts rank of fwd_30m excess) +
+    LightGBM lambdarank grouped by ts + DROP micro -> 13-feature v1.1.0. Rank aligns
+    with how we trade (deciles), denominator-free, fat-tail-robust. Vol-scaling = E1
+    challenger.
+  - Micro = SYMBOL-IDENTITY LEAK (non-NaN perfectly identifies the ~10 streamed names;
+    the within-ts label shuffle canary does NOT catch a feature encoding identity).
+    Confirms drop-to-13.
+  - NW-lag check: lag must be label overlap in CADENCE STEPS. Our trainer already uses
+    lag=max(1,horizon//cadence)=1 for fwd_30m@30min (adjacent on-cadence labels don't
+    overlap) -> t=2.98 is honest. Good.
+  - Decision tree E0′→E1(label bake-off)→E2(daily momentum + reversal features, no new
+    infra)→E3(OVERNIGHT model = the real destination; amortizes spread vs our latency)
+    →E4(micro as liquid-subset enrichment ONLY if E2/E3 plateau; gates universe-wide
+    micro infra). Gate-zero every run on canary<~0.003.
+  - Trading shape: commit fwd_30m FIRST (validated-clean, exercises the loop) but
+    overnight is the destination. LONG-emphasis, short-as-overlay (shorts carry the
+    structural foot-guns + blowup risk; restrict to liquid ETB >=$5; report long/short
+    IC SEPARATELY). Order types: day marketable-limit + cls/LOC flatten; whole shares.
+    BRACKETS = disconnect safety net ONLY, never the exit rule (RTH-only, kills overnight,
+    both legs can fire -> pollutes attribution).
+  - Requirements: store daily 1/3/5/10d momentum (E2) + late-session/close-structure
+    (E3) features via the SAME featurestore path (parity); realized-vol column if E1
+    picks vol-scaling. 13-feat v1.1.0 = stable PREFIX subset; don't bump live constant;
+    new feats -> v1.2.0+. QA must: 100% replay-equiv for every production feature;
+    settled-day bar-parity gate; PIT-universe confirmed; lookahead audit on new feats.
+  - Honest gate ladder: harness-trust -> rebuilt-panel -> clean-baseline(E0′) ->
+    robustness(no feat>40%, beat ElasticNet, lookahead) -> AFTER-COST(+50% spread,
+    ±1-bar; the real kill-gate) -> significance(NW t>=4 AND deflated Sharpe) ->
+    time-depth(~250d) -> lockbox(one touch) -> frozen paper campaign. Expects 30m to
+    survive IC gates but DIE after-cost -> overnight is the structural answer.
 - EXECUTOR RED-TEAM (verdict ADJUST) — P0 CATCH that reprioritizes:
   - **Universe is polluted with leveraged/inverse ETFs/ETNs.** Top model "longs" =
     SOXL(3X)/KORU(3X)/TECL(3X)/IRE(2X)…; "shorts" = SQQQ/VXX/UVXY/SOXS. The screen
