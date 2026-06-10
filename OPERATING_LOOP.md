@@ -16,6 +16,18 @@ quality over speed: a false edge is worse than no edge.
 
 ## The loop (run every wake)
 
+0. **Dispatch an independent critic agent (background).** At the START of every
+   wake, launch a background subagent (general-purpose) that red-teams my current
+   direction. Give it: (a) the high-level goal/mission (below), (b) my CURRENT
+   sub-goal in one sentence, (c) instructions to read `STATE.md`, `JOURNAL.md` tail,
+   `ARCHITECTURE.md`, `OPERATING_LOOP.md`, and `git -C /home/ben/quant log --oneline -15`
+   to judge the actual trajectory. Its job: poke holes — am I on track? Is this the
+   RIGHT focus given project state and the A-E ladder? Am I drifting, over-
+   engineering, doing premature/low-value work, missing a bug/risk, or building off
+   the critical path? It returns a prioritized critique + a verdict (on-track /
+   adjust / off-track) + the single most important next thing. When it completes,
+   **incorporate its valid points honestly** (and push back in JOURNAL on ones I
+   disagree with, with reasons). Don't rubber-stamp my own plan.
 1. **Orient.** Read `STATE.md`, the tail of `JOURNAL.md`, and recent `git log`.
 2. **Monitor / health-check.** Containers up? ingestor streaming (bars landing this
    minute)? any crash-loops? reconciliation OK? coverage sane? disk headroom?
