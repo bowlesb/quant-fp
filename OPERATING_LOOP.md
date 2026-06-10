@@ -95,3 +95,23 @@ no pending build task, do NOT sit idle — do useful research toward the mission
 
 Honesty rule still applies: a quick experiment that says "this doesn't work" is a
 real result worth logging — don't fish for false positives.
+
+## Grafana dashboards (Ben's directive)
+
+Add graphs **one at a time**, and make sure Ben understands each before adding the
+next. Do NOT bulk-create many panels he doesn't understand. Each new graph: build
+one panel, explain in plain language what it shows and why it matters, confirm it's
+clear/useful, then (only then) consider the next. Quality and comprehension over
+quantity.
+
+## Idle ML explorations via subagents (Ben's directive)
+
+While waiting (e.g. on the backfill), it's fine to dispatch subagents to explore ML
+directions. For EACH exploration, state clearly up front:
+- **Goal:** what question it answers and how it serves the mission.
+- **State:** the current reality (platform being built+backfilled, ~data on hand,
+  18-feature v1 set, fwd_30m/60m labels, LightGBM intended).
+- **Intention:** that this is a *side exploration*, subordinate to the larger,
+  pressing goal — get the platform operational and backfilled. It informs
+  `docs/RESEARCH.md` / `JOURNAL.md`; it does not divert from building the platform.
+Fold useful findings back into the research backlog; keep explorations bounded.

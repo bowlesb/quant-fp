@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    uid: timescaledb
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    user: quant
+    isDefault: true
+    jsonData:
+      database: quant
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: true
+    secureJsonData:
+      password: $DB_PASSWORD

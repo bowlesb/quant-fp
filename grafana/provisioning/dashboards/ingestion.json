@@ -1,0 +1,40 @@
+{
+  "uid": "ingestion-coverage",
+  "title": "Ingestion — Live Coverage",
+  "tags": ["quant"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Symbols reporting a 1-min bar (per minute, live stream)",
+      "description": "How many distinct symbols sent a streamed 1-minute bar each minute. Should sit near the universe size (~1000) during market hours, and drop to ~0 when the market is closed. A sustained dip while the market is open means we are losing data.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('minute', ts) AS \"time\", count(DISTINCT symbol) AS \"symbols_with_bars\" FROM bars_1m WHERE source = 'stream' AND $__timeFilter(ts) GROUP BY 1 ORDER BY 1"
+        }
+      ]
+    }
+  ]
+}

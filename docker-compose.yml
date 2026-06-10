@@ -115,7 +115,11 @@ services:
     image: grafana/grafana:latest
     <<: *common
     ports:
-      - "127.0.0.1:3001:3000"
+      - "0.0.0.0:3001:3000"     # LAN-accessible: http://192.168.1.32:3001
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_BASIC_ENABLED: "false"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
