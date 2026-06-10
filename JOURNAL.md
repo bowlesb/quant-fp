@@ -78,6 +78,24 @@ why.
   deflated Sharpe + one-touch lockbox, IC stability > peak IC. Feature tiers:
   Tier1 (cheap, high EV) = signed-vol z 5/15/30m, cross-sectional rank transforms,
   vol-normalized returns, late-day/closing-auction flow, sector-neutral residual.
+- CRITIC AGENT (wake red-team) findings + my decisions:
+  - #1 (ACCEPTED, top priority): survivorship/point-in-time-universe leakage — the
+    historical feature AND label builders use universe of max(trade_date) applied to
+    all dates, violating ARCHITECTURE rule #4 and biasing the cross-sectional label
+    median over survivors. FIX (ahead of the modeling harness): (a) construct
+    universe_membership per historical trade_date from backfilled bars via
+    quantlib.universe; (b) make build_feature_store/build_labels select per-date
+    membership and demean within that date's universe; (c) rebuild the panel.
+  - #2 (ACCEPTED but DEFERRED w/ correction): close the Phase-1 parity gate on a
+    SETTLED day. Correction to the critic: we only have 1 day of *stream* data
+    (started today), so there is no settled stream-vs-backfill overlap yet; earliest
+    possible is tomorrow once today settles. Plan: automate a nightly validate-bars
+    on the prior settled day in the scheduler. Until then the gate stays honestly open.
+  - #3 (ACCEPTED): don't read any edge number off the lopsided same-day panel; gate
+    modeling-harness "doneness" on synthetic fixtures + the shuffle-label canary, not
+    a live number.
+  - #4 (FIXED now): aggregate backfill used DO NOTHING while bars used DO UPDATE;
+    made trade_agg/quote_agg backfill upsert too, so re-fetch self-corrects.
 - Health-check note: the "symbols streaming in last 90s" probe can transiently read
   0 in the gap between minute close and bar delivery (~up to 60s); use a 2-3min
   window. Verified ingestor healthy (latest bar always ~1min old).

@@ -100,14 +100,21 @@ INSERT INTO trade_agg_1m
     (symbol, ts, signed_volume, buy_volume, sell_volume, large_print_cnt,
      trade_intensity, median_size, p95_size, n_trades, source)
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'backfill')
-ON CONFLICT (symbol, ts, source) DO NOTHING
+ON CONFLICT (symbol, ts, source) DO UPDATE SET
+    signed_volume=EXCLUDED.signed_volume, buy_volume=EXCLUDED.buy_volume,
+    sell_volume=EXCLUDED.sell_volume, large_print_cnt=EXCLUDED.large_print_cnt,
+    trade_intensity=EXCLUDED.trade_intensity, median_size=EXCLUDED.median_size,
+    p95_size=EXCLUDED.p95_size, n_trades=EXCLUDED.n_trades, ingested_at=now()
 """
 QUOTE_AGG_SQL = """
 INSERT INTO quote_agg_1m
     (symbol, ts, mean_spread_bps, median_spread_bps, mean_bid_size, mean_ask_size,
      quote_imbalance, n_quotes, source)
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'backfill')
-ON CONFLICT (symbol, ts, source) DO NOTHING
+ON CONFLICT (symbol, ts, source) DO UPDATE SET
+    mean_spread_bps=EXCLUDED.mean_spread_bps, median_spread_bps=EXCLUDED.median_spread_bps,
+    mean_bid_size=EXCLUDED.mean_bid_size, mean_ask_size=EXCLUDED.mean_ask_size,
+    quote_imbalance=EXCLUDED.quote_imbalance, n_quotes=EXCLUDED.n_quotes, ingested_at=now()
 """
 
 

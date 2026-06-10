@@ -36,8 +36,17 @@ continuation; doesn't wait to be asked.
       idempotent upsert, rate-limited. Shared fetch in quantlib/barsource.py (reused
       by the one-shot backfiller). Replaces the manual hand-launched backfill.
 - [ ] Let history accumulate toward target; raise target once proven stable.
-- [ ] **Build features+labels on source='backfill'** over the accumulated panel →
-      real multi-day universe panel for modeling.
+- [ ] **TOP PRIORITY (critic-flagged bug, before any modeling): point-in-time universe.**
+      Build universe_membership per historical trade_date (screen from backfilled bars
+      via quantlib.universe), then make build_feature_store/build_labels select per-date
+      membership and demean labels within that date's universe. Rebuild the panel.
+      Reason: current builders use max(trade_date) universe → survivorship bias.
+- [ ] Automate nightly validate-bars on the prior SETTLED day in the scheduler
+      (closes the Phase-1 parity gate honestly; needs ≥1 settled stream day — earliest
+      tomorrow).
+- [ ] **Then** build features+labels on source='backfill' over the corrected panel.
+- [ ] Modeling harness (gate doneness on synthetic fixtures + shuffle-label canary,
+      NOT on the thin/lopsided real panel).
 - [x] asset_metadata (Alpaca exchange + shortable/borrow/fractionable flags),
       refreshed daily by scheduler. Universe: 939/1000 shortable — short leg must
       filter to shortable (wire into Phase 4 portfolio construction).
