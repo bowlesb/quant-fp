@@ -47,3 +47,10 @@ system READY, and what is the trade-path GO/NO-GO.
 - Live exercise found+fixed 4 real bugs (stale-close pricing, mode/traded_today re-submit loop,
   dup-coid guard, fills-capture). Day P&L ~ -$1.20 (tiny noise; NO edge — execution-infra proof).
 - Edge track: deep ~600-day panel rebuilding in parallel for the first honest overnight test.
+
+## 2026-06-11 — TERMINATION VERIFIED (full lifecycle proven)
+EOD flatten fired 15:48 ET: "closing 6 positions + cancelling open orders" -> broker FLAT
+(0 positions, 0 open orders) confirmed. Realized day P&L -$10.07 (tiny noise; NO edge). The
+FULL bet lifecycle is now proven on a live market day: submit (NBBO) -> fill (6 legs) -> manage
+(fills_log + reconcile + pnl_daily) -> TERMINATE (EOD flatten). Execution infrastructure COMPLETE
++ validated. Bets do not linger. (Edge separate: price-only proven dead; order-flow next.)

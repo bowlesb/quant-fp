@@ -550,3 +550,14 @@ why.
   overlapping daily). CAVEATS to disclose with results: residual survivorship (delisted names
   absent), earnings-gap noise NOT excluded (FMP deferred). The honest question: does ANYTHING
   clear breakeven net on real depth? Results imminent.
+
+- ===== EXECUTION LIFECYCLE PROVEN (2026-06-11) =====
+  First live-paper trading day complete + clean. EOD flatten at 15:48 ET terminated the 6-leg
+  book -> broker FLAT (0 pos, 0 orders), realized day P&L -$10.07 (noise). Full lifecycle
+  validated: submit(NBBO marketable-limit) -> fill -> manage(fills_log/reconcile/pnl_daily) ->
+  TERMINATE(EOD flatten via close_all_positions). The live exercise found+fixed 6 real bugs
+  (stale-close pricing->NBBO, mode/traded_today re-submit loop, dup-coid guard, fills-capture,
+  lambdarank label-31, label fragmentation). EXECUTION INFRA = DONE/PROVEN. Ben's #1 (bets must
+  terminate) = VERIFIED. Open exec refinements (lower priority): realized-P&L attribution per name,
+  partial-basket cancel-replace, broker-side LOC EOD net, multi-day holds. NEXT focus = EDGE via
+  ORDER-FLOW data (price-only has none).
