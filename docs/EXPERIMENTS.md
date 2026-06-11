@@ -168,3 +168,21 @@ breakeven 4.1->15.0bps, sharpe_net 0.50->1.95. Strongest result yet. BUT lambdar
 (0.0077) is still highest, and the prior probe showed the model partly ranks a PERSISTENT
 per-symbol component (canary-persistence 0.34) = likely SURVIVORSHIP. GATE: neutralize the
 persistent per-symbol prediction bias -> does within-symbol TIMING alpha survive? (running)
+
+## SURVIVORSHIP GATE — overnight "edge" is SURVIVORSHIP, not alpha (2026-06-11, DEFINITIVE)
+Clean de-fragmented overnight lambdarank: RAW sharpe_net +2.11 (breakeven 15.9bps). Per-symbol-
+DEMEANED (remove persistent per-symbol bias = the survivorship component): sharpe_net -0.21,
+net -0.0001, breakeven 1.7bps. COLLAPSE. => the entire overnight result was the model ranking
+ex-post SURVIVORS (persistent per-symbol drift, known only because they survived 2.5yr), NOT
+within-symbol overnight TIMING. Real timing alpha ~ ZERO.
+
+### DEEP-PANEL EDGE INVESTIGATION — HONEST CONCLUSION
+Price-only cross-sectional features have NO tradeable edge, gated rigorously (cost + canary +
+de-fragmentation + survivorship neutralization):
+- 30m intraday: REAL signal (IC 0.024-0.032, clean canary on 612 days) but NET-NEGATIVE after
+  costs (breakeven ~1.3bps < ~2bps) -> uneconomic at turnover.
+- overnight: apparent strong result (sharpe +2.1) was SURVIVORSHIP -> ~0 timing alpha.
+PATH TO EDGE is BETTER DATA, not more price-feature modeling: universe-wide ORDER-FLOW /
+microstructure (the Architect's sharded trade/quote ingestion — we only stream 10 symbols), and
+delisted-name backfill to test overnight survivorship-free. The EXECUTION infra is proven (place/
+manage/terminate bets live-paper), so when real edge appears we can trade it. No false edge shipped.
