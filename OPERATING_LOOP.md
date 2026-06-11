@@ -44,6 +44,14 @@ quality over speed: a false edge is worse than no edge.
      Where are we vs the overall goal and timeline? On track? Using time as effectively
      as possible? Which specialists to invoke and how, given the lifecycle stage? What
      are we NOT doing enough of given where we're going? Decide priorities; sequence work.
+     **OWN THE OUTCOME (anti-crack duty):** read `docs/RESPONSIBILITY_MAP.md` every wake;
+     (a) scan for ORPHANS — any core area with no owner is a defect; assign it (cross-
+     cutting concerns default to me); (b) confirm each owner CLOSED THE LOOP this cycle
+     (verified its invariant green with real evidence, not just recommended); (c) after
+     ANY code change, ensure RUNNING == intended (rebuilt+restarted+verified end-to-end)
+     before trusting output — the stale-experimenter bug is the cautionary tale. Owners
+     analyze; the outcome is mine to guarantee — but the goal is to push ownership DOWN so
+     it isn't all concentrated here.
    - **2) Data QA Tester (PERSISTENT, not one-shot):** owns `docs/QA_LEDGER.md` — a
      standing, severity-ranked registry of data-integrity INVARIANTS and open concerns.
      EVERY wake it: (a) reads the ledger, (b) re-checks the standing invariants with live
