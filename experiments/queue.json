@@ -108,5 +108,21 @@
     "label": "raw",
     "features": "all",
     "set_version": "v1.1.0"
+  },
+  {
+    "id": "DEEP_overnight_volscaled_nocal_v11",
+    "hypothesis": "DEEP panel: overnight + VOL-SCALED label (stops ranking volatility instead of alpha) + no-calendar. Judge NET P&L.",
+    "horizon": "overnight",
+    "label": "vol_scaled",
+    "features": "nocalendar",
+    "set_version": "v1.1.0"
+  },
+  {
+    "id": "DEEP_30m_volscaled_nocal_v11",
+    "hypothesis": "DEEP panel: 30m vol-scaled, no-calendar \u2014 does vol-normalization rescue any intraday signal at real depth? NET P&L.",
+    "horizon": "fwd_30m",
+    "label": "vol_scaled",
+    "features": "nocalendar",
+    "set_version": "v1.1.0"
   }
 ]

@@ -94,8 +94,9 @@ def run_queue() -> int:
             else:
                 # overnight = ~1 rebalance/day -> periods_per_year ~252 (cadence_min=390)
                 exp_cadence = 390 if horizon == "overnight" else CADENCE_MIN
+                vol_scaler = X[:, names.index("vol_30m")] if "vol_30m" in names else None
                 result = run_experiment(
-                    X, y, ts, symbols=symbols, label=exp.get("label", "raw"),
+                    X, y, ts, symbols=symbols, vol_scaler=vol_scaler, label=exp.get("label", "raw"),
                     feature_idx=feature_idx, horizon_minutes=HORIZON_MIN.get(horizon, 30),
                     cadence_min=exp_cadence,
                 )

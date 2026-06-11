@@ -63,18 +63,27 @@ def within_ts_rank(y, ts) -> list[float]:
     return out
 
 
-def run_experiment(X, y, ts, *, symbols=None, label="raw", feature_idx=None, params=None,
-                   n_folds=5, horizon_minutes=30, cadence_min=30, num_rounds=200, seed=13,
-                   cost_bps_oneway=2.0, borrow_bps_annual=50.0):
+VOL_FLOOR = 0.001                                  # floor for the vol-scaled denominator
+
+
+def run_experiment(X, y, ts, *, symbols=None, vol_scaler=None, label="raw", feature_idx=None,
+                   params=None, n_folds=5, horizon_minutes=30, cadence_min=30, num_rounds=200,
+                   seed=13, cost_bps_oneway=2.0, borrow_bps_annual=50.0):
     """Walk-forward train (on the transformed label) + measure IC of predictions vs the
-    ACTUAL forward return, PLUS a net-of-cost L/S backtest (after-cost Sharpe + breakeven
-    cost) — the economic gate IC hides. Returns a result dict. label in {raw, rank}."""
+    ACTUAL forward return, PLUS a net-of-cost L/S backtest. label in {raw, rank, vol_scaled}.
+    vol_scaled fits y/realized_vol (stops the model ranking volatility instead of alpha);
+    pass vol_scaler (per-row realized vol). IC/P&L are always measured vs the RAW return."""
     Xs = X[:, feature_idx] if feature_idx is not None else X
     params = params or DEFAULT_LGB
     folds = walk_forward_folds(ts, horizon_minutes, n_folds)
 
     def transform(vals):
-        return within_ts_rank(vals, ts) if label == "rank" else list(vals)
+        if label == "rank":
+            return within_ts_rank(vals, ts)
+        if label == "vol_scaled" and vol_scaler is not None:
+            return [v / (abs(scl) if (scl == scl and abs(scl) > VOL_FLOOR) else VOL_FLOOR)
+                    for v, scl in zip(vals, vol_scaler)]   # scl==scl filters NaN vol
+        return list(vals)
 
     def evaluate(fit_label, collect=False):
         ics = {}
