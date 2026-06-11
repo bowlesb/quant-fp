@@ -67,7 +67,8 @@ VOL_FLOOR = 0.001                                  # floor for the vol-scaled de
 
 
 def _int_relevance(vals, ts_list) -> list[int]:
-    """Within-timestamp rank bucketed to 0..31 — LightGBM lambdarank's integer relevance."""
+    """Within-timestamp rank bucketed to 0..30 — LightGBM lambdarank's integer relevance
+    (default label_gain has 31 entries -> max valid label is 30)."""
     groups: dict[object, list[int]] = defaultdict(list)
     for i, t in enumerate(ts_list):
         groups[t].append(i)
@@ -76,7 +77,7 @@ def _int_relevance(vals, ts_list) -> list[int]:
         order = sorted(idxs, key=lambda i: vals[i])
         m = len(order)
         for rank, i in enumerate(order):
-            out[i] = int(round(31 * rank / (m - 1))) if m > 1 else 0
+            out[i] = int(round(30 * rank / (m - 1))) if m > 1 else 0
     return out
 
 
