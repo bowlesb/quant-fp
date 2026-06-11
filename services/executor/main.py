@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 from alpaca.common.exceptions import APIError
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest
@@ -53,6 +55,28 @@ DB_KWARGS = {
 trading = TradingClient(
     os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], paper=(MODE == "paper")
 )
+data_client = StockHistoricalDataClient(os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"])
+
+
+def marketable_limit(symbols: list[str], fallback: dict[str, float]) -> dict[str, dict[str, float]]:
+    """Per-symbol marketable-limit prices from the LIVE NBBO (buy=ask+1tick, sell=bid-1tick)
+    so orders actually CROSS — the morning's resting buys came from pricing off a stale bar
+    close. Falls back to last_close ±0.5% if a quote is missing."""
+    out: dict[str, dict[str, float]] = {}
+    try:
+        quotes = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbols))
+    except APIError:
+        quotes = {}
+    for symbol in symbols:
+        q = quotes.get(symbol)
+        ask = float(q.ask_price) if q and q.ask_price else 0.0
+        bid = float(q.bid_price) if q and q.bid_price else 0.0
+        if ask > 0 and bid > 0:
+            out[symbol] = {"buy": round(ask + 0.01, 2), "sell": round(bid - 0.01, 2)}
+        else:
+            close = fallback[symbol]
+            out[symbol] = {"buy": round(close * 1.005, 2), "sell": round(close * 0.995, 2)}
+    return out
 
 STATE_DDL = """
 CREATE TABLE IF NOT EXISTS executor_state (
@@ -131,9 +155,11 @@ def submit_basket(conn: psycopg.Connection, ts: datetime, today: object) -> None
     if gross > cap:
         logger.error("gross %.0f > cap %.0f (equity %.0f); skip", gross, cap, float(account.equity)); return
     rb = ts.strftime("%Y%m%dT%H%M")
+    legs = longs + shorts
+    prices = marketable_limit([leg["symbol"] for leg in legs], {leg["symbol"]: leg["price"] for leg in legs})
     for leg, side in [(x, "buy") for x in longs] + [(x, "sell") for x in shorts]:
         coid = f"{MODEL_VERSION}-{rb}-{leg['symbol']}-{side}"
-        limit = round(leg["price"] * (1.003 if side == "buy" else 0.997), 2)   # marketable limit
+        limit = prices[leg["symbol"]][side]                # marketable limit from live NBBO
         with conn.cursor() as cur:                            # persist INTENT before submit
             cur.execute(INTENT_SQL, (coid, leg["symbol"], side, leg["qty"], limit, MODE,
                                      datetime.now(timezone.utc), leg["score"], MODEL_VERSION))
