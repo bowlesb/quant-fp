@@ -64,3 +64,28 @@ IMPLICATIONS (reshape the modeling path):
 | 2026-06-11T02:28:54+00:00 | E_mom_raw_nocal_v11 | fwd_30m | raw | 19 | 568162 | 0.00648 | 0.996 | 0.00522 | KEY TEST: v1.1.0 daily-momentum features, raw, NO calendar. Does cross-sectional momentum give non-artifact within-ts IC where intraday price gave ~0? |
 | 2026-06-11T02:29:13+00:00 | E_mom_raw_all_v11 | fwd_30m | raw | 21 | 568162 | 0.0133 | 2.061 | 0.00558 | v1.1.0 momentum + all (incl calendar). Compare to nocalendar to see momentum's standalone contribution vs the calendar crutch. |
 | 2026-06-11T02:29:28+00:00 | E_mom_60m_raw_nocal_v11 | fwd_60m | raw | 19 | 519524 | 0.00593 | 0.676 | -0.00529 | v1.1.0 momentum at 60m horizon, no calendar (momentum decays slower than 30m noise). |
+
+## Momentum finding (Modeller, 2026-06-11) — real CONTRIBUTOR, but not yet edge
+
+v1.1.0 daily-momentum, correctly run on the 21-feature panel (the first run was a stale-
+code bug: it scored v1.0.0 — purged):
+
+  E_mom_raw_nocal_v11 (19f, no cal): IC  0.0065  t 1.00  canary 0.0052
+     top: gap_from_open, mom_1d(2.3), mom_1d_rel(2.1), vwap_dev, range_pct
+  E_mom_raw_all_v11   (21f, w/ cal): IC  0.0133  t 2.06  canary 0.0056   (calendar back on top)
+  E_mom_60m_nocal     (19f, no cal): IC  0.0059  t 0.68  canary -0.0053
+
+READ (honest):
+- Momentum IS the first non-calendar feature family that actually CONTRIBUTES: mom_1d /
+  mom_1d_rel rank among the top features, and adding momentum flips the no-calendar IC
+  from -0.004 (price-only, v1.0.0) to +0.0065. Orthogonal signal exists.
+- But it is NOT a validated edge: on the 30m no-calendar test the shuffle CANARY (0.0052)
+  is nearly as high as the real IC (0.0065), and t~1.0. The canary defines the noise/
+  overfit floor (~0.005) on this 51-day panel; momentum barely pokes above it. 60m has a
+  clean canary (-0.005) but t=0.68. Neither clears the bar.
+- Verdict: momentum is the best lead so far and worth keeping, but the binding constraint
+  is TIME DEPTH (51 days; 10-day momentum has ~5 independent samples), exactly as
+  predicted. Don't trade it. NEXT: true lambdarank + vol-scaled label (need research.py
+  paths), and keep accumulating days; re-run the gauntlet as depth grows.
+- METHODOLOGY NOTE for QA/Modeller: canary ~±0.005 is the IC estimation-noise band here;
+  treat any |IC| < ~0.005 as indistinguishable from zero. Make that an explicit gate.
