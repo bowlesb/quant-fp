@@ -54,3 +54,13 @@ EOD flatten fired 15:48 ET: "closing 6 positions + cancelling open orders" -> br
 FULL bet lifecycle is now proven on a live market day: submit (NBBO) -> fill (6 legs) -> manage
 (fills_log + reconcile + pnl_daily) -> TERMINATE (EOD flatten). Execution infrastructure COMPLETE
 + validated. Bets do not linger. (Edge separate: price-only proven dead; order-flow next.)
+
+## Plan for 2026-06-12 (open 06:30 PDT)
+- Objective: (1) ORDER-FLOW validation — 50-symbol trade/quote throughput holds a full session +
+  settled-day trade-parity (backfill yesterday's aggs once settled + validate-aggs); (2) keep the
+  EXECUTION lifecycle exercised — executor stays LIVE tiny paper (DRY_RUN=false) to catch
+  regressions + keep proving submit->manage->terminate daily (P&L is noise; no edge). 
+- Readiness (PE): universe + today's membership pre-open; ingestor streaming 50-sym trades/quotes
+  + universe bars; model-server scores; backfill throttled in RTH.
+- Trade-path (Exec/Risk): live tiny paper; EOD flatten must terminate again (proven yesterday).
+- Go/No-Go: GO for tiny-paper exercise + order-flow validation; NO real-size trading (no edge).

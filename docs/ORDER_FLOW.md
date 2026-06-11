@@ -37,3 +37,21 @@ init. GATE: settled-day trade-agg parity before any order-flow feature enters a 
 To test overnight survivorship-FREE (the overnight result was survivorship). Needs a historical/
 delisted asset list (Alpaca trading API doesn't give delisted easily). Weigh vs order-flow —
 order-flow is higher-EV (a NEW signal class) than rescuing a likely-dead overnight thesis.
+
+## Progress 2026-06-11
+- Step 1 DONE: trade/quote capture 10->50 symbols; aggregates landing for all 50; ingestor clean
+  in one process. trades_raw retention 30d->3d.
+- TRADE-PARITY (I2b) read: 98.2% within 2% (trade_agg), 99.9% (quote spread), same-day -> the
+  shared aggregator is parity-true. Settled-day 50-symbol gate = tomorrow's full session.
+- KEY REALIZATION: the EXISTING v1.0.0 micro features (trade_imbalance/large_print_cnt/trade_
+  intensity/spread_bps/quote_imbalance) ARE order-flow features — they were 99.9% NaN only due
+  to 10-symbol coverage. So the BOTTLENECK is DATA COVERAGE (scaling), not new features. Richer
+  features (signed-vol z over 5/15/30m, OFI, cross-sectional rank) are enhancements for later.
+- NEXT (deliberate, supervised — not overnight-unsupervised to protect the bar stream):
+  1. validate 50-symbol throughput + settled-day parity at tomorrow's open.
+  2. scale in steps (50->200->500->1000) testing single-process limits; SHARD when one process
+     can't keep up (~target the universe). Design: N processes, disjoint symbol shards, shared
+     quantlib.aggregates, aggregate-in-memory, persist only per-minute aggregates.
+  3. once micro features populate for a cross-section wide enough to RANK (~hundreds of names),
+     re-run the deep cost-gated battery WITH the micro/order-flow features -> the honest test of
+     whether order-flow has edge where price-only didn't.
