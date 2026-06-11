@@ -37,7 +37,7 @@ services:
     environment:
       # Bars stream for the whole universe (loaded from DB); trades/quotes only
       # for this liquid subset to keep one process healthy.
-      TRADE_QUOTE_SYMBOLS: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
+      TRADE_QUOTE_SYMBOLS: "MU,NVDA,TSLA,SNDK,AMD,INTC,AAPL,MSFT,GOOGL,AVGO,MRVL,AMZN,META,GOOG,PLTR,LITE,QCOM,TSM,ORCL,NBIS,AMAT,DELL,ARM,WDC,LLY,NOW,RKLB,IREN,CRWV,CSCO,STX,LRCX,ASML,BE,IBM,WMT,GLW,MSTR,UNH,APP,CRM,JPM,XOM,GEV,BRK.B,V,CAT,COHR,TXN,AAOI"
     depends_on:
       timescaledb:
         condition: service_healthy
