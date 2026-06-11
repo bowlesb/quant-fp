@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 FEATURE_SET_VERSION = "v1.0.0"           # the LIVE serving set; v1.1.0 is offline-only
 
 MOMENTUM_DAYS = [1, 3, 5, 10]            # trailing trading-day windows for daily momentum
+MAX_MOMENTUM_LOOKBACK = max(MOMENTUM_DAYS)   # prior trading days a momentum feature needs
 
 _NY = ZoneInfo("America/New_York")
 _RTH_OPEN = dtime(9, 30)

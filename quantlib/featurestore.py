@@ -10,6 +10,7 @@ recomputed feature vectors are identical by construction — which the
 validate-features replay-equivalence check confirms (guarding against any hidden
 live-only state). This module does DB I/O; the pure math stays in features.py.
 """
+import logging
 import math
 from bisect import bisect_right
 from datetime import date, datetime, timedelta
@@ -19,6 +20,7 @@ import psycopg
 from quantlib.features import (
     FEATURE_SET_VERSION,
     FEATURE_SETS,
+    MAX_MOMENTUM_LOOKBACK,
     MOMENTUM_NAMES,
     BarRow,
     FeatureContext,
@@ -26,6 +28,8 @@ from quantlib.features import (
     is_rth,
     on_cadence,
 )
+
+logger = logging.getLogger(__name__)
 
 WARMUP = timedelta(minutes=70)        # enough history for the 60m features
 MARKET_SYMBOL = "SPY"
@@ -128,6 +132,18 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
     market = [bar for bar in load_bars(conn, MARKET_SYMBOL, bar_source, start, end) if is_rth(bar.ts)]
     market_ts = [bar.ts for bar in market]
     market_daily = load_daily_closes(conn, MARKET_SYMBOL, bar_source, end) if needs_daily else {}
+    # WARMUP ASSERT (QA-I4): momentum needs MAX_MOMENTUM_LOOKBACK prior trading days. If the
+    # build window starts without enough pre-window daily history (e.g. just after a data
+    # gap), momentum is silently NaN-degraded at the start — surface it loudly, don't hide it.
+    if needs_daily:
+        prior_days = sum(1 for d in market_daily if d < start.date())
+        if prior_days < MAX_MOMENTUM_LOOKBACK:
+            logger.warning(
+                "WARMUP SHORTFALL: only %d prior trading days before %s but momentum needs "
+                "%d -> momentum features NaN-degraded at the window start (insufficient "
+                "pre-window history; widen the backfill or move the start later)",
+                prior_days, start.date(), MAX_MOMENTUM_LOOKBACK,
+            )
     total = 0
     for symbol in symbols:
         bars = [bar for bar in load_bars(conn, symbol, bar_source, start, end) if is_rth(bar.ts)]
