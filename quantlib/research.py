@@ -14,6 +14,7 @@ import numpy as np
 import psycopg
 
 from quantlib.backtest import (
+    long_short_backtest,
     mean_ic,
     newey_west_tstat,
     per_timestamp_ic,
@@ -42,9 +43,10 @@ def load_panel(conn: psycopg.Connection, horizon: str, set_version: str):
         )
         rows = cur.fetchall()
     ts = [r[0] for r in rows]
+    symbols = [r[1] for r in rows]
     X = np.array([[float(v) if v is not None else math.nan for v in r[2]] for r in rows], dtype=float)
     y = np.array([float(r[3]) for r in rows], dtype=float)
-    return names, ts, X, y
+    return names, ts, symbols, X, y
 
 
 def within_ts_rank(y, ts) -> list[float]:
@@ -61,10 +63,12 @@ def within_ts_rank(y, ts) -> list[float]:
     return out
 
 
-def run_experiment(X, y, ts, *, label="raw", feature_idx=None, params=None,
-                   n_folds=5, horizon_minutes=30, cadence_min=30, num_rounds=200, seed=13):
+def run_experiment(X, y, ts, *, symbols=None, label="raw", feature_idx=None, params=None,
+                   n_folds=5, horizon_minutes=30, cadence_min=30, num_rounds=200, seed=13,
+                   cost_bps_oneway=2.0, borrow_bps_annual=50.0):
     """Walk-forward train (on the transformed label) + measure IC of predictions vs the
-    ACTUAL forward return. Returns a result dict. label in {raw, rank}."""
+    ACTUAL forward return, PLUS a net-of-cost L/S backtest (after-cost Sharpe + breakeven
+    cost) — the economic gate IC hides. Returns a result dict. label in {raw, rank}."""
     Xs = X[:, feature_idx] if feature_idx is not None else X
     params = params or DEFAULT_LGB
     folds = walk_forward_folds(ts, horizon_minutes, n_folds)
@@ -72,8 +76,9 @@ def run_experiment(X, y, ts, *, label="raw", feature_idx=None, params=None,
     def transform(vals):
         return within_ts_rank(vals, ts) if label == "rank" else list(vals)
 
-    def evaluate(fit_label):
+    def evaluate(fit_label, collect=False):
         ics = {}
+        coll: list[tuple] = []
         for fold in folds:
             if len(fold.train_idx) < 500 or len(fold.test_idx) < 50:
                 continue
@@ -84,12 +89,22 @@ def run_experiment(X, y, ts, *, label="raw", feature_idx=None, params=None,
             )
             pred = booster.predict(Xs[te])
             ics.update(per_timestamp_ic(list(pred), [y[i] for i in te], [ts[i] for i in te]))
-        return ics
+            if collect and symbols is not None:
+                coll.extend((float(pred[j]), float(y[i]), ts[i], symbols[i]) for j, i in enumerate(te))
+        return ics, coll
 
-    real = evaluate(transform(y))
+    real, test_preds = evaluate(transform(y), collect=True)
     shuffled = shuffle_within_groups(list(y), ts, seed)
-    canary = evaluate(transform(shuffled))
+    canary, _ = evaluate(transform(shuffled))
     lag = max(1, horizon_minutes // cadence_min)
+    # Net-of-cost L/S backtest on the out-of-sample predictions (the economic gate).
+    periods_per_year = 252.0 * (390.0 / cadence_min)
+    backtest = long_short_backtest(
+        [c[0] for c in test_preds], [c[1] for c in test_preds],
+        [c[2] for c in test_preds], [c[3] for c in test_preds],
+        cost_bps_oneway=cost_bps_oneway, borrow_bps_annual=borrow_bps_annual,
+        periods_per_year=periods_per_year,
+    ) if test_preds else {}
     # Feature importances (gain) from a model on the full panel — lets the Modeller
     # interrogate WHICH features carry signal (and which are dead weight).
     full = lgb.train(params, lgb.Dataset(Xs, label=np.asarray(transform(y), dtype=float)),
@@ -104,4 +119,9 @@ def run_experiment(X, y, ts, *, label="raw", feature_idx=None, params=None,
         "n_features": int(Xs.shape[1]),
         "label": label,
         "gain_importance": importances,
+        "net_per_period": backtest.get("net_per_period"),
+        "gross_per_period": backtest.get("gross_per_period"),
+        "sharpe_net": backtest.get("sharpe_net"),
+        "breakeven_cost_bps": backtest.get("breakeven_cost_bps"),
+        "mean_turnover": backtest.get("mean_turnover"),
     }

@@ -101,6 +101,62 @@ def mean_ic(ics: dict[datetime, float]) -> float:
     return statistics.mean(ics.values()) if ics else math.nan
 
 
+def long_short_backtest(
+    pred: list[float], realized: list[float], group: list[datetime], symbol: list[str],
+    *, frac: float = 0.1, cost_bps_oneway: float = 2.0, borrow_bps_annual: float = 50.0,
+    periods_per_year: float = 3276.0,
+) -> dict[str, float]:
+    """Dollar-neutral equal-weight top/bottom-`frac` L/S basket per timestamp. Charges a
+    one-way trading cost (spread/2 + slippage, in bps) on realized TURNOVER plus short
+    borrow, and reports GROSS vs NET per-period return, after-cost Sharpe, mean turnover,
+    and the BREAKEVEN one-way cost (bps the signal can absorb before net<=0). This is the
+    economic gate that rank-IC hides: a positive IC can still lose money after costs.
+    `periods_per_year` default ~3276 = 252d x ~13 30-min rebalances."""
+    buckets: dict[datetime, list[tuple[float, float, str]]] = defaultdict(list)
+    for p, r, g, s in zip(pred, realized, group, symbol):
+        if not (math.isnan(p) or math.isnan(r)):
+            buckets[g].append((p, r, s))
+    cost = cost_bps_oneway / 1e4
+    borrow_per_period = (borrow_bps_annual / 1e4) / periods_per_year
+    gross_list: list[float] = []
+    net_list: list[float] = []
+    turn_list: list[float] = []
+    prev_w: dict[str, float] = {}
+    for ts in sorted(buckets):
+        rows = sorted(buckets[ts], key=lambda row: row[0])     # ascending prediction
+        k = max(1, int(frac * len(rows)))
+        if len(rows) < 2 * k:
+            continue                                           # can't form both legs
+        shorts, longs = rows[:k], rows[-k:]
+        weights: dict[str, float] = {}
+        for _, _, sym in longs:
+            weights[sym] = weights.get(sym, 0.0) + 1.0 / len(longs)
+        for _, _, sym in shorts:
+            weights[sym] = weights.get(sym, 0.0) - 1.0 / len(shorts)
+        gross = sum(weights[sym] * realized_ret for _, realized_ret, sym in longs + shorts)
+        turnover = sum(abs(weights.get(sym, 0.0) - prev_w.get(sym, 0.0))
+                       for sym in set(weights) | set(prev_w))
+        net = gross - cost * turnover - borrow_per_period
+        gross_list.append(gross)
+        net_list.append(net)
+        turn_list.append(turnover)
+        prev_w = weights
+    if len(net_list) < 2:
+        return {"n_periods": len(net_list)}
+    mean_gross = statistics.mean(gross_list)
+    mean_net = statistics.mean(net_list)
+    std_net = statistics.stdev(net_list)
+    mean_turn = statistics.mean(turn_list)
+    return {
+        "n_periods": len(net_list),
+        "gross_per_period": round(mean_gross, 6),
+        "net_per_period": round(mean_net, 6),
+        "sharpe_net": round(mean_net / std_net * math.sqrt(periods_per_year), 3) if std_net > 0 else math.nan,
+        "mean_turnover": round(mean_turn, 3),
+        "breakeven_cost_bps": round(mean_gross / mean_turn * 1e4, 2) if mean_turn > 0 else math.nan,
+    }
+
+
 def newey_west_tstat(ics: dict[datetime, float], lag: int) -> float:
     """t-stat of the per-timestamp IC series with a Newey-West correction up to
     `lag` (set lag to the label-overlap length so overlapping labels don't inflate

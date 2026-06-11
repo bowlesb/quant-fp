@@ -83,7 +83,7 @@ def run_queue() -> int:
                     exp.get("label"), sel)
         try:
             with psycopg.connect(**DB_KWARGS) as conn:
-                names, ts, X, y = load_panel(conn, horizon, sv)
+                names, ts, symbols, X, y = load_panel(conn, horizon, sv)
             # named feature subsets, by NAME so they work for any set version:
             #   nomicro = drop microstructure; nocalendar = drop micro + calendar
             drop = set(MICRO_NAMES) if sel == "nomicro" else \
@@ -93,8 +93,9 @@ def run_queue() -> int:
                 result = {"error": "panel too small", "n_rows": int(len(y))}
             else:
                 result = run_experiment(
-                    X, y, ts, label=exp.get("label", "raw"), feature_idx=feature_idx,
-                    horizon_minutes=HORIZON_MIN.get(horizon, 30), cadence_min=CADENCE_MIN,
+                    X, y, ts, symbols=symbols, label=exp.get("label", "raw"),
+                    feature_idx=feature_idx, horizon_minutes=HORIZON_MIN.get(horizon, 30),
+                    cadence_min=CADENCE_MIN,
                 )
                 imp = result.get("gain_importance")
                 if imp:

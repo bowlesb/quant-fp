@@ -4,12 +4,35 @@ import math
 from datetime import datetime, timedelta, timezone
 
 from quantlib.backtest import (
+    long_short_backtest,
     mean_ic,
     newey_west_tstat,
     per_timestamp_ic,
     shuffle_within_groups,
     walk_forward_folds,
 )
+
+
+def test_long_short_backtest_gross_net_and_breakeven() -> None:
+    ts1 = datetime(2026, 1, 1, 14, 30, tzinfo=timezone.utc)
+    ts2 = datetime(2026, 1, 1, 15, 0, tzinfo=timezone.utc)
+    # ts1 ranks A>B>C>D, ts2 flips to D>C>B>A (forces full turnover)
+    pred = [4, 3, 2, 1, 1, 2, 3, 4]
+    realized = [0.02, 0.01, -0.01, -0.02, 0.01, 0.01, 0.01, 0.03]
+    group = [ts1] * 4 + [ts2] * 4
+    symbol = ["A", "B", "C", "D"] * 2
+
+    free = long_short_backtest(pred, realized, group, symbol, frac=0.25,
+                               cost_bps_oneway=0.0, borrow_bps_annual=0.0)
+    assert free["n_periods"] == 2
+    assert math.isclose(free["gross_per_period"], 0.03, abs_tol=1e-9)   # mean(0.04, 0.02)
+    assert math.isclose(free["net_per_period"], 0.03, abs_tol=1e-9)     # no cost
+    assert math.isclose(free["breakeven_cost_bps"], 100.0, abs_tol=0.1) # 0.03 / turn(3) *1e4
+
+    costed = long_short_backtest(pred, realized, group, symbol, frac=0.25,
+                                 cost_bps_oneway=50.0, borrow_bps_annual=0.0)
+    assert costed["net_per_period"] < costed["gross_per_period"]        # costs bite
+    assert math.isclose(costed["net_per_period"], 0.015, abs_tol=1e-9)  # 0.04-0.01, 0.02-0.02
 
 BASE = datetime(2026, 6, 10, 13, 30, tzinfo=timezone.utc)
 

@@ -89,3 +89,15 @@ READ (honest):
   paths), and keep accumulating days; re-run the gauntlet as depth grows.
 - METHODOLOGY NOTE for QA/Modeller: canary ~±0.005 is the IC estimation-noise band here;
   treat any |IC| < ~0.005 as indistinguishable from zero. Make that an explicit gate.
+| 2026-06-11T04:11:33+00:00 | E_mom_raw_nocal_v11 | fwd_30m | raw | 19 | 568162 | 0.00648 | 0.996 | 0.00522 | KEY TEST: v1.1.0 daily-momentum features, raw, NO calendar. Does cross-sectional momentum give non-artifact within-ts IC where intraday price gave ~0? |
+
+## NET-OF-COST GATE (2026-06-11) — momentum LOSES money after costs
+
+The harness now reports a net-of-cost L/S backtest (quantlib.backtest.long_short_backtest).
+Momentum (E_mom_raw_nocal_v11), 30-min cadence:
+  gross +2.76 bps/period | NET -1.6 bps | Sharpe_net -2.0 | turnover 2.18/period
+  BREAKEVEN one-way cost = 1.27 bps  vs ~2 bps realistic (half a ~4 bps round-trip spread)
+=> Even ignoring the noise-floor IC, the strategy is NET-NEGATIVE: the signal can't clear
+the spread at full 30-min turnover. The owner-audit's call is quantified: LOWER TURNOVER
+(longer horizon) beats any feature here. "Beats breakeven cost" is now a hard gate on every
+experiment. NEXT: build + test the OVERNIGHT horizon (far lower turnover) under this gate.
