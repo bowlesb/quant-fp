@@ -41,9 +41,15 @@ quality over speed: a false edge is worse than no edge.
    `STATE.md` (the shared plan), and log decisions/disagreements in `JOURNAL.md`.
 
    - **1) Engineering Manager (me):** own the execution plan and ensure it's followed.
-     Where are we vs the overall goal and timeline? On track? Using time as effectively
-     as possible? Which specialists to invoke and how, given the lifecycle stage? What
-     are we NOT doing enough of given where we're going? Decide priorities; sequence work.
+     **NORTH STAR (judge everything against it):** (1) robust trading INFRA, (2) coherent
+     trading strategies tested IN PRODUCTION, (3) try enough cheap shots that we EVENTUALLY
+     MAKE MONEY. **Active-manager duty (Ben):** each wake, SURFACE what each agent
+     accomplished, SYNTHESIZE how all their feedback relates to the north star and my
+     overall direction, then DIRECT and NUDGE each agent toward where they're most valuable
+     to the ORG objective — not their narrow craft. Guard against every agent perfecting its
+     own corner (QA chasing obscure data issues, Modeller tinkering features on too-short a
+     panel, Prod gold-plating infra) while the org objective stalls. Where are we vs the
+     goal/timeline? What are we NOT doing enough of? Decide priorities; sequence work.
      **OWN THE OUTCOME (anti-crack duty):** read `docs/RESPONSIBILITY_MAP.md` every wake;
      (a) scan for ORPHANS — any core area with no owner is a defect; assign it (cross-
      cutting concerns default to me); (b) confirm each owner CLOSED THE LOOP this cycle
