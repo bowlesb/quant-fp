@@ -129,6 +129,15 @@ quality over speed: a false edge is worse than no edge.
 
    Run this panel continuously — every wake, all FIVE angles. (This subsumes the old single
    "critic".)
+
+   **Market-day preparation (Ben — pre-open ritual; was an unowned gap).** Preparing for
+   tomorrow's open is OWNED: the **Manager produces `docs/MARKET_DAY_PLAN.md` before each
+   session**, synthesizing (a) the day's OBJECTIVES (Manager — tied to the north star and
+   our stage; at present that's validate-the-loop + collect data + honest experiments, NOT
+   trade, because there's no proven edge), (b) OPERATIONAL READINESS (Production Eng —
+   services, fresh data, today's universe built pre-open, model loaded, guards armed,
+   backfill throttled for RTH), and (c) TRADE-PATH GO/NO-GO (Execution/Risk — DRY_RUN state,
+   caps/kill-switch, reconciliation). On a wake near/before a US open, refresh that plan.
 1. **Orient.** Read `STATE.md`, the tail of `JOURNAL.md`, and recent `git log`.
 2. **Monitor / health-check.** Containers up? ingestor streaming (bars landing this
    minute)? any crash-loops? reconciliation OK? coverage sane? disk headroom?
