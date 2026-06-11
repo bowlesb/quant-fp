@@ -48,7 +48,7 @@ services:
       dockerfile: services/executor/Dockerfile
     <<: *common
     environment:
-      DRY_RUN: "true"                 # flip to "false" to place tiny paper bets (after Exec/Risk GO)
+      DRY_RUN: "false"               # LIVE tiny paper bets (Exec/Risk GO-WITH-FIXES applied)
       MODEL_VERSION: "lgbm_fwd_30m_v1.0.0"
       K_LONG: "3"
       K_SHORT: "3"

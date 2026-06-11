@@ -525,3 +525,17 @@ why.
   first real cadences (988 syms @13:30 UTC open, 981 @14:00), stale guard held overnight then
   released, dry-run executor logged valid baskets (ETF-excluded single names, not submitted).
   The market-day VALIDATION objective passed on its own while I was silent.
+
+- ===== FIRST LIVE PAPER BETS (2026-06-11 ~07:38 PDT) — submit works, partial fill exposes a real bug =====
+  Flipped executor DRY_RUN=false (Exec/Risk GO-WITH-FIXES applied). First live paper basket
+  SUBMITTED to Alpaca: 6 orders w/ alpaca ids. RESULT: 3 SHORTS FILLED (HUM/MRVL/PRIM real
+  positions), 3 LONG buy-limits RESTING UNFILLED (status NEW). ROOT CAUSE: marketable-limit
+  priced off the stale BAR CLOSE ±0.3%, not the live NBBO — market ticked up so the buy limits
+  sat below the ask and didn't cross (sells ×0.997 crossed the bid, filled). => lopsided tiny
+  net-short book (~$820). This is exactly the kind of real execution behavior dry-run can't show.
+  TERMINATION still guaranteed: EOD flatten (~15:48 ET) closes shorts + cancels resting buys.
+  EXEC/RISK FIXES QUEUED (P1, for next rep): (1) price marketable-limit off LIVE NBBO (ask+tick
+  buy / bid-tick sell), not bar close — the fill-reliability fix; (2) capture_fills recorded 0
+  despite filled shorts — fix the CLOSED+after query/timing; (3) realized-P&L attribution (#8);
+  (4) partial-basket handling (cancel-replace unfilled / or flatten to stay neutral). Today:
+  let the lifecycle run + VERIFY the EOD flatten terminates everything (the key proof).
