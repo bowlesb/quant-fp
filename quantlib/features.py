@@ -22,6 +22,7 @@ FEATURE_SET_VERSION = "v1.0.0"           # the LIVE serving set; v1.1.0 is offli
 
 MOMENTUM_DAYS = [1, 3, 5, 10]            # trailing trading-day windows for daily momentum
 MAX_MOMENTUM_LOOKBACK = max(MOMENTUM_DAYS)   # prior trading days a momentum feature needs
+ORDER_FLOW_WINDOWS = [5, 15, 30]         # minutes for order-flow imbalance (OFI)
 
 _NY = ZoneInfo("America/New_York")
 _RTH_OPEN = dtime(9, 30)
@@ -68,6 +69,7 @@ class FeatureContext:
     market_bars: list[BarRow] = field(default_factory=list)   # SPY, aligned
     daily_closes: dict[date, float] = field(default_factory=dict)         # this symbol, by date
     market_daily_closes: dict[date, float] = field(default_factory=dict)  # SPY, by date
+    flow_by_ts: dict[datetime, tuple[float, float]] = field(default_factory=dict)  # (signed_vol, total_vol)/min
     trade_imbalance: float = math.nan        # signed_volume/(buy+sell) for ts
     large_print_cnt: float = math.nan
     trade_intensity: float = math.nan
@@ -130,6 +132,30 @@ def _daily_momentum(closes_by_date: dict[date, float], as_of: date, k: int) -> f
     return (recent / past - 1.0) if past else math.nan
 
 
+def _flow_ofi(flow_by_ts: dict, ts: datetime, window_minutes: int) -> float:
+    """Order-flow imbalance over [ts-window, ts]: net signed volume / total volume in [-1,1].
+    Point-in-time (only minutes <= ts). NaN when no volume in the window (genuinely undefined)."""
+    signed_sum = 0.0
+    total_sum = 0.0
+    for minute in range(window_minutes):
+        entry = flow_by_ts.get(ts - timedelta(minutes=minute))
+        if entry is not None:
+            signed_sum += entry[0]
+            total_sum += entry[1]
+    return signed_sum / total_sum if total_sum else math.nan
+
+
+def _flow_zscore(flow_by_ts: dict, ts: datetime, window_minutes: int) -> float:
+    """Z-score of this minute's signed volume vs the PRIOR window (flow-intensity spike)."""
+    prior = [flow_by_ts[ts - timedelta(minutes=m)][0]
+             for m in range(1, window_minutes + 1) if (ts - timedelta(minutes=m)) in flow_by_ts]
+    current = flow_by_ts.get(ts)
+    if current is None or len(prior) < window_minutes // 2:
+        return math.nan
+    spread = statistics.stdev(prior) if len(prior) > 1 else 0.0
+    return (current[0] - statistics.mean(prior)) / spread if spread else math.nan
+
+
 def compute_features(ctx: FeatureContext) -> dict[str, float]:
     """Compute the v1 feature dict for ctx. Keys match FEATURE_NAMES.
 
@@ -186,6 +212,13 @@ def compute_features(ctx: FeatureContext) -> dict[str, float]:
             own - mkt if not (math.isnan(own) or math.isnan(mkt)) else math.nan
         )
 
+    # Order-flow (v1.2.0): OFI over windows + flow-intensity z. From the trade-aggregate
+    # series (parity-true at 98.2%); NaN until universe-wide trade/quote streaming covers
+    # the name (only ~50 symbols today). The actual EDGE candidate vs price-only.
+    for window in ORDER_FLOW_WINDOWS:
+        features[f"ofi_{window}m"] = _flow_ofi(ctx.flow_by_ts, ctx.ts, window)
+    features["signed_vol_z_30"] = _flow_zscore(ctx.flow_by_ts, ctx.ts, 30)
+
     return features
 
 
@@ -210,7 +243,14 @@ FEATURE_NAMES: list[str] = (
 NON_MICRO_NAMES = [name for name in FEATURE_NAMES if name not in MICRO_NAMES]   # 13
 V11_NAMES: list[str] = NON_MICRO_NAMES + MOMENTUM_NAMES                          # 21
 
-FEATURE_SETS: dict[str, list[str]] = {"v1.0.0": FEATURE_NAMES, "v1.1.0": V11_NAMES}
+# v1.2.0 = v1.1.0 + ORDER-FLOW (OFI windows + flow-intensity z). The order-flow edge
+# candidate; computable only where universe-wide trade/quote streaming covers the name.
+ORDER_FLOW_NAMES = [f"ofi_{w}m" for w in ORDER_FLOW_WINDOWS] + ["signed_vol_z_30"]
+V12_NAMES: list[str] = V11_NAMES + ORDER_FLOW_NAMES                              # 25
+
+FEATURE_SETS: dict[str, list[str]] = {
+    "v1.0.0": FEATURE_NAMES, "v1.1.0": V11_NAMES, "v1.2.0": V12_NAMES,
+}
 
 
 def feature_vector(ctx: FeatureContext, version: str = "v1.0.0") -> list[float]:

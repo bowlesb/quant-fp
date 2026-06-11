@@ -155,3 +155,17 @@ def test_daily_momentum_point_in_time_and_v11_vector() -> None:
 
     assert len(feature_vector(ctx, "v1.1.0")) == 21
     assert len(feature_vector(ctx)) == 18                    # v1.0.0 unchanged
+
+
+def test_order_flow_ofi_and_v12_vector() -> None:
+    """OFI = net signed / total volume over the window; v1.2.0 vector = 25; NaN without flow."""
+    ts = datetime(2026, 6, 10, 15, 0, tzinfo=timezone.utc)
+    bar = BarRow(ts=ts, open=10, high=10.1, low=9.9, close=10, volume=1000, vwap=10)
+    flow = {ts - timedelta(minutes=m): (10.0, 100.0) for m in range(5)}   # signed 10/total 100 each min
+    ctx = FeatureContext(symbol="X", ts=ts, bars=[bar], session_open=10, flow_by_ts=flow)
+    feats = compute_features(ctx)
+    assert math.isclose(feats["ofi_5m"], 0.1)                # 5*10 / 5*100
+    assert len(feature_vector(ctx, "v1.2.0")) == 25
+    assert len(feature_vector(ctx)) == 18                    # v1.0.0 unchanged
+    assert math.isnan(compute_features(
+        FeatureContext(symbol="X", ts=ts, bars=[bar], session_open=10))["ofi_5m"])   # no flow -> NaN

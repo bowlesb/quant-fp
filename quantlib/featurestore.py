@@ -22,6 +22,7 @@ from quantlib.features import (
     FEATURE_SETS,
     MAX_MOMENTUM_LOOKBACK,
     MOMENTUM_NAMES,
+    ORDER_FLOW_NAMES,
     BarRow,
     FeatureContext,
     feature_vector,
@@ -116,6 +117,24 @@ def load_micro(conn: psycopg.Connection, symbol: str,
     return micro
 
 
+def load_flow(conn: psycopg.Connection, symbol: str,
+              start: datetime, end: datetime) -> dict[datetime, tuple[float, float]]:
+    """Per-minute (signed_volume, total_volume) for the symbol over [start-WARMUP, end] —
+    the order-flow series for OFI windows. Prefers backfill over stream (parity-true)."""
+    flow: dict[datetime, tuple[float, float]] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT ON (ts) ts, signed_volume, buy_volume, sell_volume
+               FROM trade_agg_1m WHERE symbol=%s AND ts>=%s AND ts<=%s
+               ORDER BY ts, (source='backfill') DESC""",
+            (symbol, start - WARMUP, end),
+        )
+        for ts, signed, buy, sell in cur.fetchall():
+            if signed is not None:
+                flow[ts] = (float(signed), float((buy or 0) + (sell or 0)))
+    return flow
+
+
 def build_feature_store(conn: psycopg.Connection, symbols: list[str],
                         start: datetime, end: datetime, bar_source: str,
                         source_label: str,
@@ -127,6 +146,7 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
     emitted only when the symbol is in that date's universe. Returns vectors written."""
     register_feature_set(conn, feature_set_version)
     needs_daily = bool(set(FEATURE_SETS[feature_set_version]) & set(MOMENTUM_NAMES))
+    needs_flow = bool(set(FEATURE_SETS[feature_set_version]) & set(ORDER_FLOW_NAMES))
     # Regular-hours only: drop extended-hours bars so returns/vol windows and
     # session_open reflect the real session (09:30-16:00 ET), not premarket prints.
     market = [bar for bar in load_bars(conn, MARKET_SYMBOL, bar_source, start, end) if is_rth(bar.ts)]
@@ -151,6 +171,7 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
             continue
         micro = load_micro(conn, symbol, start, end)
         daily_closes = load_daily_closes(conn, symbol, bar_source, end) if needs_daily else {}
+        flow_by_ts = load_flow(conn, symbol, start, end) if needs_flow else {}
         session_open: dict[object, float] = {}
         for bar in bars:
             session_open.setdefault(bar.ts.date(), bar.open)   # first RTH bar = the open
@@ -175,6 +196,7 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
                 quote_imbalance=micro_vals.get("quote_imbalance", math.nan),
                 daily_closes=daily_closes,
                 market_daily_closes=market_daily,
+                flow_by_ts=flow_by_ts,
             )
             rows.append((symbol, bar.ts, feature_set_version,
                          feature_vector(ctx, feature_set_version), source_label))
