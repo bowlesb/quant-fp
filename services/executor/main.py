@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 
 from quantlib.universe import is_etf_like
@@ -39,6 +40,8 @@ K_LONG = int(os.environ.get("K_LONG", "5"))
 K_SHORT = int(os.environ.get("K_SHORT", "5"))
 NOTIONAL_PER_NAME = float(os.environ.get("NOTIONAL_PER_NAME", "300"))
 GROSS_CAP = float(os.environ.get("GROSS_CAP", "5000"))
+# Staleness must scale with the strategy's HOLD HORIZON: 35m fits a 30-min model; an
+# overnight model decides at ~15:55 for a next-open exit, so it needs ~1 trading day.
 STALENESS_MAX_MIN = int(os.environ.get("STALENESS_MAX_MIN", "35"))
 MIN_SCORE_SEP = float(os.environ.get("MIN_SCORE_SEP", "0.0005"))
 LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "60"))
@@ -75,7 +78,7 @@ def candidate_pool(conn: psycopg.Connection, ts: datetime) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT p.symbol, p.score, am.shortable, am.name,
+            SELECT p.symbol, p.score, am.easy_to_borrow, am.name,
                    (SELECT close FROM bars_1m b WHERE b.symbol=p.symbol AND b.ts<=%s
                     ORDER BY b.ts DESC LIMIT 1) AS last_close
             FROM predictions p JOIN asset_metadata am ON am.symbol=p.symbol
@@ -85,10 +88,11 @@ def candidate_pool(conn: psycopg.Connection, ts: datetime) -> list[dict]:
         )
         rows = cur.fetchall()
     pool = []
-    for symbol, score, shortable, name, last_close in rows:
+    for symbol, score, easy_to_borrow, name, last_close in rows:
         if is_etf_like(name) or last_close is None or last_close < 5:
             continue                              # single-stock, >=$5, real price only
-        pool.append({"symbol": symbol, "score": float(score), "shortable": bool(shortable),
+        # ETB (not just shortable): HTB short opens get rejected by Alpaca (EXECUTION.md §2)
+        pool.append({"symbol": symbol, "score": float(score), "etb": bool(easy_to_borrow),
                      "price": float(last_close)})
     return pool
 
@@ -97,7 +101,7 @@ def build_basket(pool: list[dict]) -> tuple[list[dict], list[dict]]:
     """Top-K longs / bottom-K shortable shorts (filter-then-select), whole shares."""
     ranked = sorted(pool, key=lambda r: (-r["score"], r["symbol"]))
     longs = ranked[:K_LONG]
-    shorts = [r for r in reversed(ranked) if r["shortable"]][:K_SHORT]
+    shorts = [r for r in reversed(ranked) if r["etb"]][:K_SHORT]   # ETB-only shorts
     short_syms = {r["symbol"] for r in shorts}
     longs = [r for r in longs if r["symbol"] not in short_syms]   # no long+short same name
     for leg in longs + shorts:
@@ -142,6 +146,25 @@ def rebalance(conn: psycopg.Connection, ts: datetime) -> None:
     logger.warning("LIVE submit not yet enabled; intent logged only")
 
 
+def reconcile(conn: psycopg.Connection) -> None:
+    """Read-only broker-truth probe (re-added — the prior recon loop was dropped in the
+    f4ed85d rewrite). Fetches live broker positions; in dry-run we submit nothing, so the
+    expected book is FLAT and any broker position is drift. Writes to reconciliation_log
+    so a silent desync surfaces. This is our only broker-truth signal until the live path."""
+    positions = trading.get_all_positions()
+    broker = {p.symbol: float(p.qty) for p in positions}
+    expected: dict[str, float] = {}               # dry-run: nothing submitted -> flat
+    ok = (broker == expected)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reconciliation_log (ts, ok, detail) VALUES (now(), %s, %s)",
+            (ok, json.dumps({"mode": "dry_run" if DRY_RUN else MODE,
+                             "broker_positions": broker, "expected": expected})),
+        )
+    if not ok:
+        logger.warning("reconcile DRIFT: broker holds %s (expected flat in dry-run)", broker)
+
+
 def main() -> None:
     logger.info("executor starting: mode=%s dry_run=%s model=%s K=%d/%d notional=%.0f",
                 MODE, DRY_RUN, MODEL_VERSION, K_LONG, K_SHORT, NOTIONAL_PER_NAME)
@@ -149,6 +172,7 @@ def main() -> None:
     while True:
         try:
             with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+                reconcile(conn)                   # broker-truth probe every cycle
                 ts = latest_prediction_ts(conn)
                 if ts is None:
                     pass
@@ -161,7 +185,7 @@ def main() -> None:
                 else:
                     rebalance(conn, ts)
                     last_rebalanced = ts
-        except (psycopg.Error, ValueError, KeyError) as exc:
+        except (psycopg.Error, ValueError, KeyError, APIError) as exc:
             logger.error("cycle error: %s", exc)
         time.sleep(LOOP_SECONDS)
 

@@ -76,3 +76,11 @@ GROUP BY set_version, idx
 HAVING round(100.0 * avg(isnan) FILTER (WHERE early), 1)
      > round(100.0 * avg(isnan) FILTER (WHERE late), 1) + 20
 ORDER BY set_version, feature_idx;
+
+\echo '== Backfill depth vs target (catches the "phantom backfill / running!=intended" class) =='
+-- The backfill-manager target is BACKFILL_TARGET_DAYS (compose). Oldest bar should be at
+-- least ~90% as deep as the target, or the deepening silently isn't running.
+SELECT min(ts)::date AS oldest_bar,
+       (now()::date - min(ts)::date) AS depth_days,
+       count(DISTINCT ts::date) AS trading_days
+FROM bars_1m WHERE source='backfill';
