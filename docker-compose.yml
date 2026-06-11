@@ -63,7 +63,7 @@ services:
       dockerfile: services/backfill-manager/Dockerfile
     <<: *common
     environment:
-      BACKFILL_TARGET_DAYS: "90"     # raise toward ~2200 (6yr) once proven
+      BACKFILL_TARGET_DAYS: "900"     # ~2.5yr; deep history for cross-sectional ML (raise toward 6yr)
     depends_on:
       timescaledb:
         condition: service_healthy
