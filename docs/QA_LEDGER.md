@@ -19,7 +19,7 @@ even if reported before. Forward-looking: anticipate what breaks given where we'
   live out-of-order/late delivery diverges; (3) trade CONDITION filtering (odd-lot/out-of-
   seq/late) must match live↔backfill — confirm we filter identically (or at all); (4)
   minute-boundary state init. This is the parity that matters MOST (order flow ≈ the real
-  edge candidate) and is currently the LEAST proven. Gate: settled-day trade-agg parity at
+  edge candidate) and is currently the LEAST proven. Read 2026-06-11: 98.2% within 2% same-day (de-risk). Gate: settled-day trade-agg parity at
   scale before any trade feature enters a trusted model. Blocked-by: universe-wide trade/
   quote ingestion (the Architect's sharded-ingestion decision).
 - **I3 — PIT universe:** feature rows exist ONLY for that date's universe members; per-ts

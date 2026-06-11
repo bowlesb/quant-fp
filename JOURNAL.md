@@ -561,3 +561,12 @@ why.
   terminate) = VERIFIED. Open exec refinements (lower priority): realized-P&L attribution per name,
   partial-basket cancel-replace, broker-side LOC EOD net, multi-day holds. NEXT focus = EDGE via
   ORDER-FLOW data (price-only has none).
+
+- ===== TRADE-PARITY (I2b) read — 98.2%, de-risks order-flow (2026-06-11 close) =====
+  Expanded trade/quote capture to 50 symbols; backfilled REST aggs for them today + validate-aggs:
+  trade_agg 98.2% within 2%/2-trade (6071 overlapping min, mean rel n_trades diff 0.002);
+  quote_agg spread 99.9% (5925 min). MUCH better than the earlier ~95% sliver -> the shared
+  quantlib.aggregates gives parity-true trade features. CAVEAT: same-day (not fully settled);
+  the real SETTLED-day 50-symbol parity is tomorrow's full session. This de-risks the order-flow
+  edge path (the micro/order-flow features will be parity-true). I2b status: PROVISIONAL PASS
+  (98.2% same-day); gate on a settled-day run before trusting order-flow features in a model.
