@@ -48,11 +48,14 @@ services:
       dockerfile: services/executor/Dockerfile
     <<: *common
     environment:
-      DRY_RUN: "true"                 # compute + log intended basket; do NOT submit
+      DRY_RUN: "true"                 # flip to "false" to place tiny paper bets (after Exec/Risk GO)
       MODEL_VERSION: "lgbm_fwd_30m_v1.0.0"
-      K_LONG: "5"
-      K_SHORT: "5"
-      NOTIONAL_PER_NAME: "300"
+      K_LONG: "3"
+      K_SHORT: "3"
+      NOTIONAL_PER_NAME: "200"
+      GROSS_CAP: "6000"               # tiny vs ~$100k paper equity; covers whole-share lumpiness
+      MAX_DAILY_LOSS: "150"
+      EOD_FLATTEN_MIN: "12"
     depends_on:
       timescaledb:
         condition: service_healthy
