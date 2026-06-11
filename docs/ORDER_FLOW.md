@@ -47,6 +47,12 @@ order-flow is higher-EV (a NEW signal class) than rescuing a likely-dead overnig
   intensity/spread_bps/quote_imbalance) ARE order-flow features — they were 99.9% NaN only due
   to 10-symbol coverage. So the BOTTLENECK is DATA COVERAGE (scaling), not new features. Richer
   features (signed-vol z over 5/15/30m, OFI, cross-sectional rank) are enhancements for later.
+- v1.2.0 ORDER-FLOW FEATURES BUILT (2026-06-11, overnight, safe): ofi_5/15/30m (net signed/total
+  volume over window, point-in-time, bounded [-1,1]) + signed_vol_z_30 (flow-intensity spike).
+  Wired quantlib/features (FEATURE_SETS v1.2.0 = v1.1.0 + 4 = 25) + featurestore.load_flow (gated
+  on needs_flow). Unit-tested (30 pass) + smoke-built for the 50 syms: features POPULATE 0% NaN
+  (mean ofi_5m -0.005). Order-flow agg PROBE clean: 52 syms, OFI in [-1,1], |signed|<=total, no
+  NaN/Inf/neg. NOT an edge claim — untestable until the cross-section is wide enough to rank.
 - NEXT (deliberate, supervised — not overnight-unsupervised to protect the bar stream):
   1. validate 50-symbol throughput + settled-day parity at tomorrow's open.
   2. scale in steps (50->200->500->1000) testing single-process limits; SHARD when one process
