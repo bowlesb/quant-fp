@@ -409,16 +409,18 @@ def build_overnight_labels() -> None:
         last_cadence_ts: dict[str, dict[date, datetime]] = {}
         with conn.cursor() as cur:
             for symbol in symbols:
-                # last cadence RTH ts per day = the prediction point (ts only, any adjustment)
+                # ONE prediction ts/day = the 15:30-ET bar (a SINGLE clean daily cross-section
+                # shared by all symbols). Keying to each symbol's last cadence ts fragmented
+                # the panel into 13 ET-time sub-baskets (early-close/illiquidity selected) and
+                # corrupted IC/canary/turnover. Symbols without a 15:30 bar get no overnight label.
                 cur.execute(
                     """SELECT ts FROM bars_1m WHERE symbol=%s AND source=%s
-                       AND ts>=%s AND ts<=%s ORDER BY ts""",
+                       AND ts>=%s AND ts<=%s
+                       AND (ts AT TIME ZONE 'America/New_York')::time = '15:30'
+                       ORDER BY ts""",
                     (symbol, bar_source, start, end),
                 )
-                last_cad: dict[date, datetime] = {}
-                for (ts,) in cur.fetchall():
-                    if is_rth(ts) and on_cadence(ts, cadence):
-                        last_cad[ts.date()] = ts
+                last_cad: dict[date, datetime] = {row[0].date(): row[0] for row in cur.fetchall()}
                 daily = split_daily.get(symbol, {})
                 opens = {day: oc[0] for day, oc in daily.items()}
                 closes = {day: oc[1] for day, oc in daily.items()}

@@ -25,6 +25,7 @@ from quantlib.backtest import (
 DEFAULT_LGB = dict(
     objective="regression", learning_rate=0.05, num_leaves=31, min_data_in_leaf=50,
     bagging_fraction=0.8, bagging_freq=1, feature_fraction=0.8, verbose=-1,
+    seed=42, bagging_seed=42, feature_fraction_seed=42, deterministic=True,
 )
 HORIZON_MIN = {"fwd_30m": 30, "fwd_60m": 60, "overnight": 1440}   # overnight purge ~1 day
 
