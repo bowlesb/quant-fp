@@ -16,7 +16,7 @@ import logging
 import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timezone
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -150,11 +150,11 @@ def submit_basket(conn: psycopg.Connection, ts: datetime, today: object) -> None
                 "DRY-RUN (logged)" if DRY_RUN else "SUBMITTED (paper)")
 
 
-def flatten_all(reason: str) -> None:
-    """TERMINATE the day's bets: cancel open orders + close all positions (the guarantee
-    that bets don't linger). Alpaca close_all_positions(cancel_orders=True) does both."""
-    positions = trading.get_all_positions()
-    if not positions and reason != "EOD":
+def flatten_all(reason: str, positions: list) -> None:
+    """TERMINATE bets: cancel open orders + close all positions. Called whenever positions
+    exist in any termination state, so it RE-RUNS each cycle until flat (verify-by-retry —
+    a partial/failed close gets retried next cycle instead of being assumed done)."""
+    if not positions:
         return
     logger.warning("FLATTEN (%s): closing %d positions + cancelling open orders", reason, len(positions))
     if not DRY_RUN:
@@ -162,10 +162,12 @@ def flatten_all(reason: str) -> None:
 
 
 def capture_fills(conn: psycopg.Connection, today: object) -> None:
-    """Record realized fills (broker truth) to fills_log for P&L/attribution."""
+    """Record realized fills (broker truth) to fills_log for P&L/attribution. Filtered to
+    today so fills can't fall out of a fixed window."""
     if DRY_RUN:
         return
-    orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200))
+    after = datetime.combine(today, dtime.min, tzinfo=_NY)
+    orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=after, limit=500))
     with conn.cursor() as cur:
         for order in orders:
             if order.filled_at and order.filled_avg_price and float(order.filled_qty or 0) > 0:
@@ -175,14 +177,22 @@ def capture_fills(conn: psycopg.Connection, today: object) -> None:
                              float(order.filled_avg_price)))
 
 
-def reconcile(conn: psycopg.Connection) -> None:
-    """Broker-truth probe: compare broker positions to OUR expected book (today's submitted,
-    not-yet-flattened orders). Writes reconciliation_log so any desync surfaces."""
-    broker = {p.symbol: round(float(p.qty), 4) for p in trading.get_all_positions()}
-    ok = True if not DRY_RUN else (len(broker) == 0)   # live: presence is expected mid-day
+def reconcile(conn: psycopg.Connection, positions: list, today: object) -> None:
+    """Broker-truth probe with a MEANINGFUL ok: flag UNEXPECTED broker positions (a symbol
+    we didn't submit today) — the dangerous desync. After an EOD flatten the broker is empty
+    so ok stays true; a stray/unintended position trips ok=false."""
+    broker = {p.symbol: round(float(p.qty), 4) for p in positions}
     with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT symbol FROM orders_log WHERE intended_at::date=%s "
+                    "AND status='submitted' AND mode=%s", (today, MODE))
+        expected_syms = {row[0] for row in cur.fetchall()}
+        unexpected = sorted(s for s in broker if s not in expected_syms)
+        ok = len(unexpected) == 0
         cur.execute("INSERT INTO reconciliation_log (ts, ok, detail) VALUES (now(), %s, %s)",
-                    (ok, json.dumps({"mode": "dry_run" if DRY_RUN else MODE, "broker": broker})))
+                    (ok, json.dumps({"mode": "dry_run" if DRY_RUN else MODE,
+                                     "broker": broker, "unexpected": unexpected})))
+    if not ok:
+        logger.warning("reconcile DRIFT: unexpected broker positions %s", unexpected)
 
 
 def main() -> None:
@@ -197,26 +207,29 @@ def main() -> None:
                 now = datetime.now(timezone.utc)
                 today = now.astimezone(_NY).date()
                 state = ensure_session_state(conn, today)
-                reconcile(conn)
-                capture_fills(conn, today)
-                if not clock.is_open:
-                    pass                                      # closed: just monitor
-                elif state["halted"]:
-                    pass                                      # kill-switch tripped earlier today
-                elif (clock.next_close - now).total_seconds() / 60 <= EOD_FLATTEN_MIN:
-                    flatten_all("EOD")                        # TERMINATE before the close
-                elif state["equity"] < state["start_equity"] - MAX_DAILY_LOSS:
-                    flatten_all("KILL_SWITCH")
+                positions = trading.get_all_positions()       # broker truth, fetched once
+                kill_breach = state["equity"] < state["start_equity"] - MAX_DAILY_LOSS
+                in_eod = clock.is_open and (clock.next_close - now).total_seconds() / 60 <= EOD_FLATTEN_MIN
+                stranded = (not clock.is_open) and bool(positions)   # missed-window / overnight catch-up
+                # TERMINATION takes priority over everything and RE-RUNS until flat (robust to
+                # restarts/partial failures) — halted does NOT skip flatten.
+                if kill_breach and not state["halted"]:
                     with conn.cursor() as cur:
                         cur.execute("UPDATE executor_state SET halted=true WHERE day=%s", (today,))
-                    logger.error("KILL SWITCH: equity %.0f < start %.0f - %.0f; flattened + halted",
+                    state["halted"] = True
+                    logger.error("KILL SWITCH: equity %.0f < start %.0f - %.0f",
                                  state["equity"], state["start_equity"], MAX_DAILY_LOSS)
-                elif not traded_today(conn, today):
-                    cur2 = conn.cursor()
-                    cur2.execute("SELECT max(ts) FROM predictions WHERE model_version=%s", (MODEL_VERSION,))
-                    ts = cur2.fetchone()[0]
+                if state["halted"] or in_eod or stranded:
+                    flatten_all("KILL_SWITCH" if state["halted"] else ("EOD" if in_eod else "CATCH_UP"),
+                                positions)
+                elif clock.is_open and not traded_today(conn, today):
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT max(ts) FROM predictions WHERE model_version=%s", (MODEL_VERSION,))
+                        ts = cur.fetchone()[0]
                     if ts and (now - ts).total_seconds() / 60 <= STALENESS_MAX_MIN:
                         submit_basket(conn, ts, today)        # one basket/day
+                reconcile(conn, positions, today)
+                capture_fills(conn, today)
         except (psycopg.Error, ValueError, KeyError, APIError) as exc:
             logger.error("cycle error: %s", exc)
         time.sleep(LOOP_SECONDS)
