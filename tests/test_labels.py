@@ -44,3 +44,9 @@ def test_cross_sectional_excess_ignores_nan() -> None:
 
 def test_horizon_name() -> None:
     assert horizon_name(30) == "fwd_30m"
+
+
+def test_cross_sectional_excess_breadth_floor() -> None:
+    from quantlib.labels import cross_sectional_excess as cse
+    assert math.isnan(cse({"A": 0.01})["A"])                 # 1 name < default floor(2)
+    assert all(math.isnan(v) for v in cse({"A": 0.01, "B": 0.02}, min_members=5).values())

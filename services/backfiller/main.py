@@ -34,6 +34,7 @@ from quantlib.features import is_rth, on_cadence
 from quantlib.featurestore import build_feature_store, load_membership
 from quantlib.labels import (
     LABEL_HORIZONS,
+    MIN_CROSS_SECTION,
     OVERNIGHT_HORIZON,
     cross_sectional_excess,
     forward_return_series,
@@ -86,7 +87,9 @@ def build_universe_history() -> None:
                       sum(close*volume) AS dollar_vol,
                       (array_agg(close ORDER BY ts DESC))[1] AS last_close
                FROM bars_1m
-               WHERE source='backfill' AND ts::time>='13:30' AND ts::time<'20:00'
+               WHERE source='backfill'
+                 AND (ts AT TIME ZONE 'America/New_York')::time >= '09:30'
+                 AND (ts AT TIME ZONE 'America/New_York')::time <  '16:00'
                GROUP BY symbol, ts::date"""
         )
         daily: dict[str, list[tuple]] = {}
@@ -364,7 +367,7 @@ def build_labels() -> None:
                     if ts in fwd and (members is None or symbol in members)
                 }
                 # demean within THIS date's universe cross-section (point-in-time)
-                excess = cross_sectional_excess(section)
+                excess = cross_sectional_excess(section, MIN_CROSS_SECTION)
                 for symbol, value in excess.items():
                     if not math.isnan(value):
                         rows.append((symbol, ts, name, value))
@@ -431,7 +434,7 @@ def build_overnight_labels() -> None:
                 for symbol, series in overnight_by_symbol.items()
                 if day in series and (members is None or symbol in members)
             }
-            excess = cross_sectional_excess(section)
+            excess = cross_sectional_excess(section, MIN_CROSS_SECTION)
             for symbol, value in excess.items():
                 prediction_ts = last_cadence_ts[symbol].get(day)
                 if prediction_ts is not None and not math.isnan(value):

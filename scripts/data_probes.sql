@@ -84,3 +84,11 @@ SELECT min(ts)::date AS oldest_bar,
        (now()::date - min(ts)::date) AS depth_days,
        count(DISTINCT ts::date) AS trading_days
 FROM bars_1m WHERE source='backfill';
+
+\echo '== Cross-section BREADTH per date (thin sections poison the demean; gate the deep rebuild) =='
+SELECT ts::date AS d, count(DISTINCT symbol) AS symbols
+FROM bars_1m WHERE source='backfill'
+  AND (ts AT TIME ZONE 'America/New_York')::time >= '09:30'
+  AND (ts AT TIME ZONE 'America/New_York')::time <  '16:00'
+GROUP BY ts::date HAVING count(DISTINCT symbol) < 20
+ORDER BY d;

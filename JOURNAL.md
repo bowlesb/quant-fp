@@ -462,3 +462,38 @@ why.
   323 days WITH dividend/earnings handling, then re-run overnight under the cost gate on real
   depth (lag=1, 252/yr). STOP running 51-day experiments. Honesty: nothing is edge until it
   clears breakeven net P&L on the deep panel with gaps/divs handled.
+
+- ===== QA DEEP-PANEL AUDIT — rebuild plan REVISED (2026-06-11) =====
+  QA (owner) found that running the deep rebuild TODAY would bake in FOUR P0s. Plan revised
+  (do NOT naive-rebuild on backfill completion):
+  P0s to resolve BEFORE the rebuild:
+   1. PIT universe covers only 52 of 443 dates -> load_membership empty for ~270 dates.
+      MUST re-run build_universe_history over full depth first. (Also FIXED its DST-fragile
+      UTC window -> America/New_York, was corrupting winter-date screening.)
+   2. 11-month bar HOLE (2025-03-31..2026-03-02) + ragged breadth (1-symbol days exist).
+      Don't rebuild over a void. ADDED breadth floor: cross_sectional_excess returns NaN
+      below MIN_CROSS_SECTION=20 (a 1-symbol day's median==itself==>excess 0 = poison) +
+      a breadth probe in data_probes. Wait for the hole to fill.
+   3. Overnight DIVIDEND LOOK-AHEAD verified: Adjustment.ALL retro-marks pre-ex closes; the
+      overnight gap spans the adjustment boundary so the factor does NOT cancel (intraday it
+      does) -> ~+div/price bias on ex-div mornings (~3,900 contaminated cells, fat-tailed).
+      The 0.094 IC was partly fitting this deterministic, un-tradeable artifact. FIX: SPLIT-
+      only-adjusted bars for the overnight LABEL (keep ALL-adjusted for intraday features) +
+      ex-div/earnings exclusion (FMP).
+   4. SURVIVORSHIP is structural+total: the deep backfill used TODAY's universe (survivors);
+      delisted names have NO bars and can never enter. Worst for overnight (delistings/M&A
+      gap overnight). MANAGER DECISION: document loudly as an upward bias + do NOT trust the
+      overnight tail P&L; defer the delisted-name historical backfill (big, needs historical
+      asset list) — accept-and-disclose for now.
+  Plus: live(stream)=RAW vs backfill=ALL-adjusted -> same-minute close diverges after any
+  corp action (the "100% replay-equivalence" held same-day only) = latent train/serve skew;
+  re-fetch under retro-adjustment desyncs panel vs bars (stamp a build epoch, rebuild in one
+  pass); warmup NaN-degrade at the gap's far edge (QA-I4 warmup assert still open).
+  REVISED REBUILD SEQUENCE: (1) finish gap fill -> (2) build-universe-history over 323 days
+  (DST-fixed) -> (3) split adjustment path (ALL features / SPLIT-only overnight labels) +
+  ex-div/earnings exclusion -> (4) breadth-floor[done] + warmup assert + breadth probe[done]
+  -> (5) THEN rebuild DELETE-then-insert in one pass, stamp epoch.
+  COVERAGE ANSWERS: delisted-name backfill = deferred, accept-and-disclose (Prod owns the
+  eventual fetch); split-only storage = Prod owns (recommend a SPLIT-only DAILY-bar fetch for
+  labels, lighter than dual minute series); adjustment-parity gate = QA on a settled ex-div
+  day; breadth guard = DONE (QA owns the probe).

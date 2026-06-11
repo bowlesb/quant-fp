@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta
 
 LABEL_HORIZONS = [30, 60]        # minutes
 OVERNIGHT_HORIZON = "overnight"  # close -> next session open
+MIN_CROSS_SECTION = 20           # breadth floor: don't demean a too-thin cross-section
 
 
 def overnight_return_series(
@@ -49,11 +50,14 @@ def forward_return_series(
     return out
 
 
-def cross_sectional_excess(returns: dict[str, float]) -> dict[str, float]:
+def cross_sectional_excess(returns: dict[str, float], min_members: int = 2) -> dict[str, float]:
     """Subtract the cross-sectional median (over the non-NaN members) from each
-    member's return. Median is robust to outliers. NaN inputs stay NaN."""
+    member's return. Median is robust to outliers. NaN inputs stay NaN. Returns ALL
+    NaN when fewer than `min_members` valid names — a 1-symbol cross-section has
+    median==itself==>excess 0 (garbage that poisons the panel); the builders pass a
+    real breadth floor (MIN_CROSS_SECTION)."""
     valid = [value for value in returns.values() if not math.isnan(value)]
-    if not valid:
+    if len(valid) < min_members:
         return {symbol: math.nan for symbol in returns}
     median = statistics.median(valid)
     return {
