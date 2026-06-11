@@ -12,14 +12,18 @@ Real paper orders on Alpaca (DRY_RUN=false). NO proven edge yet -> intentionally
 P&L is noise. Live exercise found+fixed: stale-close pricing (->NBBO), mode/traded_today
 re-submit loop, dup-coid guard, fills capture, lambdarank label-31. Open exec items: realized-
 P&L attribution per name, partial-basket cancel-replace, broker-side LOC EOD net.
-**EDGE (ML, honest):** the 51-day signal was a CALENDAR ARTIFACT; price-only IC ~0; momentum a
-weak contributor below noise; everything failed the net-of-cost gate. Built: net-of-cost L/S
-backtest gate (breakeven/sharpe_net), split-only overnight labels (no div look-ahead), breadth
-floor, warmup assert, loss-alignment battery (raw/rank/vol_scaled/lambdarank, all verified).
-REBUILDING the panel over the DEEP ~600-day history (universe 613 PIT dates; features ~541/600,
-then labels) -> first honest signal read on ~300 effective samples is imminent. Caveats:
-residual survivorship (delisted absent), earnings-gap noise (FMP deferred). NEXT: run the deep
-cost-gated battery; judge NET P&L not IC.
+**EDGE (ML) — DEFINITIVE (2026-06-11): price-only cross-sectional features have NO tradeable
+edge**, proven rigorously on the deep ~600-day panel via 4 gates (net-of-cost L/S backtest +
+shuffle canary + label de-fragmentation + survivorship neutralization):
+- 30m intraday: REAL signal (IC 0.024-0.032, clean canary at depth) but NET-NEGATIVE after costs
+  (breakeven ~1.3bps < ~2bps) -> uneconomic at turnover.
+- overnight: apparent strong result (lambdarank sharpe_net +2.1, breakeven 15bps) was SURVIVORSHIP
+  (model ranks ex-post survivors); per-symbol-neutralized sharpe -0.2 -> ~0 timing alpha.
+PATH TO EDGE = BETTER DATA, not more price-feature modeling: universe-wide ORDER-FLOW (the
+Architect's sharded trade/quote ingestion — currently only 10 symbols) + delisted-name backfill.
+Built+verified this round: cost gate, split-only overnight labels, breadth floor, warmup assert,
+4-label loss-alignment battery, de-fragmented daily overnight labels, determinism, survivorship
+neutralization. NEXT EDGE WORKSTREAM: order-flow data (sharded ingestion). No false edge shipped.
 
 ## (history below — older E2E plan)
 
