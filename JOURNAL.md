@@ -425,3 +425,40 @@ why.
      from-fresh-broker-truth path (currently a scaffold).
   MANAGER CALL: the #1 next build is the NET-OF-COST GATE (#2) — it may reveal we're hunting
   a number that's economically negative, and that lengthening the horizon beats any feature.
+
+- ===== MANAGER SYNTHESIS — 5-role team cycle (2026-06-11, overnight + execution) =====
+  Both specialists thought like owners and found real things (the framing works).
+  MODELLER (overnight design): the 0.094 IC is NOT trusted — it's contaminated by
+  (a) Adjustment.ALL dividend look-ahead (retroactive div adjustment bakes future info
+  into the overnight gap; cancels intraday, NOT overnight), (b) earnings-gap dominance
+  (un-tradeable event noise, no earnings calendar in DB), (c) survivorship (delistings
+  happen overnight; deep panel lacks delisted names). The negative L/S P&L = fat-tail gaps.
+  #1 ACTION (Modeller's call, I agree): REBUILD features+labels over the full 323-day deep
+  history (still only 51 days built) — attacks BOTH binding constraints at once (time depth
+  51->323 AND overnight turnover). Don't run more thin-panel experiments (canary≈IC = noise).
+  Design fixes: anchor prediction at ~15:55 close (not 15:30); purge by TRADING-DAY index
+  (minute purge under-purges weekends); NW lag=1 (non-overlapping); periods_per_year=252;
+  MOC/MOO cost still ~2-3bps one-way (overnight = fewer trades, not cheaper trades); borrow
+  on calendar-nights.
+  EXECUTION/RISK (cycle 1): LIVE REGRESSION — the reconciliation loop was dropped in the
+  f4ed85d rewrite (mine); reconciliation_log 6h stale; the docstring LIED (claimed recon +
+  kill-switch scaffold). Fixed the docstring this cycle. No kill-switch/caps-from-broker
+  exist (inert in dry-run, fine). ETB (not just shortable) must gate shorts; no marketable-
+  limit pricing; no EOD LOC flatten; staleness=35min wrong for overnight. Overnight execution
+  (MOC/MOO, ext-hours, gap, borrow) is UNOWNED and changes routing/risk/cost.
+  MANAGER COVERAGE-QUESTION ANSWERS (own-the-outcome assignments):
+   - Corporate-actions/dividend adjustment -> NEW data-integrity workstream: Prod gets an
+     FMP dividends/splits table; QA validates; decide split-only vs ex-div-exclusion for
+     overnight labels. (Gates a trustworthy overnight number.)
+   - Earnings calendar (FMP) -> Prod pulls; Modeller excludes reporting names. Prereq for
+     overnight, not nice-to-have.
+   - Deep-panel rebuild + PIT membership over ALL 323 days -> Prod owns (after backfill
+     completes); residual survivorship = documented known caveat.
+   - MOC/MOO execution feasibility on Alpaca paper -> Execution/Risk validates BEFORE we
+     invest more overnight modeling cycles.
+   - Recon-loop re-add (read-only, dry-run), ETB gate, fills_log+pnl_daily truth ledger,
+     removed-Alpaca-fields audit, docstring-vs-code -> all Execution/Risk (confirmed owned).
+  NEXT (gated on deep backfill finishing): rebuild universe-history + features + labels over
+  323 days WITH dividend/earnings handling, then re-run overnight under the cost gate on real
+  depth (lag=1, 252/yr). STOP running 51-day experiments. Honesty: nothing is edge until it
+  clears breakeven net P&L on the deep panel with gaps/divs handled.
