@@ -135,9 +135,11 @@ def ensure_session_state(conn: psycopg.Connection, today: object) -> dict:
 
 
 def traded_today(conn: psycopg.Connection, today: object) -> bool:
+    # mode-agnostic: ANY submitted order today means we've traded (don't re-submit and trip
+    # Alpaca's unique-client_order_id). NY date matches intended_at::date during RTH.
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM orders_log WHERE intended_at::date=%s AND status!='intended' "
-                    "AND mode=%s LIMIT 1", (today, MODE))
+                    "LIMIT 1", (today,))
         return cur.fetchone() is not None
 
 
@@ -165,12 +167,17 @@ def submit_basket(conn: psycopg.Connection, ts: datetime, today: object) -> None
                                      datetime.now(timezone.utc), leg["score"], MODEL_VERSION))
         if DRY_RUN:
             continue
-        order = trading.submit_order(LimitOrderRequest(
-            symbol=leg["symbol"], qty=leg["qty"], limit_price=limit, time_in_force=TimeInForce.DAY,
-            side=OrderSide.BUY if side == "buy" else OrderSide.SELL, client_order_id=coid))
+        try:
+            order = trading.submit_order(LimitOrderRequest(
+                symbol=leg["symbol"], qty=leg["qty"], limit_price=limit, time_in_force=TimeInForce.DAY,
+                side=OrderSide.BUY if side == "buy" else OrderSide.SELL, client_order_id=coid))
+        except APIError as exc:
+            if "unique" in str(exc):                          # coid already submitted: idempotent skip
+                logger.warning("coid %s already submitted; skipping", coid); continue
+            raise
         with conn.cursor() as cur:
-            cur.execute("UPDATE orders_log SET status='submitted', submitted_at=now(), "
-                        "alpaca_order_id=%s WHERE client_order_id=%s", (str(order.id), coid))
+            cur.execute("UPDATE orders_log SET status='submitted', submitted_at=now(), mode=%s, "
+                        "alpaca_order_id=%s WHERE client_order_id=%s", (MODE, str(order.id), coid))
     logger.info("BASKET %s | longs=%s shorts=%s gross=%.0f | %s", ts.isoformat(),
                 [l["symbol"] for l in longs], [s["symbol"] for s in shorts], gross,
                 "DRY-RUN (logged)" if DRY_RUN else "SUBMITTED (paper)")
