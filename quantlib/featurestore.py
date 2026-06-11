@@ -12,13 +12,14 @@ live-only state). This module does DB I/O; the pure math stays in features.py.
 """
 import math
 from bisect import bisect_right
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import psycopg
 
 from quantlib.features import (
-    FEATURE_NAMES,
     FEATURE_SET_VERSION,
+    FEATURE_SETS,
+    MOMENTUM_NAMES,
     BarRow,
     FeatureContext,
     feature_vector,
@@ -40,15 +41,29 @@ def load_membership(conn: psycopg.Connection) -> dict[object, set[str]]:
     return membership
 
 
-def register_feature_set(conn: psycopg.Connection) -> None:
+def register_feature_set(conn: psycopg.Connection, version: str = FEATURE_SET_VERSION) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO feature_sets (version, names, notes) VALUES (%s,%s,%s)
                ON CONFLICT (version) DO NOTHING""",
-            (FEATURE_SET_VERSION, FEATURE_NAMES,
-             "v1 set: returns, vol, volume-z, vwap dev, range, gap, "
-             "market-relative, calendar, microstructure"),
+            (version, FEATURE_SETS[version], f"feature set {version}"),
         )
+
+
+def load_daily_closes(conn: psycopg.Connection, symbol: str, source: str,
+                      end: datetime) -> dict[date, float]:
+    """{date: RTH-session close} for the symbol up to `end`. The session close is the
+    last RTH bar of each day (DST-correct via America/New_York)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT ON (ts::date) ts::date, close FROM bars_1m
+               WHERE symbol=%s AND source=%s AND ts<=%s
+                 AND (ts AT TIME ZONE 'America/New_York')::time >= '09:30'
+                 AND (ts AT TIME ZONE 'America/New_York')::time <  '16:00'
+               ORDER BY ts::date, ts DESC""",
+            (symbol, source, end),
+        )
+        return {row[0]: float(row[1]) for row in cur.fetchall()}
 
 
 def load_bars(conn: psycopg.Connection, symbol: str, source: str,
@@ -101,21 +116,25 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
                         start: datetime, end: datetime, bar_source: str,
                         source_label: str,
                         membership: dict[object, set[str]] | None = None,
-                        cadence_minutes: int | None = None) -> int:
+                        cadence_minutes: int | None = None,
+                        feature_set_version: str = FEATURE_SET_VERSION) -> int:
     """Compute and insert feature_vectors for symbols over [start, end]. If
     `membership` is given (point-in-time {date: {symbols}}), a (symbol, ts) row is
     emitted only when the symbol is in that date's universe. Returns vectors written."""
-    register_feature_set(conn)
+    register_feature_set(conn, feature_set_version)
+    needs_daily = bool(set(FEATURE_SETS[feature_set_version]) & set(MOMENTUM_NAMES))
     # Regular-hours only: drop extended-hours bars so returns/vol windows and
     # session_open reflect the real session (09:30-16:00 ET), not premarket prints.
     market = [bar for bar in load_bars(conn, MARKET_SYMBOL, bar_source, start, end) if is_rth(bar.ts)]
     market_ts = [bar.ts for bar in market]
+    market_daily = load_daily_closes(conn, MARKET_SYMBOL, bar_source, end) if needs_daily else {}
     total = 0
     for symbol in symbols:
         bars = [bar for bar in load_bars(conn, symbol, bar_source, start, end) if is_rth(bar.ts)]
         if not bars:
             continue
         micro = load_micro(conn, symbol, start, end)
+        daily_closes = load_daily_closes(conn, symbol, bar_source, end) if needs_daily else {}
         session_open: dict[object, float] = {}
         for bar in bars:
             session_open.setdefault(bar.ts.date(), bar.open)   # first RTH bar = the open
@@ -138,8 +157,11 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
                 trade_intensity=micro_vals.get("trade_intensity", math.nan),
                 spread_bps=micro_vals.get("spread_bps", math.nan),
                 quote_imbalance=micro_vals.get("quote_imbalance", math.nan),
+                daily_closes=daily_closes,
+                market_daily_closes=market_daily,
             )
-            rows.append((symbol, bar.ts, FEATURE_SET_VERSION, feature_vector(ctx), source_label))
+            rows.append((symbol, bar.ts, feature_set_version,
+                         feature_vector(ctx, feature_set_version), source_label))
         with conn.cursor() as cur:
             cur.executemany(
                 """INSERT INTO feature_vectors (symbol, ts, set_version, vector, source)

@@ -68,5 +68,29 @@
     "horizon": "fwd_30m",
     "label": "rank",
     "features": "nocalendar"
+  },
+  {
+    "id": "E_mom_raw_nocal_v11",
+    "hypothesis": "KEY TEST: v1.1.0 daily-momentum features, raw, NO calendar. Does cross-sectional momentum give non-artifact within-ts IC where intraday price gave ~0?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.0"
+  },
+  {
+    "id": "E_mom_raw_all_v11",
+    "hypothesis": "v1.1.0 momentum + all (incl calendar). Compare to nocalendar to see momentum's standalone contribution vs the calendar crutch.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "all",
+    "set_version": "v1.1.0"
+  },
+  {
+    "id": "E_mom_60m_raw_nocal_v11",
+    "hypothesis": "v1.1.0 momentum at 60m horizon, no calendar (momentum decays slower than 30m noise).",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.0"
   }
 ]

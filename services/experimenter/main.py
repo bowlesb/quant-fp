@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
+from quantlib.features import CALENDAR_NAMES, MICRO_NAMES
 from quantlib.research import HORIZON_MIN, load_panel, run_experiment
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -76,17 +77,18 @@ def run_queue() -> int:
         if exp["id"] in finished:
             continue
         horizon = exp.get("horizon", "fwd_30m")
-        # named subsets of the 18-feature v1.0.0 vector (indices 0..17):
-        #   nomicro   = drop micro (keep 0..12)
-        #   nocalendar= drop micro + minute_of_day(11) + day_of_week(12) -> keep 0..10
-        feature_idx = {
-            "nomicro": list(range(13)),
-            "nocalendar": list(range(11)),
-        }.get(exp.get("features"))
-        logger.info("running experiment %s (%s, %s, %s)", exp["id"], horizon, exp.get("label"), exp.get("features"))
+        sv = exp.get("set_version", SET_VERSION)
+        sel = exp.get("features")
+        logger.info("running experiment %s (%s, set=%s, %s, %s)", exp["id"], horizon, sv,
+                    exp.get("label"), sel)
         try:
             with psycopg.connect(**DB_KWARGS) as conn:
-                names, ts, X, y = load_panel(conn, horizon, SET_VERSION)
+                names, ts, X, y = load_panel(conn, horizon, sv)
+            # named feature subsets, by NAME so they work for any set version:
+            #   nomicro = drop microstructure; nocalendar = drop micro + calendar
+            drop = set(MICRO_NAMES) if sel == "nomicro" else \
+                (set(MICRO_NAMES) | set(CALENDAR_NAMES)) if sel == "nocalendar" else set()
+            feature_idx = [i for i, n in enumerate(names) if n not in drop] if drop else None
             if len(y) < 1000:
                 result = {"error": "panel too small", "n_rows": int(len(y))}
             else:
@@ -95,8 +97,8 @@ def run_queue() -> int:
                     horizon_minutes=HORIZON_MIN.get(horizon, 30), cadence_min=CADENCE_MIN,
                 )
                 imp = result.get("gain_importance")
-                if imp:                         # used features are a prefix of names
-                    used = names[:len(imp)]
+                if imp:
+                    used = [names[i] for i in feature_idx] if feature_idx else names
                     top = sorted(zip(used, imp), key=lambda kv: -kv[1])[:5]
                     result["top_features"] = [f"{n}:{v}" for n, v in top]
         except (psycopg.Error, ValueError, KeyError) as exc:
@@ -104,8 +106,8 @@ def run_queue() -> int:
         record = {
             "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "id": exp["id"], "horizon": horizon, "label": exp.get("label", "raw"),
-            "features": exp.get("features", "all"), "hypothesis": exp["hypothesis"],
-            "set_version": SET_VERSION, "result": result,
+            "features": sel or "all", "set_version": sv, "hypothesis": exp["hypothesis"],
+            "result": result,
         }
         log_result(record)
         logger.info("logged %s: %s", exp["id"], result)

@@ -47,8 +47,9 @@ def test_returns_and_vector_shape() -> None:
     bars = _bars(closes)
     ctx = FeatureContext(symbol="X", ts=bars[-1].ts, bars=bars, session_open=100.0)
     feats = compute_features(ctx)
-    assert set(feats) == set(FEATURE_NAMES)
+    assert set(FEATURE_NAMES) <= set(feats)        # v1.0.0 names present (+ momentum keys)
     assert len(feature_vector(ctx)) == len(FEATURE_NAMES)
+    assert math.isnan(feats["mom_1d"])             # no daily_closes supplied -> NaN, not error
     # 5-minute return = close[-1]/close[-6]-1 = 169/164-1
     assert abs(feats["ret_5m"] - (169.0 / 164.0 - 1.0)) < 1e-12
 
@@ -127,3 +128,30 @@ def test_replay_equivalence() -> None:
     # change the value at the cut (we slice to cut+1 either way).
     rel = compute_features(ctx_truncated)["rel_ret_30m"]
     assert not math.isnan(rel)
+
+
+def test_daily_momentum_point_in_time_and_v11_vector() -> None:
+    """mom_k uses only completed trading days strictly before ctx.ts; today's
+    (partial) close must never leak in; v1.1.0 vector is 21, v1.0.0 stays 18."""
+    from datetime import date
+
+    ts = datetime(2026, 6, 10, 15, 0, tzinfo=timezone.utc)   # 11:00 ET, date 2026-06-10
+    bar = BarRow(ts=ts, open=10, high=10.1, low=9.9, close=10, volume=1000, vwap=10)
+    closes = {date(2026, 6, d): c for d, c in
+              [(1, 100), (2, 101), (3, 102), (4, 103), (5, 104), (8, 105), (9, 106)]}
+    closes[date(2026, 6, 10)] = 999.0                        # today's close: must be IGNORED
+    mkt = {date(2026, 6, d): c for d, c in
+           [(1, 200), (2, 202), (3, 204), (4, 206), (5, 208), (8, 210), (9, 212)]}
+    ctx = FeatureContext(symbol="X", ts=ts, bars=[bar], session_open=10,
+                         daily_closes=closes, market_daily_closes=mkt)
+    features = compute_features(ctx)
+
+    assert math.isclose(features["mom_1d"], 106 / 105 - 1)
+    assert math.isclose(features["mom_3d"], 106 / 103 - 1)
+    assert math.isclose(features["mom_5d"], 106 / 101 - 1)
+    assert math.isnan(features["mom_10d"])                   # only 7 prior days
+    assert math.isclose(features["mom_1d_rel"], (106 / 105 - 1) - (212 / 210 - 1))
+    assert features["mom_1d"] < 1.0                          # 999 (today) not used -> no lookahead
+
+    assert len(feature_vector(ctx, "v1.1.0")) == 21
+    assert len(feature_vector(ctx)) == 18                    # v1.0.0 unchanged

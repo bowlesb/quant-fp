@@ -15,10 +15,12 @@ Bump FEATURE_SET_VERSION whenever the set changes.
 import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
-FEATURE_SET_VERSION = "v1.0.0"
+FEATURE_SET_VERSION = "v1.0.0"           # the LIVE serving set; v1.1.0 is offline-only
+
+MOMENTUM_DAYS = [1, 3, 5, 10]            # trailing trading-day windows for daily momentum
 
 _NY = ZoneInfo("America/New_York")
 _RTH_OPEN = dtime(9, 30)
@@ -63,6 +65,8 @@ class FeatureContext:
     bars: list[BarRow]                       # this symbol, up to and incl ts
     session_open: float                      # first bar open of the session
     market_bars: list[BarRow] = field(default_factory=list)   # SPY, aligned
+    daily_closes: dict[date, float] = field(default_factory=dict)         # this symbol, by date
+    market_daily_closes: dict[date, float] = field(default_factory=dict)  # SPY, by date
     trade_imbalance: float = math.nan        # signed_volume/(buy+sell) for ts
     large_print_cnt: float = math.nan
     trade_intensity: float = math.nan
@@ -114,6 +118,17 @@ def _volume_zscore_ts(vol_by_ts: dict[datetime, float], ts: datetime, window: in
     return (current - statistics.mean(prior)) / spread
 
 
+def _daily_momentum(closes_by_date: dict[date, float], as_of: date, k: int) -> float:
+    """Trailing k-trading-day return using only completed days STRICTLY BEFORE as_of
+    (point-in-time: never uses today's still-forming close). NaN if <k+1 prior days."""
+    prior = sorted(d for d in closes_by_date if d < as_of)
+    if len(prior) <= k:
+        return math.nan
+    recent = closes_by_date[prior[-1]]
+    past = closes_by_date[prior[-1 - k]]
+    return (recent / past - 1.0) if past else math.nan
+
+
 def compute_features(ctx: FeatureContext) -> dict[str, float]:
     """Compute the v1 feature dict for ctx. Keys match FEATURE_NAMES.
 
@@ -158,28 +173,50 @@ def compute_features(ctx: FeatureContext) -> dict[str, float]:
     features["spread_bps"] = ctx.spread_bps
     features["quote_imbalance"] = ctx.quote_imbalance
 
+    # Cross-sectional daily MOMENTUM (v1.1.0): trailing returns + market-relative, from
+    # completed prior trading days only. NaN when daily_closes isn't supplied (v1.0.0
+    # callers) or there isn't enough history.
+    as_of = ctx.ts.astimezone(_NY).date()
+    for k in MOMENTUM_DAYS:
+        own = _daily_momentum(ctx.daily_closes, as_of, k)
+        mkt = _daily_momentum(ctx.market_daily_closes, as_of, k)
+        features[f"mom_{k}d"] = own
+        features[f"mom_{k}d_rel"] = (
+            own - mkt if not (math.isnan(own) or math.isnan(mkt)) else math.nan
+        )
+
     return features
 
 
 # The ordered contract. Built once from a representative call so it can't drift
 # from compute_features.
+MICRO_NAMES = ["trade_imbalance", "large_print_cnt", "trade_intensity", "spread_bps", "quote_imbalance"]
+CALENDAR_NAMES = ["minute_of_day", "day_of_week"]
+MOMENTUM_NAMES = [f"mom_{k}d" for k in MOMENTUM_DAYS] + [f"mom_{k}d_rel" for k in MOMENTUM_DAYS]
+
 FEATURE_NAMES: list[str] = (
     [f"ret_{w}m" for w in RETURN_WINDOWS]
     + [f"vol_{w}m" for w in VOL_WINDOWS]
     + [
         "vol_z_30", "vwap_dev", "range_pct", "gap_from_open", "rel_ret_30m",
         "minute_of_day", "day_of_week",
-        "trade_imbalance", "large_print_cnt", "trade_intensity",
-        "spread_bps", "quote_imbalance",
     ]
+    + MICRO_NAMES
 )
 
+# v1.1.0 = the 13 non-micro v1 features (stable prefix) + 8 daily-momentum features.
+# Offline only — used by the experimenter/backfiller; the live computer stays v1.0.0.
+NON_MICRO_NAMES = [name for name in FEATURE_NAMES if name not in MICRO_NAMES]   # 13
+V11_NAMES: list[str] = NON_MICRO_NAMES + MOMENTUM_NAMES                          # 21
 
-def feature_vector(ctx: FeatureContext) -> list[float]:
-    """compute_features as an ordered vector matching FEATURE_NAMES."""
+FEATURE_SETS: dict[str, list[str]] = {"v1.0.0": FEATURE_NAMES, "v1.1.0": V11_NAMES}
+
+
+def feature_vector(ctx: FeatureContext, version: str = "v1.0.0") -> list[float]:
+    """compute_features as an ordered vector matching the named feature set's contract."""
+    names = FEATURE_SETS[version]
     features = compute_features(ctx)
-    if set(features) != set(FEATURE_NAMES):
-        raise ValueError(
-            f"feature mismatch: {set(features) ^ set(FEATURE_NAMES)}"
-        )
-    return [features[name] for name in FEATURE_NAMES]
+    missing = set(names) - set(features)
+    if missing:
+        raise ValueError(f"feature set {version} missing: {missing}")
+    return [features[name] for name in names]

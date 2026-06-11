@@ -294,6 +294,7 @@ def build_features() -> None:
     from stored bars/aggregates via the shared featurestore module."""
     start, end = resolve_window()
     bar_source = os.environ.get("FEATURE_BAR_SOURCE", "stream")
+    set_version = os.environ.get("FEATURE_SET_VERSION", "v1.0.0")
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
         membership = load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
         symbols = (
@@ -301,9 +302,10 @@ def build_features() -> None:
             if membership else resolve_symbols(conn)
         )
         cadence = int(os.environ["FEATURE_CADENCE_MIN"]) if os.environ.get("FEATURE_CADENCE_MIN") else None
-        logger.info("building features for %d symbols, %s..%s (src=%s, pit=%s, cadence=%s)",
-                    len(symbols), start, end, bar_source, membership is not None, cadence)
-        total = build_feature_store(conn, symbols, start, end, bar_source, "historical", membership, cadence)
+        logger.info("building features for %d symbols, %s..%s (src=%s, pit=%s, cadence=%s, set=%s)",
+                    len(symbols), start, end, bar_source, membership is not None, cadence, set_version)
+        total = build_feature_store(conn, symbols, start, end, bar_source, "historical",
+                                    membership, cadence, set_version)
         logger.info("feature build complete: %d vectors", total)
 
 
