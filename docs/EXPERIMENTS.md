@@ -101,3 +101,21 @@ Momentum (E_mom_raw_nocal_v11), 30-min cadence:
 the spread at full 30-min turnover. The owner-audit's call is quantified: LOWER TURNOVER
 (longer horizon) beats any feature here. "Beats breakeven cost" is now a hard gate on every
 experiment. NEXT: build + test the OVERNIGHT horizon (far lower turnover) under this gate.
+| 2026-06-11T04:39:58+00:00 | E_overnight_raw_nocal_v11 | overnight | raw | 19 | 49225 | 0.09376 | 2.653 | 0.00958 | Overnight (close->next-open) under the net-of-cost gate: ~1 rebalance/day = far lower turnover; should clear breakeven where 30-min could not. raw, no-calendar, v1.1.0 (momentum+price at 15:30). |
+| 2026-06-11T04:40:07+00:00 | E_overnight_raw_all_v11 | overnight | raw | 21 | 49225 | 0.06849 | 1.757 | 0.02403 | Overnight, all features incl calendar/momentum, v1.1.0. Compare to nocalendar. |
+
+## OVERNIGHT under the cost gate (2026-06-11) — high IC that is NOT money (fat-tail/gap)
+
+Built a close->next-open label (quantlib.labels.overnight_return_series; backfiller
+build-overnight-labels; assigned to each day's last cadence ts). E_overnight_raw_nocal_v11
+(v1.1.0, 50 days):
+  rank-IC 0.094 (t 2.65) BUT gross -0.23bps/period, NET -0.31bps, Sharpe_net -0.84,
+  turnover 3.98, breakeven -5.9bps.
+READ (honest): a strongly positive rank-IC with NEGATIVE dollar P&L is the tell that the
+ordering doesn't translate to money — fat-tailed overnight returns (earnings GAPS): extreme
+positive gaps in the low-pred (short) leg blow up the equal-weight basket. IC is a
+MISLEADING metric overnight; the net-of-cost L/S backtest exposed it. Overnight-as-built is
+net-negative AND its IC is untrustworthy. NEXT (Modeller): vol-SCALE / winsorize the
+overnight label, filter earnings-gap days, and judge on net P&L (not IC). Also: turnover
+~4/period is too high for "overnight" — the staleness/rebalance logic needs the daily cadence.
+Cost gate working as intended: it stopped a 0.094 IC from being mistaken for edge.

@@ -12,9 +12,24 @@ the backfiller.
 """
 import math
 import statistics
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 LABEL_HORIZONS = [30, 60]        # minutes
+OVERNIGHT_HORIZON = "overnight"  # close -> next session open
+
+
+def overnight_return_series(
+    daily_open: dict[date, float], daily_close: dict[date, float]
+) -> dict[date, float]:
+    """Per-day overnight simple return = next trading day's OPEN / this day's CLOSE - 1.
+    Keyed by the day held (d); the label realizes at d+1's open. NaN where undefined."""
+    days = sorted(set(daily_open) & set(daily_close))
+    out: dict[date, float] = {}
+    for i in range(len(days) - 1):
+        day, next_day = days[i], days[i + 1]
+        close = daily_close[day]
+        out[day] = (daily_open[next_day] / close - 1.0) if close else math.nan
+    return out
 
 
 def horizon_name(horizon_minutes: int) -> str:

@@ -15,7 +15,7 @@ import logging
 import math
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import psycopg
 from alpaca.data.historical import StockHistoricalDataClient
@@ -34,9 +34,11 @@ from quantlib.features import is_rth, on_cadence
 from quantlib.featurestore import build_feature_store, load_membership
 from quantlib.labels import (
     LABEL_HORIZONS,
+    OVERNIGHT_HORIZON,
     cross_sectional_excess,
     forward_return_series,
     horizon_name,
+    overnight_return_series,
 )
 from quantlib.universe import SymbolStats, select_universe
 
@@ -378,6 +380,71 @@ def build_labels() -> None:
         logger.info("label build complete: %d labels", total)
 
 
+def build_overnight_labels() -> None:
+    """Overnight (close->next-open) cross-sectional excess labels, assigned to each
+    day's LAST cadence ts (the prediction point near the close — the low-turnover
+    horizon). Demeaned within that date's point-in-time universe."""
+    start, end = resolve_window()
+    bar_source = os.environ.get("FEATURE_BAR_SOURCE", "backfill")
+    cadence = int(os.environ.get("FEATURE_CADENCE_MIN", "30"))
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+        membership = load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        symbols = (
+            sorted({s for members in membership.values() for s in members})
+            if membership else resolve_symbols(conn)
+        )
+        logger.info("building overnight labels for %d symbols, %s..%s, pit=%s",
+                    len(symbols), start, end, membership is not None)
+        # per symbol: overnight return by day + the last-cadence ts of each day
+        overnight_by_symbol: dict[str, dict[date, float]] = {}
+        last_cadence_ts: dict[str, dict[date, datetime]] = {}
+        with conn.cursor() as cur:
+            for symbol in symbols:
+                cur.execute(
+                    """SELECT ts, open, close FROM bars_1m
+                       WHERE symbol=%s AND source=%s AND ts>=%s
+                         AND ts<=%s + interval '1 day' ORDER BY ts""",
+                    (symbol, bar_source, start, end),
+                )
+                daily_open: dict[date, float] = {}
+                daily_close: dict[date, float] = {}
+                last_cad: dict[date, datetime] = {}
+                for ts, bar_open, bar_close in cur.fetchall():
+                    if not is_rth(ts):
+                        continue
+                    day = ts.date()
+                    daily_open.setdefault(day, bar_open)     # first RTH bar = session open
+                    daily_close[day] = bar_close             # last RTH bar = session close
+                    if on_cadence(ts, cadence):
+                        last_cad[day] = ts                   # last cadence point of the day
+                overnight_by_symbol[symbol] = overnight_return_series(daily_open, daily_close)
+                last_cadence_ts[symbol] = last_cad
+
+        all_days = {day for series in overnight_by_symbol.values() for day in series}
+        rows = []
+        for day in all_days:
+            if day > end.date():
+                continue
+            members = membership.get(day) if membership else None
+            section = {
+                symbol: series[day]
+                for symbol, series in overnight_by_symbol.items()
+                if day in series and (members is None or symbol in members)
+            }
+            excess = cross_sectional_excess(section)
+            for symbol, value in excess.items():
+                prediction_ts = last_cadence_ts[symbol].get(day)
+                if prediction_ts is not None and not math.isnan(value):
+                    rows.append((symbol, prediction_ts, OVERNIGHT_HORIZON, value))
+        with conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO labels (symbol, ts, horizon, value) VALUES (%s,%s,%s,%s)
+                   ON CONFLICT (symbol, ts, horizon) DO UPDATE SET value=EXCLUDED.value""",
+                rows,
+            )
+        logger.info("overnight label build complete: %d labels", len(rows))
+
+
 def validate_features() -> None:
     """Replay-equivalence at the feature level: live (source='stream') vs
     recomputed (source='historical') feature_vectors must be identical."""
@@ -471,6 +538,8 @@ def main() -> None:
         validate_features()
     elif command == "build-labels":
         build_labels()
+    elif command == "build-overnight-labels":
+        build_overnight_labels()
     elif command == "build-universe-history":
         build_universe_history()
     else:

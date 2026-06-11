@@ -92,5 +92,21 @@
     "label": "raw",
     "features": "nocalendar",
     "set_version": "v1.1.0"
+  },
+  {
+    "id": "E_overnight_raw_nocal_v11",
+    "hypothesis": "Overnight (close->next-open) under the net-of-cost gate: ~1 rebalance/day = far lower turnover; should clear breakeven where 30-min could not. raw, no-calendar, v1.1.0 (momentum+price at 15:30).",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.0"
+  },
+  {
+    "id": "E_overnight_raw_all_v11",
+    "hypothesis": "Overnight, all features incl calendar/momentum, v1.1.0. Compare to nocalendar.",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": "all",
+    "set_version": "v1.1.0"
   }
 ]

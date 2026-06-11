@@ -92,10 +92,12 @@ def run_queue() -> int:
             if len(y) < 1000:
                 result = {"error": "panel too small", "n_rows": int(len(y))}
             else:
+                # overnight = ~1 rebalance/day -> periods_per_year ~252 (cadence_min=390)
+                exp_cadence = 390 if horizon == "overnight" else CADENCE_MIN
                 result = run_experiment(
                     X, y, ts, symbols=symbols, label=exp.get("label", "raw"),
                     feature_idx=feature_idx, horizon_minutes=HORIZON_MIN.get(horizon, 30),
-                    cadence_min=CADENCE_MIN,
+                    cadence_min=exp_cadence,
                 )
                 imp = result.get("gain_importance")
                 if imp:

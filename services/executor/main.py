@@ -6,10 +6,16 @@ Alpaca foot-guns in docs/EXECUTION.md. Default DRY_RUN: compute + persist the IN
 basket to orders_log (status='intended') and log it, WITHOUT submitting. Submission is
 enabled only after the live-scoring path is validated at the open.
 
-Safeguards even in dry-run: staleness guard (no trading on stale predictions), ETF
-exclusion, shortable-only shorts (filter-then-select), hard caps (K + per-name notional
-+ gross), intent persisted before any submit (idempotent client_order_id), and a
-daily max-loss kill-switch scaffold. Still keeps the position reconciliation loop.
+Safeguards present in dry-run: staleness guard, ETF exclusion, shortable filter,
+score-degeneracy guard, hard caps (K + per-name notional + gross), intent persisted
+before submit (idempotent client_order_id).
+
+NOT YET BUILT (owned by Execution/Risk — do not believe a docstring over the code):
+the live-submit path, a real kill-switch + caps bound from a FRESH broker snapshot, the
+diff->close->flip->open sequencer, ETB (not just shortable) enforcement, marketable-limit
+pricing, EOD LOC flatten, and the reconciliation loop (the prior recon loop was dropped in
+the f4ed85d rewrite — re-adding a read-only recon to dry-run is a tracked Execution/Risk
+item). See docs/QA_LEDGER.md / RESPONSIBILITY_MAP.md.
 """
 import json
 import logging
