@@ -497,3 +497,17 @@ why.
   eventual fetch); split-only storage = Prod owns (recommend a SPLIT-only DAILY-bar fetch for
   labels, lighter than dual minute series); adjustment-parity gate = QA on a settled ex-div
   day; breadth guard = DONE (QA owns the probe).
+
+- ===== DEEP PANEL REBUILD UNDERWAY (2026-06-11 00:25 PDT) =====
+  Deep backfill complete (668 dates, 2023-12..2026-06, clean breadth). PIT universe rebuilt
+  over the full range: universe_membership 52 -> 613 dates (2024-01-02..2026-06-11, avg 933
+  members/day; DST-fixed screen). Panel rebuild launched (be93qbgjo, ~3-5h): DELETEd old
+  v1.1.0 historical (632,978) + overnight labels (49,225); rebuilding DELETE-then-insert over
+  BACKFILL_START=2023-12-01 -> build-features v1.1.0 + build-labels(fwd) + build-overnight-
+  labels(SPLIT-only). This is the first ~600-day clean panel (≈12x the 51-day; ~300 effective
+  daily samples vs ~40 -> the canary≈IC noise problem should resolve). ON COMPLETION: purge the
+  contaminated overnight experiment from results.jsonl + re-run OVERNIGHT under the cost gate
+  (NET P&L, NW lag=1) + a deep INTRADAY baseline; judge on net P&L not IC; DISCLOSE survivorship
+  (delisted absent) + earnings-gap noise (FMP deferred). Tech-debt noted: build_universe_history
+  uses per-row inserts (slow, ~20min/600 dates) -> batch later. Market-day plan unchanged
+  (validation+data, DRY_RUN true); open 06:30 PDT, rebuild runs into it (independent of live scoring).
