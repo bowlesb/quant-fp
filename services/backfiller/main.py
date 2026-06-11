@@ -18,6 +18,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 
 import psycopg
+from alpaca.data.enums import Adjustment
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockQuotesRequest, StockTradesRequest
 
@@ -29,7 +30,7 @@ from quantlib.aggregates import (
     aggregate_trades,
     bucket_minute,
 )
-from quantlib.barsource import fetch_and_store_bars
+from quantlib.barsource import fetch_and_store_bars, fetch_daily_bars
 from quantlib.features import is_rth, on_cadence
 from quantlib.featurestore import build_feature_store, load_membership
 from quantlib.labels import (
@@ -384,9 +385,12 @@ def build_labels() -> None:
 
 
 def build_overnight_labels() -> None:
-    """Overnight (close->next-open) cross-sectional excess labels, assigned to each
-    day's LAST cadence ts (the prediction point near the close — the low-turnover
-    horizon). Demeaned within that date's point-in-time universe."""
+    """Overnight (close->next-open) cross-sectional excess labels, assigned to each day's
+    LAST cadence ts (the prediction point near the close — the low-turnover horizon).
+    PRICE BASIS = SPLIT-ONLY daily bars (not the Adjustment.ALL minute bars), so the
+    retroactive dividend adjustment can't leak a known-in-advance dividend into the
+    overnight gap (the look-ahead QA found that inflated the 0.094 IC). The prediction
+    TIMESTAMP still comes from the minute bars (adjustment doesn't affect the ts)."""
     start, end = resolve_window()
     bar_source = os.environ.get("FEATURE_BAR_SOURCE", "backfill")
     cadence = int(os.environ.get("FEATURE_CADENCE_MIN", "30"))
@@ -396,31 +400,29 @@ def build_overnight_labels() -> None:
             sorted({s for members in membership.values() for s in members})
             if membership else resolve_symbols(conn)
         )
-        logger.info("building overnight labels for %d symbols, %s..%s, pit=%s",
+        logger.info("building overnight labels (split-only basis) for %d symbols, %s..%s, pit=%s",
                     len(symbols), start, end, membership is not None)
-        # per symbol: overnight return by day + the last-cadence ts of each day
+        # SPLIT-only daily prices = the correct overnight basis (no dividend look-ahead).
+        split_daily = fetch_daily_bars(data_client, symbols, start, end + timedelta(days=1),
+                                       Adjustment.SPLIT)
         overnight_by_symbol: dict[str, dict[date, float]] = {}
         last_cadence_ts: dict[str, dict[date, datetime]] = {}
         with conn.cursor() as cur:
             for symbol in symbols:
+                # last cadence RTH ts per day = the prediction point (ts only, any adjustment)
                 cur.execute(
-                    """SELECT ts, open, close FROM bars_1m
-                       WHERE symbol=%s AND source=%s AND ts>=%s
-                         AND ts<=%s + interval '1 day' ORDER BY ts""",
+                    """SELECT ts FROM bars_1m WHERE symbol=%s AND source=%s
+                       AND ts>=%s AND ts<=%s ORDER BY ts""",
                     (symbol, bar_source, start, end),
                 )
-                daily_open: dict[date, float] = {}
-                daily_close: dict[date, float] = {}
                 last_cad: dict[date, datetime] = {}
-                for ts, bar_open, bar_close in cur.fetchall():
-                    if not is_rth(ts):
-                        continue
-                    day = ts.date()
-                    daily_open.setdefault(day, bar_open)     # first RTH bar = session open
-                    daily_close[day] = bar_close             # last RTH bar = session close
-                    if on_cadence(ts, cadence):
-                        last_cad[day] = ts                   # last cadence point of the day
-                overnight_by_symbol[symbol] = overnight_return_series(daily_open, daily_close)
+                for (ts,) in cur.fetchall():
+                    if is_rth(ts) and on_cadence(ts, cadence):
+                        last_cad[ts.date()] = ts
+                daily = split_daily.get(symbol, {})
+                opens = {day: oc[0] for day, oc in daily.items()}
+                closes = {day: oc[1] for day, oc in daily.items()}
+                overnight_by_symbol[symbol] = overnight_return_series(opens, closes)
                 last_cadence_ts[symbol] = last_cad
 
         all_days = {day for series in overnight_by_symbol.values() for day in series}

@@ -53,3 +53,30 @@ def fetch_and_store_bars(
             total += len(rows)
         time.sleep(pause_seconds)
     return total
+
+
+def fetch_daily_bars(
+    data_client: StockHistoricalDataClient,
+    symbols: list[str], start, end,
+    adjustment: Adjustment = Adjustment.SPLIT,
+    pause_seconds: float = 0.3,
+) -> dict[str, dict]:
+    """Daily (open, close) per symbol over [start, end], SPLIT-only adjusted by default.
+    Returns {symbol: {date: (open, close)}}. SPLIT-only is the CORRECT basis for an
+    overnight close->next-open label: splits are mechanical (must adjust), but dividends
+    must NOT be retro-applied across a held overnight boundary (doing so leaks the
+    known-in-advance dividend into the gap return — the look-ahead QA found)."""
+    out: dict[str, dict] = {}
+    for i in range(0, len(symbols), CHUNK):
+        chunk = symbols[i : i + CHUNK]
+        request = StockBarsRequest(
+            symbol_or_symbols=chunk, timeframe=TimeFrame.Day,
+            start=start, end=end, adjustment=adjustment,
+        )
+        barset = data_client.get_stock_bars(request)
+        for symbol, bars in barset.data.items():
+            per_day = out.setdefault(symbol, {})
+            for bar in bars:
+                per_day[bar.timestamp.date()] = (bar.open, bar.close)
+        time.sleep(pause_seconds)
+    return out
