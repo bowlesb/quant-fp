@@ -157,3 +157,14 @@ net-NEGATIVE (breakeven ~1.3bps < ~2bps cost) -> turnover kills it at 30m cadenc
 tradeable. CONTRAST WITH OVERNIGHT: 30m canaries are CLEAN; the overnight canaries were ELEVATED
 (up to 0.0097) exactly on the configs that cleared breakeven -> the overnight "win" is where the
 integrity check is dirty = likely artifact, not alpha. (Canary investigation in progress.)
+
+## CLEAN DEEP OVERNIGHT (2026-06-11, de-fragmented = 612 daily cross-sections, deterministic)
+  lambdarank IC 0.030 sharpe_net +1.95 breakeven 15.0bps turn 1.40 canary 0.0077
+  rank       IC 0.017 sharpe_net +0.62 breakeven 3.75bps turn 2.94 canary 0.001
+  raw        IC 0.007 sharpe_net +0.27 breakeven 2.69bps turn 2.93 canary -0.007
+  vol_scaled IC 0.006 sharpe_net -0.15 breakeven 1.76bps turn 3.07 canary -0.006
+De-fragmentation (one 15:30-ET cross-section/day) DROPPED lambdarank turnover 4.0->1.40 ->
+breakeven 4.1->15.0bps, sharpe_net 0.50->1.95. Strongest result yet. BUT lambdarank canary
+(0.0077) is still highest, and the prior probe showed the model partly ranks a PERSISTENT
+per-symbol component (canary-persistence 0.34) = likely SURVIVORSHIP. GATE: neutralize the
+persistent per-symbol prediction bias -> does within-symbol TIMING alpha survive? (running)
