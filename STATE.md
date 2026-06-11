@@ -1,10 +1,27 @@
 # STATE — read this first
 
-**Phase:** Phase 1 ~done; Phase 2 (feature engine) in progress
-**Mode:** paper
-**Last updated:** 2026-06-10
-**Operating mode:** autonomous maintainer loop — see `OPERATING_LOOP.md`. Self-schedules
-continuation; doesn't wait to be asked.
+**Mode:** paper | **Last updated:** 2026-06-11
+**Operating mode:** autonomous maintainer loop (`OPERATING_LOOP.md`) — 5-role team every wake;
+self-schedules WITH A FALLBACK (never silent); bar = don't stop until edge-in-production.
+
+## >>> CURRENT STATE (2026-06-11) — two parallel tracks <<<
+**EXECUTION (live paper, WORKING):** full bet lifecycle proven on a live market day — model-
+server scores the universe each cadence -> executor places a tiny (3L/3S, ~$200/name) NBBO
+marketable-limit basket -> fills captured -> reconcile + pnl_daily -> EOD flatten terminates.
+Real paper orders on Alpaca (DRY_RUN=false). NO proven edge yet -> intentionally tiny; today's
+P&L is noise. Live exercise found+fixed: stale-close pricing (->NBBO), mode/traded_today
+re-submit loop, dup-coid guard, fills capture, lambdarank label-31. Open exec items: realized-
+P&L attribution per name, partial-basket cancel-replace, broker-side LOC EOD net.
+**EDGE (ML, honest):** the 51-day signal was a CALENDAR ARTIFACT; price-only IC ~0; momentum a
+weak contributor below noise; everything failed the net-of-cost gate. Built: net-of-cost L/S
+backtest gate (breakeven/sharpe_net), split-only overnight labels (no div look-ahead), breadth
+floor, warmup assert, loss-alignment battery (raw/rank/vol_scaled/lambdarank, all verified).
+REBUILDING the panel over the DEEP ~600-day history (universe 613 PIT dates; features ~541/600,
+then labels) -> first honest signal read on ~300 effective samples is imminent. Caveats:
+residual survivorship (delisted absent), earnings-gap noise (FMP deferred). NEXT: run the deep
+cost-gated battery; judge NET P&L not IC.
+
+## (history below — older E2E plan)
 
 ## >>> PRIORITY: thin END-TO-END vertical slice (Ben's directive 2026-06-10) <<<
 Get the whole loop running once — backfill → train → deploy → paper-trade → reconcile —
