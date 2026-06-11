@@ -21,11 +21,24 @@ quality over speed: a false edge is worse than no edge.
    the code, and the live DB) from all angles and takes coordinated action. I am the
    **Engineering Manager**; at the start of every wake I launch the three specialists
    as PARALLEL background subagents (read-only — they analyze and recommend; the
-   manager executes, to avoid concurrent-edit conflicts). Each reads the shared state
-   and returns a prioritized, agenda-specific report with concrete recommended actions.
-   I synthesize all three + my own manager view into the execution plan, act on the
-   highest-value items (sequencing to avoid conflicts), update `STATE.md` (the shared
-   plan), and log decisions/disagreements in `JOURNAL.md`.
+   manager executes, to avoid concurrent-edit conflicts).
+
+   **MANDATORY agent context (do NOT hand-relay — give every agent the same packet):**
+   At wake start the manager runs `scripts/team_brief.sh --advance` ONCE and includes
+   its full output in EVERY specialist prompt — so each agent automatically sees WHAT
+   CHANGED since the last review (commits, file diffs, and any NEW feature-set version in
+   the DB) and the current state, without me remembering to mention it. Every specialist
+   prompt also points the agent at `docs/INSPECT.md` (exactly HOW to query the DB and
+   engage every debugging system — connection string, tables, probes, logs, services,
+   dashboard) and `docs/QA_LEDGER.md` (standing concerns). Agents must never depend on the
+   manager to relay what changed or how to inspect — the brief + INSPECT.md make them
+   self-sufficient. (This closes the failure where a new feature wasn't guaranteed to reach
+   QA, and where agents only knew how to query the DB if I pasted the command.)
+
+   Each reads the shared state and returns a prioritized, agenda-specific report with
+   concrete recommended actions. I synthesize all three + my own manager view into the
+   execution plan, act on the highest-value items (sequencing to avoid conflicts), update
+   `STATE.md` (the shared plan), and log decisions/disagreements in `JOURNAL.md`.
 
    - **1) Engineering Manager (me):** own the execution plan and ensure it's followed.
      Where are we vs the overall goal and timeline? On track? Using time as effectively
