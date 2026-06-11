@@ -24,16 +24,20 @@ quality over speed: a false edge is worse than no edge.
    manager executes, to avoid concurrent-edit conflicts).
 
    **MANDATORY agent context (do NOT hand-relay — give every agent the same packet):**
-   At wake start the manager runs `scripts/team_brief.sh --advance` ONCE and includes
-   its full output in EVERY specialist prompt — so each agent automatically sees WHAT
-   CHANGED since the last review (commits, file diffs, and any NEW feature-set version in
-   the DB) and the current state, without me remembering to mention it. Every specialist
-   prompt also points the agent at `docs/INSPECT.md` (exactly HOW to query the DB and
-   engage every debugging system — connection string, tables, probes, logs, services,
-   dashboard) and `docs/QA_LEDGER.md` (standing concerns). Agents must never depend on the
-   manager to relay what changed or how to inspect — the brief + INSPECT.md make them
-   self-sufficient. (This closes the failure where a new feature wasn't guaranteed to reach
-   QA, and where agents only knew how to query the DB if I pasted the command.)
+   Every specialist prompt MUST open by having the agent read `docs/MISSION.md` (the goal +
+   the OWNER mentality + the "what are we missing toward making money" mandate) and find its
+   area in `docs/RESPONSIBILITY_MAP.md` — so each agent operates as an OWNER toward the
+   north star, not a contractor doing my ticket. Then include the `scripts/team_brief.sh
+   --advance` output (what CHANGED since last review + current feature sets) and point them
+   at `docs/INSPECT.md` (how to query the DB + engage every debugging system), `docs/
+   QA_LEDGER.md`, `docs/TECH_DEBT.md`.
+   **Brief agents with GOAL + DOMAIN, never a narrow checklist.** Telling an agent exactly
+   what to look at bounds it to MY blind spots — which is precisely how warmup, "only 51
+   days", and trade-parity slipped past them. Instead: give the goal, name their ownership,
+   and REQUIRE every report to answer "what is the most important thing we're NOT seeing/
+   doing toward making money, that nobody asked about?" Agents must never depend on the
+   manager to relay what changed, how to inspect, or what matters — Mission + brief +
+   INSPECT make them self-sufficient OWNERS.
 
    Each reads the shared state and returns a prioritized, agenda-specific report with
    concrete recommended actions. I synthesize all three + my own manager view into the
