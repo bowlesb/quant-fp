@@ -143,3 +143,17 @@ excluded. VERDICT: a real LEAD, not edge. NEXT GATES (in order): (1) EXPLAIN the
 ranking-canary (leakage? group-structure overfit? a feature with persistent cross-sectional
 selection?) — if it's leakage the result is fake; (2) earnings exclusion (FMP) + survivorship
 handling; (3) deflate for the 8-config multiple test; (4) lockbox/OOS. Do NOT trade it.
+
+## DEEP 30m intraday baseline (2026-06-11) — real signal, CLEAN canary, but net-NEGATIVE (turnover)
+612-day panel (6.15M rows). nocalendar v1.1.0, cost-gated:
+  rank IC 0.032 sharpe_net -3.42 breakeven 1.33bps canary -0.003
+  raw  IC 0.024 sharpe_net -3.57 breakeven 1.29bps canary -0.004
+  vol  IC 0.024 sharpe_net -4.05 breakeven 1.26bps canary -0.004
+  lrank IC 0.001 sharpe_net -1.49 breakeven 0.61bps canary -0.003
+KEY: this DEBUNKS the 51-day "calendar artifact / price-only IC~0" conclusion. With real depth,
+nocalendar 30m IC is 0.024-0.032 with a CLEAN canary (~ -0.004) -> a REAL intraday cross-
+sectional signal exists in price features (the 51-day collapse was thin-panel noise). BUT it's
+net-NEGATIVE (breakeven ~1.3bps < ~2bps cost) -> turnover kills it at 30m cadence. Real, not
+tradeable. CONTRAST WITH OVERNIGHT: 30m canaries are CLEAN; the overnight canaries were ELEVATED
+(up to 0.0097) exactly on the configs that cleared breakeven -> the overnight "win" is where the
+integrity check is dirty = likely artifact, not alpha. (Canary investigation in progress.)
