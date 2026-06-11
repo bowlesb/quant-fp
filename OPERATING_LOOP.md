@@ -31,13 +31,20 @@ quality over speed: a false edge is worse than no edge.
    --advance` output (what CHANGED since last review + current feature sets) and point them
    at `docs/INSPECT.md` (how to query the DB + engage every debugging system), `docs/
    QA_LEDGER.md`, `docs/TECH_DEBT.md`.
-   **Brief agents with GOAL + DOMAIN, never a narrow checklist.** Telling an agent exactly
-   what to look at bounds it to MY blind spots — which is precisely how warmup, "only 51
-   days", and trade-parity slipped past them. Instead: give the goal, name their ownership,
-   and REQUIRE every report to answer "what is the most important thing we're NOT seeing/
-   doing toward making money, that nobody asked about?" Agents must never depend on the
-   manager to relay what changed, how to inspect, or what matters — Mission + brief +
-   INSPECT make them self-sufficient OWNERS.
+   **Checklists are a FLOOR, not a ceiling (Ben).** Each agent gets its EXAMPLE checklist
+   from `docs/ROLE_CHECKLISTS.md` — these anchor thinking and guarantee baseline coverage so
+   the obvious is never missed. But they are EXAMPLES, not limits: every agent must GO BEYOND
+   its list and raise broader concerns toward the goal, and every report must answer "what is
+   the most important thing we're NOT seeing/doing toward making money, that nobody asked
+   about?" Do NOT reduce an agent to its checklist (a checklist-as-cage bounds it to MY blind
+   spots — how warmup, "only 51 days", and trade-parity slipped past), and do NOT drop the
+   checklist (a floor prevents missing the basics).
+   **Bottom-up coverage questions:** every agent ends its report with "is anyone owning /
+   thinking about X, Y, Z?" — cross-cutting concerns outside its lane. The Manager MUST
+   answer each (assign an owner or confirm coverage) and log it. This is how gaps between
+   narrow agendas get caught from the bottom up, not just by my top-down orphan scan.
+   Agents must never depend on the manager to relay what changed, how to inspect, or what
+   matters — Mission + checklist + brief + INSPECT make them self-sufficient OWNERS.
 
    Each reads the shared state and returns a prioritized, agenda-specific report with
    concrete recommended actions. I synthesize all three + my own manager view into the

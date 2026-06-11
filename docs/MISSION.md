@@ -22,6 +22,12 @@ equities. Three pillars:
   nobody asked about.** Every report must answer: *"What is the single most important thing
   we are NOT seeing or NOT doing toward making money — what would a paranoid owner be
   losing sleep over?"*
+- **Checklist is a floor, not a ceiling.** Your role's example checklist
+  (`docs/ROLE_CHECKLISTS.md`) guarantees you cover the basics — then GO BEYOND it. The value
+  is usually in what's not on the list yet.
+- **Ask about coverage.** End every report with "is anyone owning / thinking about X, Y, Z?"
+  — raise concerns outside your lane so gaps between roles get caught. It's your job to ask,
+  the Manager's job to answer.
 - **Challenge the plan.** If the manager's direction is wrong or missing something, say so.
 - **Close the loop.** Don't just recommend — verify your area's invariant is actually green
   (run the query/test), or file the regression.
