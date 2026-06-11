@@ -54,3 +54,25 @@ WHERE fv.source='historical' GROUP BY n.names[i], i ORDER BY pct_nan DESC;
 SELECT horizon, round(avg(value)::numeric,6) AS mean, round(stddev(value)::numeric,6) AS std,
        round(min(value)::numeric,4) AS min, round(max(value)::numeric,4) AS max
 FROM labels GROUP BY horizon;
+
+\echo '== Feature warmup/coverage: features NaN-degraded in EARLY dates vs late (catches ragged warmup; I4) =='
+-- early-NaN >> late-NaN  => a feature lacking enough backfill at the panel start
+-- (warmup not covered by pre-window history). A constantly-high NaN feature is dead, not ragged.
+WITH d AS (
+  SELECT set_version, ts::date AS dt, vector FROM feature_vectors WHERE source='historical'
+),
+bounds AS (SELECT set_version, min(dt) AS mn, max(dt) AS mx FROM d GROUP BY set_version),
+exploded AS (
+  SELECT d.set_version, u.idx, (u.val = 'NaN'::float8)::int AS isnan,
+         (d.dt <= b.mn + 5) AS early, (d.dt >= b.mx - 5) AS late
+  FROM d JOIN bounds b USING (set_version),
+       LATERAL unnest(d.vector) WITH ORDINALITY AS u(val, idx)
+)
+SELECT set_version, idx AS feature_idx,
+       round(100.0 * avg(isnan) FILTER (WHERE early), 1) AS early_nan_pct,
+       round(100.0 * avg(isnan) FILTER (WHERE late), 1)  AS late_nan_pct
+FROM exploded
+GROUP BY set_version, idx
+HAVING round(100.0 * avg(isnan) FILTER (WHERE early), 1)
+     > round(100.0 * avg(isnan) FILTER (WHERE late), 1) + 20
+ORDER BY set_version, feature_idx;

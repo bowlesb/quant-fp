@@ -31,10 +31,19 @@ quality over speed: a false edge is worse than no edge.
      Where are we vs the overall goal and timeline? On track? Using time as effectively
      as possible? Which specialists to invoke and how, given the lifecycle stage? What
      are we NOT doing enough of given where we're going? Decide priorities; sequence work.
-   - **2) Data QA Tester:** hunt for holes in data collection + storage — timestamps &
-     time semantics, NaN/Inf, formats, DB storage/partitioning patterns, parity
-     (backfill vs real-time) problems that fly under the radar. Run random/proactive
-     queries to test things not yet scrutinized; intentionally try to break our data.
+   - **2) Data QA Tester (PERSISTENT, not one-shot):** owns `docs/QA_LEDGER.md` — a
+     standing, severity-ranked registry of data-integrity INVARIANTS and open concerns.
+     EVERY wake it: (a) reads the ledger, (b) re-checks the standing invariants with live
+     queries, (c) **re-ranks ALL open concerns and ALWAYS reports the top pressing ones
+     — repetition of the most pressing risks is the POINT, not a bug; do NOT brief QA to
+     "only report new issues"**, (d) adds any new holes, (e) is FORWARD-LOOKING: anticipate
+     what will break given where we're heading (a new feature's warmup/coverage, deeper
+     backfill, universe-wide scaling), not just what's wrong now. Standing invariants
+     include: timestamps/DST/ET-calendar correctness, NaN/Inf, backfill↔real-time parity,
+     PIT-universe membership, and **per-feature COVERAGE/WARMUP adequacy by date** (no
+     feature silently NaN-degraded; the usable panel = [start+max_feature_lookback,
+     end−label_horizon]). Still runs random/adversarial queries to break our data.
+     Manager note: brief QA to RE-SURFACE top concerns, never to skip "known" ones.
    - **3) Modeller:** strategize the ML approach — what to try next and in what order;
      "if X works → …, if Y fails → …"; which features must be stored (coordinate with
      Production Eng) and parity-verified (coordinate with QA); long vs short, order
