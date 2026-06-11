@@ -394,3 +394,34 @@ why.
    research.py lambdarank/vol_scaled; (ops) backfill incremental current-month + experimenter
    uid; (architect) design the sharded trade/quote ingestion tier. Open = VALIDATE scoring,
    executor stays DRY-RUN. Honesty: predictions are not tradeable signal yet.
+
+- ===== OWNER-AUDIT TRIAGE (Manager, 2026-06-11) — validation of the owner-framing =====
+  An open-ended owner-charter agent (no checklist from me) surfaced 6 real, mostly-
+  unflagged issues. The framing WORKS. Triaged + assigned:
+  1. [Prod] PHANTOM BACKFILL — the deep backfill never ran: backfill-manager was still at
+     TARGET_DAYS=90 (compose said 900, never restarted) + my one-shot committed 0 bars in
+     16 min (full-range chunking). The exact "running != intended" bug, recurred in a day.
+     ACTION: killed one-shot; restarted manager (now 900); launched reliable month-by-month
+     deep backfill. DURABLE GUARD (owed): startup TARGET_DAYS log stamp + a probe asserting
+     min(bars.ts) <= today - TARGET_DAYS*0.9. "Running==intended" needs a TEST, not a habit.
+  2. [Modeller] **NO COST MODEL anywhere** — the whole signal hunt optimizes rank-IC with
+     no net-of-cost P&L. At 30-min cadence (~13x/day) vs ~4bps round-trip spread, even real
+     momentum (IC 0.006) is plausibly NET-NEGATIVE. THE #1 STRATEGIC GAP. ACTION: add net-
+     of-cost backtest to quantlib/backtest.py (dollar-neutral basket, charge spread/2+
+     slippage+borrow, report after-cost Sharpe + breakeven IC); make "beats breakeven cost"
+     the FIRST gate. Likely conclusion: lengthen horizon (cut turnover) > any new feature.
+  3. [Prod] LIVE COVERAGE MONITORS 10/998 SYMBOLS (1%) — data_quality_daily tracks 10; a
+     silent partial-ingestion failure of the other 988 trips no alarm. ACTION: coverage over
+     the FULL universe + alert when streamed < 95% of universe.
+  4. [Modeller/QA] METHODOLOGY — 51 days x 13 intraday cadences are pseudo-replicated;
+     effective N ~ day count (~40), so NW-t over "510 timestamps" is inflated; canary ~= real
+     IC. ACTION: compute significance on DAILY-block IC (or block-bootstrap by day); make the
+     canary band an explicit numeric gate (|IC| > 2x canary-std).
+  5. [Modeller/Prod] NO LIVE TRACK RECORD — predictions has 1 cadence; nothing accumulates a
+     live prediction->realized-return ledger. ACTION: nightly live_ic_daily job. THAT series
+     (not backtest IC) is what eventually justifies DRY_RUN=false.
+  6. [Execution/Risk] executor tracks no position state between rebalances ("no-flip" only
+     holds on a flat book); latent (submit off). Close before live + build the kill-switch-
+     from-fresh-broker-truth path (currently a scaffold).
+  MANAGER CALL: the #1 next build is the NET-OF-COST GATE (#2) — it may reveal we're hunting
+  a number that's economically negative, and that lengthening the horizon beats any feature.
