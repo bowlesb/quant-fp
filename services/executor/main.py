@@ -82,6 +82,11 @@ STATE_DDL = """
 CREATE TABLE IF NOT EXISTS executor_state (
     day date PRIMARY KEY, start_equity numeric, halted boolean NOT NULL DEFAULT false)
 """
+PNL_DDL = """
+CREATE TABLE IF NOT EXISTS pnl_daily (
+    day date PRIMARY KEY, start_equity numeric, equity numeric, unrealized numeric,
+    n_positions int, updated_at timestamptz)
+"""
 INTENT_SQL = """
 INSERT INTO orders_log
     (client_order_id, symbol, side, qty, order_type, limit_price, mode, intended_at, status,
@@ -210,6 +215,20 @@ def capture_fills(conn: psycopg.Connection, today: object) -> None:
                              float(order.filled_avg_price)))
 
 
+def write_pnl(conn: psycopg.Connection, today: object, state: dict, positions: list) -> None:
+    """Daily P&L record so we can say what the day's bets did: equity vs session-start (total
+    realized+unrealized+fees) and the book's mark-to-market unrealized. After the EOD flatten
+    the final row is the realized day P&L (equity - start_equity, book flat)."""
+    unrealized = sum(float(p.unrealized_pl) for p in positions)
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO pnl_daily (day, start_equity, equity, unrealized, n_positions, updated_at)
+               VALUES (%s,%s,%s,%s,%s, now())
+               ON CONFLICT (day) DO UPDATE SET equity=EXCLUDED.equity, unrealized=EXCLUDED.unrealized,
+                   n_positions=EXCLUDED.n_positions, updated_at=now()""",
+            (today, state["start_equity"], state["equity"], round(unrealized, 2), len(positions)))
+
+
 def reconcile(conn: psycopg.Connection, positions: list, today: object) -> None:
     """Broker-truth probe with a MEANINGFUL ok: flag UNEXPECTED broker positions (a symbol
     we didn't submit today) — the dangerous desync. After an EOD flatten the broker is empty
@@ -233,6 +252,7 @@ def main() -> None:
                 MODE, DRY_RUN, MODEL_VERSION, K_LONG, K_SHORT, NOTIONAL_PER_NAME, GROSS_CAP)
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(STATE_DDL)
+        cur.execute(PNL_DDL)
     while True:
         try:
             with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
@@ -263,6 +283,7 @@ def main() -> None:
                         submit_basket(conn, ts, today)        # one basket/day
                 reconcile(conn, positions, today)
                 capture_fills(conn, today)
+                write_pnl(conn, today, state, positions)
         except (psycopg.Error, ValueError, KeyError, APIError) as exc:
             logger.error("cycle error: %s", exc)
         time.sleep(LOOP_SECONDS)
