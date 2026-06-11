@@ -125,3 +125,21 @@ Cost gate working as intended: it stopped a 0.094 IC from being mistaken for edg
 | 2026-06-11T16:40:32+00:00 | DEEP_30m_lambdarank_nocal_v11 | fwd_30m | lambdarank |  | 0 |  |  |  | DEEP: 30m lambdarank, no-calendar — the trading-aligned loss on real depth. NET P&L. |
 | 2026-06-11T17:40:33+00:00 | E_overnight_raw_nocal_v11 | overnight | raw |  | 0 |  |  |  | Overnight (close->next-open) under the net-of-cost gate: ~1 rebalance/day = far lower turnover; should clear breakeven where 30-min could not. raw, no-calendar, v1.1.0 (momentum+price at 15:30). |
 | 2026-06-11T17:40:34+00:00 | E_overnight_raw_all_v11 | overnight | raw |  | 0 |  |  |  | Overnight, all features incl calendar/momentum, v1.1.0. Compare to nocalendar. |
+
+## DEEP OVERNIGHT under the cost gate (2026-06-11) — first positive net result, BUT canary-contaminated
+
+612-day clean panel (570,590 overnight rows, split-only basis). Ranked by sharpe_net:
+  lambdarank: IC 0.029 net +0.082bps sharpe_net +0.50 breakeven 4.11bps  CANARY 0.0097
+  rank:       IC 0.023 net +0.027bps sharpe_net +0.18 breakeven 2.72bps  CANARY 0.003
+  vol_scaled: IC 0.008 net -0.052bps sharpe_net -0.34 breakeven 0.75bps  CANARY 0.0067
+  raw:        IC 0.004 net -0.060bps sharpe_net -0.37 breakeven 0.55bps  CANARY -0.002
+EXCITING: lambdarank+overnight is the FIRST config to clear breakeven NET-of-cost (positive net
+P&L, sharpe_net +0.50) — the thesis (lower turnover + loss alignment) held where 30m died.
+BUT NOT TRUSTED: the shuffle canary RISES with ranking sophistication (raw -0.002 -> lambdarank
+0.0097). At ~480 test days, canary 0.0097 is ~6sigma from 0 -> NOT noise = leakage/selection
+artifact the model exploits even on shuffled labels. So a large part of the apparent IC is
+artifact, not alpha. PLUS survivorship (delisted absent, upward bias) + earnings-gap noise NOT
+excluded. VERDICT: a real LEAD, not edge. NEXT GATES (in order): (1) EXPLAIN the elevated
+ranking-canary (leakage? group-structure overfit? a feature with persistent cross-sectional
+selection?) — if it's leakage the result is fake; (2) earnings exclusion (FMP) + survivorship
+handling; (3) deflate for the 8-config multiple test; (4) lockbox/OOS. Do NOT trade it.
