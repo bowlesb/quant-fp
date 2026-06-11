@@ -539,3 +539,14 @@ why.
   despite filled shorts — fix the CLOSED+after query/timing; (3) realized-P&L attribution (#8);
   (4) partial-basket handling (cancel-replace unfilled / or flatten to stay neutral). Today:
   let the lifecycle run + VERIFY the EOD flatten terminates everything (the key proof).
+
+- ===== DEEP PANEL COMPLETE + battery running (2026-06-11 11:02 PDT) =====
+  Deep rebuild DONE: v1.1.0 features 612 dates (2024-01..2026-06), fwd_30m/fwd_60m 612 dates,
+  overnight 570,590 labels/612 dates (SPLIT-only basis = no dividend look-ahead). Universe PIT
+  613 dates. This is the first ~600-day clean panel (~300 effective daily samples vs ~40).
+  Launched the deep cost-gated battery as one-offs: 30m (bzdb8o0m2) + overnight (bntlxmbml),
+  each running raw/rank/vol_scaled/lambdarank x nocalendar, judged on NET P&L/sharpe_net/
+  breakeven (NOT IC). Overnight uses cadence_min=390 -> periods_per_year~252, NW lag=1 (non-
+  overlapping daily). CAVEATS to disclose with results: residual survivorship (delisted names
+  absent), earnings-gap noise NOT excluded (FMP deferred). The honest question: does ANYTHING
+  clear breakeven net on real depth? Results imminent.
