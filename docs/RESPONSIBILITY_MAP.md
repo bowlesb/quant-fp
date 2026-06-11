@@ -12,7 +12,7 @@ each cycle), not a narrow analyst who recommends and disappears. "Unowned" is a 
 | 2 | Infra/reliability/lights-on | **Production Eng** | all services up; ingestion fresh; no DB contention; recovers on restart |
 | 3 | ML/signal/features | **Modeller** | honest IC reporting (canary + sign-consistency); NO false-edge claims; experiment log current |
 | 4 | Architecture + tech debt | **Architect** (in Prod) | `docs/TECH_DEBT.md` triaged; periodic core-rebuild scheduled; complexity paid down, not accreted |
-| 5 | **Execution / trading / risk / P&L** | **(SEE OPEN DECISION)** | executor correct; caps + kill-switch bind from fresh broker truth; reconciliation matches; P&L truthful |
+| 5 | **Execution / trading / risk / P&L** | **Execution/Risk Engineer** (5th role) | executor correct; caps + kill-switch bind from fresh broker truth; reconciliation matches; P&L truthful |
 | 6 | **Release / deploy correctness** | **Production Eng** | RUNNING code == intended (rebuilt+restarted after edits); change verified end-to-end BEFORE its output is trusted |
 | 7 | Cross-role handoffs + orphans | **Manager** | every handoff works (new feature → QA via team_brief); scans for unowned concerns each wake |
 
@@ -30,8 +30,6 @@ each cycle), not a narrow analyst who recommends and disappears. "Unowned" is a 
   produced plausible-but-wrong v1.0.0 results under v1.1.0 ids. Nobody owned "running ==
   intended." → Area #6 created; Prod owns rebuild+restart+verify before trusting output.
 
-## OPEN DECISION (needs Ben): who owns Execution/Trading/Risk (area #5)?
-For a trading system this is the money surface and currently the biggest orphan.
-Options: (a) a 5th dedicated role "Execution/Risk Engineer"; (b) fold into Production
-Eng with an explicit execution mandate; (c) split — Modeller owns trade SHAPE, Prod owns
-plumbing, no single risk owner (status quo, NOT recommended). Recommendation: (a).
+## RESOLVED (Ben, 2026-06-11): Execution/Risk is a dedicated 5th role.
+The team is now FIVE: Manager + QA + Modeller + Production-Eng/Architect + Execution/Risk
+Engineer. The Manager launches four specialists each wake. Area #5 is owned, not orphaned.

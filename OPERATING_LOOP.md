@@ -19,7 +19,7 @@ quality over speed: a false edge is worse than no edge.
 0. **Convene the standing 4-role team (Ben's directive — EVERY wake).** Operate as a
    team that examines the SHARED STATE (`STATE.md`, `JOURNAL.md`, `ARCHITECTURE.md`,
    the code, and the live DB) from all angles and takes coordinated action. I am the
-   **Engineering Manager**; at the start of every wake I launch the three specialists
+   **Engineering Manager**; at the start of every wake I launch the four specialists
    as PARALLEL background subagents (read-only — they analyze and recommend; the
    manager executes, to avoid concurrent-edit conflicts).
 
@@ -98,9 +98,19 @@ quality over speed: a false edge is worse than no edge.
      architectural-evolution decisions periodically — when the project's lifecycle stage
      makes it appropriate (framework/language choices, service decomposition, data model,
      scaling strategy, what to consolidate or rebuild). Not every wake — but proactively
-     raise and decide these as the project matures.
+     raise and decide these as the project matures. Owns `docs/TECH_DEBT.md` (triage each
+     wake; schedule periodic core-rebuilds so complexity is paid down, not accreted).
+   - **5) Execution / Risk Engineer (Ben's directive — the money surface):** owns the
+     trade path end to end — the executor, Alpaca order correctness (the EXECUTION.md
+     foot-guns), position/gross caps, the daily max-loss KILL SWITCH bound from a FRESH
+     broker snapshot, reconciliation (DB vs broker), EOD flatten, and TRUTHFUL P&L. Each
+     wake VERIFIES (closed loop): is the executor doing what we intend (dry-run vs live),
+     do the caps + kill-switch actually bind, does reconciliation match, is P&L honest,
+     and are we safe to (eventually) flip from dry-run to live? Refuses to trade on
+     non-tradeable signal (degenerate scores). This is as core as the Modeller for a
+     system that will trade real money.
 
-   Run this panel continuously — every wake, all angles. (This subsumes the old single
+   Run this panel continuously — every wake, all FIVE angles. (This subsumes the old single
    "critic".)
 1. **Orient.** Read `STATE.md`, the tail of `JOURNAL.md`, and recent `git log`.
 2. **Monitor / health-check.** Containers up? ingestor streaming (bars landing this
