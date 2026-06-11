@@ -66,6 +66,36 @@ def within_ts_rank(y, ts) -> list[float]:
 VOL_FLOOR = 0.001                                  # floor for the vol-scaled denominator
 
 
+def _int_relevance(vals, ts_list) -> list[int]:
+    """Within-timestamp rank bucketed to 0..31 — LightGBM lambdarank's integer relevance."""
+    groups: dict[object, list[int]] = defaultdict(list)
+    for i, t in enumerate(ts_list):
+        groups[t].append(i)
+    out = [0] * len(vals)
+    for idxs in groups.values():
+        order = sorted(idxs, key=lambda i: vals[i])
+        m = len(order)
+        for rank, i in enumerate(order):
+            out[i] = int(round(31 * rank / (m - 1))) if m > 1 else 0
+    return out
+
+
+def _group_counts(ts_sorted) -> list[int]:
+    """Per-timestamp row counts for a ts-SORTED sequence (lambdarank `group`)."""
+    counts: list[int] = []
+    prev, n = object(), 0
+    for t in ts_sorted:
+        if t == prev:
+            n += 1
+        else:
+            if n:
+                counts.append(n)
+            prev, n = t, 1
+    if n:
+        counts.append(n)
+    return counts
+
+
 def run_experiment(X, y, ts, *, symbols=None, vol_scaler=None, label="raw", feature_idx=None,
                    params=None, n_folds=5, horizon_minutes=30, cadence_min=30, num_rounds=200,
                    seed=13, cost_bps_oneway=2.0, borrow_bps_annual=50.0):
@@ -85,26 +115,36 @@ def run_experiment(X, y, ts, *, symbols=None, vol_scaler=None, label="raw", feat
                     for v, scl in zip(vals, vol_scaler)]   # scl==scl filters NaN vol
         return list(vals)
 
-    def evaluate(fit_label, collect=False):
+    is_rank_obj = label == "lambdarank"
+
+    def _fit(train_idx, label_values):
+        if is_rank_obj:                            # learning-to-rank: needs group + int relevance
+            order = sorted(train_idx, key=lambda i: ts[i])
+            rel = _int_relevance([label_values[i] for i in order], [ts[i] for i in order])
+            dataset = lgb.Dataset(Xs[order], label=np.asarray(rel, dtype=float),
+                                  group=_group_counts([ts[i] for i in order]))
+            return lgb.train({**params, "objective": "lambdarank"}, dataset, num_boost_round=num_rounds)
+        fit = transform(label_values)
+        return lgb.train(params, lgb.Dataset(Xs[train_idx],
+                         label=np.asarray([fit[i] for i in train_idx], dtype=float)),
+                         num_boost_round=num_rounds)
+
+    def evaluate(label_values, collect=False):
         ics = {}
         coll: list[tuple] = []
         for fold in folds:
             if len(fold.train_idx) < 500 or len(fold.test_idx) < 50:
                 continue
             tr, te = fold.train_idx, fold.test_idx
-            booster = lgb.train(
-                params, lgb.Dataset(Xs[tr], label=np.asarray([fit_label[i] for i in tr], dtype=float)),
-                num_boost_round=num_rounds,
-            )
-            pred = booster.predict(Xs[te])
+            pred = _fit(tr, label_values).predict(Xs[te])
             ics.update(per_timestamp_ic(list(pred), [y[i] for i in te], [ts[i] for i in te]))
             if collect and symbols is not None:
                 coll.extend((float(pred[j]), float(y[i]), ts[i], symbols[i]) for j, i in enumerate(te))
         return ics, coll
 
-    real, test_preds = evaluate(transform(y), collect=True)
+    real, test_preds = evaluate(list(y), collect=True)
     shuffled = shuffle_within_groups(list(y), ts, seed)
-    canary, _ = evaluate(transform(shuffled))
+    canary, _ = evaluate(shuffled)
     lag = max(1, horizon_minutes // cadence_min)
     # Net-of-cost L/S backtest on the out-of-sample predictions (the economic gate).
     periods_per_year = 252.0 * (390.0 / cadence_min)
@@ -116,8 +156,7 @@ def run_experiment(X, y, ts, *, symbols=None, vol_scaler=None, label="raw", feat
     ) if test_preds else {}
     # Feature importances (gain) from a model on the full panel — lets the Modeller
     # interrogate WHICH features carry signal (and which are dead weight).
-    full = lgb.train(params, lgb.Dataset(Xs, label=np.asarray(transform(y), dtype=float)),
-                     num_boost_round=num_rounds)
+    full = _fit(list(range(len(y))), list(y))
     importances = [round(float(v), 1) for v in full.feature_importance(importance_type="gain")]
     return {
         "mean_ic": round(mean_ic(real), 5),

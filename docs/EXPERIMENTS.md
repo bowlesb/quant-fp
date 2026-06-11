@@ -119,3 +119,5 @@ net-negative AND its IC is untrustworthy. NEXT (Modeller): vol-SCALE / winsorize
 overnight label, filter earnings-gap days, and judge on net P&L (not IC). Also: turnover
 ~4/period is too high for "overnight" — the staleness/rebalance logic needs the daily cadence.
 Cost gate working as intended: it stopped a 0.094 IC from being mistaken for edge.
+| 2026-06-11T16:10:08+00:00 | DEEP_overnight_volscaled_nocal_v11 | overnight | vol_scaled |  | 0 |  |  |  | DEEP panel: overnight + VOL-SCALED label (stops ranking volatility instead of alpha) + no-calendar. Judge NET P&L. |
+| 2026-06-11T16:10:19+00:00 | DEEP_30m_volscaled_nocal_v11 | fwd_30m | vol_scaled |  | 0 |  |  |  | DEEP panel: 30m vol-scaled, no-calendar — does vol-normalization rescue any intraday signal at real depth? NET P&L. |

@@ -124,5 +124,21 @@
     "label": "vol_scaled",
     "features": "nocalendar",
     "set_version": "v1.1.0"
+  },
+  {
+    "id": "DEEP_overnight_lambdarank_nocal_v11",
+    "hypothesis": "DEEP: overnight + true LGBMRanker (lambdarank, grouped by ts) + no-calendar. Loss aligned to decile trading. NET P&L.",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": "nocalendar",
+    "set_version": "v1.1.0"
+  },
+  {
+    "id": "DEEP_30m_lambdarank_nocal_v11",
+    "hypothesis": "DEEP: 30m lambdarank, no-calendar \u2014 the trading-aligned loss on real depth. NET P&L.",
+    "horizon": "fwd_30m",
+    "label": "lambdarank",
+    "features": "nocalendar",
+    "set_version": "v1.1.0"
   }
 ]
