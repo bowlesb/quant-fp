@@ -16,3 +16,5 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 
 ## Scheduled core-rebuilds (maintenance windows)
 - (none scheduled yet) — Architect proposes one when debt in an area crosses a threshold.
+
+| P1 | build_feature_store is O(n²) in per-symbol bars | rebuilds close_by_ts/vol_by_ts from the growing bars[:i+1] per cadence point — fine at 51 days, ~36-55h over 600 days (stuck the deep rebuild) | proper fix: precompute close_by_ts/vol_by_ts ONCE per symbol + pass past-only views (careful re lookahead). WORKAROUND IN USE: rebuild in monthly chunks (bounds per-symbol bars → ~2min/month). |

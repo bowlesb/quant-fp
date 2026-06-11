@@ -511,3 +511,17 @@ why.
   (delisted absent) + earnings-gap noise (FMP deferred). Tech-debt noted: build_universe_history
   uses per-row inserts (slow, ~20min/600 dates) -> batch later. Market-day plan unchanged
   (validation+data, DRY_RUN true); open 06:30 PDT, rebuild runs into it (independent of live scoring).
+
+- ===== TWO FAILURES (2026-06-11 ~07:20 PDT, Ben caught the silence) =====
+  (1) I went SILENT ~7h: relied solely on the deep-rebuild completion notification and did
+  NOT arm a fallback wakeup, so when the job ran pathologically long I never woke — through
+  the open I'd promised to watch. LESSON (durable): ALWAYS arm a fallback ScheduleWakeup even
+  when notification-driven (per the guidance: long fallback so the loop survives a hang).
+  (2) The single-pass deep rebuild was O(n²) in per-symbol bars (build_feature_store rebuilds
+  the price dict per cadence point over the growing bar list) -> ~126/1000 symbols in 7h,
+  infeasible. FIX: killed it; rebuilding in MONTHLY CHUNKS (first month built in ~2min ->
+  full ~60-90min). Proper O(n²) fix logged as TECH_DEBT P1.
+  SILVER LINING — the live E2E loop WORKED at the open AUTONOMOUSLY: model-server fired its
+  first real cadences (988 syms @13:30 UTC open, 981 @14:00), stale guard held overnight then
+  released, dry-run executor logged valid baskets (ETF-excluded single names, not submitted).
+  The market-day VALIDATION objective passed on its own while I was silent.
