@@ -55,6 +55,8 @@ Run (from repo root):
     python3 scripts/qa_invariants.py --list      # list invariant names
     python3 scripts/qa_invariants.py --only universe_is_equities_only,calendar_et_correct
     python3 scripts/qa_invariants.py --update-baseline  # roll live_feature_coverage baseline fwd
+    python3 scripts/qa_invariants.py --nan-report [set_version]  # CANONICAL per-feature in-vector
+                                                 #   NaN — cite for any "panel is clean" claim
 
 Tiering: a monolithic run of ALL invariants exceeds 500s on the 5.5M-row panel. The FAST tier
 (universe composition trio + live_feature_coverage) runs in seconds as a standalone every-wake /
@@ -245,6 +247,62 @@ def active_set_version() -> str:
             "no feature_vectors present — cannot determine active set version"
         )
     return rows[0][0]
+
+
+def nan_report(set_version: str | None = None) -> int:
+    """Canonical per-feature IN-VECTOR NaN report (Manager fixture 2026-06-13).
+
+    THE authoritative NaN number every "panel is clean" claim must cite. It exists because the
+    same failure class bit us twice in two wakes: a rebuild-time "0.000% NaN" claim that counted
+    NULL / whole-vector-missing instead of the in-vector `'NaN'::float8` sentinel (v1.1.1's
+    returns are actually 12-20% NaN; v1.2.0's momentum 100%). This measures the ONE correct thing:
+    `vector[i]='NaN'::float8` per feature index, over ALL rows of a set_version. No set claims a
+    NaN figure without citing this output.
+
+    Args: set_version=None reports every set present; else just that one.
+    """
+    if set_version is None:
+        versions = [
+            r[0] for r in sql("SELECT DISTINCT set_version FROM feature_vectors")
+        ]
+        versions.sort()
+    else:
+        versions = [set_version]
+
+    print("\n" + "=" * 78)
+    print("CANONICAL PER-FEATURE IN-VECTOR NaN REPORT (vector[i]='NaN'::float8)")
+    print("=" * 78)
+    print("The authoritative NaN number. Cite THIS for any 'panel is clean' claim.\n")
+
+    for version in versions:
+        rows = sql(
+            "WITH exploded AS ("
+            "  SELECT u.idx, (u.val='NaN'::float8)::int AS isnan "
+            "  FROM feature_vectors f, LATERAL unnest(f.vector) WITH ORDINALITY AS u(val, idx) "
+            f"  WHERE f.source='historical' AND f.set_version='{version}'"
+            ") "
+            "SELECT e.idx, fs.names[e.idx] AS feature, round(100.0*avg(isnan),2) AS nan_pct, "
+            "       count(*) AS n "
+            f"FROM exploded e JOIN feature_sets fs ON fs.version='{version}' "
+            "GROUP BY e.idx, fs.names[e.idx] ORDER BY e.idx"
+        )
+        n_rows = scalar(
+            "SELECT count(*) FROM feature_vectors "
+            f"WHERE source='historical' AND set_version='{version}'"
+        )
+        print(f"--- set_version {version}  ({n_rows} rows) ---")
+        if not rows:
+            print("  (no historical rows)")
+            continue
+        worst = 0.0
+        for idx, feature, nan_pct, _cells in rows:
+            pct = float(nan_pct)
+            worst = max(worst, pct)
+            flag = "  ←" if pct > 0.0 else ""
+            print(f"  [{int(idx):>2}] {feature:<18} {pct:>6.2f}% NaN{flag}")
+        print(f"  worst feature: {worst:.2f}% NaN\n")
+    print("-" * 78)
+    return 0
 
 
 def _latest_members() -> tuple[str, list[tuple[str, str]]]:
@@ -1445,6 +1503,10 @@ def main() -> int:
     if "--update-baseline" in argv:
         update_coverage_baseline()
         return 0
+    if "--nan-report" in argv:
+        idx = argv.index("--nan-report")
+        target = argv[idx + 1] if idx + 1 < len(argv) else None
+        return nan_report(target)
     if "--fast" in argv:
         selected = select_tier(FAST)
     elif "--full" in argv:

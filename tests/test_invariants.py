@@ -61,15 +61,51 @@ def test_fill_reconciliation_is_registered() -> None:
     assert "fill_reconciliation" in qa.FAST_INVARIANTS
 
 
+def test_nan_report_is_callable() -> None:
+    # The canonical per-feature in-vector NaN report (Manager fixture 2026-06-13) must exist by
+    # this exact name — every "panel is clean" claim cites it, so its absence can never be silent.
+    assert callable(qa.nan_report)
+
+
+def test_known_issue_fingerprint_does_not_camouflage() -> None:
+    # The EXPECTED/OWNED tag must match ONLY the tight fingerprint, never blanket-suppress an
+    # invariant. v1.2.0 with all-WIP-family reds is owned; the moment a STABLE feature (or a
+    # different set) goes red, classify_known must return None so it surfaces as a real FAIL.
+    wip = qa.Result(
+        "warmup_coverage",
+        "FAIL",
+        "ACTIVE set v1.2.0: ...",
+        [
+            "[15] mom_3d: early=100.0% late=100.0% — 100.0% NaN (dead)",
+            "[22] ofi_5m: 16.6% NaN mid-session (post-warmup, steady-state degrade)",
+        ],
+    )
+    assert qa.classify_known(wip) is not None
+    stable_red = qa.Result(
+        "warmup_coverage",
+        "FAIL",
+        "ACTIVE set v1.2.0: ...",
+        wip.details
+        + ["[1] ret_5m: 25.0% NaN mid-session (post-warmup, steady-state degrade)"],
+    )
+    assert qa.classify_known(stable_red) is None
+    other_set = qa.Result(
+        "warmup_coverage",
+        "FAIL",
+        "ACTIVE set v1.1.1: ...",
+        ["[1] ret_5m: 25.0% NaN mid-session (post-warmup, steady-state degrade)"],
+    )
+    assert qa.classify_known(other_set) is None
+
+
 def test_terminal_order_states_match_executor() -> None:
     # qa.TERMINAL_ORDER_STATES is a hand-kept mirror of services/executor/main.py's set; if the
     # executor's terminal set drifts, fill_reconciliation would mis-judge "stuck" orders. Guard it.
-    executor_main = (
-        qa.REPO / "services" / "executor" / "main.py"
-    ).read_text()
-    assert 'TERMINAL_ORDER_STATES = {"filled", "canceled", "expired", "rejected", "done_for_day", "replaced"}' in executor_main, (
-        "executor's TERMINAL_ORDER_STATES changed — update qa.TERMINAL_ORDER_STATES to match"
-    )
+    executor_main = (qa.REPO / "services" / "executor" / "main.py").read_text()
+    assert (
+        'TERMINAL_ORDER_STATES = {"filled", "canceled", "expired", "rejected", "done_for_day", "replaced"}'
+        in executor_main
+    ), "executor's TERMINAL_ORDER_STATES changed — update qa.TERMINAL_ORDER_STATES to match"
 
 
 def test_family_valued_pct_averages_only_present_indices() -> None:
