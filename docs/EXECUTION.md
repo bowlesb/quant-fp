@@ -245,17 +245,21 @@ First live test of everything built last night, at the 09:30 ET open:
   SERIES), not on the 09:30 spot looking right.
 
 ## Standing future items (open exec work, by gating milestone)
-- **[gated on prod CA feed #18] Automatic "ex-date today → exclude from basket" guard in
-  candidate_pool.** HAZARD CLASS (generalized from KLAC 6/12): any name with a corporate-action
-  ex-date TODAY (forward/reverse split, large special dividend, spinoff) can present MIXED-BASIS
-  features at the open — the live spot price is on the new basis while multi-bar lookback features
-  span the adjustment boundary on the old basis → a garbage cross-sectional score that can pull
-  the name into the basket on artifact. Today this is handled by the MANUAL `SYMBOL_DENYLIST`,
-  which only works if a human spots the ex-date pre-open — not scalable/safe. Fix: once prod wires
-  the Alpaca Corporate Actions feed (#18) into the DB, add a candidate_pool filter that excludes
-  any symbol with an ex_date within the feature lookback window (≈ longest multi-bar feature
-  horizon, not just same-day) until its series is verified consistent. Until #18 lands, the manual
-  denylist + watching the CA calendar is the mitigation. Worth doing right after #18; not blocking M1.
+- **[BUILT 6/12, awaiting deploy] Automatic ex-date guard in candidate_pool (#18).** HAZARD CLASS
+  (generalized from KLAC 6/12): any name with a split ex-date inside the feature-lookback window
+  presents MIXED-BASIS features (live spot on the new basis, multi-bar lookback straddling the
+  adjustment boundary) → garbage cross-sectional score → basket risk on artifact. IMPLEMENTED:
+  `candidate_pool` now unions `SYMBOL_DENYLIST` with `ex_date_excluded(conn, today)`, which calls
+  prod's `quantlib.corporate_actions.names_with_recent_ex_date(conn, as_of, EX_DATE_LOOKBACK_DAYS,
+  SPLIT_TYPES)`. `EX_DATE_LOOKBACK_DAYS` default 15 (covers the longest live feature lookback,
+  mom_10d ≈ 14 calendar days; env-tunable). Splits only by default (dividends don't corrupt
+  intraday momentum). FAIL-OPEN until prod creates the `corporate_actions` table: the call catches
+  `psycopg.errors.UndefinedTable` (verified SQLSTATE 42P01) → empty set + a loud warning, so the
+  manual denylist still covers KLAC in the meantime. DEPLOY GATE: do NOT rebuild the executor until
+  (a) post EOD-flatten (no live basket at risk) AND (b) prod's post-close CA fetch has created+
+  populated the table — also the executor image must be rebuilt to pick up quantlib.corporate_actions
+  (the running image predates it). Pairs with QA's price-match invariant (backstop for already-bad
+  history). Two-layer defense, exactly as prod-architect-2 specified. Not blocking M1.
 - **[M4/M5 — mandatory before real money] Settled-day reconciliation vs broker statements.**
   Paper has no statements to reconcile against, so this can't be exercised now — but the muscle
   (fills + realized P&L + borrow fees vs the broker's official daily statement, T+1 settled) is
