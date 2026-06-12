@@ -908,3 +908,14 @@ writeback; build now, deploy post-flatten; QA then encodes fill_reconciliation i
 Coverage assigned: exec-side data integrity = exec implements/QA gates; post-restart
 bar-subscription swap VERIFICATION added to -2's runbook (count + ETF-absence spot-check).
 Noted Ben's new P-series process-milestone ladder in ROADMAP — will report both ladders.
+
+## 2026-06-12 — Manager: modeller-2 owns lane; exploration engine back; Plan B ratified
+modeller-2 (respawn) owns the Modeller lane. Exploration engine RESTARTED per Ben's
+directive: 48 curiosity experiments queued on clean v1.1.1 (solo-IC all 21 features,
+momentum isolation, leave-one-out, 4 long-shots), with an EXP_HEAVY_AFTER_PT=15:30
+quiet-window guard protecting the post-close batch. Harness extended (keep/drop lists).
+Manager rulings: (1) "single-threaded on OFI" risk RATIFIED -> #20 GICS sector map
+(prod, cheap, post-batch) + #21 news/event-flag Plan B SCOPING memo (modeller specs,
+prod scopes; not a build commitment; post-M2-start). News stream now has an owner.
+(2) OFI sequencing unchanged: tonight's #15 proof gates #10 panel investment.
+Post-close window order: batch ~13:05 PT -> #16 staging review -> exp queue >=15:30 PT.
