@@ -615,3 +615,21 @@ sums to -$10.07 exactly). GO for tiny paper lifecycle 6/12; NO-GO for any size-u
    Output format to be coordinated with Modeller.
 Known hazard kept on Exec ledger (post-M1): stranded-position catch-up path would queue
 market orders when closed; fix = broker-side LOC/`cls` EOD net.
+
+## 2026-06-12 (early) — Manager: Modeller prep done; 2 cross-lane bugs; M2 parallelism enforced
+Modeller (7cfa4b9): battery.py = ONE deterministic 4-gate command, smoke-verified on
+contaminated panel (survivorship gate demonstrably works: +1.17 -> -7.5 demeaned);
+hypotheses pre-registered BEFORE clean data (primary ~70%: "no edge" holds). Found 2
+bugs in Prod's lane: (A) experimenter image quantlib 23h STALE (vol_scaled would
+NameError — RUNNING != intended, again); (B) empty-panel results persisted permanently
+when loading mid-rebuild (6 DEEP_* results poisoned; race window OPEN during current
+rebuild). Both -> task #8 (prod-architect), wired as blocker of #4.
+Prod-architect: clean-universe rebuild ~25% at report; KEY FINDING — funds didn't just
+pollute, they DISPLACED ~160 equities/date from the 1000-cap; clean universe ~885-900/
+date (ROADMAP updated, c19dca9). Labels being recomputed too (Manager confirmed scope).
+Manager decisions: (1) set_version for clean panel -> Prod decides, my registered
+preference = NEW version (dirty v1.1.0 stays as QA fixture + provenance); (2) M2
+order-flow scaling runs IN PARALLEL — Prod's queue after #6/#8 is M2 work while the
+panel grinds; (3) delisted-name backfill orphan -> task #9 feasibility memo (Prod,
+post-M1; Modeller specs requirements); (4) suggested unattached 50-name OFI pilot
+panel to Modeller's queue (early read before M2 500-name scale-up).
