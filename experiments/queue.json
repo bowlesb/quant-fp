@@ -140,5 +140,554 @@
     "label": "lambdarank",
     "features": "nocalendar",
     "set_version": "v1.1.0"
+  },
+  {
+    "id": "C11_30m_raw_nocal",
+    "hypothesis": "Clean v1.1.1 30m baseline: raw, no-calendar (19 feats). Anchor the per-feature interrogation; expect IC ~0.027 net-negative matching battery.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_30m_rank_nocal",
+    "hypothesis": "Clean v1.1.1 30m: rank label, no-calendar. Trading-aligned loss; does rank beat raw IC on clean data?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_30m_raw_all",
+    "hypothesis": "Clean v1.1.1 30m raw, ALL 21 incl calendar. Quantify how much of any IC is the within-ts-constant calendar crutch (should add ~0 within-ts).",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "all",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_ret_5m",
+    "hypothesis": "Single-feature interrogation: ret_5m ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_ret_15m",
+    "hypothesis": "Single-feature interrogation: ret_15m ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_15m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_ret_30m",
+    "hypothesis": "Single-feature interrogation: ret_30m ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_30m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_ret_60m",
+    "hypothesis": "Single-feature interrogation: ret_60m ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_vol_30m",
+    "hypothesis": "Single-feature interrogation: vol_30m ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vol_30m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_vol_60m",
+    "hypothesis": "Single-feature interrogation: vol_60m ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vol_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_vol_z_30",
+    "hypothesis": "Single-feature interrogation: vol_z_30 ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_vwap_dev",
+    "hypothesis": "Single-feature interrogation: vwap_dev ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vwap_dev"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_range_pct",
+    "hypothesis": "Single-feature interrogation: range_pct ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "range_pct"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_gap_from_open",
+    "hypothesis": "Single-feature interrogation: gap_from_open ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_rel_ret_30m",
+    "hypothesis": "Single-feature interrogation: rel_ret_30m ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "rel_ret_30m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_1d",
+    "hypothesis": "Single-feature interrogation: mom_1d ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_3d",
+    "hypothesis": "Single-feature interrogation: mom_3d ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_3d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_5d",
+    "hypothesis": "Single-feature interrogation: mom_5d ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_5d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_10d",
+    "hypothesis": "Single-feature interrogation: mom_10d ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_1d_rel",
+    "hypothesis": "Single-feature interrogation: mom_1d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_3d_rel",
+    "hypothesis": "Single-feature interrogation: mom_3d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_3d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_5d_rel",
+    "hypothesis": "Single-feature interrogation: mom_5d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_5d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_solo_mom_10d_rel",
+    "hypothesis": "Single-feature interrogation: mom_10d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC \u2014 find which carry signal vs dead weight.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_mom_all_30m",
+    "hypothesis": "Momentum-only (10 feats) at 30m raw. Standalone momentum IC vs price-only \u2014 does cross-sectional momentum carry the signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_mom_abs_30m",
+    "hypothesis": "Absolute momentum only (mom_1d..10d). Abs vs rel split: is raw price momentum or universe-relative momentum the carrier?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_mom_rel_30m",
+    "hypothesis": "Relative momentum only (mom_*_rel). The universe-demeaned momentum \u2014 should be the cleaner cross-sectional signal.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_mom_short_30m",
+    "hypothesis": "Short-lookback momentum (mom_1d, mom_1d_rel) at 30m. Does recent (1d) momentum dominate?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_1d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_mom_long_30m",
+    "hypothesis": "Long-lookback momentum (mom_10d, mom_10d_rel) at 30m. Does the 10d lookback carry more than 1d?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_10d",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_price_only_30m",
+    "hypothesis": "Price/calendar features WITHOUT momentum (drop all mom_*). Isolate the intraday-price contribution alone on clean data.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "drop:mom_1d,mom_3d,mom_5d,mom_10d,mom_1d_rel,mom_3d_rel,mom_5d_rel,mom_10d_rel",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_mom_60m",
+    "hypothesis": "Momentum-only at 60m horizon raw. Momentum decays slower than 30m noise \u2014 does IC strengthen at 60m?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_60m_raw_nocal",
+    "hypothesis": "Clean 60m baseline: raw nocalendar (19 feats). Longer horizon, full price+mom set.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_overnight_raw_nocal",
+    "hypothesis": "Clean overnight raw nocalendar. Re-anchor overnight on clean panel (battery showed survivorship; this is the IC-level read).",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_overnight_mom_rel",
+    "hypothesis": "Overnight, relative-momentum only. Overnight gap continuation/reversal is where cross-sectional momentum is most plausible.",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_overnight_rank_nocal",
+    "hypothesis": "Overnight rank label nocalendar. Trading-aligned overnight ranking on clean data.",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_overnight_lambdarank_nocal",
+    "hypothesis": "Overnight lambdarank nocalendar. The config that looked best (pre-survivorship) \u2014 re-check IC/canary on clean panel.",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_1d",
+    "hypothesis": "Leave-one-out: momentum minus mom_1d. Marginal contribution of mom_1d \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_3d",
+    "hypothesis": "Leave-one-out: momentum minus mom_3d. Marginal contribution of mom_3d \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_5d",
+    "hypothesis": "Leave-one-out: momentum minus mom_5d. Marginal contribution of mom_5d \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_10d",
+    "hypothesis": "Leave-one-out: momentum minus mom_10d. Marginal contribution of mom_10d \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_1d_rel",
+    "hypothesis": "Leave-one-out: momentum minus mom_1d_rel. Marginal contribution of mom_1d_rel \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_3d_rel",
+    "hypothesis": "Leave-one-out: momentum minus mom_3d_rel. Marginal contribution of mom_3d_rel \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_5d_rel",
+    "hypothesis": "Leave-one-out: momentum minus mom_5d_rel. Marginal contribution of mom_5d_rel \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_loo_mom_10d_rel",
+    "hypothesis": "Leave-one-out: momentum minus mom_10d_rel. Marginal contribution of mom_10d_rel \u2014 does dropping it move IC?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_30m_volscaled_nocal",
+    "hypothesis": "Clean 30m vol_scaled label nocalendar. Does scaling the label by realized vol surface alpha hidden under vol-ranking?",
+    "horizon": "fwd_30m",
+    "label": "vol_scaled",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "C11_overnight_volscaled_nocal",
+    "hypothesis": "Clean overnight vol_scaled nocalendar. Vol-normalized overnight target.",
+    "horizon": "overnight",
+    "label": "vol_scaled",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_C11_reversal_short",
+    "hypothesis": "LONG-SHOT: short-horizon ret_5m+ret_15m ONLY at 30m, rank label. Pure intraday reversal/continuation play \u2014 do recent intraday returns predict next 30m cross-sectionally?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "ret_5m",
+      "ret_15m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_C11_range_vwap",
+    "hypothesis": "LONG-SHOT: range_pct + vwap_dev + gap_from_open ONLY. Intraday positioning (where price sits in its range) as a standalone signal.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "range_pct",
+      "vwap_dev",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_C11_mom_vol_interaction",
+    "hypothesis": "LONG-SHOT: relative momentum + vol features (mom_*_rel + vol_30m + vol_z_30). Momentum conditioned on volatility regime \u2014 does vol context sharpen momentum? (GBM captures the interaction.)",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_C11_mom_only_lambdarank",
+    "hypothesis": "LONG-SHOT: momentum-only with lambdarank at 30m. Learning-to-rank on pure momentum \u2014 does the ranking objective extract more from momentum than regression?",
+    "horizon": "fwd_30m",
+    "label": "lambdarank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
   }
 ]

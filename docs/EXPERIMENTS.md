@@ -514,3 +514,88 @@ survivorship-neutralized sharpe stays NEGATIVE — the discontinuity does not mo
 predicted (0.03% of momentum cells, intraday + labels untouched): "shown stable," not just "reasoned
 stable." VERDICT STANDS with this documented caveat; the price-only "no tradeable edge" conclusion is
 robust to the 11 flagged names. (Sensitivity output: experiments/battery_excl11.jsonl, gitignored.)
+
+## ★ EXPLORATION ENGINE RESTART (Modeller, 2026-06-12 post-M1) — Ben's directive: always-running, refilled
+
+M1 is DONE; the price-only verdict is the price-only ENDPOINT. Per Ben's directive the always-on
+exploration engine (the experimenter service) had gone cold (queue 100% drained, all 19 ids in
+results.jsonl) and is restarted TODAY with a curiosity-driven refill against the CLEAN v1.1.1 panel.
+
+WHAT THE ENGINE DOES (so the next wake doesn't re-derive it): experimenter reads experiments/queue.json,
+runs each id not already in results.jsonl via quantlib.research.run_experiment, appends to
+results.jsonl + this file. run_experiment returns within-ts rank-IC, NW_t, shuffle canary, a
+net-of-cost L/S backtest (net/sharpe/breakeven/turnover) AND gain importances. It is the IC-LEVEL
+interrogation engine; the 4-gate survivorship/cost battery (experiments/battery.py) stays a manual
+run for verdicts. The experimenter env is FEATURE_SET_VERSION=v1.0.0, so EVERY clean-panel entry MUST
+set "set_version": "v1.1.1" explicitly (else it reads the stale v1.0.0 18-feat panel).
+
+v1.1.1 FEATURE VOCABULARY (21): 11 price/calendar [ret_5m,ret_15m,ret_30m,ret_60m,vol_30m,vol_60m,
+vol_z_30,vwap_dev,range_pct,gap_from_open,rel_ret_30m,minute_of_day,day_of_week] + 10 momentum
+[mom_1d/3d/5d/10d and _rel variants]. NOTE: v1.1.1 has NO microstructure cols -> "nomicro"=="all";
+"nocalendar" drops the 2 calendar feats -> 19 price+mom feats (the "price-only" battery config).
+
+HARNESS EXTENSION (services/experimenter/main.py, this wake): the queue "features" field now also
+accepts an explicit KEEP-list (JSON list of names, or "keep:a,b,c") and a "drop:a,b,c" form — on top
+of all/nomicro/nocalendar. This unlocks single-feature interrogation, leave-one-out, and feature-group
+isolation WITHOUT touching run_experiment. (resolve_feature_idx; backward-compatible.)
+
+QUIET-WINDOW GUARD (same file + compose EXP_HEAVY_AFTER_PT=15:30): each experiment loads the full
+~5.5M-row panel = heavy DB reads. The engine now DEFERS heavy reads until ≥15:30 PT on weekdays
+(weekends always open) so the panel-wide reads grind OVERNIGHT and never contend with the live session
+or prod's 13:00-15:00 PT post-close batch. Verified firing: "quiet window (09:49 PT < 15:30 PT) —
+deferring". Engine rebuilt+restarted on the fresh image (stale-image hygiene). It will pick up the 48
+new ids after 15:30 PT tonight.
+
+QUEUE REFILL — 48 new C11_* / LONGSHOT_C11_* ids on v1.1.1 (curiosity-driven, run far more than we'd
+ship). Organized as interrogations of WHY the clean 30m signal is real-but-uneconomic and WHERE any
+residual might hide:
+- BASELINES: C11_30m_raw_nocal / rank_nocal / raw_all (re-anchor on clean panel; quantify calendar crutch).
+- PER-FEATURE SOLO (21 ids C11_solo_*): each feature ALONE at 30m raw -> which columns carry within-ts
+  IC vs dead weight. The core "why is this feature weak" interrogation.
+- MOMENTUM ISOLATION: mom_all / mom_abs / mom_rel / mom_short(1d) / mom_long(10d) — abs vs rel, short vs
+  long lookback. Plus C11_price_only_30m (drop all momentum) to isolate intraday-price contribution.
+- HORIZON CROSS: mom_60m, 60m_raw_nocal; overnight raw/rank/lambdarank/mom_rel (momentum should matter
+  most overnight — where the battery found survivorship; this is the IC-level read).
+- LEAVE-ONE-OUT (8 ids C11_loo_*): momentum minus each feature -> marginal contribution.
+- VOL-SCALED LABEL: 30m + overnight vol_scaled nocal (surface alpha hidden under vol-ranking).
+- LONG-SHOTS (4, deliberately weird, expect failure): reversal_short (ret_5m+ret_15m rank),
+  range_vwap (intraday positioning), mom_vol_interaction (momentum conditioned on vol regime — GBM
+  captures the interaction), mom_only_lambdarank (LTR on pure momentum).
+RESUMED CADENCE: 2-4 deliberate long-shots/day continue (the 4 LONGSHOT_C11_* seed tonight's batch);
+keep seeding ~daily, all logged here regardless of outcome (failures are data).
+
+### NEW FEATURE IDEAS — registered for data collection (idea -> data -> experiment -> keep/discard)
+
+Logged NOW because data collection has lead time (Ben's directive). These are NOT in the queue yet —
+they need data the panel doesn't have. Coordinate storage with prod-architect-2 in the shared
+featurestore path, parity with QA. Ranked by plausibility-of-edge at our latency:
+
+1. ⭐ ORDER-FLOW IMBALANCE (OFI) — ALREADY THE PRIMARY M2 BET, not new, but the #1 data dependency.
+   v1.2.0 OFI features (ofi_5m/15m/30m, signed_vol_z_30) need task #10 (build v1.2.0 panel over the
+   order-flow names) + M2 50->500 scaling + the ≥15:50 ET close-exclusion (spec'd). Pilot ~6/26.
+   This is where I most expect real edge; everything below is secondary.
+2. INTRADAY REVERSAL/AUTOCORRELATION STRUCTURE — short-horizon mean-reversion is the classic
+   microcap/midcap intraday edge. Partly testable NOW (LONGSHOT_C11_reversal_short), but the real
+   version needs finer-grained intra-bar returns / a reversal-specific label (e.g. residual vs a
+   short-window VWAP). DATA: derived from existing bars — LOW lead time. Spec a reversal label next wake.
+3. CROSS-SECTIONAL DISPERSION / BETA-TO-UNIVERSE — each name's sensitivity to the universe move and
+   its idiosyncratic residual. DATA: computable from the existing panel (rolling regression of name
+   return on universe-median return) — derived feature, no new ingestion. Candidate for a v1.3.0
+   feature group; spec next wake.
+4. NEWS / EVENT FLAGS — a news stream table was scoped long ago (STATE.md "News stream -> news table",
+   lower priority) but NEVER built. An is_news_today / minutes_since_news flag could gate or condition
+   the ranking. DATA: needs the news ingestion built first (medium lead time; FMP key exists). Raise
+   with Manager whether to prioritize the news stream now that price-only is exhausted.
+5. SECTOR / INDUSTRY NEUTRALIZATION — demeaning momentum within GICS sector could clean the
+   cross-sectional momentum signal (remove sector beta). DATA: needs a GICS sector map (STATE.md flags
+   "sector needs a non-Alpaca source, e.g. the existing FMP key"). Medium lead time. Sector-relative
+   momentum is a well-known improvement over raw relative momentum — worth the data.
+6. BORROW / SHORTABILITY / HARD-TO-BORROW as a feature (not just a trade filter) — asset_metadata
+   already has shortable/borrow flags refreshed daily; HTB names often carry short-side alpha. DATA:
+   EXISTS (asset_metadata) — LOW lead time. Easy add once we snapshot it PIT into the panel.
+
+NEXT-WAKE TODO (Modeller): (a) read tonight's C11_* results, write the "why is the signal weak"
+synthesis (which solo features carry IC; does momentum isolation beat price-only; overnight IC-level
+read); (b) seed the next 2-4 long-shots; (c) spec the lowest-lead-time new features (#3 dispersion/beta,
+#6 borrow, #2 reversal label) as concrete featurestore additions for prod-architect-2; (d) chase the
+OFI pilot prerequisites (#10 v1.2.0 panel, at-scale parity).

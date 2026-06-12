@@ -10,7 +10,8 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timezone
+from zoneinfo import ZoneInfo
 
 import psycopg
 
@@ -28,11 +29,66 @@ LOG_MD = os.environ.get("EXP_LOG_MD", "/app/docs/EXPERIMENTS.md")
 IDLE_SECONDS = int(os.environ.get("EXP_IDLE_SECONDS", "1800"))
 NOMICRO_FEATURES = 13          # first 13 of 18 are the non-micro set (stable prefix)
 
+# Each experiment loads the full multi-million-row panel — heavy DB reads. Defer them past
+# the live session + the post-close rebuild/batch window (prod owns 13:00-15:00 PT) so the
+# always-on engine grinds overnight without contending for the DB. Set the gate OPEN
+# (EXP_HEAVY_AFTER_PT="00:00") to disable.
+PT = ZoneInfo("America/Los_Angeles")
+HEAVY_AFTER_PT = os.environ.get("EXP_HEAVY_AFTER_PT", "15:30")   # earliest heavy reads, PT
+QUIET_RECHECK_SECONDS = int(os.environ.get("EXP_QUIET_RECHECK_SECONDS", "900"))
+
+
+def heavy_reads_allowed(now_pt: datetime) -> bool:
+    """True once the protected RTH + post-close-batch window has passed for the day.
+
+    Weekends are always allowed (no live session / batch). On weekdays, allow only at/after
+    HEAVY_AFTER_PT so the panel-wide reads land overnight, not during the session or the
+    13:00-15:00 PT post-close batch.
+    """
+    if now_pt.weekday() >= 5:
+        return True
+    hour_str, minute_str = HEAVY_AFTER_PT.split(":")
+    cutoff = dtime(int(hour_str), int(minute_str))
+    return now_pt.timetz().replace(tzinfo=None) >= cutoff
+
 DB_KWARGS = {
     "host": os.environ["DB_HOST"], "port": int(os.environ.get("DB_PORT", "5432")),
     "dbname": os.environ["DB_NAME"], "user": os.environ["DB_USER"],
     "password": os.environ["DB_PASSWORD"],
 }
+
+
+def resolve_feature_idx(sel: str | list[str] | None, names: list[str]) -> list[int] | None:
+    """Translate a queue `features` spec into column indices into `names`.
+
+    Supported forms (by NAME so they work for any set version):
+      - None / "all"           -> use every feature (returns None = no subsetting)
+      - "nomicro"              -> drop the microstructure features
+      - "nocalendar"           -> drop micro + calendar features
+      - ["mom_5d", ...]        -> KEEP exactly these features (explicit list)
+      - "keep:<a,b,c>"         -> KEEP exactly these comma-separated features
+      - "drop:<a,b,c>"         -> drop these comma-separated features, keep the rest
+
+    Explicit keep-lists enable single-feature interrogation, leave-one-out, and
+    feature-group isolation without changing the research harness.
+    """
+    if sel is None or sel == "all":
+        return None
+    if isinstance(sel, list):
+        keep = set(sel)
+        return [i for i, n in enumerate(names) if n in keep]
+    if sel == "nomicro":
+        drop = set(MICRO_NAMES)
+    elif sel == "nocalendar":
+        drop = set(MICRO_NAMES) | set(CALENDAR_NAMES)
+    elif sel.startswith("keep:"):
+        keep = {part.strip() for part in sel[len("keep:"):].split(",") if part.strip()}
+        return [i for i, n in enumerate(names) if n in keep]
+    elif sel.startswith("drop:"):
+        drop = {part.strip() for part in sel[len("drop:"):].split(",") if part.strip()}
+    else:
+        drop = set()
+    return [i for i, n in enumerate(names) if n not in drop] if drop else None
 
 
 def done_ids() -> set[str]:
@@ -96,9 +152,7 @@ def run_queue() -> int:
                 continue
             # named feature subsets, by NAME so they work for any set version:
             #   nomicro = drop microstructure; nocalendar = drop micro + calendar
-            drop = set(MICRO_NAMES) if sel == "nomicro" else \
-                (set(MICRO_NAMES) | set(CALENDAR_NAMES)) if sel == "nocalendar" else set()
-            feature_idx = [i for i, n in enumerate(names) if n not in drop] if drop else None
+            feature_idx = resolve_feature_idx(sel, names)
             # overnight = ~1 rebalance/day -> periods_per_year ~252 (cadence_min=390)
             exp_cadence = 390 if horizon == "overnight" else CADENCE_MIN
             vol_scaler = X[:, names.index("vol_30m")] if "vol_30m" in names else None
@@ -127,8 +181,15 @@ def run_queue() -> int:
 
 
 def main() -> None:
-    logger.info("experimenter starting: queue=%s set=%s", QUEUE, SET_VERSION)
+    logger.info("experimenter starting: queue=%s set=%s heavy_after_pt=%s",
+                QUEUE, SET_VERSION, HEAVY_AFTER_PT)
     while True:
+        now_pt = datetime.now(PT)
+        if not heavy_reads_allowed(now_pt):
+            logger.info("quiet window (%s PT < %s PT) — deferring heavy panel reads %ds",
+                        now_pt.strftime("%H:%M"), HEAVY_AFTER_PT, QUIET_RECHECK_SECONDS)
+            time.sleep(QUIET_RECHECK_SECONDS)
+            continue
         try:
             ran = run_queue()
         except (OSError, json.JSONDecodeError) as exc:
