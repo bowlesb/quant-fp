@@ -428,3 +428,59 @@ REVISIONS to the trigger-gated OFI pilot:
   partial-capture days.
 - Unchanged: needs v1.2.0 feature_vectors built (task #10), experimenter fixed (done), and the ≥15:50
   OFI exclusion baked into the shared featurestore. Still a curiosity read at 50 names, never a verdict.
+
+## ★ CLEAN v1.1.1 VERDICT (Modeller, 2026-06-12) — price-only STILL has NO tradeable edge (honest, fund-free)
+
+Ran experiments/battery.py FULL-depth on the CLEAN equities-only panel: set_version=v1.1.1, 5,525,040
+feature rows / 613 days / 785 symbols (per-date breadth ~742), 0 ETFs/funds, labels DELETE-then-insert
+re-demeaned over the clean cross-section (acceptance gate PASSED: min(computed_at) 2026-06-12 06:43Z all
+3 horizons, post-rebuild). 4 gates: net-of-cost L/S + shuffle canary + de-fragmented overnight labels +
+per-symbol survivorship neutralization. Deterministic (host quantlib mounted; image had VOL_FLOOR).
+
+RESULTS (price-only = nocalendar 19 feats; net/sharpe per-period; breakeven = one-way bps the signal
+absorbs before net<=0; SURV-OUT = per-symbol-demeaned re-backtest):
+
+  fwd_30m    IC      NW_t   canary    net        sharpe  breakeven  turn   SURV-OUT sharpe
+  raw        0.0270  19.99  -0.0018   -0.000183  -3.46   1.42bps    3.13   -3.51
+  rank       0.0318  21.40  -0.0008   -0.000184  -3.24   1.44bps    3.25   -3.34
+  vol_scaled 0.0268  19.79  -0.0014   -0.000208  -4.15   1.37bps    3.27   -3.64
+  lambdarank 0.0010   0.33  -0.0015   -0.000238  -2.01   0.58bps    1.67   -6.88
+
+  overnight  IC      NW_t   canary    net        sharpe  breakeven  turn   SURV-OUT sharpe
+  raw        0.0142   1.70  -0.0056    0.000336   0.58   3.20bps    2.95   -1.79
+  rank       0.0189   2.19   0.0001    0.000265   0.39   2.91bps    3.12   -1.20
+  vol_scaled 0.0076   1.03  -0.0046   -0.000344  -0.66   0.97bps    3.14   -1.68
+  lambdarank 0.0358   2.80   0.0020    0.001700   1.66   9.65bps    2.25   -0.35
+
+VERDICT: ALL 8 configs => NO tradeable edge. The price-only "no edge" conclusion HOLDS on clean,
+fund-free, re-demeaned data. **The 21% fund contamination did NOT mask or fake a real edge.**
+
+HONEST READ (mechanism, unchanged from the contaminated run):
+- **30m intraday: REAL signal, NOT economic.** IC 0.027-0.032 with a CLEAN canary (~ -0.001) and huge
+  NW t (~20 over 613 days) = a genuinely, reliably non-zero cross-sectional intraday price signal. But
+  net-NEGATIVE: breakeven 1.37-1.44bps < ~2bps realistic one-way cost. Turnover (~3.1/period) kills it.
+  Removing funds barely moved the IC (0.024->0.027) — funds were neither inflating nor diluting it.
+  SURV-OUT also negative => not even a per-symbol-drift artifact; just uneconomic.
+- **overnight: apparent win is SURVIVORSHIP, not timing.** lambdarank shows net +0.0017, sharpe 1.66,
+  breakeven 9.65bps (clears cost) — but per-symbol demean COLLAPSES it to sharpe -0.35 / net -0.00016.
+  Same story as contaminated. The model ranks ex-post survivors' persistent drift, not overnight timing.
+  Timing alpha ~ 0 on every overnight config (all SURV-OUT sharpe negative).
+
+PRE-REGISTRATION SCORECARD (predictions logged BEFORE seeing this, commits 8bc0bbd/411831c):
+- PRIMARY (~70%, "no tradeable edge holds"): ✅ CONFIRMED — 8/8 no edge.
+- 30m stays net-negative regardless of IC direction: ✅ (IC ~unchanged, net-negative).
+- overnight = survivorship, timing ~0: ✅ (SURV-OUT collapses every config).
+- H4 "removing funds LOWERS the overnight ranking canary": ✅ lambdarank canary 0.0077->0.0020. The
+  TRIPWIRE (canary stays elevated => intrinsic feature leakage) did NOT trigger — it dropped, and the
+  survivorship gate independently kills the residual. Clean.
+- Breadth tripwire: ✅ in PURPOSE (NW t ballooned to ~20 but I pre-committed to judge BREAKEVEN not t,
+  and breakeven<cost => no edge). MINOR MISS on direction: I predicted t might FALL (cross-section
+  933->742); instead the 613-day time depth dominated and t rose. The lesson held: t is not edge.
+- The "would-change-everything" low-turnover tail: did NOT materialize. lambdarank cut 30m turnover to
+  1.67 but IC collapsed to 0.001; overnight lambdarank cleared breakeven but was survivorship. No
+  price-only config produced survivorship-free positive net.
+
+CONCLUSION (unchanged, now TRUSTWORTHY not contaminated): price-only cross-sectional features have NO
+tradeable edge under the 4-gate battery. PATH TO EDGE remains BETTER DATA — universe-wide ORDER-FLOW
+(v1.2.0 OFI, gated on M2 scaling + the 50-name pilot) and delisted-name backfill (to test overnight
+survivorship-free at the source rather than via the conservative demean proxy). No false edge shipped.

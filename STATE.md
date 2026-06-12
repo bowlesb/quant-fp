@@ -1,6 +1,6 @@
 # STATE — read this first
 
-**Mode:** paper | **Last updated:** 2026-06-11
+**Mode:** paper | **Last updated:** 2026-06-12
 **Operating mode:** autonomous maintainer loop (`OPERATING_LOOP.md`) — 5-role team every wake;
 self-schedules WITH A FALLBACK (never silent); bar = don't stop until edge-in-production.
 
@@ -12,24 +12,28 @@ Real paper orders on Alpaca (DRY_RUN=false). NO proven edge yet -> intentionally
 P&L is noise. Live exercise found+fixed: stale-close pricing (->NBBO), mode/traded_today
 re-submit loop, dup-coid guard, fills capture, lambdarank label-31. Open exec items: realized-
 P&L attribution per name, partial-basket cancel-replace, broker-side LOC EOD net.
-**EDGE (ML) — verdict NOW SUSPECT pending clean re-run.** ⚠️ OVERNIGHT FINDING (2026-06-11):
-the ~600-day panel was ~21% CONTAMINATED — 207 of 1000 universe members are ETFs/leveraged-
-inverse/VIX-futures funds (SOXL, TQQQ, SQQQ, UVXY, VXX, UPRO...), RANKED cross-sectionally
-against stocks (1.59M feature rows). The "no edge" verdict below was computed on this polluted
-cross-section. SUPERVISED OPEN (gates everything): exclude funds (scripts/etf_exclusion.sql),
-rebuild clean equity panel, RE-RUN the price-only battery -> does "no edge" hold or was it masked?
-**Prior (contaminated) verdict — price-only cross-sectional features have NO tradeable
-edge**, on the deep ~600-day panel via 4 gates (net-of-cost L/S backtest +
-shuffle canary + label de-fragmentation + survivorship neutralization):
-- 30m intraday: REAL signal (IC 0.024-0.032, clean canary at depth) but NET-NEGATIVE after costs
-  (breakeven ~1.3bps < ~2bps) -> uneconomic at turnover.
-- overnight: apparent strong result (lambdarank sharpe_net +2.1, breakeven 15bps) was SURVIVORSHIP
-  (model ranks ex-post survivors); per-symbol-neutralized sharpe -0.2 -> ~0 timing alpha.
-PATH TO EDGE = BETTER DATA, not more price-feature modeling: universe-wide ORDER-FLOW (the
-Architect's sharded trade/quote ingestion — currently only 10 symbols) + delisted-name backfill.
-Built+verified this round: cost gate, split-only overnight labels, breadth floor, warmup assert,
-4-label loss-alignment battery, de-fragmented daily overnight labels, determinism, survivorship
-neutralization. NEXT EDGE WORKSTREAM: order-flow data (sharded ingestion). No false edge shipped.
+**EDGE (ML) — verdict RE-VALIDATED on CLEAN data (2026-06-12): price-only has NO tradeable edge.**
+✅ The contaminated verdict was RE-RUN on the clean equities-only panel and HELD — the ~21% fund
+contamination did NOT mask or fake a real edge. CLEAN re-run (experiments/battery.py, set_version
+v1.1.1: 5.5M rows / 613 days / 785 symbols / 0 funds; labels re-demeaned over the clean ~742-name
+cross-section; acceptance gate passed). All 8 configs (30m + overnight × raw/rank/vol/lambdarank)
+under the 4 gates (net-of-cost L/S + shuffle canary + de-fragmented overnight + survivorship
+neutralization) => NO EDGE. Full numbers + pre-registration scorecard in docs/EXPERIMENTS.md
+("★ CLEAN v1.1.1 VERDICT"). Mechanism (unchanged from contaminated, now trustworthy):
+- 30m intraday: REAL signal (IC 0.027-0.032, CLEAN canary ~-0.001, NW t ~20 over 613 days) but
+  NET-NEGATIVE after costs (breakeven 1.37-1.44bps < ~2bps) -> uneconomic at turnover. Removing funds
+  barely moved IC (0.024->0.027). NB: huge t is panel DEPTH, not edge — the economic gate (breakeven)
+  is what binds.
+- overnight: apparent win (lambdarank sharpe_net +1.66, breakeven 9.65bps) COLLAPSES under per-symbol
+  demean to sharpe -0.35 -> SURVIVORSHIP, ~0 timing alpha. (Fund-removal LOWERED the overnight canary
+  0.0077->0.0020, confirming funds were part of it; the survivorship gate kills the residual.)
+PATH TO EDGE = BETTER DATA, not more price-feature modeling: universe-wide ORDER-FLOW (v1.2.0 OFI;
+gated on M2 50->500-name scaling + the trigger-gated 50-name pilot ~6/26) + delisted-name backfill
+(test overnight survivorship-free at the source, not via the conservative demean proxy). The price-only
+re-validation is the price-only ENDPOINT — no more price-feature modeling until better data lands.
+Built+verified across this arc: cost gate, split-only overnight labels, breadth floor, warmup assert,
+4-label battery, de-fragmented overnight labels, determinism, survivorship neutralization, and the
+committed one-command battery.py (chimera-guarded vs dirty set_versions). No false edge shipped.
 
 ## (history below — older E2E plan)
 
