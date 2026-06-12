@@ -74,6 +74,11 @@ OUT_JSONL = os.environ.get("BATTERY_OUT", "/app/experiments/battery_results.json
 
 SEED = 13
 N_FOLDS = 5
+# v1.1.0's original labels are OVERWRITTEN in place by the clean v1.1.1 recompute (the labels table
+# has no version column). Re-running the battery on v1.1.0 features against the fresh labels would
+# join dirty features to clean labels = a meaningless chimera. The canonical v1.1.0 "before" results
+# already live in experiments/results.jsonl. Refuse it in CODE, not memory.
+FORBIDDEN_VERSIONS = {"v1.1.0"}
 NUM_ROUNDS = 200
 LABELS = ["raw", "rank", "vol_scaled", "lambdarank"]
 # horizon -> (purge horizon_minutes, cadence_min). overnight = ~1 rebalance/day (390 min RTH).
@@ -277,6 +282,13 @@ def run_horizon(conn: psycopg.Connection, horizon: str) -> list[dict[str, object
 
 
 def main() -> None:
+    if SET_VERSION in FORBIDDEN_VERSIONS:
+        sys.exit(
+            f"REFUSING SET_VERSION={SET_VERSION}: its original labels were overwritten by the clean "
+            "v1.1.1 recompute, so battery-ing it against the fresh labels produces a meaningless "
+            "chimera (dirty features ⨝ clean labels). The canonical v1.1.0 'before' lives in "
+            "experiments/results.jsonl. Use SET_VERSION=v1.1.1 for the clean run."
+        )
     mode = f"SMOKE (last {SMOKE_DAYS}d)" if SMOKE_DAYS is not None else "FULL"
     print(f"PRICE-ONLY 4-GATE BATTERY | set={SET_VERSION} | mode={mode}", flush=True)
     all_rows: list[dict[str, object]] = []
