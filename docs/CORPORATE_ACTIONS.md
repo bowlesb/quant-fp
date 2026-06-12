@@ -12,13 +12,20 @@ DONE (staged, import-validated, no live-service change yet):
   = the #17 re-fetch trigger), `names_with_recent_ex_date()` (executor ex-date guard consumer).
 - `services/backfiller/main.py fetch-corporate-actions` — tool subcommand (CA_START/CA_END/
   BACKFILL_SYMBOLS env; logs new-action symbols).
+DONE (wiring staged, import-validated; activates at the post-close backfill-manager rebuild):
+- backfill-manager: `process_corporate_actions()` runs once/day (gated on corporate_actions
+  max(ingested_at)::date) — refreshes the feed for the universe (±CA_WINDOW_DAYS=35), then
+  full-history single-pass re-fetches any symbol that just gained a RECENT split (ex_date within
+  CA_REFETCH_LOOKBACK_DAYS=45). The recent-only gate prevents a cold-start re-fetch storm; this is
+  the permanent #17 adjustment-consistency guarantee. The backfill-manager OWNS the daily fetch, so
+  no separate scheduler job is needed (avoids a duplicate fetcher).
+
 PENDING (DB-write / restart — batched post-close, or on Manager's DB-clear):
-1. Apply DDL to the live DB + first fetch over the universe (`fetch-corporate-actions`).
-2. backfill-manager: on `upsert` returning new-action symbols, full-history single-pass re-fetch
-   of each (closes the #17 mid-backfill class permanently).
-3. scheduler: daily rolling CA fetch (last 30d + next 35d) so the feed stays current.
-4. Consumers in other lanes: QA wires the table into the jump invariant; execution wires
-   `names_with_recent_ex_date()` into the candidate-pool guard. Needs a QA unit test for the parser.
+1. Apply DDL to the live DB + first fetch over the universe (`fetch-corporate-actions`) — note the
+   first backfill-manager cycle post-rebuild also self-populates the table.
+2. Consumers in other lanes: QA wires the table into the jump invariant; execution wires
+   `names_with_recent_ex_date()` into the candidate-pool guard (signature handed off). Needs a QA
+   unit test for the parser.
 
 ## Why this exists
 The KLAC incident (2026-06-12): a real **10:1 forward split, ex-date 2026-06-12** (announced

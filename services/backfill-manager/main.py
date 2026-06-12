@@ -13,8 +13,14 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical.corporate_actions import CorporateActionsClient
 
 from quantlib.barsource import fetch_and_store_bars
+from quantlib.corporate_actions import (
+    SPLIT_TYPES,
+    fetch_corporate_actions,
+    upsert_corporate_actions,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backfill-manager")
@@ -22,6 +28,12 @@ logger = logging.getLogger("backfill-manager")
 TARGET_DAYS = int(os.environ.get("BACKFILL_TARGET_DAYS", "90"))
 IDLE_SECONDS = int(os.environ.get("BACKFILL_IDLE_SECONDS", "3600"))
 PARTITION_PAUSE = float(os.environ.get("BACKFILL_PAUSE_SECONDS", "0.3"))
+# A newly-seen SPLIT with an ex_date within this many days of today triggers a full-history
+# single-pass re-fetch of that symbol (the #17 adjustment-consistency guarantee). Bounded so a
+# cold-start populate of the corporate_actions table doesn't re-fetch every historically-split
+# name — only genuinely recent/imminent splits (the KLAC mid-backfill hazard) re-fetch.
+CA_REFETCH_LOOKBACK_DAYS = int(os.environ.get("CA_REFETCH_LOOKBACK_DAYS", "45"))
+CA_WINDOW_DAYS = int(os.environ.get("CA_WINDOW_DAYS", "35"))
 
 DB_KWARGS = {
     "host": os.environ["DB_HOST"],
@@ -32,6 +44,10 @@ DB_KWARGS = {
 }
 
 data_client = StockHistoricalDataClient(
+    os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
+)
+
+corporate_actions_client = CorporateActionsClient(
     os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
 )
 
@@ -80,6 +96,63 @@ def record_window(conn: psycopg.Connection, m_start: date, status: str, bars: in
         )
 
 
+def corporate_actions_polled_today(conn: psycopg.Connection) -> bool:
+    """True if the corporate_actions table was already refreshed today (UTC) — the CA poll is a
+    once-per-day job, not every backfill cycle."""
+    today = datetime.now(timezone.utc).date()
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(ingested_at)::date FROM corporate_actions")
+        row = cur.fetchone()
+    return row is not None and row[0] == today
+
+
+def full_history_refetch(conn: psycopg.Connection, symbol: str) -> int:
+    """Re-fetch a single symbol's WHOLE backfill window in ONE Adjustment.ALL pass, so its series
+    can never straddle a mid-backfill adjustment boundary (the KLAC failure class). Idempotent
+    upsert overwrites the mixed-basis months with a single consistent basis."""
+    now = datetime.now(timezone.utc)
+    start = datetime.combine(
+        now.date() - timedelta(days=TARGET_DAYS), datetime.min.time(), tzinfo=timezone.utc
+    )
+    end = now - timedelta(minutes=1)
+    return fetch_and_store_bars(data_client, conn, [symbol], start, end, PARTITION_PAUSE)
+
+
+def process_corporate_actions(conn: psycopg.Connection, symbols: list[str]) -> None:
+    """Once/day: refresh the corporate_actions feed for the universe, then full-history re-fetch
+    any symbol that just gained a RECENT split (the #17 adjustment-consistency guarantee). Recent-
+    only so a cold-start populate doesn't re-fetch every historically-split name."""
+    if corporate_actions_polled_today(conn):
+        return
+    today = datetime.now(timezone.utc).date()
+    actions = fetch_corporate_actions(
+        corporate_actions_client,
+        symbols,
+        today - timedelta(days=CA_WINDOW_DAYS),
+        today + timedelta(days=CA_WINDOW_DAYS),
+    )
+    newly_inserted = upsert_corporate_actions(conn, actions)
+    refetch = sorted(
+        {
+            action.symbol
+            for action in actions
+            if action.symbol in newly_inserted
+            and action.action_type in SPLIT_TYPES
+            and action.ex_date >= today - timedelta(days=CA_REFETCH_LOOKBACK_DAYS)
+        }
+    )
+    logger.info(
+        "corporate_actions: %d actions upserted, %d new; %d recent-split re-fetch(es): %s",
+        len(actions),
+        len(newly_inserted),
+        len(refetch),
+        ",".join(refetch) if refetch else "(none)",
+    )
+    for symbol in refetch:
+        written = full_history_refetch(conn, symbol)
+        logger.info("CA-triggered full-history re-fetch %s: %d bars", symbol, written)
+
+
 def run_once() -> bool:
     """Fetch one outstanding month window. Returns True if it did work."""
     now = datetime.now(timezone.utc)
@@ -89,6 +162,7 @@ def run_once() -> bool:
         if not symbols:
             logger.info("no universe yet; idling")
             return False
+        process_corporate_actions(conn, symbols)
         done = done_months(conn)
         # Oldest-missing first; the current month is never 'done' (always refresh).
         for m_start in target_months():
