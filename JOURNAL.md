@@ -828,3 +828,20 @@ patch offered to Modeller). computed_at gate PASSED. Two rebuild bugs fixed en r
 Prod queue approved as sequenced: #13 now (scheduler-only), KLAC root-cause read-only
 (fix deferred to post-close ingestor batch), #11 staging, #12 held until battery
 completes (DB contention). Constraint intact: no ingestor restart during RTH.
+
+## 2026-06-12 — Manager: VERDICT lands + split-discontinuity HOLD resolved as CAVEAT
+Battery (Modeller, 224d6ef): "price-only NO tradeable edge" RE-VALIDATED on clean
+v1.1.1 — contamination neither faked nor masked edge. 30m: real signal (IC 0.027-0.032,
+clean canary, NW t~20 = depth not edge) but net-NEGATIVE (breakeven 1.4bps < ~2bps).
+Overnight: survivorship (sharpe 1.66 -> -0.35 per-symbol-demeaned). Pre-registered ~70%
+prediction held. Price-only ENDPOINT: path to edge = order-flow + delisted backfill.
+HOLD crossed in flight: Prod found backfill split-adjustment discontinuity. REVERSAL:
+KLAC backfill is 10x-DEFLATED (mixed adjustment states from month-window backfilling);
+STREAM was correct all along. Blast radius: momentum-only (8/21 feats), <=11 names,
+~0.03% of momentum cells; fwd labels unaffected (within-session); overnight labels
+unaffected (separate one-shot SPLIT fetch). Manager ruling: CAVEAT conditional on
+Modeller's 11-name sensitivity pass (show stable, not just reason stable) -> then #3
+GREEN + M1 declared. Task #17: adjustment-consistent backfill + per-name artifact
+verification + QA >3x-jump invariant (corp-action cross-checked). QA ledger corrected
+(detection right, direction wrong). Denylist stays (live mixed-basis garbage either
+way); removal condition now points at #17.
