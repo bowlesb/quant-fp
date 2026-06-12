@@ -1146,3 +1146,14 @@ Day P-series read (Ben's process ladder): P1 evidence-first held under pressure 
 day — 5 catch-by-verification saves, 3 self-corrections pre-consumption, every gate
 evidence-closed; review policy survived its first incident (absorption) and first
 full Tier-1 cycle (#19) on day one.
+
+## 2026-06-12 — Manager: duplicate team-lead TERMINATED by Ben — single manager restored
+Ben killed the co-manager session (~14:55 PT). Its final commit (c46cf89) was a clean
+night-complete wrap — no mid-flight coordination orphaned. For the record: throughout
+the duplication its rulings stayed consistent with the canonical session's (the shared
+task board as single source of rulings is WHY), and its contributions were real
+(#19 bless chain, load-bearing ret_5m read, batch synthesis). Sole manager = this
+session. Lesson for the platform: duplicate coordinators are survivable when (a) all
+rulings live on a shared board, (b) provenance rules gate consequential actions,
+(c) ledgers are append-only. Lesson for ops: session managers must be killable and
+findable — Ben had to do this by hand.
