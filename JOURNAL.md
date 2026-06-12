@@ -1039,3 +1039,21 @@ rebuild-batch (one ingestor restart + subscription verify) -> #12 + grinds resum
 Research day net: Family B DISCARD (survivorship), OFI pipeline validated (no read),
 signed_vol_z_30 norm bug caught, ex-div hygiene verified. #21 news scoping pulled to
 6/13 morning — queued-signal inventory if OFI fails is otherwise empty.
+
+## 2026-06-12 — Manager: ex-div corrected verdict — hygiene win, no hidden alpha; shapes + #22
+Modeller (bb0659b): ex-div correction LOWERS overnight IC on every config (raw
+0.0142->0.0096; lambdarank 0.0358->0.0339) — part of the raw "signal" was predicting
+the mechanical dividend drop. Survivorship-neutralized sharpe stays NEGATIVE everywhere
+=> overnight was and remains survivorship; no hidden alpha. Family B discard FINAL
+(pre-registered trigger not met). Hygiene fix ships as correctness PR (deflates false
+IC in all future overnight work) with yield-denominator refinement.
+Strategy-shape backlog started (b2a7fa2): 7 shapes; weekend picks = open-gap dynamics,
+opening-range breakout (first non-cross-sectional shape), horizon ensemble — Tier-2
+sandbox labels until a shape proves out. Shapes 3/5/6 queued on CA/sector/news data.
+Task #22 (Architect): composable label/feature materialization — kill the monolithic-
+rebuild bottleneck (3 workarounds needed today); design memo this weekend, label-
+versioning column first brick. "Iterate on any strategy cheaply" is currently false at
+the label layer; #22 makes it true.
+Close window mid-flight: BOOK FLAT received; max_locks=2048 staged; DB restart pending
+modeller pause-ack (10-min deadline set, then kill-and-restart); exec deploy + rebuild-
+batch + #12 serialized behind it.
