@@ -52,6 +52,10 @@ def load_exdiv_yields(conn: psycopg.Connection) -> dict[tuple[str, object], floa
     Keyed by the LABEL's local date D (the night close(D)->open(D+1)); the artifact hits when
     ex_date == D+1. Yield = cash_amount / prior RTH close (15:59 ET backfill bar). READ-ONLY.
     """
+    # The bars_1m hypertable is 253M rows over many chunks; an unbounded scan with a
+    # time-of-day predicate touches every chunk and exhausts the lock table (out of shared
+    # memory). Bound the raw ts to the panel window so TimescaleDB prunes chunks, and pull only
+    # the daily LAST close per (symbol, date) via DISTINCT ON (cheaper + robust if 15:59 is missing).
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -59,11 +63,14 @@ def load_exdiv_yields(conn: psycopg.Connection) -> dict[tuple[str, object], floa
               SELECT symbol, ex_date, cash_amount
               FROM corporate_actions_pit
               WHERE action_type = 'cash_dividend'
+                AND ex_date BETWEEN %(start)s AND %(end)s
             ),
             px AS (
               SELECT symbol, (ts AT TIME ZONE 'America/New_York')::date AS d, close
               FROM bars_1m
               WHERE source = 'backfill'
+                AND ts >= %(start)s::timestamptz
+                AND ts <  (%(end)s::date + 1)::timestamptz
                 AND (ts AT TIME ZONE 'America/New_York')::time = '15:59'
             )
             SELECT d.symbol, (d.ex_date - 1) AS label_date,
@@ -71,7 +78,8 @@ def load_exdiv_yields(conn: psycopg.Connection) -> dict[tuple[str, object], floa
             FROM div d
             JOIN px ON px.symbol = d.symbol AND px.d = d.ex_date - 1
             WHERE px.close > 0 AND d.cash_amount IS NOT NULL
-            """
+            """,
+            {"start": "2024-01-01", "end": "2026-06-14"},
         )
         return {(sym, label_date): float(yld)
                 for sym, label_date, yld in cur.fetchall() if yld is not None}
