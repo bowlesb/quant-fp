@@ -59,6 +59,16 @@ capture-regression signal qa-2 watches). This is the acceptance gate at each sca
 $47.3B → rank-500 QXO $281M; clean liquidity floor that supports OFI). The LIVE mechanism derives this
 DYNAMICALLY from universe_membership by ADV at subscription build time (self-maintains as the universe
 churns) — NOT a static committed list; modeller-2's /tmp CSV is the reference snapshot.
+RATIONALE (modeller-2): the OFI STREAM (500) and research-panel BREADTH (1000) are DIFFERENT things —
+sector-neutral momentum (#20) + dispersion run on the FULL 1000-name panel (price features), so they do
+NOT depend on which 500 stream order-flow; pure-ADV costs them nothing. The 500 should optimize for what
+it's FOR = OFI SIGNAL QUALITY: OFI (signed-volume imbalance) needs enough trades/minute to be trustworthy,
+so a sector-spread cut would pull in low-ADV names where OFI is WEAKEST and where the at-scale parity
+re-proof is LEAST likely to hold. Concentration (NVDA/AMD/AAPL-heavy) is fine at the capture tier — book
+diversification happens at portfolio construction off the full panel, not here.
+V2 (post-pilot, NOT now): if the OFI pilot proves edge AND sector_map (#20) lands, "is OFI
+sector-CONDITIONAL?" would want sector coverage in the stream — a deliberate sector-spread expansion gated
+on the pilot working. First 500 = max signal quality = pure ADV.
 - **Soft boundary → size the cut for EVEN sharding, not exactly 500.** Rank 501 (IR $281.0M) ≈ rank 500
   (QXO $281.2M), so ±20 names costs ~nothing in liquidity. WORKING COUNT: **512 names / 4 shards =
   128/shard** (clean power-of-two; +12 vs 500, within tolerance). Final count tracks the Manager's
