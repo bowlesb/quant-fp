@@ -30,6 +30,9 @@ SET_VERSION = os.environ.get("FEATURE_SET_VERSION", "v1.0.0")
 CADENCE_MIN = int(os.environ.get("FEATURE_CADENCE_MIN", "30"))
 N_FOLDS = int(os.environ.get("TRAIN_FOLDS", "5"))
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
+# Override the output filename so a STAGING train (e.g. a new feature-contract model under review)
+# cannot clobber the live model_<horizon>.txt the model-server serves. Empty = live default.
+MODEL_FILENAME = os.environ.get("MODEL_FILENAME", "")
 
 DB_KWARGS = {
     "host": os.environ["DB_HOST"], "port": int(os.environ.get("DB_PORT", "5432")),
@@ -124,13 +127,16 @@ def main() -> None:
     print("NOTE: first run is a PIPELINE CHECK, not an edge claim. Trust the canary, "
           "not the IC, on this thin panel.")
 
-    # Save a final model trained on the whole panel for the model-server.
+    # Save a final model trained on the whole panel. Default = the live model_<horizon>.txt;
+    # MODEL_FILENAME redirects a staging train to a versioned path so it can't clobber the live model.
     final = _fit(X, y)
     os.makedirs(MODELS_DIR, exist_ok=True)
-    final.save_model(os.path.join(MODELS_DIR, f"model_{HORIZON}.txt"))
-    with open(os.path.join(MODELS_DIR, f"model_{HORIZON}.meta.json"), "w") as f:
+    outfile = MODEL_FILENAME or f"model_{HORIZON}.txt"
+    meta_file = (outfile[:-4] if outfile.endswith(".txt") else outfile) + ".meta.json"
+    final.save_model(os.path.join(MODELS_DIR, outfile))
+    with open(os.path.join(MODELS_DIR, meta_file), "w") as f:
         json.dump({"set_version": SET_VERSION, "horizon": HORIZON, "features": names}, f)
-    print(f"saved model_{HORIZON}.txt + meta to {MODELS_DIR}")
+    print(f"saved {outfile} + {meta_file} to {MODELS_DIR}")
 
 
 if __name__ == "__main__":
