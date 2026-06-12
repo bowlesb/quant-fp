@@ -69,6 +69,9 @@ DB_KWARGS = {
 
 SET_VERSION = os.environ.get("SET_VERSION", "v1.1.0")
 SMOKE_DAYS = int(os.environ["SMOKE_DAYS"]) if os.environ.get("SMOKE_DAYS") else None
+# Comma-separated symbols to drop from the panel (e.g. names with backfill split-adjustment
+# discontinuities) — used for the sensitivity pass that confirms the verdict is robust to their removal.
+EXCLUDE_SYMBOLS = {s.strip().upper() for s in os.environ.get("EXCLUDE_SYMBOLS", "").split(",") if s.strip()}
 MIN_ROWS = int(os.environ.get("MIN_ROWS", "50000"))
 OUT_JSONL = os.environ.get("BATTERY_OUT", "/app/experiments/battery_results.jsonl")
 
@@ -245,6 +248,11 @@ def run_horizon(conn: psycopg.Connection, horizon: str) -> list[dict[str, object
     names, ts, symbols, X, y = load_panel(conn, horizon, SET_VERSION)
     if SMOKE_DAYS is not None:
         ts, symbols, X, y = filter_smoke(ts, symbols, X, y, SMOKE_DAYS)
+    if EXCLUDE_SYMBOLS:
+        keep = [i for i, sym in enumerate(symbols) if sym.upper() not in EXCLUDE_SYMBOLS]
+        dropped = len(y) - len(keep)
+        ts, symbols, X, y = [ts[i] for i in keep], [symbols[i] for i in keep], X[keep], y[keep]
+        print(f"EXCLUDED {sorted(EXCLUDE_SYMBOLS)} -> dropped {dropped} rows", flush=True)
 
     n_days = len({t.date() for t in ts})
     print(f"\n=== {horizon} | set={SET_VERSION} | {len(y)} rows | {n_days} days ===", flush=True)
