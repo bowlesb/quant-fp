@@ -109,6 +109,16 @@ parity-overlap, both being fixed).
   + terminal-blind `orders_log.status`. Reported to Manager; fix owned by Exec/Risk; QA to add
   a `fill_reconciliation` invariant after the fix lands.
 
+## #15 full-50 coverage PRE-CONFIRMED (2026-06-12 live, before settle)
+
+Checked trade_agg_1m live coverage today: **all 50 names captured every hour 04:00→12:00 ET**
+(50 distinct symbols/hour, ~3000 rows/hr = 50×~60min, uninterrupted). Unlike 6/11 (10-name
+until 15:51), 6/12 is a genuine full-50 session from the pre-market on. So tonight's #15 run on
+the settled 6/12 data is a REAL at-scale proof, not a 10-name proxy — premise confirmed before
+running. Reminders from the 6/11 drill still apply: EXCLUDE the 16:00 ET closing-auction minute
+(14% within-2% — auction divergence) and note backfill trade-agg is RTH-bounded (no post-16:00
+validation target).
+
 ## KLAC re-fetch verification baseline (captured 2026-06-12 12:49 ET, BEFORE prod #17 re-fetch)
 
 Pre-re-fetch backfill state to diff against tonight: 217,382 bars, close range 188.65–2097.50.
