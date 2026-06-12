@@ -926,3 +926,36 @@ The ≥15:30 guard is OPEN (EXP_HEAVY_AFTER_PT=00:00). Manager ruling (provenanc
   NO round-trip to the Manager. I told prod they hold that authority.
 LESSON (operating): the quiet-window guard was precaution; it's now empirically tested as unnecessary
 under current load. Keep the guard CODE (cheap insurance for a real future reason) but default OPEN.
+| 2026-06-12T19:31:41+00:00 | C11_solo_ret_60m | fwd_30m | raw | 1 | 4840765 | -0.00177 | -2.223 | -0.00165 | Single-feature interrogation: ret_60m ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+
+## ★ FAMILY A — EX-DIV OVERNIGHT-LABEL ARTIFACT CONFIRMED + HYGIENE VALIDATED (Modeller, 2026-06-12)
+
+Prod populated corporate_actions_pit LIVE (DO-IT-NOW): 7133 cash_dividends / 5565 in the panel window
+(2024-01..2026-06) over 607 symbols. SCOPE CUT from prod's finding: Alpaca's CA feed has NO
+announcement/declaration date (process_date is POST-ex, a settlement date) → REALIZED features + the
+overnight-label HYGIENE fix work off ex_date (supported), but ANTICIPATION features (days_TO_ex_div,
+pre-announcement) are NOT supportable from this source — they'd need FMP declaration dates or the #21
+news feed. So days_to_ex_div is OFF the table for now; is_ex_div_today / days_since / trailing_yield /
+the hygiene fix are ON.
+
+DIAGNOSTIC (SQL, full panel) — the ex-div overnight artifact is REAL and exactly where theory predicts.
+Overnight label = close(D)→open(D+1) excess-vs-universe-median. The mechanical ex-div drop hits the
+label whose FORWARD open is the ex-morning (label_date+1 == ex_date):
+
+  bucket                                   n        mean_overnight_label
+  non-ex baseline                          420,635  +0.000474   (normal overnight drift)
+  ex_date == label_date                    4,098    +0.000157   (forward open is post-ex; no effect ✓)
+  ex_date == label_date+1 (fwd=ex-morning) 3,291    -0.005157   ← -51.6 bps mechanical DROP
+
+HYGIENE VALIDATION (add back the dividend yield to the affected labels):
+  mean ex-night label            -0.005157
+  mean (-cash_amount/prior_close) -0.006103   (the dividend yield ≈ the drop)
+  label + dividend_yield          +0.000946   ← back to ~baseline (+0.0005). ARTIFACT NEUTRALIZED.
+
+READ: ~52bps of MECHANICAL, non-alpha negative return on ~3,291 (symbol, night) cells, ~85% explained
+by the dividend yield. The overnight model could be (mis)learning this as "signal." This is a genuine
+LABEL-HYGIENE win — same honesty class as survivorship demean. NEXT: re-run the overnight battery on
+ex-div-CORRECTED labels (add yield back on affected nights) and see whether the survivorship/IC picture
+changes — does removing the dividend artifact clean or kill the residual overnight signal? (Prototype
+next; the diagnostic above already justifies the correction regardless of the battery outcome — a
+known mechanical contaminant should not be in the label.)
