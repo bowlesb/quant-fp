@@ -206,3 +206,107 @@ across folds; (2) OPEN-spread cost — even liquid names have wide OPENING-aucti
 common_spreads_at_cadence excludes the auction, so the open-RT cost needs a dedicated measure. If it
 survives walk-forward + real open-cost, this is a genuine M3-track edge candidate.
 Both cuts (all + liquid50) committed in shape_gap_results.jsonl.
+
+## 2026-06-12 (cont.) — LITERATURE SEARCH (new binding protocol). My charge: strategy classes + NET-of-cost reality.
+
+Ran 4 targeted searches, one per queued shape, focused on the NET-of-cost / liquid-vs-illiquid angle
+(my specific charge — a shape that's gross-profitable but dead net-of-cost is the norm). Findings
+INFORM pre-registration, never replace gates. Each cite = link + takeaway, translated to our reality.
+
+[002 GAP REVERSAL] Berkman et al. 2012 "Time-Varying Rationality" + Baltussen/Da/Soebhag "End-of-Day
+  Reversal" (https://academicweb.nd.edu/~zda/EOD.pdf) + Della Corte/Kosowski "Overnight-Intraday
+  Reversal Everywhere".
+  MECHANISM (matches my shape exactly): retail-attention price pressure at the OPEN pushes price up ->
+  high overnight return -> INTRADAY REVERSAL. Baltussen: end-of-day/overnight price-pressure reversal
+  from late-day forced selling, NOT information.
+  ★ CRITICAL COST TAKEAWAY (my charge): BOTH papers find the reversal is STRONGER for ILLIQUID/small-cap
+  stocks and "does NOT survive reasonable transaction costs for most investors"; "large-cap liquid names
+  show dramatically attenuated or negligible reversals after costs." TRANSLATE: this is EXACTLY the open-
+  minute cost wall the Lead just measured (6-12bps half at the open vs 2.7 at 10:00). The literature
+  PREDICTS my low-vol-fade should be WEAKER on liquid-50 — yet it survived canary+survivorship there.
+  So either (a) my flat-2bps cost flattered it and the measured open cost will kill it (the Lead's ~70%
+  prior, lit-consistent), or (b) the volume-CONDITIONING isolates a sub-effect the broad reversal lit
+  didn't test. The measured-open-cost gate (task #12) is the lit-predicted decider. Pre-registration
+  updated: my prior the low-vol-fade survives MEASURED open cost drops from ~50% to ~30% on this lit.
+
+[004 ORB] Concretum/Cretarola 2024 "A Profitable Day Trading Strategy" (ssrn 4729284) + Holmberg et al.
+  "Assessing the profitability of intraday ORB" (sciencedirect S1544612312000438).
+  TAKEAWAY: the OLDER lit (Holmberg) = basic ORB rules "would NOT be profitable when applied to intra-
+  daily datasets" once costs are in — MATCHES my clean death (+11bps gross, net-negative at every cost).
+  BUT the 2024 Concretum result (2.4 Sharpe, beta~0) survives net-of-cost ONLY by restricting to "STOCKS
+  IN PLAY" (abnormal-volume names) — the SAME sparsity-on-liquid-volatile-names rescue as everything
+  here. TRANSLATE: my 004 tested UNCONDITIONAL break direction and died (correctly). The lit says the
+  live version is breakout CONDITIONED ON abnormal volume. My 004 had or_vol_z computed but UNUSED in
+  the book — a concrete miss. If 004 is ever revisited: gate the up-break book on high or_vol_z (stocks
+  in play). Logged as the one revival path; not reopening now (Lead killed it, accepted).
+
+[003 POST-EX-DIV] Frank-Jagannathan 1998 + Elton-Gruber 1970 + decimalization studies (researchgate
+  4992558; the 2001-decimalization / 2003-tax-equalization decline literature).
+  TAKEAWAY: Frank-Jagannathan = the ex-day return is a MICROSTRUCTURE artifact (bid-ask bounce + tick
+  size make the dividend exceed the price drop), NOT alpha. Ex-day abnormal returns "declined SIGNIFI-
+  CANTLY after 2001 decimalization and further after 2003 tax equalization." TRANSLATE: in a post-2024
+  decimalized, penny-spread market the effect should be NEAR-ZERO and what remains is bid-ask-bounce
+  (untradeable). This is fully CONSISTENT with the Lead's verdict (003 NO-EDGE: mean excess ~0, |t|<0.8).
+  The lit RETRODICTS the null — good. My ~30% pre-reg prior was if anything too high given the post-
+  decimalization decay; lesson logged.
+
+[005 VOLUME-SHOCK] Quantitativo "Volume Shocks and Overnight Returns" (quantitativo.com) + abnormal-
+  trading-volume reversal lit (tandfonline 1351847X.2024.2303092; investor-attention reversal S154461..).
+  ★ TAKEAWAY THAT CORRECTS MY PRE-REG: the documented volume-shock overnight effect is CONTINUATION, not
+  reversal — "stocks with large volume shocks earn significantly higher CLOSE-TO-OPEN returns" (high vol
+  -> positive overnight gap), with NO intraday predictability. I pre-registered REVERSAL. And the
+  net-of-cost reality is the headline: on Russell 3000 with commissions + 10% ADV limit the Sharpe
+  COLLAPSES from 1.5+ to unviable ("a good chunk of the edge gets eaten"); it survives ONLY in a
+  concentrated LIQUID-VOLATILE subset (Nasdaq biotech, Sharpe 1.52). TRANSLATE: my 005 tested reversal on
+  the overnight L/S label and the Lead verdicted NO-EDGE (survivorship-neg at every sparsity) — consistent
+  with "dies on the broad universe." The lit says if anything to test (a) CONTINUATION not reversal and
+  (b) a concentrated liquid-volatile subset (we have no sector map yet -> blocked). Logged as the only
+  revival path for the volume-shock class; not reopening (Lead killed the reversal version).
+
+OFI CROSS-REFERENCE (Lead's survey): Markwick / Chordia-Subrahmanyam document the identical failure mode
+— "looks profitable gross, costs destroy it." My low-turnover/sparse/conditional designs are the
+lit-endorsed RESPONSE to exactly this wall. The gap-fade is the test case: does conditioning + low
+turnover beat the cost wall where the broad reversal strategies don't?
+
+NET PRE-REGISTRATION UPDATE going into task #12: lit consensus is that overnight/EOD reversal is an
+illiquid, cost-fragile, open-spread-killed effect. My gap-fade survived flat-2bps on liquid-50 AGAINST
+that prior — which is exactly why the MEASURED-open-cost gate is decisive, not optional. I now put ~30%
+(down from 50%) on it surviving measured open cost after walk-forward. Honest going in.
+
+## 2026-06-12 (cont.) — ★★ 002 PASSES THE VERDICT GATE: walk-forward OOS + measured open cost + canary.
+
+Built shape_gap_walkforward.py — the two gates the Lead set as the decider. Per fold: LEARN volz-split +
+fade/follow DIRECTION on TRAIN (via gap-excess covariance sign), APPLY to TEST, accumulate OOS returns
+(reuses quantlib walk_forward_folds, horizon=390 purges train labels reaching into test). Charges the
+Lead's MEASURED open half-spread by entry minute + close exit half-spread. Added a leakage canary
+(shuffle excess within date, re-run the FULL pipeline) because a 2.6 net Sharpe demands it.
+
+RESULT (liquid-50, walk-forward OOS):
+  low_vol FADE:  gross OOS Sharpe +3.40 (517 OOS dates)
+    net @09:30 (RT 15.3bps) +2.62 | @09:33 (10.2) +2.88 | @09:35 (9.4) +2.92 | @09:40 (8.7) +2.96
+    CANARY (shuffled excess): -0.72  <- COLLAPSES. No structural leak.
+  high_vol FOLLOW: gross OOS Sharpe -0.95 (DIES out-of-sample — not a universal artifact; the edge is
+    specifically the LIGHT-volume gap reversion, which is the cleaner mechanism story anyway).
+
+VERDICT-RULE (the Lead's, verbatim): "low-vol-fade Sharpe POSITIVE at measured open cost AFTER
+walk-forward -> legitimate M3 candidate, escalate THAT moment." -> CONDITION MET. Positive (+2.6 to +3.0)
+at the MEASURED open cost across EVERY entry minute, walk-forward OOS, canary-clean.
+
+This is the FIRST honest edge candidate the whole effort has produced. It clears all 4 M3-style gates:
+  [x] within-timestamp structure (conditional gap->O2C IC, regime sign-coherent)
+  [x] clean shuffle canary (OOS canary -0.72)
+  [x] positive net-of-cost at MEASURED open spread (not flat 2bps) on the liquid tradeable tier
+  [x] survives survivorship (per-symbol demean barely moved it; + the OOS direction-learning is itself
+      a survivorship-robustness check — direction is learned per-fold, not assumed)
+
+HONEST REMAINING CAVEATS (must travel WITH the escalation — not blockers, but real):
+  1. Open-spread cost measured on ~3 days of quote_agg_1m (small sample). Needs more sessions to firm.
+  2. Entry-price DECAY not modeled: the cost-sweep varies COST by entry minute but the entry PRICE is
+     fixed at the 09:30 open (helper has 09:30 + 10:00 only). Later entry = tighter spread BUT some fade
+     already realized — the true entry-minute optimum needs intra-window bars (helper extension). The
+     +2.96 @09:40 is OPTIMISTIC on price (assumes full fade still available at 09:40); the +2.62 @09:30
+     is the CONSERVATIVE honest number (full spread, full fade) — and it's STILL positive. Lead to judge.
+  3. Paper-stage; mechanism = light-volume overnight gaps overshoot and revert (Berkman retail-attention
+     price pressure) — lit says this is usually illiquid/cost-killed, yet it survives here on liquid-50
+     at measured cost. That's surprising enough to warrant the Lead's independent re-run before promotion.
+Reporting to the Lead to ESCALATE per his verdict rule. Wrote the 002 report. Committed.
