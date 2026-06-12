@@ -274,3 +274,52 @@ AFTER the rebuild timestamp for ALL three horizons (proves every value was recom
 **Net effect on the PRIMARY prediction:** UNCHANGED / mildly reinforced (~70%). The cost asymmetry from
 the added lower-ADV names pushes AGAINST a tradeable 30m edge, and the tighter labels don't rescue
 overnight from survivorship. The result that would still flip it is the same low-turnover tail flagged above.
+
+## DELISTED-NAME BACKFILL — research requirements spec (Modeller → prod-architect, task #9)
+
+WHY IT MATTERS (what verdict it changes): the overnight result collapsed under per-symbol demean
+(sharpe +2.1 → ~0). But per-symbol demean is a CONSERVATIVE PROXY for survivorship — it removes ALL
+persistent per-symbol drift, which also kills any real persistent alpha. The HONEST test is to put
+the delisted names BACK into each historical cross-section so the panel contains the names that
+actually existed on that date (some later delisted), removing the upward bias AT THE SOURCE instead
+of via demean. Delisted names are disproportionately the LOSERS (bankruptcies, distressed M&A) =
+exactly the short-leg names whose absence inflates L/S and overnight results.
+
+REQUIREMENTS (minimum that would actually change a verdict):
+- NAMES: US equities that QUALIFIED for our liquid universe (price>$5, ADV$>$10M) at any date in
+  the window (2024-01-02 → present) but have since delisted/merged/acquired/gone bankrupt. Estimate
+  ~50-120 names over ~2.5yr (liquid-equity delist rate ~2-4%/yr). Don't need every micro-cap; the
+  liquid delisted set is what de-biases the cross-section.
+- DEPTH: split/div-ADJUSTED DAILY OHLCV from each name's first in-window date through its delist date.
+  Minute bars NOT required for the overnight/daily survivorship test (overnight = close→next-open).
+  Minute bars are a lower-priority follow-on only if we later test INTRADAY survivorship-free.
+- POINT-IN-TIME UNIVERSE: `universe_membership` history must include delisted names on the dates they
+  qualified. Today it's built from SURVIVING names' backfilled bars only — that IS the bias source.
+  So the backfill must feed BOTH bars and the universe screen, PIT.
+- SOURCE: Alpaca drops delisted symbols. Need a source carrying dead tickers + delist dates — Polygon,
+  the existing FMP key, or Sharadar/Norgate. Feasibility/cost is prod's call; I need adjusted daily
+  bars + the delisting date per name.
+- ACCEPTANCE: re-run the overnight battery with delisted names included PIT and NO per-symbol demean.
+  If net-of-cost sharpe stays positive survivorship-free → a genuine lead (escalate to full M3 gate).
+  If it collapses like the demean proxy → the no-edge verdict is confirmed survivorship-FREE, not just
+  by a conservative proxy. Either outcome is a real result.
+
+## OFI 50-NAME PILOT — pre-registered design + TRIGGER (Modeller, 2026-06-12) — NOT runnable yet
+
+Manager suggested a cheap early read on order-flow (v1.2.0 OFI features: ofi_5m/15m/30m, signed_vol_z_30)
+on the ~50-name capture, before the M2 500-name scale-up, to de-risk/redirect the edge bet. I AGREE it's
+worth a slot — but it is NOT runnable now and must be TRIGGER-GATED to avoid a false read:
+- DATA STATUS (2026-06-12): trade_agg/quote_agg cover **52 symbols × 2 days** only; v1.2.0
+  feature_vectors = **0 rows (never computed)**. Two days is pure noise.
+- PREREQUISITES (all three): (a) ≥ ~10 trading days of OFI capture accrued (≥ ~2-3 wks wall-clock);
+  (b) prod builds v1.2.0 feature_vectors over the 52-name OFI panel (currently unbuilt); (c) experimenter
+  image fixed (task #8).
+- DESIGN when it runs: cost-gated battery, fwd_30m + fwd_60m, on the 52-name cross-section, comparing
+  three feature subsets to ISOLATE OFI's marginal value — price-only (nocalendar) vs price+OFI vs
+  OFI-only — same IC + shuffle-canary + net-of-cost gates. (Requires extending battery.py with an
+  OFI-aware feature-subset selector; trivial, do it when data lands.)
+- WHAT IS / IS NOT A SIGNAL: a 50-name cross-section gives ~25/leg deciles = very noisy; this is a
+  CURIOSITY read, NOT a verdict. A real positive sign = price+OFI IC materially > price-only with a
+  clean canary AND OFI features ranking high in importance. Anything marginal = "wait for the 500-name
+  scale-up," not "OFI works." NO edge claim comes out of 50 names regardless.
+- PURPOSE: a cheap early YES/NO/MAYBE to inform whether M2's 500-name investment is well-aimed.
