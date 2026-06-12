@@ -28,6 +28,14 @@ Lead's synthesis cycle. The edge hunt never idles; this is its engine room.
    - Each explorer writes only its own journal + proposal dir. Never another agent's.
 4. **Gates always:** shuffle canary, survivorship neutralization, net-of-cost with the
    current best cost model, turnover honesty. The Lead rejects proposals lacking them.
+   **TRADEABLE-ENTRY rule (added 2026-06-12 after the gap-fade look-ahead):** a label's
+   realized return MUST be bookable at a price you could actually execute. Open-anchored
+   labels must enter at a tradeable price (≥09:35 / px_1000), NEVER the 09:30 auction print —
+   using the open print as both the signal reference and the entry look-aheads the fastest part
+   of the move (the gap-fade showed +0.08 Sharpe at 09:30 entry → −1.38 at the tradeable 10:00
+   entry). Same rule for any signal computed from a price you also book the return from: the
+   entry must lag the signal observation. The Lead independently re-runs any candidate before
+   promotion (a too-good net Sharpe at high cost is the tell).
 5. **Verdicts are the Lead's:** explorers propose and interpret; the Lead (with the full
    multiple-testing picture — track the global experiment count) declares findings,
    promotes them to docs/EXPERIMENTS.md, and kills lore that fails replication.
