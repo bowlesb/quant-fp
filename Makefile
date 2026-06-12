@@ -3,10 +3,12 @@
 # Build-time provenance (task #11): stamp the current git SHA into every image so
 # running==intended is verifiable by content. Appends -dirty if the working tree is unclean
 # (an image built from uncommitted code must NEVER read as authoritative).
-# -dirty if the worktree has EITHER unstaged OR staged uncommitted changes — a baked SHA must never
-# read "clean" when the repo isn't at that exact commit (staged-only drift fooled the old unstaged-only
-# check; exposed by the EXPERIMENTS.md staged-in-shared-index incident 2026-06-12).
-GIT_SHA := $(shell git rev-parse --short HEAD)$(shell git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || echo -dirty)
+# -dirty reflects uncommitted IMAGE-RELEVANT source only (staged OR unstaged) — what actually gets
+# COPYed into an image + its build inputs. NOT docs/ ledgers or experiments/ output, which the
+# never-idle grind writes continuously and which never enter an image (so they must not false-flag it).
+# This is the principled #11 stamp: an image is -dirty iff its SOURCE is uncommitted, period.
+IMG_SRC := services quantlib docker-compose.yml Makefile
+GIT_SHA := $(shell git rev-parse --short HEAD)$(shell git diff --quiet -- $(IMG_SRC) 2>/dev/null && git diff --cached --quiet -- $(IMG_SRC) 2>/dev/null || echo -dirty)
 
 # Run the shared-library tests (parity + aggregation) in a clean container.
 test:
