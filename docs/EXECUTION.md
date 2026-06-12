@@ -199,3 +199,19 @@ Built the measured cost curve the cost-gate battery only ASSUMED (cost_bps_onewa
 - Modeller guidance: keep cost_bps_oneway=2.0 until several `nbbo`-sourced sessions accrue;
   then use `execution_slippage_daily.oneway_cost_bps_mean` (one-way, mid-referenced — directly
   comparable to the battery's breakeven_cost_bps). Round-trip ≈ 2× (entry + exit half-spread).
+
+## Standing future items (open exec work, by gating milestone)
+- **[M4/M5 — mandatory before real money] Settled-day reconciliation vs broker statements.**
+  Paper has no statements to reconcile against, so this can't be exercised now — but the muscle
+  (fills + realized P&L + borrow fees vs the broker's official daily statement, T+1 settled) is
+  required before any real capital. Manager is adding it as an M4 exit criterion in ROADMAP.
+  Owner: execution-risk. Build when a paper track record (M4) starts accumulating.
+- **[post-M1, low priority] Stranded-position catch-up queues market orders for next open.**
+  The market-closed `stranded` branch calls `close_all_positions` = MARKET orders, which Alpaca
+  QUEUES for the next open rather than flattening now (ledger §0 foot-gun). Only bites if a
+  position ever lingers past close (hasn't happened — EOD flatten fires at 15:48 while open).
+  Resolution: route EOD termination through LOC/`cls` (broker-side net before 15:50 ET) so the
+  flatten is auction-filled, and make the closed-market branch cancel-only rather than submit
+  market orders. Pairs with the open "broker-side LOC EOD net" item.
+- **[open] Partial-basket cancel-replace** — re-price unfilled legs (whole-share, no opposing
+  same-symbol coexist) vs the 30s loop; cap re-prices then escalate near close.
