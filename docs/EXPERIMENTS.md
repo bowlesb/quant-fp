@@ -662,3 +662,24 @@ just mega-caps), historical depth (need ~600 days to backtest on our panel), lat
 MEMO DELIVERABLE (prod): source comparison table on those axes + recommended source + storage shape +
 lead time to first experiment. Then Manager decides whether/when to build. Sequence: AFTER M2 capture
 scaling is underway — do not preempt M2.
+
+## REVIEW POLICY ADOPTED (Modeller, 2026-06-12) — role authorship + tiering of my lane
+
+Ben's binding REVIEW_POLICY.md (commit e13ead7): commit author = ROLE (`--author="modeller
+<modeller@quant-team>"`), WHY lives here in EXPERIMENTS.md, and PRODUCTION feature/label/training
+changes are Tier 1 (role branch + PR + mapped reviewer). My lane specifics:
+- experiments/ (queue, battery, results) = TIER 2 sandbox: direct-commit to master, friction-free —
+  this is most of my work and the exploration mandate depends on it staying unblocked.
+- quantlib feature/label DEFINITIONS, model-server/training path = TIER 1: when I propose a real
+  feature group (e.g. the v1.3.0 sector-demeaned momentum, or any OFI feature definition) for
+  PRODUCTION, it goes on a `modeller/<topic>` branch → PR → mapped reviewer (qa for data-semantics,
+  prod for runtime) → Manager merges. The IC-level exploration that motivates it stays Tier 2.
+- I am the named REVIEWER (adversarial) on any peer PR touching feature/label/training definitions.
+
+SELF-FLAG (honesty, not buried): my commit 1012d2a touched services/experimenter/main.py +
+docker-compose.yml — both Tier 1 under this policy (service runtime + compose). It PREDATES the policy
+(e13ead7 was committed after), so not a violation, but the experimenter is a real service and the
+quiet-window guard / resolve_feature_idx changes are now LIVE without a prod adversarial review.
+Flagging to the Manager for prod-architect's RETROACTIVE review; future experimenter/compose edits go
+through a PR. (The change is low-risk — isolated sandbox service, no order/data-corruption path — but
+the policy maps it to prod regardless and I won't self-exempt.)
