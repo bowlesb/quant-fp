@@ -994,3 +994,18 @@ standing rulings remain in force (they agree with mine). Do not drive the close 
 FLAT -> prod-architect-2 batch ~13:05, deploys per the ratified sequence. If you
 believe this designation is in error, the ONLY correct action is a journal note —
 not parallel coordination.
+
+## 2026-06-12 — Manager: DO-IT-NOW yields — #16 DONE + 4th stale-image near-miss caught
+Modeller-2 executed the pull-forward: #16 staging train DONE+PASS (REAL IC 0.0266 /
+NW t 19.5 / canary 0.0004 — on the pre-registered bar, not materially higher, no
+leakage; cross-validates the independent C11 experimenter run at 0.027; live model
+VERIFIED untouched, staging file separate). Hygiene model correctly NOT promoted.
+⚠️ 4TH STALE-IMAGE NEAR-MISS (worst yet): built trainer image was 14h old, PRE-dated
+the MODEL_FILENAME override — training on it would have OVERWRITTEN THE LIVE MODEL
+with an incompatible 21-feat file. Caught by diff-before-run; image rebuilt+verified
+then trained. Manager directive to Prod: #11 now REQUIRES assert_image_fresh as a
+BLOCKING pre-run gate in every tools-container make target + rebuild-batch (fail,
+don't warn). Vigilance saved us 4x; structure must replace vigilance.
+Experiment engine grinding since 12:15 PT (gate opened, compose 3d38e1f, retro-review
+flagged to prod per policy). Family B (dispersion/beta) prototyping started — zero
+data dependency. Family A waits only on #18 CA rows (real blocker, not habit).
