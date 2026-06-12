@@ -17,8 +17,11 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 
 ## Scheduled core-rebuilds (maintenance windows)
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
-Prereqs before starting: market closed (≥16:00 ET) AND exec EOD-flatten done (book flat, ~15:48 ET —
-exec has a live basket in flight intraday); Manager go on #12. Sequence (any successor can run this):
+Prereqs before starting: market closed (≥16:00 ET); Manager go on #12; **THE GUN = exec's
+broker-CONFIRMED-flat signal** after the ~15:48 ET EOD-flatten (exec reports 0 positions / 0 open
+orders from a FRESH broker snapshot). Do NOT run step 1 before that signal. If exec's flatten report
+shows ANY stranded position, the batch HOLDS until it's resolved — a mid-batch ingestor restart with
+an open book is the compound failure we don't risk. Sequence (any successor can run this):
 1. **Apply #18 DDL** (idempotent, instant): `docker compose exec -T timescaledb psql -U quant -d quant -f /dev/stdin < db/init/05_corporate_actions.sql` (or paste the CREATE TABLE). Verify table exists.
 2. **#18 first CA fetch** (cheap): `BACKFILL_SYMBOLS=universe docker compose --profile tools run --rm backfiller fetch-corporate-actions` → confirms KLAC forward_split ex-6/12 lands; note new-action symbols. **Then PING execution-risk** — table is created+populated; they rebuild the executor to pick up quantlib.corporate_actions + verify KLAC auto-excludes via the ex-date guard (their guard fails-open until now, so this is the activation point). (DDL create + this populate are adjacent; exec only acts after this ping, so they never see exists-but-empty.)
 3. **#17 KLAC re-fetch** (one consistent Adjustment.ALL pass): `BACKFILL_SYMBOLS=KLAC BACKFILL_START=2023-12-01 docker compose --profile tools run --rm backfiller backfill-bars` → then recompute KLAC v1.1.1 momentum cells. Verify no >3× internal jump (QA invariant should flip green). Tell QA + execution-risk (denylist-removal GATED on QA parity green).
@@ -58,6 +61,17 @@ cycle self-populates corporate_actions and re-fetches any recent-split name. The
 `fetch-corporate-actions` in step 2 just front-runs that for an immediate populate. Remaining #18
 consumers are in other lanes: QA jump-invariant + executor candidate_pool guard (signature handed
 to exec), plus a QA unit test for the parser.
+
+## #20 sector_map — deferred state (post-batch + FMP key)
+Schema `sector_map(symbol PK, sector, industry, source, updated_at)` staged (db/init/06_sector_map.sql).
+Source = FMP /profile (label taxonomy, not strict GICS — categorical grouping suffices; documented in
+the DDL). BLOCKED on `FMP_API_KEY` reaching quant .env (lives only in the legacy project's encrypted
+secrets; ask relayed to Ben). When the key lands, build (post-batch): `quantlib/sector.py` (FMP fetch
+via stdlib urllib, chunked, NULL-safe) + backfiller `fetch-sectors` tool + weekly scheduler refresh.
+AT POPULATE TIME: ping Modeller-2 the DISTINCT sector-label SET (not just the null rate) — they want to
+eyeball ~11 coherent buckets, no "N/A"/"" pseudo-sector fragmenting the demean groups; and ping QA to
+add the <5% null-sector coverage invariant. Consumer = Modeller's v1.3.0 sector-neutral momentum
+(JOIN by symbol at compute time, NOT a feature_vectors column).
 
 ## Incident log (running==intended)
 - **2026-06-12: STALE-IMAGE re-contamination caught.** The first M1 clean-universe rebuild ran
