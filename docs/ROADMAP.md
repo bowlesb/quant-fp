@@ -64,6 +64,8 @@ but only covers ~50 names.
 **Exit criteria:**
 - [ ] Edge candidate run live-paper **≥20 trading days** with daily stat-gate monitoring.
 - [ ] Realized net Sharpe & IC consistent with backtest within tolerance; no risk-limit breach.
+- [ ] Settled-day reconciliation muscle exercised (fills/fees vs broker records, Exec/Risk owns) —
+      mandatory before M5 real money. (Added 2026-06-11 from Exec/Risk coverage question.)
 
 ### M5 — Real capital, small → scaled (target 2026-10-01, gated on M4, Ben signs off)
 **Exit criteria:**

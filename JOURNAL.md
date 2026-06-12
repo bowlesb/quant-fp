@@ -588,3 +588,30 @@ TD Bank, Equity Residential, ADRs like ARM; high-recall — catches QQQ "Invesco
 PRIORITY #0 in MARKET_DAY_PLAN, qualified STATE. Supervised open: exclude funds -> rebuild clean panel
 -> RE-RUN price-only battery (does "no edge" hold?) -> then order-flow on clean liquid stocks.
 The QA agent missed this; it's the most important thing we were not seeing.
+
+## 2026-06-11 (evening) — Manager: FIRST AGENT-TEAMS CYCLE convened (M1)
+Team `quant-team` live: qa / modeller / prod-architect / execution-risk as independent
+teammate sessions on the shared board. Critical path wired: #1 clean-universe rebuild ->
+#2 clean panel -> #4 battery re-run; #3 QA invariant suite parallel; #5 exec verify done.
+
+**Exec/Risk report (task #5, commit 31f19b1):** M0 STILL HOLDS, all evidence fresh-run:
+broker flat (0 pos/0 orders, equity $100,027.22==cash), reconcile ok, pnl_daily 6/11
+-$10.07 to the cent, kill-switch armed not tripped, caps bind, signal non-degenerate
+(L-S sep 0.0140), staleness guard correctly idling overnight. Per-name realized P&L
+attribution SHIPPED (fills_log symbol/side + realized_pnl_by_name view; 6/11 backfilled,
+sums to -$10.07 exactly). GO for tiny paper lifecycle 6/12; NO-GO for any size-up.
+
+**Manager decisions (logged per protocol):**
+1. Pre-open 6/12 readiness (model-server fresh at 09:30, membership row pre-open) was an
+   ORPHAN -> task #6, prod-architect.
+2. KEEP trading contaminated-model v1.0.0 scores at tiny size: value = lifecycle regression
+   coverage; execution-side is_etf_like filter is defense-in-depth; swap MODEL_VERSION when
+   the clean-panel model exists. Pausing would blind us to exec regressions.
+3. Settled-day broker-statement reconciliation -> deferred to M4 (added to ROADMAP exit
+   criteria; Exec/Risk owns). Paper has no statements; the muscle is mandatory before M5.
+4. APPROVED slippage/implementation-shortfall attribution (task #7, Exec/Risk): per-leg
+   intended-limit vs fill vs NBBO-mid. Replaces the ASSUMED ~2bps cost in the battery's
+   cost gate with a measured curve — the single number the whole net-edge verdict pivots on.
+   Output format to be coordinated with Modeller.
+Known hazard kept on Exec ledger (post-M1): stranded-position catch-up path would queue
+market orders when closed; fix = broker-side LOC/`cls` EOD net.
