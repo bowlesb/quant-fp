@@ -1657,3 +1657,96 @@ VERDICT (matches pre-registered ~65% null): dividend timing adds NO honest cross
 - METHOD WIN: the canary caught it again — overnight IC 0.0214 would have looked like a find without
   the shuffle arbiter. Standing rule reaffirmed: |IC| must clear the canary, and overnight IC is
   untrustworthy without survivorship neutralization.
+| 2026-06-12T22:12:59+00:00 | W11_pair_mom_5d_mom_10d_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00103 | -0.891 | -0.00042 | Momentum term-structure: mom_5d+mom_10d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:13:35+00:00 | W11_pair_mom_5d_mom_10d_overnight | overnight | raw | 2 | 428024 | 0.00864 | 1.575 | -0.00425 | Momentum term-structure: mom_5d+mom_10d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:15:23+00:00 | W11_pair_mom_1d_mom_10d_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00081 | -0.576 | -0.00036 | Momentum term-structure: mom_1d+mom_10d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:15:56+00:00 | W11_pair_mom_1d_mom_10d_overnight | overnight | raw | 2 | 428024 | 0.01164 | 2.112 | -0.00225 | Momentum term-structure: mom_1d+mom_10d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:18:07+00:00 | W11_pair_mom_1d_rel_mom_3d_rel_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00298 | -1.901 | -0.00018 | Momentum term-structure: mom_1d_rel+mom_3d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:18:44+00:00 | W11_pair_mom_1d_rel_mom_3d_rel_overnight | overnight | raw | 2 | 428024 | 0.00569 | 1.086 | -0.00166 | Momentum term-structure: mom_1d_rel+mom_3d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+
+## ★★ COST-BY-LIQUIDITY VERDICT (Modeller, 2026-06-12) — task #5 — NO, NOT tradeable on the liquid tier
+
+The decisive test of "is ret_5m+position ALREADY tradeable on the liquid tier?" — measured cost
+(quote_agg_1m) + signal re-gated on the liquid-50 vs a random-50 control vs the full panel, all on
+the 613-day v1.1.1 panel. ANSWER: NO. The cost lever does NOT rescue this signal.
+
+MEASURED COST (quote_agg_1m, 50 names, RTH 30-min cadence, per-NAME median half-spread):
+  11/50 liquid EQUITIES < 1.4bps; 19<2.0; 23<3.0; 29<4.0; 35<5.0 (median name ~3.1bps). SPY/QQQ
+  (2 ETFs in the capture, tightest of all) excluded — not in the equity book.
+
+SIGNAL re-gate (ret_5m + position group, rank label, 613 days):
+  | tier        | names | IC      | NW t  | breakeven | sharpe_net @1.0bps | canary  |
+  | liquid50    | 50    | 0.00912 | 4.15  | 0.82bps   | -0.53 (NEG @ all)  | 0.0048  |
+  | random50    | 50    | 0.01701 | 7.76  | 0.47bps   | -1.88 (NEG @ all)  | 0.0020  |
+  | full_panel  | 785   | 0.03141 | 22.63 | 1.47bps   | +3.12 (pos <=1.27) | 0.0015  |
+
+THE VERDICT (airtight, decomposed):
+1. The signal and the tradeable-cost names are DISJOINT. The full-panel signal (IC 0.031, breakeven
+   1.47bps) lives in the BROAD cross-section — which includes the LESS-liquid names whose real
+   spread is WIDE (median ~3bps). On the LIQUID tier where cost is low enough to matter, the signal
+   is too WEAK (breakeven 0.82bps) to clear even an optimistic 1.0bps cost (sharpe_net NEGATIVE at
+   every swept cost level). So you cannot have both cheap trading AND the signal.
+2. random50 (0.017) > liquid50 (0.009) at the SAME cross-section size -> the liquid drop is PARTLY
+   liquidity-specific (efficient mega-caps have less cross-sectional alpha), not just the 50-name
+   thinning. Both 50-name tiers are uneconomic; the full panel is only economic below ~1.4bps, a
+   cost the broad (illiquid-inclusive) universe cannot actually achieve.
+3. liquid50 canary (0.0048) is elevated vs full (0.0015) — small-cross-section noise; another reason
+   the thin tier is untrustworthy. NW t 22.6 on the full panel is DEPTH, not edge (breakeven binds).
+
+CONSEQUENCE (sharpens the whole strategy): the cost lever alone CANNOT make the existing price
+signal tradeable. This REDIRECTS — definitively — to OFI: not "trade the existing signal cheaper"
+but "find a signal strong enough to clear realistic cost." The cost-vs-tradeable-count curve
+(11/19/23/29/35 names below 1.4/2/3/4/5bps) shows OFI would need to lift breakeven ~1-2bps to
+unlock a 19-29-name liquid universe — that is the bar the OFI pilot must clear. PHASE 1 caveat
+holds: 3 days/50 names of cost data = directional; the real gate is the M2 500-name multi-week
+capture + exec's fill-prob curve (Monday). Pre-registered prediction 3 (~65%, "not cleanly
+tradeable even on liquid tier") CONFIRMED.
+
+## OFI CURIOSITY READ (Modeller, 2026-06-12) — ⚠️ NOT A VERDICT (50 names / 3 days, underpowered)
+Manager-requested cheap early read (prod's ask). signed-volume imbalance (buy-sell)/(buy+sell) vs
+forward-5m return, per-minute cross-sections, 44,510 obs over 3 days:
+  Pearson -0.032 | Spearman-ish -0.050  (NEGATIVE).
+READ (shading expectations ONLY — gates NOTHING; the trigger-gated >=10-session 50-name pilot stands):
+order-flow imbalance shows a small NEGATIVE corr with the next 5 min = very-short-horizon MEAN-
+REVERSION (high buy pressure -> slight pullback). Right SIGN for a microstructure reversal effect and
+non-trivial magnitude, but 3 days is far too thin to trust the number. It does NOT yet say OFI beats
+its ret_5m proxy (the real headline metric) — only that order flow is not obviously noise. Encouraging
+enough to keep the 512-name build on the critical path; decides nothing.
+
+## ★ OFI MARGINAL-IC BATTERY PRE-REGISTRATION (Modeller, 2026-06-12) — Manager directive, run when data ready
+
+Committing the OFI pilot design + falsifiable predictions BEFORE the data depth exists, so the
+result can't be rationalized after. GATED ON: >=10 full-session 50-name days (capture day 1 was
+today; 512-name capture Monday) + at-scale trade-agg parity >=98% + the >=15:50 ET close exclusion
++ the signed_vol_z_30 clip/floor fix. Until then this is design-only; the curiosity read above
+shades nothing.
+
+HEADLINE METRIC (Manager-set, not negotiable): OFI's MARGINAL within-ts rank-IC OVER ret_5m — NOT
+"does OFI have IC". The grind proved the only 30m price signal IS ret_5m (a crude order-book proxy);
+OFI measures the book directly. So the pilot is a clean head-to-head: OFI vs its own proxy.
+
+PRE-REGISTERED CONFIGS (all at 30m, the horizon where ret_5m signal lives; v1.2.0, 25 feats incl
+ofi_5m/ofi_15m/ofi_30m/signed_vol_z_30 at idx 22-25):
+  A. price_only_baseline = ret_5m + position group (the carrier set) — the baseline the DELTA is over.
+  B. price_plus_ofi      = A + the 4 OFI features.
+  C. ofi_only            = the 4 OFI features alone.
+  PRIMARY = IC(B) - IC(A) = OFI's marginal lift over the ret_5m-inclusive baseline.
+
+PRE-REGISTERED PREDICTIONS (falsifiable):
+1. (~55%) ofi_only has POSITIVE within-ts IC at 30m (the curiosity read's negative sign suggests a
+   reversal-style effect; magnitude unknown). If ofi_only IC ~0 with a clean canary -> OFI is noise
+   at our 1-min aggregation, bet weakens.
+2. (~45%) PRIMARY: OFI's MARGINAL IC over ret_5m is POSITIVE and clears the canary. This is the
+   coin-flip the whole bet rides on — does direct order flow beat the 5-min-return proxy? I am
+   deliberately NOT optimistic (the proxy is already decent); a clean null here kills OFI honestly.
+3. (~70%) EVEN IF marginal IC is positive, net-of-cost breakeven stays BELOW realistic liquid-tier
+   cost (~3bps median, from task #5) at 30m turnover — i.e. OFI sharpens the signal but not enough
+   to clear cost ALONE; the win (if any) needs OFI lift + the cost-tier's tightest names + lower
+   turnover TOGETHER. Task #5 set this bar: OFI must lift breakeven from ~1.4 toward ~3bps.
+4. (~80%) the FIRST 10-session read is DIRECTIONAL, not a verdict; the real gate is multi-week
+   500-name depth. Pre-commit: no OFI edge claim before NW t>3 on >= the depth that gives it AND
+   net-of-MEASURED-cost positive on a tradeable subset AND survivorship-clean.
+
+Battery script to build when data lands: experiments/ofi_marginal_battery.py (mirror battery.py
+gates; report IC(A), IC(B), IC(C), the B-A delta, canary on each, net-of-cost at the measured
+liquid-tier cost from research.common_spread_at_cadence, survivorship demean).

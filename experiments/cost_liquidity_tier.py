@@ -94,7 +94,14 @@ def main() -> None:
     feat_idx = [names.index(name) for name in SIGNAL_FEATURES]
     vol_scaler = X[:, names.index("vol_30m")]
 
-    for tier_name, tier in [("liquid50", LIQUID_TIER), ("full_panel", None)]:
+    # CONTROL: a seeded RANDOM 50-name equity subset = same cross-section SIZE as liquid50 but
+    # no liquidity selection. Separates "signal dies on the liquid tier" (liquidity) from "signal
+    # needs a wide cross-section" (the 50-name L/S deciles are just too thin/noisy).
+    rng = np.random.default_rng(SEED)
+    all_syms = sorted(set(symbols))
+    random50 = list(rng.choice(all_syms, size=min(50, len(all_syms)), replace=False))
+
+    for tier_name, tier in [("liquid50", LIQUID_TIER), ("random50", random50), ("full_panel", None)]:
         if tier is None:
             t_ts, t_sym, t_X, t_y, t_vol = ts, symbols, X, y, vol_scaler
         else:
