@@ -16,7 +16,7 @@ import logging
 import math
 import os
 import time
-from datetime import datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timezone
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -27,6 +27,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest
 
+from quantlib.corporate_actions import names_with_recent_ex_date
 from quantlib.universe import is_etf_like
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -53,6 +54,12 @@ LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "30"))
 SYMBOL_DENYLIST = {
     sym.strip().upper() for sym in os.environ.get("SYMBOL_DENYLIST", "KLAC").split(",") if sym.strip()
 }
+# Data-driven successor to the manual denylist (task #18): exclude any name with a split ex-date
+# inside the feature-lookback window, since its multi-bar features straddle the adjustment boundary
+# (the KLAC failure class). Must cover the longest backward feature window — currently mom_10d
+# (10 trading days ≈ 14 calendar) → default 15. Splits only by default (dividends don't corrupt
+# intraday momentum). Pairs with QA's price-match invariant (the backstop for already-bad history).
+EX_DATE_LOOKBACK_DAYS = int(os.environ.get("EX_DATE_LOOKBACK_DAYS", "15"))
 _NY = ZoneInfo("America/New_York")
 
 DB_KWARGS = {
@@ -154,7 +161,20 @@ ON CONFLICT (client_order_id) DO NOTHING
 """
 
 
-def candidate_pool(conn: psycopg.Connection, ts: datetime) -> list[dict]:
+def ex_date_excluded(conn: psycopg.Connection, as_of: date) -> set[str]:
+    """Names with a split ex-date inside the feature-lookback window — excluded until their series
+    is verified consistent (the data-driven successor to the manual denylist). Returns empty (with a
+    warning) while prod's corporate_actions table is not yet created — the manual SYMBOL_DENYLIST
+    still covers known cases until then; QA's price-match invariant is the other backstop."""
+    try:
+        return names_with_recent_ex_date(conn, as_of, EX_DATE_LOOKBACK_DAYS)
+    except psycopg.errors.UndefinedTable:
+        logger.warning("corporate_actions table absent; ex-date guard INACTIVE (manual denylist applies)")
+        return set()
+
+
+def candidate_pool(conn: psycopg.Connection, ts: datetime, today: date) -> list[dict]:
+    excluded = SYMBOL_DENYLIST | ex_date_excluded(conn, today)
     with conn.cursor() as cur:
         cur.execute(
             """SELECT p.symbol, p.score, am.easy_to_borrow, am.name,
@@ -167,7 +187,7 @@ def candidate_pool(conn: psycopg.Connection, ts: datetime) -> list[dict]:
         rows = cur.fetchall()
     pool = []
     for symbol, score, easy_to_borrow, name, last_close in rows:
-        if symbol in SYMBOL_DENYLIST or is_etf_like(name) or last_close is None or last_close < 5:
+        if symbol in excluded or is_etf_like(name) or last_close is None or last_close < 5:
             continue
         pool.append({"symbol": symbol, "score": float(score), "etb": bool(easy_to_borrow),
                      "price": float(last_close)})
@@ -207,7 +227,7 @@ def traded_today(conn: psycopg.Connection, today: object) -> bool:
 
 
 def submit_basket(conn: psycopg.Connection, ts: datetime, today: object) -> None:
-    pool = candidate_pool(conn, ts)
+    pool = candidate_pool(conn, ts, today)
     if len(pool) < K_LONG + K_SHORT:
         logger.warning("pool too small (%d); skip", len(pool)); return
     longs, shorts = build_basket(pool)

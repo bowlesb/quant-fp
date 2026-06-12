@@ -23,7 +23,13 @@ Manager go on #12; Modeller GO on #16 swap + #12 panel rebuild. Sequence (any su
 2. **#18 first CA fetch** (cheap): `BACKFILL_SYMBOLS=universe docker compose --profile tools run --rm backfiller fetch-corporate-actions` → confirms KLAC forward_split ex-6/12 lands; note new-action symbols.
 3. **#17 KLAC re-fetch** (one consistent Adjustment.ALL pass): `BACKFILL_SYMBOLS=KLAC BACKFILL_START=2023-12-01 docker compose --profile tools run --rm backfiller backfill-bars` → then recompute KLAC v1.1.1 momentum cells. Verify no >3× internal jump (QA invariant should flip green). Tell QA + execution-risk (denylist-removal GATED on QA parity green).
 4. **#12 Part A** (optional, if Manager go): one-shot deepen the 222 thin universe names (BACKFILL_START=2023-12-01) — see docs/BACKFILL_SCOPE.md.
-5. **#16 model swap** (if Modeller GO): drop models/model_fwd_30m_v1.1.1.txt, point model-server at the versioned file, include in the rebuild below.
+5. **#16 = STAGING ONLY — NO live swap** (Manager ruling 2b9cde3): v1.1.1 is 21-feat vs the live
+   18-feat v1.0.0 contract; a live swap needs a contract bump + replay-equiv re-verify for a no-edge
+   hygiene model — deferred to v1.2.0/OFI post-M2 with three-way sign-off. My only #16 action: rebuild
+   the trainer image (so Modeller's guarded clean code trains, not the stale image), then Modeller
+   trains to a STAGING path. HAZARD: the staging artifact must NOT be models/model_fwd_30m.txt (the
+   LIVE model-server path) — a 21-feat file there breaks live 18-feat scoring on reload. Train to a
+   versioned path (e.g. models/model_fwd_30m_v1.1.1.txt). model-server stays on v1.0.0; QA v1.0.0 purge stays deferred.
 6. **`make rebuild-all`** — FIRST build with GIT_SHA baked into every image (running==intended); ONE ingestor restart; picks up clean bar-subscription membership + clears the benign ingestor quantlib-drift (OFI/is_etf_like/v1.1.1 commits the running ingestor predates).
 7. **Verify**: `scripts/assert_image_fresh.sh` → all "fresh ... baked <sha>"; ingestion resumes fresh (last bar within tolerance); model-server scores on next cadence.
 8. **#12 Part B** (gated on Modeller): monthly-chunked v1.1.1 panel rebuild over full 1000-name universe (DELETE-then-insert) + labels + QA re-validate.
