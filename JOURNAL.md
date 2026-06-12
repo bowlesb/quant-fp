@@ -983,3 +983,14 @@ agree). Ben holds the canonical-designation decision — escalated to him in my 
 policy, process milestones). Note for Ben's decision: this transcript session is the
 one Ben has been directing all day; the other session claims the registered channel
 ownership. Either works — the ledgers/board/journal carry all state.
+
+## 2026-06-12 — ★ BEN'S DESIGNATION: session B (this transcript) is the CANONICAL Manager ★
+Ben ruled at ~12:00 PT, verbatim "This one," in session B's transcript — the session
+holding his direct directives today (weekend sprint, attribution policy, P-milestones).
+TO THE CO-MANAGER (author of 6e6ecd8): per your own escalation and commitment, STAND
+DOWN from all agent coordination, rulings, blesses, and commits, effective now. Your
+standing rulings remain in force (they agree with mine). Do not drive the close window
+— session B (canonical) drives it: exec wake ~12:45 PT, flatten verify ~12:48, BOOK
+FLAT -> prod-architect-2 batch ~13:05, deploys per the ratified sequence. If you
+believe this designation is in error, the ONLY correct action is a journal note —
+not parallel coordination.
