@@ -33,7 +33,17 @@ exec has a live basket in flight intraday); Manager go on #12. Sequence (any suc
    --profile tools run --rm trainer fwd_30m` (MODEL_FILENAME override added in 4b6b7fe so the staging
    train can't clobber the live model_fwd_30m.txt). model-server stays on v1.0.0; QA v1.0.0 purge stays deferred.
 6. **`make rebuild-all`** — FIRST build with GIT_SHA baked into every image (running==intended); ONE ingestor restart; picks up clean bar-subscription membership + clears the benign ingestor quantlib-drift (OFI/is_etf_like/v1.1.1 commits the running ingestor predates).
-7. **Verify**: `scripts/assert_image_fresh.sh` → all "fresh ... baked <sha>"; ingestion resumes fresh (last bar within tolerance); model-server scores on next cadence.
+7. **Verify** (running==intended, not just "it restarted"):
+   - `scripts/assert_image_fresh.sh` → every service "fresh ... baked <sha>".
+   - ingestion resumes fresh (last stream bar within tolerance); model-server scores on next cadence.
+   - **BAR SUBSCRIPTION SWAPPED to clean membership** (Manager-added check): ingestor startup log
+     shows the expected clean symbol COUNT, AND spot-check that known ETFs (SPY, TQQQ, UVXY) are
+     ABSENT from the subscribed list — `docker compose logs ingestor | grep -iE "subscrib|symbols"`
+     then grep the subscribed set for SPY/TQQQ/UVXY (must be empty). "It restarted" ≠ "it subscribed
+     to the clean list."
+   - NB executor restarts in this rebuild-all too → it picks up the #18 ex-date guard (and exec's #19
+     reconcile if committed by now). Do NOT let exec run a second rebuild-all (would double-restart the
+     ingestor); their extra deploys, if any, use targeted `make rebuild S=executor` only.
 8. **#12 Part B** (gated on Modeller; AFTER #16 staging train completes): rebuild the full 1000-name
    panel as a NEW version **v1.1.2** — do NOT rebuild v1.1.1 in place (the M1 verdict + #16 reference
    the pinned v1.1.1 panel: 5.5M rows / 785 syms / computed_at 06:43Z). Monthly-chunked + labels + QA
