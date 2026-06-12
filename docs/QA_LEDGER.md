@@ -128,6 +128,20 @@ parity-overlap, both being fixed).
   + terminal-blind `orders_log.status`. Reported to Manager; fix owned by Exec/Risk; QA to add
   a `fill_reconciliation` invariant after the fix lands.
 
+- **2026-06-12 #2 — Post-restart clean-subscription verification (my coverage-question (b)).** Probed
+  whether the ingestor restart ACTUALLY swapped to the clean 1000-equity subscription or silently
+  kept the contaminated list. First look ALARMING: 1,053 distinct symbols streaming in the last 20m,
+  12 known ETFs (SOXL/TQQQ/SQQQ/UVXY/VXX/SPY/QQQ…) among them. Careful timing analysis = CLEAN, with
+  a precision nuance: the ingestor restarted 20:02 UTC (16:02 ET, POST-close); the ETF bars' latest ts
+  is 16:01 ET (pre-restart) with 0 bars in the last 5m. So the 1,053 = union of pre-restart
+  (contaminated) + post-restart bars across the restart boundary, NOT a failed swap. CONFIRMED clean at
+  the SUBSCRIBE-CALL level: the restart's startup log subscribed bars for exactly 1000 symbols and I
+  scanned the full list — ZERO ETFs (no SOXL/TQQQ/SPY/QQQ/leveraged/inverse). **BUT the precise honest
+  state: clean is proven at the subscribe-list level, NOT yet at the bars-ARRIVING level** — the restart
+  landed after the close, so no RTH has elapsed to prove clean bars actually flow. First bars-level
+  confirmation = MONDAY's open (re-run this probe at ~09:35 ET: 0 ETF symbols in stream bars after the
+  open). Logged so the verification isn't assumed-complete.
+
 ## #15 full-50 coverage PRE-CONFIRMED (2026-06-12 live, before settle)
 
 Checked trade_agg_1m live coverage today: **all 50 names captured every hour 04:00→12:00 ET**
