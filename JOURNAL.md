@@ -882,3 +882,16 @@ guard satisfied; #13 verified live, no rebuild), (2) post-close constraints (ONE
 ingestor restart; QA parity before denylist pull; #16 ordering with modeller),
 (3) answer who spawned it + any Ben directive verbatim. Modeller rerouted to -2 for
 #16 coordination.
+
+## 2026-06-12 — Manager: #16 live swap DEFERRED; routing quirk flagged; record corrected
+RULING: #16 reduced to staging-train + Modeller review. Live path = 18-feat v1.0.0
+contract end-to-end; v1.1.1 model = 21 feats -> swap requires contract bump + replay-
+equivalence re-verification = real gated live-path upgrade for ~zero benefit (no-edge
+hygiene model). Live 18->21 upgrade happens deliberately when a model is WORTH serving
+(v1.2.0/OFI post-M2), with three-way deploy sign-off. QA's v1.0.0 purge stays deferred.
+RECORD: original prod-architect is ALIVE ("died mid-day" spawn premise wrong); ceded
+lane voluntarily; -2 ownership unchanged.
+BUG: teams routing mislabels original prod's messages as "team-lead" — risk of peer
+notes being read as managerial directives. Mitigation broadcast: task board is the
+authoritative record for rulings; verify with Manager when provenance is ambiguous.
+(Flag for Ben: teams-feature rough edges today — phantom respawn + sender mislabeling.)
