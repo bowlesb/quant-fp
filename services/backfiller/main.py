@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 import psycopg
 from alpaca.data.enums import Adjustment
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical.corporate_actions import CorporateActionsClient
 from alpaca.data.requests import StockQuotesRequest, StockTradesRequest
 
 from quantlib.aggregates import (
@@ -32,6 +33,10 @@ from quantlib.aggregates import (
     bucket_minute,
 )
 from quantlib.barsource import fetch_and_store_bars, fetch_daily_bars
+from quantlib.corporate_actions import (
+    fetch_corporate_actions,
+    upsert_corporate_actions,
+)
 from quantlib.features import is_rth, on_cadence
 from quantlib.featurestore import build_feature_store, load_membership
 from quantlib.labels import (
@@ -57,6 +62,10 @@ DB_KWARGS = {
 }
 
 data_client = StockHistoricalDataClient(
+    os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
+)
+
+corporate_actions_client = CorporateActionsClient(
     os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
 )
 
@@ -653,6 +662,35 @@ def validate_bars() -> None:
             )
 
 
+def fetch_corporate_actions_cmd() -> None:
+    """Pull corporate actions (splits/dividends/mergers) for the symbol set into the
+    corporate_actions table (task #18). Window via CA_START/CA_END (ISO dates); defaults to a wide
+    trailing window through +35d so announced-but-future ex-dates are captured. Logs the symbols
+    that gained a NEW action — those are the #17 full-history re-fetch candidates."""
+    start = date.fromisoformat(
+        os.environ.get("CA_START", (datetime.now(timezone.utc).date() - timedelta(days=1100)).isoformat())
+    )
+    end = date.fromisoformat(
+        os.environ.get("CA_END", (datetime.now(timezone.utc).date() + timedelta(days=35)).isoformat())
+    )
+    with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
+        symbols = resolve_symbols(conn)
+        logger.info(
+            "fetching corporate actions for %d symbols, %s .. %s",
+            len(symbols),
+            start,
+            end,
+        )
+        actions = fetch_corporate_actions(corporate_actions_client, symbols, start, end)
+        newly_inserted = upsert_corporate_actions(conn, actions)
+    logger.info(
+        "corporate_actions: %d actions upserted; %d symbols with NEW actions (re-fetch candidates): %s",
+        len(actions),
+        len(newly_inserted),
+        ",".join(sorted(newly_inserted)) if newly_inserted else "(none)",
+    )
+
+
 def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "backfill-bars"
     if command == "backfill-bars":
@@ -673,6 +711,8 @@ def main() -> None:
         build_overnight_labels()
     elif command == "build-universe-history":
         build_universe_history()
+    elif command == "fetch-corporate-actions":
+        fetch_corporate_actions_cmd()
     else:
         raise SystemExit(f"unknown command: {command}")
 

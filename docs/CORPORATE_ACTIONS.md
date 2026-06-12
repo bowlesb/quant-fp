@@ -1,8 +1,24 @@
 # Corporate Actions feed + adjustment-consistency (tasks #18 + #17)
 
-Owner: prod-architect (data acquisition lane). Status: SPEC (validated against the live API
-2026-06-12; build sequenced post-M1, alongside M2). This note captures the validated API shape,
-the KLAC root cause, and the fix design so the post-close build is fast and correct.
+Owner: prod-architect (data acquisition lane). Status: CORE BUILT 2026-06-12 (table DDL + fetch/
+upsert module + backfiller tool), wiring + first fetch pending (see "Build status" below). This note
+captures the validated API shape, the KLAC root cause, and the fix design.
+
+## Build status (2026-06-12)
+DONE (staged, import-validated, no live-service change yet):
+- `db/init/05_corporate_actions.sql` — table DDL (PK symbol/action_type/ex_date, ex_date index).
+- `quantlib/corporate_actions.py` — `fetch_corporate_actions()` (per-type pydantic parse, guarded),
+  `upsert_corporate_actions()` (idempotent; RETURNS the set of symbols with a NEWLY-inserted action
+  = the #17 re-fetch trigger), `names_with_recent_ex_date()` (executor ex-date guard consumer).
+- `services/backfiller/main.py fetch-corporate-actions` — tool subcommand (CA_START/CA_END/
+  BACKFILL_SYMBOLS env; logs new-action symbols).
+PENDING (DB-write / restart — batched post-close, or on Manager's DB-clear):
+1. Apply DDL to the live DB + first fetch over the universe (`fetch-corporate-actions`).
+2. backfill-manager: on `upsert` returning new-action symbols, full-history single-pass re-fetch
+   of each (closes the #17 mid-backfill class permanently).
+3. scheduler: daily rolling CA fetch (last 30d + next 35d) so the feed stays current.
+4. Consumers in other lanes: QA wires the table into the jump invariant; execution wires
+   `names_with_recent_ex_date()` into the candidate-pool guard. Needs a QA unit test for the parser.
 
 ## Why this exists
 The KLAC incident (2026-06-12): a real **10:1 forward split, ex-date 2026-06-12** (announced
