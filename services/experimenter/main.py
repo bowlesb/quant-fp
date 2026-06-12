@@ -84,27 +84,34 @@ def run_queue() -> int:
         try:
             with psycopg.connect(**DB_KWARGS) as conn:
                 names, ts, symbols, X, y = load_panel(conn, horizon, sv)
+            # A too-small panel is almost always TRANSIENT — the experimenter loaded while a
+            # panel rebuild was mid-flight. Persisting it would poison the id permanently
+            # (done_ids() never retries), so SKIP without recording and retry next cycle.
+            if len(y) < 1000:
+                logger.warning(
+                    "skipping %s: panel too small (n_rows=%d, set=%s, horizon=%s) — not "
+                    "persisting; will retry when the panel grows",
+                    exp["id"], len(y), sv, horizon,
+                )
+                continue
             # named feature subsets, by NAME so they work for any set version:
             #   nomicro = drop microstructure; nocalendar = drop micro + calendar
             drop = set(MICRO_NAMES) if sel == "nomicro" else \
                 (set(MICRO_NAMES) | set(CALENDAR_NAMES)) if sel == "nocalendar" else set()
             feature_idx = [i for i, n in enumerate(names) if n not in drop] if drop else None
-            if len(y) < 1000:
-                result = {"error": "panel too small", "n_rows": int(len(y))}
-            else:
-                # overnight = ~1 rebalance/day -> periods_per_year ~252 (cadence_min=390)
-                exp_cadence = 390 if horizon == "overnight" else CADENCE_MIN
-                vol_scaler = X[:, names.index("vol_30m")] if "vol_30m" in names else None
-                result = run_experiment(
-                    X, y, ts, symbols=symbols, vol_scaler=vol_scaler, label=exp.get("label", "raw"),
-                    feature_idx=feature_idx, horizon_minutes=HORIZON_MIN.get(horizon, 30),
-                    cadence_min=exp_cadence,
-                )
-                imp = result.get("gain_importance")
-                if imp:
-                    used = [names[i] for i in feature_idx] if feature_idx else names
-                    top = sorted(zip(used, imp), key=lambda kv: -kv[1])[:5]
-                    result["top_features"] = [f"{n}:{v}" for n, v in top]
+            # overnight = ~1 rebalance/day -> periods_per_year ~252 (cadence_min=390)
+            exp_cadence = 390 if horizon == "overnight" else CADENCE_MIN
+            vol_scaler = X[:, names.index("vol_30m")] if "vol_30m" in names else None
+            result = run_experiment(
+                X, y, ts, symbols=symbols, vol_scaler=vol_scaler, label=exp.get("label", "raw"),
+                feature_idx=feature_idx, horizon_minutes=HORIZON_MIN.get(horizon, 30),
+                cadence_min=exp_cadence,
+            )
+            imp = result.get("gain_importance")
+            if imp:
+                used = [names[i] for i in feature_idx] if feature_idx else names
+                top = sorted(zip(used, imp), key=lambda kv: -kv[1])[:5]
+                result["top_features"] = [f"{n}:{v}" for n, v in top]
         except (psycopg.Error, ValueError, KeyError) as exc:
             result = {"error": f"{type(exc).__name__}: {exc}"}
         record = {

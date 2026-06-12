@@ -248,8 +248,14 @@ V11_NAMES: list[str] = NON_MICRO_NAMES + MOMENTUM_NAMES                         
 ORDER_FLOW_NAMES = [f"ofi_{w}m" for w in ORDER_FLOW_WINDOWS] + ["signed_vol_z_30"]
 V12_NAMES: list[str] = V11_NAMES + ORDER_FLOW_NAMES                              # 25
 
+# v1.1.1 = the v1.1.0 feature CONTRACT (identical 21 names) recomputed on the CLEAN,
+# equities-only universe (ETFs/leveraged funds excluded; labels re-demeaned). A distinct
+# version so battery results in results.jsonl are unambiguously tagged clean-panel vs the
+# contaminated v1.1.0 runs. Features are membership-independent; the version marks the panel epoch.
+V111_NAMES: list[str] = V11_NAMES                                                # 21
+
 FEATURE_SETS: dict[str, list[str]] = {
-    "v1.0.0": FEATURE_NAMES, "v1.1.0": V11_NAMES, "v1.2.0": V12_NAMES,
+    "v1.0.0": FEATURE_NAMES, "v1.1.0": V11_NAMES, "v1.1.1": V111_NAMES, "v1.2.0": V12_NAMES,
 }
 
 

@@ -6,6 +6,34 @@ why.
 
 ---
 
+- ===== M1 CLEAN-UNIVERSE REBUILD DONE + STALE-IMAGE BUG CAUGHT (2026-06-12 ~04:25, Prod/Architect) =====
+  Task #1 COMPLETE. **STALE-IMAGE TRAP (running!=intended), caught before it poisoned everything:**
+  the first build-universe-history ran on a backfiller image built 06-11 14:08 PDT — ~6.5h BEFORE the
+  is_etf_like fix (814e548 @20:44). `docker compose run <svc>` BAKES source into the image (no volume
+  mount), so it ran pre-fix select_universe and RE-CONTAMINATED the universe (~175 ETFs/date still on
+  "rebuilt" dates). Caught by verifying already-rebuilt EARLY dates BEFORE trusting completion (they
+  still had iShares/SPDR/ProShares). Also found quant-scheduler stale (06-10) — the LIVE daily universe
+  builder, which would have re-contaminated universe_membership on its next pre-open run.
+  FIX: rebuilt + verified backfiller AND scheduler images (in-image is_etf_like: SPDR/iShares excluded,
+  TQQQ dropped despite 9e9 ADV, Apple kept), re-ran.
+  **AUTHORITATIVE VERIFICATION (code's own is_etf_like over EVERY member): 614 dates, 455,881 members,
+  0 ETF-like violations across 0 dates.** Sizes min 696 / avg 742 / max 1000 (the 1000 is the live 6/12
+  scheduler row). Contamination removed: 573,149 -> 455,881 rows (~117k ETF members gone).
+  CORRECTION of an earlier claim: clean universe = ~715-742 equities/date, NOT ~885. The "~885 + ~160
+  displaced equities" finding was a MISREAD of the stale (ETF-included) run. Reality: contamination was
+  purely ADDITIVE ETFs (~210/date); the clean equity set ~= the old equity portion; no meaningful
+  displacement. The substantive change for Modeller is LABEL re-demeaning (cross-sectional median no
+  longer includes fund returns), not new names.
+  DATA-COVERAGE GAP (noted, M2): historical panel is backfill-limited to ~715-742 names (we only
+  backfilled the OLD universe's ~1006 symbols); the LIVE clean universe fills to 1000 from all 7439
+  tradable equities -> ~285 live names have NO backfilled history. Full clean-universe backfill is M2/
+  task-#9 territory.
+  Pre-open #6: 6/12 live membership was contaminated (1000, 200 ETFs) and maybe_build_universe SKIPS
+  when a row exists -> deleted it + restarted the fixed scheduler -> rebuilt CLEAN (1000, 0 funds).
+  model-server ready (lgbm_fwd_30m_v1.0.0 loaded, 30m cadence firing, staleness guard correctly idling
+  overnight). NOTE for QA: maybe_build_universe uses datetime.now(UTC).date() not ET — latent calendar bug.
+  NEXT: panel rebuild as v1.1.1 (monthly-chunked features + label overwrite), then unblocks Modeller #4.
+
 ## 2026-06-10 — Project start
 
 - Decision: build fresh at `~/quant`, ignoring prior repos (Edgar,
