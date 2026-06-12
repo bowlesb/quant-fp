@@ -17,10 +17,10 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 
 ## Scheduled core-rebuilds (maintenance windows)
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
-Prereqs before starting: market closed (≥16:00 ET); Modeller battery done (✓ guard satisfied);
-Manager go on #12; Modeller GO on #16 swap + #12 panel rebuild. Sequence (any successor can run this):
+Prereqs before starting: market closed (≥16:00 ET) AND exec EOD-flatten done (book flat, ~15:48 ET —
+exec has a live basket in flight intraday); Manager go on #12. Sequence (any successor can run this):
 1. **Apply #18 DDL** (idempotent, instant): `docker compose exec -T timescaledb psql -U quant -d quant -f /dev/stdin < db/init/05_corporate_actions.sql` (or paste the CREATE TABLE). Verify table exists.
-2. **#18 first CA fetch** (cheap): `BACKFILL_SYMBOLS=universe docker compose --profile tools run --rm backfiller fetch-corporate-actions` → confirms KLAC forward_split ex-6/12 lands; note new-action symbols.
+2. **#18 first CA fetch** (cheap): `BACKFILL_SYMBOLS=universe docker compose --profile tools run --rm backfiller fetch-corporate-actions` → confirms KLAC forward_split ex-6/12 lands; note new-action symbols. **Then PING execution-risk** — table is created+populated; they rebuild the executor to pick up quantlib.corporate_actions + verify KLAC auto-excludes via the ex-date guard (their guard fails-open until now, so this is the activation point). (DDL create + this populate are adjacent; exec only acts after this ping, so they never see exists-but-empty.)
 3. **#17 KLAC re-fetch** (one consistent Adjustment.ALL pass): `BACKFILL_SYMBOLS=KLAC BACKFILL_START=2023-12-01 docker compose --profile tools run --rm backfiller backfill-bars` → then recompute KLAC v1.1.1 momentum cells. Verify no >3× internal jump (QA invariant should flip green). Tell QA + execution-risk (denylist-removal GATED on QA parity green).
 4. **#12 Part A** (optional, if Manager go): one-shot deepen the 222 thin universe names (BACKFILL_START=2023-12-01) — see docs/BACKFILL_SCOPE.md.
 5. **#16 = STAGING ONLY — NO live swap** (Manager ruling 2b9cde3): v1.1.1 is 21-feat vs the live
@@ -34,7 +34,10 @@ Manager go on #12; Modeller GO on #16 swap + #12 panel rebuild. Sequence (any su
    train can't clobber the live model_fwd_30m.txt). model-server stays on v1.0.0; QA v1.0.0 purge stays deferred.
 6. **`make rebuild-all`** — FIRST build with GIT_SHA baked into every image (running==intended); ONE ingestor restart; picks up clean bar-subscription membership + clears the benign ingestor quantlib-drift (OFI/is_etf_like/v1.1.1 commits the running ingestor predates).
 7. **Verify**: `scripts/assert_image_fresh.sh` → all "fresh ... baked <sha>"; ingestion resumes fresh (last bar within tolerance); model-server scores on next cadence.
-8. **#12 Part B** (gated on Modeller): monthly-chunked v1.1.1 panel rebuild over full 1000-name universe (DELETE-then-insert) + labels + QA re-validate.
+8. **#12 Part B** (gated on Modeller; AFTER #16 staging train completes): rebuild the full 1000-name
+   panel as a NEW version **v1.1.2** — do NOT rebuild v1.1.1 in place (the M1 verdict + #16 reference
+   the pinned v1.1.1 panel: 5.5M rows / 785 syms / computed_at 06:43Z). Monthly-chunked + labels + QA
+   re-validate. v1.1.2 becomes the research==production panel; v1.1.1 stays frozen for provenance.
 NB: the backfill-manager CA fetch + recent-split full-history re-fetch trigger is already CODED
 (commit 5f17db9) and activates automatically at step 6's rebuild-all — its first non-market-hours
 cycle self-populates corporate_actions and re-fetches any recent-split name. The explicit
