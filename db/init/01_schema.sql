@@ -188,8 +188,24 @@ CREATE TABLE fills_log (
     fill_ts         timestamptz NOT NULL,
     qty             numeric NOT NULL,
     price           numeric NOT NULL,
+    symbol          text,                              -- broker truth: which name filled
+    side            text,                              -- 'buy' | 'sell' (for signed cashflow)
     PRIMARY KEY (alpaca_order_id, fill_ts)
 );
+
+-- Realized P&L per name per day: signed cashflow over every fill (entry AND EOD-flatten
+-- exit). For a fully round-tripped name (bought_qty == sold_qty) realized_pnl is the net
+-- realized dollars; summed across names it reconciles to pnl_daily.day_pnl (modulo fees).
+CREATE VIEW realized_pnl_by_name AS
+SELECT fill_ts::date AS day,
+       symbol,
+       round(sum(CASE WHEN side = 'sell' THEN qty * price ELSE -qty * price END), 2) AS realized_pnl,
+       sum(CASE WHEN side = 'buy'  THEN qty ELSE 0 END) AS bought_qty,
+       sum(CASE WHEN side = 'sell' THEN qty ELSE 0 END) AS sold_qty,
+       count(*) AS n_fills
+FROM fills_log
+WHERE symbol IS NOT NULL
+GROUP BY 1, 2;
 
 CREATE TABLE reconciliation_log (
     ts     timestamptz PRIMARY KEY,

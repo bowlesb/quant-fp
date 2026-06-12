@@ -154,3 +154,28 @@ Intraday Margin Framework, common-trading-api-errors, usage-limit (rate). Verify
 live: exact rate limit (headers), HTB short status, short maintenance % under IML.
 
 (Reference compiled from Alpaca docs + alpaca-py + hands-on paper probing, 2026-06-10.)
+
+## Ledger — closed-loop verifications & fixes
+
+### 2026-06-12 pre-open — closed-loop verify (all GREEN) + per-name P&L attribution shipped
+Ran every check against FRESH broker truth (not asserted):
+- Flat: 0 pos / 0 open orders; equity $100,027.22 == cash. Reconcile `ok=t`, `broker={}`.
+- P&L truthful: `pnl_daily` 6/11 = −$10.07, equity == broker to the cent; 6/12 opened flat.
+- Kill-switch armed, `halted=f` (trips < start−$150, fresh equity each cycle, persists across
+  restart). Caps bind = min($6,000, equity×0.05 ≈ $5,001); ~$1.2k basket << cap.
+- Signal non-degenerate: 993 syms / 343 distinct scores / L-S sep 0.0140 ≫ 0.0005 guard.
+  Staleness guard (35min) blocks trading until fresh open scores land.
+- **CLOSED the #1 open item — realized-P&L attribution per name.** Root cause: `fills_log`
+  had no symbol/side, and EOD-flatten fills are broker-generated (not in `orders_log`) so they
+  could not be joined back → per-name P&L was uncomputable. Fix: `capture_fills` now persists
+  `order.symbol` + `order.side.value`; added cols (self-healing ALTER in executor startup +
+  `db/init/01_schema.sql`) + `realized_pnl_by_name` view (signed cashflow per name/day).
+  Backfilled 6/11 from Alpaca → per-name realized sums to −$10.07 EXACTLY (== pnl_daily):
+  MRVL −15.52, PRIM −3.04, HUM −0.88, DXYZ +0.55, UMAC +4.14, LUNR +4.68. Validated end-to-end.
+- Executor rebuilt+restarted clean (dry_run=false, paper); session state + reconcile resumed flat.
+- TOP REMAINING HAZARD (flagged, not yet fixed): EOD flatten uses `close_all_positions` =
+  MARKET orders at 15:48 ET. Works while open, but (a) no price control vs a LOC/`cls` net, and
+  (b) the `stranded` market-closed catch-up path would submit market orders that QUEUE for the
+  next open (ledger §0.foot-gun) rather than flattening now — only bites if a position ever
+  lingers past close, which hasn't happened. Open items still: partial-basket cancel-replace,
+  broker-side LOC EOD net.

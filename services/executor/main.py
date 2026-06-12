@@ -87,6 +87,19 @@ CREATE TABLE IF NOT EXISTS pnl_daily (
     day date PRIMARY KEY, start_equity numeric, equity numeric, unrealized numeric,
     n_positions int, updated_at timestamptz)
 """
+# Self-healing: 01_schema.sql only runs on a fresh DB, so add the per-name attribution
+# columns + view here (idempotent) for already-initialized databases.
+FILLS_DDL = [
+    "ALTER TABLE fills_log ADD COLUMN IF NOT EXISTS symbol text",
+    "ALTER TABLE fills_log ADD COLUMN IF NOT EXISTS side text",
+    """CREATE OR REPLACE VIEW realized_pnl_by_name AS
+       SELECT fill_ts::date AS day, symbol,
+              round(sum(CASE WHEN side='sell' THEN qty*price ELSE -qty*price END), 2) AS realized_pnl,
+              sum(CASE WHEN side='buy'  THEN qty ELSE 0 END) AS bought_qty,
+              sum(CASE WHEN side='sell' THEN qty ELSE 0 END) AS sold_qty,
+              count(*) AS n_fills
+       FROM fills_log WHERE symbol IS NOT NULL GROUP BY 1, 2""",
+]
 INTENT_SQL = """
 INSERT INTO orders_log
     (client_order_id, symbol, side, qty, order_type, limit_price, mode, intended_at, status,
@@ -209,10 +222,13 @@ def capture_fills(conn: psycopg.Connection, today: object) -> None:
     with conn.cursor() as cur:
         for order in orders:
             if order.filled_at and order.filled_avg_price and float(order.filled_qty or 0) > 0:
-                cur.execute("INSERT INTO fills_log (alpaca_order_id, fill_ts, qty, price) "
-                            "VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                            (str(order.id), order.filled_at, float(order.filled_qty),
-                             float(order.filled_avg_price)))
+                cur.execute(
+                    "INSERT INTO fills_log (alpaca_order_id, fill_ts, qty, price, symbol, side) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (alpaca_order_id, fill_ts) DO UPDATE "
+                    "SET symbol=EXCLUDED.symbol, side=EXCLUDED.side",
+                    (str(order.id), order.filled_at, float(order.filled_qty),
+                     float(order.filled_avg_price), order.symbol, order.side.value))
 
 
 def write_pnl(conn: psycopg.Connection, today: object, state: dict, positions: list) -> None:
@@ -253,6 +269,8 @@ def main() -> None:
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(STATE_DDL)
         cur.execute(PNL_DDL)
+        for stmt in FILLS_DDL:
+            cur.execute(stmt)
     while True:
         try:
             with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
