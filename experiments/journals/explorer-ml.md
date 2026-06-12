@@ -82,3 +82,47 @@ DELIBERATELY NOT PROPOSED this wake (to keep the batch few-and-strong; parked fo
 - If 002/004 lower turnover but breakeven still ≤1.4bps across the grid → retire "relabel your
   way out of turnover"; the fix is genuinely-slower signal or measured cost. Document the null.
 - THEN revisit sample weighting (post-#5 cost-tier) and ensembling (only if a config clears cost).
+
+---
+
+## 2026-06-12 — Wake 1 cont: Lead dispositions + 001 ridge BUILT & smoke-validated
+
+Lead enqueued ML-003 (my 3 exact pos-vs-ret5m configs, after the W12 block). Build order set:
+001 ridge FIRST (load-bearing), then 002, then 004. Lead owns the per-symbol-demean follow-up
+on 003 (queue runner does L/S but not demean).
+
+### 001 built: experiments/ml_ridge_baseline.py
+- sklearn is NOT in the experimenter image (checked) -> used CLOSED-FORM ridge
+  (XtX+aI)^-1 Xt y, no new dep (as pre-committed). ElasticNet/L1 dropped (no closed form;
+  the L2 path answers the floor+turnover question). Fold-local median-impute + standardize
+  (leakage-safe). Alpha picked by inner-split on the FIRST train fold only. Labels: raw + rank.
+- Mirrors the battery's 4 gates byte-for-byte (canary, net-of-cost L/S, survivorship demean),
+  reusing battery.per_symbol_demean / filter_smoke / PRICE_ONLY_DROP and quantlib.backtest.
+- CANARY FIX during build: canary now applies the SAME label transform to the within-ts-shuffled
+  return (rank-of-shuffled for the rank config), so it's an apples-to-apples leakage arbiter.
+
+### Smoke (120d) — harness validated, canary clean, directional read (NOT a verdict)
+ridge/rank: IC 0.0179 t3.9, canary -0.0069 | ridge/raw: IC ~0 (degenerate, a=1.0).
+SANITY CHECK that vindicates the canary: I ran the GBM battery on the SAME 120d window — its
+canaries are -0.0092/-0.0042/-0.0127/-0.0027. So my ridge canary magnitude (~0.007-0.017) is the
+SAME smoke-window noise floor the GBM exhibits on 120d, NOT a ridge leak. On full 600d both
+collapse toward 0. Harness is clean.
+
+DIRECTIONAL FINDING (full-depth needed to confirm, Lead's verdict):
+- Ridge/rank IC 0.0179 vs GBM/rank 0.0235 on the SAME window -> ridge recovers ~76% of the GBM
+  rank IC. A linear model captures MOST of the signal -> consistent with 001(a): the signal is
+  largely LINEAR; GBM nonlinearity buys little here.
+- Ridge/rank standardized coefs are dominated by vwap_dev (-0.0089), vol_30m, rel_ret_30m,
+  mom_1d_rel, gap_from_open — i.e. the POSITION group (vwap_dev, gap_from_open) + a momentum-REL
+  term carry weight. This is a DIFFERENT attribution from the GBM's "ret_5m is everything" gain
+  story. EXACTLY the model-dependency 001 was built to surface: on the linear view, "momentum is
+  dead / signal is purely ret_5m" looks model-dependent, not airtight. Ties straight into 003
+  (is pos a real carrier?). FLAG for the Lead: do NOT treat full-depth ridge coefs as confirming
+  the GBM gain story until checked — they may partly diverge.
+NOTE on smoke economics: like the GBM, ridge is net-negative / breakeven <1.4bps on 120d (turnover
+~2.2-2.6). The breakeven HEADLINE (does linear's smoothness lift breakeven vs GBM) needs full depth
+— 120d is too short and too high-turnover to read the economic gate.
+
+QA: ruff clean, black formatted, py_compile OK. mypy's only gripe is the psycopg stub (host-only,
+hits every experiment script identically — not a real error). Committed; handed to Lead to enqueue
+full-depth. NEXT: build 002 (turnover-smoothed target).
