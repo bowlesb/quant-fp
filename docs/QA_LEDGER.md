@@ -152,6 +152,20 @@ denylist — do NOT signal it until verified.
 
 ## Reviews performed (mapped-reviewer gate outcomes — policy docs/REVIEW_POLICY.md)
 
+- **2026-06-12 (UPDATE) — ex-div verify COMPLETED via modeller-2's committed SQL (adf9415).**
+  The earlier caveat (couldn't run the bars-based add-back — OOM) is now CLOSED: modeller-2's Query 2
+  filters bars to `time='15:59'` (one bar/symbol-day, few chunks) instead of my `last(close)` agg, so
+  it runs. Reproduced Query 2 EXACTLY: mean_label −0.005157, neg_div_yield −0.006103, hygiene-corrected
+  **+0.000946, missing_px=0** (every ex-night has a 15:59 close — no price-proxy coverage gap). Closed
+  the 3 adversarial angles modeller-2 raised: (1) alignment re-confirmed (label_date+1==ex_date, the
+  directional bucket split is the proof). (2) RESIDUAL benign: NOT date-clustering — the 3,291 ex-nights
+  spread over 462 dates (avg 7.1/date, busiest = 1.09% of total), so no high-leverage-date artifact; the
+  +0.00047 overshoot is consistent with cross-sectional demean + 15:59-vs-official-close proxy.
+  (3) COVERAGE clean: action_type='cash_dividend' is PURE (splits 48 + stock_dividends 11 are separate
+  types, zero leak); 607/785 panel symbols (77%) pay dividends — broad, not large-cap-skewed, so the
+  non-ex baseline is a fair counterfactual. **VERDICT STANDS, now fully reproduced end-to-end. Battery
+  interpretation against ex-div-corrected labels is sound.**
+
 - **2026-06-12 — 827f478 (modeller's ex-div overnight-label artifact diagnostic), verified by qa.**
   CONFIRMED — the diagnostic holds; it's a real label-hygiene finding, safe to interpret the
   corrected battery against. Adversarial checks I ran:
