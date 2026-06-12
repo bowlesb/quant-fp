@@ -432,6 +432,23 @@ denylist — do NOT signal it until verified.
 
 ## KNOWN / SCHEDULED — do NOT re-flag as findings
 
+- **v1.2.0 warmup_coverage RED is EXPECTED/OWNED (task #9), tagged in the suite** (Manager ruling
+  2026-06-13, option b). The v1.2.0 OFI research set is WIP: momentum family 100% NaN (daily-bar
+  join not wired) + order-flow family sparse mid-session (ofi_* 16.6%, signed_vol_z 16.6%, mom_1d
+  62% — the OFI NaN is NOT warmup: 0% first-hour, 16.6% mid-session = honest no-trade-minute gaps).
+  The suite renders it `[FAIL·EXPECTED] (OWNED: modeller+prod, task #9)` and excludes it from the
+  exit code, but the fingerprint is family-based (`mom_/ofi_/signed_vol_z`) so a NaN in ANY STABLE
+  feature (ret_/vol_/calendar/vwap) or any non-v1.2.0 set breaks the match and surfaces as a real
+  red. v1.2.0 is NOT live-served (model-server reads source='live' = v1.0.0) → no trading impact.
+  **CAUTION: v1.2.0 has GROWN new reds since the ruling (12 steady-state-NaN, not the original 6
+  dead) — the tight fingerprint refused to camouflage the larger problem; re-confirm scope as the
+  modeller fixes families.**
+- **Market-context ETFs in the capture set (SPY/QQQ/IWM) are INTENTIONAL** (Manager ruling
+  2026-06-13). The ingestor streams them for BARS only as a market-beta reference; they are NOT in
+  the equities universe and NOT in the OFI/trade-quote tier. **RULE for all analyses: EXCLUDE
+  SPY/QQQ/IWM from any equity cross-section** (modeller hit this in task #5). The 512-name OFI set
+  must be confirmed equities-only BY CONSTRUCTION at Monday's deploy (it derives from
+  universe_membership WHERE in_universe, which already excludes them — verify at deploy).
 - **Ingestor BAR subscription still carries the contaminated 1000-name membership** (incl.
   ETFs) until the post-close clean-membership restart (batched with prod #11 after 2026-06-12
   16:00 ET). HARMLESS: ETF bars are stored but unused by trading/universe. Known + scheduled.
@@ -440,6 +457,11 @@ denylist — do NOT signal it until verified.
 
 ## Resolved (kept for history)
 
+- **2026-06-13 MILESTONE: both parity invariants GREEN at full-panel scale for the first time**
+  (Manager marked it). backfill_realtime_parity 99.32% within 0.2% on 1,020,258 overlap bars (the
+  split-aware 0.97% fix holds at scale) + trade_agg_parity PASS — the first full `--full` run that
+  completed without lock-OOM (the max_locks 64→2048 bump). The panel the M1 verdict rests on is now
+  parity-verified at scale.
 - Compression: 0/74 → 68/74 chunks (DB 6.8GB→2.7GB).
 - day_of_week ET-correct across all 662k historical rows; per-ts demean exact; no Inf.
 - Micro features 99.9% NaN universe-wide → dropped from the v1.1.0 set (identity-leak risk).
