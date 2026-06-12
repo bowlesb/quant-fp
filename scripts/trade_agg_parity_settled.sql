@@ -6,28 +6,25 @@
 -- Run (edit :day to the settled day under test):
 --   docker compose exec -T timescaledb psql -U quant -d quant -f - < scripts/trade_agg_parity_settled.sql
 --
--- FINDINGS (settled day 2026-06-11):
---   *** THE HEADLINE NUMBER IS NOT AN AT-SCALE PROOF. *** The per-minute coverage drill (sections
---   below) shows the live STREAM captured only ~10 of 50 names for the WHOLE day until ~15:51 ET,
---   when the subscription scaled 10->50; backfill had all 50 throughout. So the 6,058 "overlap"
---   minutes and the 98.05% within-2% / 99.82% sign agreement are essentially a 10-NAME proof plus
---   a ~10-minute 50-name window (15:51-16:00). A true 50-name full-session proof needs a day with
---   all 50 streamed start-to-finish (earliest 2026-06-12).
---   GOOD news where the stream DID capture a name:
---     * per-minute parity excellent — 15:30 / 15:45 / 15:55 ET all 100% count + sign (the overnight
---       label anchor + last intraday cadence are CLEAN; the overnight verdict is not tainted).
---     * tick-rule SIGN agreement 99.82% — the HARDEST threat (sign depends on order+last-price
---       state, sensitive to out-of-order live delivery) holds on the captured names.
---   RESIDUAL THREATS:
---     * 16:00-ET CLOSING-PRINT minute = 14% within-2% (closing-auction divergence) -> exclude
---       >=16:00; the Modeller's conservative >=15:50 OFI line is safe (15:50-15:59 ~100%).
---     * backfill trade-agg is RTH-bounded (no post-16:00 ET) -> post-close OFI has NO backfill to
---       validate against at all.
---   VERDICT: encouraging on the 10 streamed names, but NOT proven at 50. Re-run on the first full
---   50-name settled session. Owner of the 10->50 live-coverage gap + at-scale data path: prod-architect.
+-- *** FINDINGS (settled day 2026-06-12) — FIRST TRUE FULL-50 AT-SCALE PROOF: PASS. ***
+--   COVERAGE is the headline: stream==backfill 50 names EVERY hour 04:00-16:00 ET (36,334 overlap
+--   minutes) — a genuine full-session 50-name proof, NOT the 6/11 10-name proxy. Vs the >=98% gate:
+--     * n_trades within-2% = 99.79% (corr 1.0000, mean abs diff 0.11)
+--     * tick-rule SIGN agreement = 99.85% — the HARDEST threat (sign depends on order+last-price
+--       state, sensitive to out-of-order live delivery) HOLDS at scale.
+--     * signed_volume within-2%-of-vol = 99.41%.
+--   By hour: 100% all premarket+RTH; only the 16:00 closing hour dips to 95.5% (closing-auction).
+--   Section 6: 15:50-15:59 all 100% count / 100% sign -> Modeller's >=15:50 OFI line is CLEAN.
+--   => M2 exit criterion "settled-day I2b >=98% at scale" MET; green light for 500-name scaling.
+--   STANDING residual (by design, unchanged): backfill trade-agg is RTH-bounded -> post-16:00 OFI
+--   has NO backfill to validate against; keep OFI <=15:59 ET. Re-prove as scale grows 50->500.
+--
+-- HISTORY (settled day 2026-06-11): NOT an at-scale proof — the stream captured only ~10 of 50
+--   names until ~15:51 ET (the 7dfb438 deploy-restart one-off, since resolved); headline 98.05% /
+--   sign 99.82% was a 10-name proof + a ~10-min 50-name window. Superseded by the 6/12 full-50 run.
 
 \timing off
-\set day '2026-06-11'
+\set day '2026-06-12'
 
 \echo '== COVERAGE: minutes per source (dropped-minute threat) =='
 WITH st AS (SELECT symbol, ts FROM trade_agg_1m WHERE source='stream'   AND ts::date=:'day'),
