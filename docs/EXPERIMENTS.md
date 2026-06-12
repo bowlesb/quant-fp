@@ -1855,3 +1855,45 @@ QUEUED NEXT: the 11 W12 pos probes + 3 ML003 configs (front of queue); staggered
 sector family fires when task#8 lands. GLOBAL experiment count: 143 + the new proposals (tracking multiple-testing).
 BIGGEST RISK TO THE MONDAY BAR: compute contention — 7 scripts each load the 6M-row panel; with no parallel
 runner (task#7) yet, I'm running them SERIALLY as smokes-first. If a lens stalls on compute I escalate.
+| 2026-06-12T22:33:00+00:00 | W11_int_mom_x_ret_fwd_30m | fwd_30m | raw | 8 | 4840765 | 0.00601 | 3.878 | -0.00126 | Interaction probe: mom_x_ret (8 feats) at fwd_30m. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |
+| 2026-06-12T22:37:05+00:00 | W12_solo_vwap_dev_fwd_30m | fwd_30m | raw | 1 | 4840765 | 0.02839 | 21.293 | 0.00148 | RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_30m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+
+## ★ OFI LITERATURE SURVEY (Research Lead, 2026-06-12) — sharpens the pilot priors (Ben/Mgr directive)
+
+Per the new literature-search protocol, surveyed published OFI signal-horizon/decay/cost work BEFORE the
+pilot. Sources + takeaways (literature INFORMS priors; it does NOT replace our gates — a published alpha
+is a hypothesis here):
+
+1. Cont, Kukanov, Stoikov (2014), "The Price Impact of Order Book Events", J. Financial Econometrics
+   12(1):47-88 [arxiv 1011.6402]. FOUNDATIONAL: over short intervals, price changes are mainly driven by
+   OFI; LINEAR relation, slope INVERSELY proportional to market DEPTH; robust to intraday seasonality,
+   stable across the 50 stocks studied. => OFI price impact is LARGER in THIN-depth (illiquid) names.
+   DIRECT TENSION with our task #5: just like our price signal, OFI is strongest exactly where depth is
+   thin = spreads wide = expensive. The signal-vs-tradeable-cost disjointness likely RECURS for OFI.
+
+2. Cont, Cucuringu, Zhang (2023), "Cross-impact of order flow imbalance in equity markets", Quant.
+   Finance 23(10) [arxiv 2112.13213]. PREDICTIVE content: cross-sectional/lagged OFI improves OOS R²,
+   BUT the predictive (future-return) signal is concentrated at <3 MIN and DECAYS RAPIDLY within minutes.
+   Contemporaneous fit (OFI explains the CURRENT move) is strong but NOT tradeable; the lagged/predictive
+   part is much weaker. => at OUR 30m cadence the literature prior is that OFI's PREDICTIVE edge is SMALL
+   (its natural horizon is seconds-to-3min, not 30min).
+
+3. Practitioner (Markwick 2022; Chordia-Subrahmanyam order-imbalance line, JFE 2004): "an OFI signal looks
+   profitable at first glance but ISN'T in practice without slippage + fill probability — it wants to
+   trade as much as possible, so transaction costs DESTROY the return profile." Imbalance strategies yield
+   statistically significant gross profits but individual investors can't profit net of cost; only
+   institutions with minimal cost + good fills can. => THE documented OFI failure mode is EXACTLY our
+   turnover/cost wall (task #5), now confirmed for OFI specifically.
+
+PILOT-PRIOR UPDATES (translating to our horizon/universe/cost — NOT transplanting):
+- LOWER my pre-registered PRIMARY confidence ("OFI marginal IC over ret_5m at 30m is positive + clears
+  canary") from ~45% toward ~35%: the literature says OFI's predictive horizon is <3min; at 30m it may be
+  largely the same already-decayed info ret_5m captures. The cleaner test may be OFI at a SHORTER horizon
+  (5m/15m), where the literature says the signal actually lives — ADD a 5m/15m OFI cut to the pilot.
+- RAISE confidence that even if marginal IC is positive, net-of-cost breakeven stays below realistic cost
+  (was ~70%, now ~80%): the cost wall is the documented OFI killer, matching task #5's mechanism exactly.
+- The fill-probability work (exec, Monday) is now DOUBLY decisive — the literature names it as THE thing
+  that separates "looks profitable" from "is profitable" for OFI. Marginal IC is necessary but the
+  fill-prob-adjusted net is the real gate.
+NET: the literature doesn't kill OFI but it sharpens the bet — test it at ITS native short horizon, judge
+on fill-prob-adjusted net cost, and expect the cost wall to bind. No gate relaxed; priors updated honestly.
