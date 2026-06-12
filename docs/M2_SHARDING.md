@@ -76,8 +76,29 @@ churns) — NOT a static committed list; modeller-2's /tmp CSV is the reference 
 4. Deploy Monday pre-open (one coordinated restart; the ingestor freeze discipline applies during RTH).
 5. qa-2 re-runs the #15 settled-day parity proof at 500 → must hold (99%+ sign agreement) → M2 criterion ticks.
 
-## Open questions for the Manager (design checkpoint)
-- Shard count: 4 workers (≈125/shard) to start — OK, or size to a specific per-worker budget?
-- Queue substrate for topology A: Redis Streams (in-stack) vs multiprocessing — preference?
-- Is 500 the hard target or "≥500 up to the liquid cutoff"? (affects the ADV cut with modeller-2)
-- Confirm the first-real-PR-flow intent (qa as data-semantics reviewer) so I branch accordingly.
+## Manager decisions (APPROVED 2026-06-12) — topology A is the build
+- **Topology A approved** (reader + N aggregation-workers; constraint-safe). Still run the Alpaca
+  websocket-limit verification (careful, off-hours) so we KNOW whether fallback B is available — but
+  it's not blocking, A works either way.
+- **Shard count = dry-run-sized, NOT fixed.** 4 workers is the PRIOR; size N from the measured
+  per-worker tick-rate budget with ~2× headroom at PEAK (open/close bursts are the binding load, not
+  session average). Follow the profile (3/6/whatever it says).
+- **Queue substrate = Redis Streams** (in-stack, observable — consumer-group lag is a queryable metric
+  that feeds the coverage invariant; decouples reader/worker restart lifecycles). CONDITION: the dry-run
+  MUST measure end-to-end queue lag at realistic BURST rates; if serialization can't hold the open's
+  tick burst, fall back to multiprocessing queues without ceremony (topology survives the substrate swap).
+- **Target = "≥500 up to the liquid cutoff", NOT 500 hard.** ADV-based; floor at 500 to satisfy the
+  criterion, ceiling at the liquidity cliff (~500-600); illiquid names fail the cost gate anyway so
+  capturing them buys nothing. Size the cut to shard evenly (512/4×128 working).
+- **First-real-PR: branch `prod-architect/m2-sharding`; qa-2 is the mapped reviewer** (data semantics —
+  aggregation parity is what's at stake; exec not needed, order path untouched). The PR is also the
+  first exercise of the full PR flow — its description carries the design rationale so review is substantive.
+
+## Next concrete step
+Alpaca websocket-limit verification (careful, off-hours): determine if SIP/Algo-Trader-Plus allows >1
+concurrent data websocket per account. RISK to manage: opening a 2nd connection could bump the LIVE
+ingestor's single websocket → reconnect loop. Do it deliberately (check Alpaca docs definitively first;
+if a live test is needed, account for the ingestor's reconnect and do it when a brief stream gap is
+costless — post-close/weekend). Then: #12 completes → build topology A on the branch → weekend dry-run
+(profile per-worker CPU + Redis burst lag + coverage invariant green) → Monday pre-open deploy → qa-2
+re-proof at the new scale ticks the M2 criterion.
