@@ -18,6 +18,12 @@ git_sha() {
   git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || printf -- '-dirty'
 }
 
+# The GIT_SHA baked into an image (empty if none) — for explicit old->new provenance logging.
+baked_sha() {
+  docker inspect "quant-$1" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | sed -n 's/^GIT_SHA=//p' | head -n1
+}
+
 # Distinguish CONTENT-STALE (image missing a source commit = the dangerous near-miss class: BLOCK,
 # rebuild) from DIRTY (image built from uncommitted WIP = ahead of commits, not behind: WARN, allow —
 # else any peer's unrelated WIP would block every tool run in this shared worktree).
@@ -25,7 +31,10 @@ out="$(scripts/assert_image_fresh.sh "$svc" 2>&1 || true)"
 if printf '%s\n' "$out" | grep -qE '^(STALE|MISSING|UNKNOWN) '; then
   echo "run_tool: $svc image is CONTENT-STALE vs source — REBUILDING before run (task #11 gate)" >&2
   printf '%s\n' "$out" | grep -E '^(STALE|MISSING|UNKNOWN) ' >&2
-  docker compose build --build-arg GIT_SHA="$(git_sha)" "$svc"
+  old_sha="$(baked_sha "$svc")"; new_sha="$(git_sha)"
+  echo "run_tool: REBUILD $svc  baked ${old_sha:-none} -> source ${new_sha}" >&2
+  docker compose build --build-arg GIT_SHA="${new_sha}" "$svc"
+  echo "run_tool: $svc rebuilt, now baked $(baked_sha "$svc") (was ${old_sha:-none})" >&2
   recheck="$(scripts/assert_image_fresh.sh "$svc" 2>&1 || true)"
   if printf '%s\n' "$recheck" | grep -qE '^(STALE|MISSING|UNKNOWN) '; then
     echo "run_tool: $svc STILL content-stale after rebuild — REFUSING to run (investigate)" >&2

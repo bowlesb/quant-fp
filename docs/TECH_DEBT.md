@@ -117,6 +117,16 @@ eyeball ~11 coherent buckets, no "N/A"/"" pseudo-sector fragmenting the demean g
 add the <5% null-sector coverage invariant. Consumer = Modeller's v1.3.0 sector-neutral momentum
 (JOIN by symbol at compute time, NOT a feature_vectors column).
 
+## Architectural coupling — #11 freshness gate ↔ PR flow (Manager condition, 2026-06-12)
+`scripts/run_tool.sh` AUTO-REBUILDS a content-stale tool image to HEAD before running (accepted over
+hard-fail: hard-fail reinstates the human-vigilance dependency we're removing; auto-rebuild guarantees
+stale code cannot execute AND completes the task). **SAFETY COUPLING:** auto-rebuilding to HEAD is only
+safe if HEAD == reviewed code. Once the Tier-1 PR flow binds (tomorrow), master == reviewed, so the gate
+can't pull unvetted changes into a run. Until then (and any time direct-to-master is used), a tool run
+could rebuild to un-reviewed HEAD. Mitigations in place: the gate logs old→new SHA loudly (provenance
+never silent), and tolerates -dirty as WARN+run (doesn't mask uncommitted WIP). If the PR flow ever
+lapses, revisit whether the gate should pin to a known-good tag instead of HEAD.
+
 ## Cross-agent reviews (REVIEW_POLICY)
 - **2026-06-12 — #19 executor (the diff my `git add -A` absorbed into b856aa7). My lane =
   schema/runtime (qa-2 owns the reconcile/fill_reconciliation CONTRACT). VERDICT: APPROVE, no
