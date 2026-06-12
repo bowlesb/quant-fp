@@ -41,6 +41,14 @@ BATCH_SERVICES := ingestor scheduler feature-computer model-server backfill-mana
 rebuild-batch:
 	docker compose build --build-arg GIT_SHA=$(GIT_SHA) $(BATCH_SERVICES)
 	docker compose up -d $(BATCH_SERVICES)
+	@echo "rebuild-batch: asserting running==intended (task #11 BLOCKING gate)"
+	scripts/assert_image_fresh.sh $(BATCH_SERVICES)
+
+# Run a one-shot tools-profile container through the BLOCKING freshness gate (task #11) — never run
+# stale code (the 4th near-miss was a 14h-stale trainer). Rebuilds-if-stale then runs; env passes
+# through. Usage: make run-tool S=backfiller A="fetch-corporate-actions"
+run-tool:
+	scripts/run_tool.sh $(S) $(A)
 
 # Build one or all services with the SHA baked in, no restart: make build-fresh [S=ingestor]
 build-fresh:
