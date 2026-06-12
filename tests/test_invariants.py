@@ -48,3 +48,19 @@ def test_invariant_green(name: str) -> None:
 def test_universe_is_equities_only_is_registered() -> None:
     # The contamination check must always exist by this exact name (M1 exit criterion #1).
     assert "universe_is_equities_only" in qa.INVARIANTS
+
+
+def test_live_feature_coverage_is_registered() -> None:
+    # Same-day live-path coverage check must exist by this exact name (Ben's 2026-06-12 ask).
+    assert "live_feature_coverage" in qa.INVARIANTS
+
+
+def test_family_valued_pct_averages_only_present_indices() -> None:
+    # DB-free: family valued% is the mean over the indices that exist in today's vector.
+    valued = {1: 90.0, 2: 80.0, 12: 100.0, 13: 100.0}
+    assert qa._family_valued_pct(valued, [1, 2]) == 85.0
+    assert qa._family_valued_pct(valued, [12, 13]) == 100.0
+    # An index absent from today's data is skipped, not counted as 0.
+    assert qa._family_valued_pct(valued, [1, 99]) == 90.0
+    # No present indices -> 0.0 (nothing to average), never a ZeroDivisionError.
+    assert qa._family_valued_pct(valued, [98, 99]) == 0.0

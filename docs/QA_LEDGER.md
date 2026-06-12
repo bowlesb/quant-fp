@@ -58,6 +58,13 @@ noticing — a violation fails CI with a clear message.
 | `pit_universe_membership` | I3 | ACTIVE set: every (symbol,date) feature row is an in-universe member that date. |
 | `warmup_coverage` | I4 | ACTIVE set: no ragged-warmup / dead feature. Legacy sets reported, not gated. |
 | `no_inf_no_degenerate` | I5 | no Inf; predictions not score-degenerate; per-ts labels demeaned (avg, not max). |
+| `live_feature_coverage` | I4-live | **NEW (Ben's 2026-06-12 ask "how many features have values for today?").** Same-day source='live' per-FAMILY valued% vs DERIVED expectation: price/vol ≥ warmup-adequate fraction−slack; trade/quote ≥ captured-name fraction−slack; calendar exact 100%; symbol deficit EXPLAINED by warmup, not silent. Fails on a family DROP vs trailing baseline (>5%) or unexplained symbol-count loss. The live serving path was previously UNCHECKED on the day it's produced — only the research panel was scoped. Baseline: tests/fixtures/live_feature_coverage_baseline.json, rolled via `--update-baseline` post-close. |
+
+**First baseline row (2026-06-12, recorded):** live v1.0.0, 9,098 rows / 788 syms / 12 cadences;
+price/vol 90.1% (warmup ceiling 78.8% = 788/1000 names ≥60 bars — the 212-name deficit is fully
+warmup-explained), calendar 100%, trade/quote 6.6% (= 50 captured / 788 live, ≈ expected 6.3%).
+The 6.6% trade/quote is the M2 signal to watch: it should JUMP as capture scales 50→500; a stall
+there is a capture regression the invariant will catch.
 
 **Set scoping:** calendar/warmup/pit gate the ACTIVE set (`QA_ACTIVE_SET` or the highest
 set_version present; currently **v1.1.1**). Legacy sets (v1.0.0, the frozen-dirty v1.1.0

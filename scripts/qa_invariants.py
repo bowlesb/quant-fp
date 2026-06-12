@@ -28,6 +28,13 @@ Invariants (map to docs/QA_LEDGER.md):
   warmup_coverage            — I4: ACTIVE set has no silently NaN-degraded / dead feature.
   no_inf_no_degenerate       — I5: no Inf in vectors; predictions not score-degenerate;
                                per-ts label cross-section demeaned (avg per-ts median ~0).
+  live_feature_coverage      — same-day LIVE serving-path coverage (Ben's 2026-06-12 ask): for
+                               TODAY's source='live' rows, each feature FAMILY is valued at its
+                               DERIVED expectation (price/vol ~warmup-adequate fraction; trade/
+                               quote ~captured-name fraction; calendar exact) with the symbol
+                               deficit EXPLAINED by warmup; fails on a family DROP vs the trailing
+                               baseline (tests/fixtures/live_feature_coverage_baseline.json,
+                               rolled via --update-baseline) or an unexplained symbol-count loss.
 
 Set scoping: calendar/warmup/pit/no_inf scan ONLY the ACTIVE feature set (env QA_ACTIVE_SET,
 else the highest set_version present) — so the DEFAULT run is green-on-active and cheap, and the
@@ -47,11 +54,13 @@ Override for CI / in-network runs with env QA_PSQL, e.g.
 Exit code: 0 = all selected invariants PASS (skips allowed); 1 = any FAIL (or DB error).
 """
 
+import json
 import os
 import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -82,6 +91,19 @@ SESSION_FORWARD_SLACK_DAYS = (
 EXTREME_JUMP_RATIO = 3.0  # backfill daily-close day-over-day ratio beyond this -> flag
 DENYLIST_PATH = REPO / "tests" / "fixtures" / "known_funds.txt"
 CORP_ACTIONS_PATH = REPO / "tests" / "fixtures" / "known_corporate_actions.txt"
+LIVE_COVERAGE_BASELINE_PATH = REPO / "tests" / "fixtures" / "live_feature_coverage_baseline.json"
+
+# live_feature_coverage: per-family valued% must not DROP below its derived expectation, nor
+# regress vs the trailing baseline. Floors are DERIVED (not hardcoded): price/vol expects ~the
+# fraction of universe names with adequate intraday history; trade/quote expects ~the captured-
+# name fraction; calendar must be exact. A DROP vs trailing baseline beyond tolerance fails loud.
+LIVE_PRICEVOL_IDX = list(range(1, 12))  # ret_*/vol_*/vwap_dev/range_pct/gap_from_open/rel_ret_30m
+LIVE_CALENDAR_IDX = [12, 13]  # minute_of_day, day_of_week
+LIVE_TRADEQUOTE_IDX = [14, 15, 16, 17, 18]  # trade/quote microstructure family
+LIVE_WARMUP_MIN_BARS = 60  # bars needed today to warm the longest price-feature lookback (60m)
+LIVE_COVERAGE_DROP_TOL_PCT = 5.0  # family valued% may fall at most this vs trailing baseline
+LIVE_PRICEVOL_FLOOR_SLACK_PCT = 5.0  # price/vol valued% may trail its warmup-adequacy ceiling by this
+LIVE_SYMBOL_DROP_TOL = 25  # live symbol-count may fall at most this vs trailing baseline median
 
 # Independent leverage/inverse/structure tokens, maintained HERE and deliberately NOT identical
 # to quantlib.universe's regex, so this gate can flag a fund the builder's classifier misses
@@ -797,6 +819,203 @@ def check_no_inf_no_degenerate() -> Result:
     )
 
 
+def _load_coverage_baseline() -> list[dict[str, object]]:
+    """Trailing per-day live-coverage rows (oldest..newest). Missing file = no baseline yet."""
+    if not LIVE_COVERAGE_BASELINE_PATH.exists():
+        return []
+    return json.loads(LIVE_COVERAGE_BASELINE_PATH.read_text())
+
+
+def _family_valued_pct(valued_by_idx: dict[int, float], idxs: list[int]) -> float:
+    """Mean valued% across a feature family (each feature already a valued% over today's rows)."""
+    vals = [valued_by_idx[i] for i in idxs if i in valued_by_idx]
+    return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+
+def check_live_feature_coverage() -> Result:
+    """Same-day LIVE feature coverage (Ben's question, 2026-06-12): for TODAY's source='live'
+    rows, is each feature FAMILY valued at its EXPECTED level, with any deficit EXPLAINED?
+
+    The standing suite scopes the research panel (historical, set_version active); NOTHING checked
+    the live serving path on the day it is produced. This closes that gap. Floors are DERIVED,
+    never hardcoded:
+      - price/vol  -> ceiling = fraction of universe names with >=60 intraday bars today (warmup-
+                      adequate); valued% must not trail that ceiling by > slack. RISES after backfill.
+      - trade/quote-> expected = captured-name fraction (distinct trade_agg_1m symbols today /
+                      live symbols). A STALL when M2 scales 50->500 is a capture regression.
+      - calendar   -> must be exactly valued (deterministic from ts).
+      - symbol cnt -> the universe deficit must be explained by warmup, not silent; and must not
+                      drop > tol vs the trailing-baseline median (a silent live-path coverage loss).
+    Also fails on any family valued% DROP vs the trailing baseline beyond tolerance. SKIPs cleanly
+    before the open (no live rows yet today). Roll the baseline forward with --update-baseline."""
+    today = scalar("SELECT (now() AT TIME ZONE 'America/New_York')::date")
+    live_set = scalar(
+        "SELECT set_version FROM feature_vectors WHERE source='live' "
+        "GROUP BY set_version ORDER BY set_version DESC LIMIT 1"
+    )
+    if not live_set:
+        return Result("live_feature_coverage", "SKIP", "no source='live' feature_vectors yet")
+    dims = sql(
+        "SELECT count(*), count(DISTINCT symbol), count(DISTINCT ts) FROM feature_vectors "
+        f"WHERE source='live' AND set_version='{live_set}' "
+        "AND (ts AT TIME ZONE 'America/New_York')::date = "
+        "(now() AT TIME ZONE 'America/New_York')::date"
+    )
+    n_rows, n_syms, n_cadences = (int(x) for x in dims[0])
+    if n_rows == 0:
+        return Result(
+            "live_feature_coverage", "SKIP",
+            f"no live rows for {today} yet (pre-open / model-server idle)",
+        )
+    rows = sql(
+        "WITH today AS ("
+        "  SELECT vector FROM feature_vectors "
+        f"  WHERE source='live' AND set_version='{live_set}' "
+        "    AND (ts AT TIME ZONE 'America/New_York')::date = "
+        "        (now() AT TIME ZONE 'America/New_York')::date"
+        "), exploded AS ("
+        "  SELECT u.idx, (u.val='NaN'::float8)::int AS isnan "
+        "  FROM today, LATERAL unnest(today.vector) WITH ORDINALITY AS u(val, idx)"
+        ") SELECT idx, round(100.0*avg(1 - isnan), 1) AS valued_pct "
+        "FROM exploded GROUP BY idx ORDER BY idx"
+    )
+    valued = {int(idx): float(pct) for idx, pct in rows}
+    pricevol = _family_valued_pct(valued, LIVE_PRICEVOL_IDX)
+    calendar = _family_valued_pct(valued, LIVE_CALENDAR_IDX)
+    tradequote = _family_valued_pct(valued, LIVE_TRADEQUOTE_IDX)
+
+    universe_total = int(
+        scalar(
+            "SELECT count(*) FROM universe_membership WHERE in_universe AND trade_date="
+            "(now() AT TIME ZONE 'America/New_York')::date"
+        )
+    )
+    warm_enough = int(
+        scalar(
+            "WITH univ AS (SELECT symbol FROM universe_membership WHERE in_universe AND "
+            "  trade_date=(now() AT TIME ZONE 'America/New_York')::date), "
+            "b AS (SELECT symbol, count(*) n FROM bars_1m WHERE source='stream' AND "
+            "  (ts AT TIME ZONE 'America/New_York')::date="
+            "  (now() AT TIME ZONE 'America/New_York')::date GROUP BY symbol) "
+            f"SELECT count(*) FROM univ u LEFT JOIN b USING (symbol) WHERE COALESCE(b.n,0) >= {LIVE_WARMUP_MIN_BARS}"
+        )
+    )
+    captured = int(
+        scalar(
+            "SELECT count(DISTINCT symbol) FROM trade_agg_1m WHERE "
+            "(ts AT TIME ZONE 'America/New_York')::date="
+            "(now() AT TIME ZONE 'America/New_York')::date"
+        )
+    )
+    pricevol_ceiling = round(100.0 * warm_enough / universe_total, 1) if universe_total else 0.0
+    tradequote_expected = round(100.0 * captured / n_syms, 1) if n_syms else 0.0
+
+    details = [
+        f"live set {live_set} for {today}: {n_rows} rows / {n_syms} symbols / {n_cadences} cadences",
+        f"price/vol valued {pricevol}% (warmup ceiling {pricevol_ceiling}% = {warm_enough}/{universe_total} names >= {LIVE_WARMUP_MIN_BARS} bars)",
+        f"calendar valued {calendar}% (must be 100)",
+        f"trade/quote valued {tradequote}% (expected ~{tradequote_expected}% = {captured} captured / {n_syms} live)",
+        f"symbol deficit {universe_total - n_syms} of {universe_total} (explained by warmup: {universe_total - warm_enough})",
+    ]
+    failures: list[str] = []
+
+    if calendar < 100.0:
+        failures.append(f"calendar features valued {calendar}% < 100% — deterministic family is NaN-leaking")
+    if pricevol < pricevol_ceiling - LIVE_PRICEVOL_FLOOR_SLACK_PCT:
+        failures.append(
+            f"price/vol valued {pricevol}% trails warmup ceiling {pricevol_ceiling}% by "
+            f">{LIVE_PRICEVOL_FLOOR_SLACK_PCT}% — coverage loss beyond warmup"
+        )
+    # trade/quote: should track captured-name coverage; flag a SHORTFALL vs the captured fraction
+    # (the family is valued for fewer names than we actually captured -> pipeline drop), not the
+    # expected low cross-sectional % itself (that RISES with M2 scaling, by design).
+    if tradequote < tradequote_expected - LIVE_PRICEVOL_FLOOR_SLACK_PCT:
+        failures.append(
+            f"trade/quote valued {tradequote}% < captured-name expectation {tradequote_expected}% — "
+            f"microstructure family NaN for names we DID capture (aggregation drop)"
+        )
+    # The unexplained-deficit gate: every missing live symbol should be a warmup-lacking name.
+    unexplained = (universe_total - n_syms) - (universe_total - warm_enough)
+    if unexplained > LIVE_SYMBOL_DROP_TOL:
+        failures.append(
+            f"{unexplained} live symbols missing beyond the warmup-lacking set — unexplained "
+            f"live-path coverage loss (not attributable to short intraday history)"
+        )
+
+    baseline = _load_coverage_baseline()
+    if baseline:
+        prior = [r for r in baseline if r["date"] != today]
+        if prior:
+            def _med(key: str) -> float:
+                vals = sorted(float(r[key]) for r in prior)  # type: ignore[arg-type]
+                mid = len(vals) // 2
+                return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+            for fam, val in (("pricevol", pricevol), ("calendar", calendar), ("tradequote", tradequote)):
+                base = _med(fam)
+                if val < base - LIVE_COVERAGE_DROP_TOL_PCT:
+                    failures.append(
+                        f"{fam} valued {val}% dropped > {LIVE_COVERAGE_DROP_TOL_PCT}% vs trailing "
+                        f"baseline median {round(base,1)}% — coverage regression"
+                    )
+            base_syms = _med("n_syms")
+            if n_syms < base_syms - LIVE_SYMBOL_DROP_TOL:
+                failures.append(
+                    f"live symbol count {n_syms} dropped > {LIVE_SYMBOL_DROP_TOL} vs baseline median "
+                    f"{round(base_syms)} — live-path symbol coverage regression"
+                )
+    else:
+        details.append("no trailing baseline yet — run with --update-baseline to record the first row")
+
+    if failures:
+        return Result("live_feature_coverage", "FAIL", "; ".join(failures), details)
+    return Result(
+        "live_feature_coverage", "PASS",
+        f"live {live_set} coverage healthy for {today} (price/vol {pricevol}%, calendar {calendar}%, trade/quote {tradequote}%)",
+        details,
+    )
+
+
+def update_coverage_baseline() -> None:
+    """Append TODAY's live-coverage row to the trailing baseline (idempotent per date)."""
+    today = scalar("SELECT (now() AT TIME ZONE 'America/New_York')::date")
+    live_set = scalar(
+        "SELECT set_version FROM feature_vectors WHERE source='live' "
+        "GROUP BY set_version ORDER BY set_version DESC LIMIT 1"
+    )
+    if not live_set:
+        print("no source='live' feature_vectors yet — nothing to record")
+        return
+    rows = sql(
+        "WITH today AS (SELECT vector FROM feature_vectors WHERE source='live' AND "
+        f"set_version='{live_set}' AND (ts AT TIME ZONE 'America/New_York')::date="
+        "(now() AT TIME ZONE 'America/New_York')::date), exploded AS ("
+        "SELECT u.idx, (u.val='NaN'::float8)::int AS isnan FROM today, "
+        "LATERAL unnest(today.vector) WITH ORDINALITY AS u(val, idx)) "
+        "SELECT idx, round(100.0*avg(1 - isnan), 1) FROM exploded GROUP BY idx ORDER BY idx"
+    )
+    valued = {int(idx): float(pct) for idx, pct in rows}
+    n_syms = int(
+        scalar(
+            f"SELECT count(DISTINCT symbol) FROM feature_vectors WHERE source='live' AND set_version='{live_set}' "
+            "AND (ts AT TIME ZONE 'America/New_York')::date=(now() AT TIME ZONE 'America/New_York')::date"
+        )
+    )
+    row = {
+        "date": today,
+        "set_version": live_set,
+        "n_syms": n_syms,
+        "pricevol": _family_valued_pct(valued, LIVE_PRICEVOL_IDX),
+        "calendar": _family_valued_pct(valued, LIVE_CALENDAR_IDX),
+        "tradequote": _family_valued_pct(valued, LIVE_TRADEQUOTE_IDX),
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    baseline = [r for r in _load_coverage_baseline() if r["date"] != today]
+    baseline.append(row)
+    baseline.sort(key=lambda r: str(r["date"]))
+    LIVE_COVERAGE_BASELINE_PATH.write_text(json.dumps(baseline, indent=2) + "\n")
+    print(f"recorded live_feature_coverage baseline row for {today}: {row}")
+
+
 INVARIANTS: dict[str, Callable[[], Result]] = {
     "universe_is_equities_only": check_universe_is_equities_only,
     "universe_no_known_funds": check_universe_no_known_funds,
@@ -809,6 +1028,7 @@ INVARIANTS: dict[str, Callable[[], Result]] = {
     "pit_universe_membership": check_pit_universe_membership,
     "warmup_coverage": check_warmup_coverage,
     "no_inf_no_degenerate": check_no_inf_no_degenerate,
+    "live_feature_coverage": check_live_feature_coverage,
 }
 
 
@@ -845,6 +1065,9 @@ def main() -> int:
     if "--list" in argv:
         for name in INVARIANTS:
             print(name)
+        return 0
+    if "--update-baseline" in argv:
+        update_coverage_baseline()
         return 0
     selected = list(INVARIANTS)
     if "--only" in argv:
