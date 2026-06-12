@@ -1288,3 +1288,17 @@ missing_px=0) and noted my time='15:59' filter fixed the OOM their last(close) a
 write the production ex-div label fix (Tier-1 quantlib/labels.py), qa-2 reviews (label semantics = their
 map). That PR waits on label-versioning (#22 first brick) so the corrected labels persist without
 overwriting the frozen canonical ones.
+
+### COST-MODEL — exec/risk to deliver fill-prob data Monday (2026-06-12 update)
+
+Exec/risk confirmed the fill-prob-as-cost refinement and is producing the DATA, not just a binary:
+per-leg-per-session from orders_log (nbbo_bid/ask/mid at submit) + fills_log -> submitted vs filled,
+spread(bps) at submit, side, price -> so I can fit fill_prob(spread, side[, ADV]) DIRECTLY. Today's
+datapoint (OLD 1¢ cross): short fill-rate 1/3, long 3/3; both unfilled shorts (FLY 112bps, AMPX 82bps)
+stranded on WIDE SPREADS -> spread is the DOMINANT driver. The #19 spread-scaled cross (short limit
+0.5×spread under bid, 21¢/7¢ vs old 1¢) is the variable that moves the curve: if Monday's short
+fill-rate climbs, the asymmetry shrinks toward "symmetric-with-a-haircut"; if wide-spread shorts STILL
+miss, keep the hard fill-prob curve for the widest spread buckets. Exec pings me + qa-2 MONDAY with the
+actual short fill-rate + per-leg spread-vs-filled data. I consume it then (accumulating sessions; n=4
+today is noise). This is a real M3-gate tightener: the net-of-cost backtest must charge for short legs
+that don't fill (uncompensated net-long exposure = missed-hedge risk), not assume symmetric fills.
