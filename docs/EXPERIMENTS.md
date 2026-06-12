@@ -1363,3 +1363,22 @@ to the open tasks are all delivered: #15 ADV-500 (this), #10 OFI pipeline valida
 requirements specced, ex-div/signed_vol_z PRs queued. The rest (sharding build, backfills, #19 exec) are
 owners' to execute. I continue MY never-idle work = the strategy-shape backlog (batch-safe shapes while
 prod's bars_1m batch runs).
+| 2026-06-12T20:51:21+00:00 | W11_grid_fwd_60m_lambdarank_nocal | fwd_60m | lambdarank | 19 | 4416876 | -0.00044 | -0.112 | 0.00299 | Baseline grid cell: fwd_60m x lambdarank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:51:56+00:00 | W11_grid_overnight_raw_nocal | overnight | raw | 19 | 428024 | 0.0142 | 1.661 | -0.00557 | Baseline grid cell: overnight x raw label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:52:32+00:00 | W11_grid_overnight_rank_nocal | overnight | rank | 19 | 428024 | 0.01891 | 2.121 | 0.00012 | Baseline grid cell: overnight x rank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:53:07+00:00 | W11_grid_overnight_vol_scaled_nocal | overnight | vol_scaled | 19 | 428024 | 0.00761 | 0.998 | -0.00457 | Baseline grid cell: overnight x vol_scaled label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:53:56+00:00 | W11_grid_overnight_lambdarank_nocal | overnight | lambdarank | 19 | 428024 | 0.03583 | 2.766 | 0.00202 | Baseline grid cell: overnight x lambdarank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+
+### M2 500-NAME SELECTION RULE — decided: PURE top-500-by-ADV (Modeller, 2026-06-12)
+
+Prod asked the selection rule (pure-ADV vs ADV-with-sector-spread). DECISION: PURE top-500-by-ADV.
+RATIONALE: the 500-name OFI STREAM and the research-panel BREADTH are different things — sector-neutral
+momentum (#20) + dispersion run on the FULL 1000-name panel (price features), independent of which 500
+stream order-flow. So pure-ADV costs the sector-spread features nothing. The 500 selection optimizes for
+what it's FOR = OFI SIGNAL QUALITY: OFI (signed-vol imbalance) needs enough trades/min to be trustworthy;
+less-liquid names = sparse trades = noisy OFI = the exact thing that fails parity. Concentration
+(NVDA/AMD/AAPL-heavy) is fine at the DATA-CAPTURE tier — book diversification happens at portfolio
+construction off the panel, not at capture. FORWARD v2 (post-pilot, gated on OFI showing edge + sector_map
+landing): "is OFI sector-conditional?" would want sector coverage in the stream — a deliberate expansion,
+NOT the first 500. EXCLUDE QQQ/SPY (ETFs). The current 50 OF equities are all in the top-500 (auto
+continuity). Count: shard-even (480/500/512 all ~0 liquidity difference at that ADV).
