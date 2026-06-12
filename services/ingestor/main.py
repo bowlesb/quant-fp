@@ -1,47 +1,42 @@
-"""Ingestor: Alpaca SIP websocket -> TimescaleDB.
+"""Ingestor entrypoint: sharded Alpaca SIP websocket -> TimescaleDB (M2 topology A).
 
-Streams bars, trades, and quotes for the symbol set. Trades and quotes are
-buffered per symbol per minute and, when the minute's bar arrives (signaling the
-minute has closed), aggregated through quantlib.aggregates — the SAME functions
-the historical backfiller uses — and written to trade_agg_1m / quote_agg_1m.
-Raw trades are bulk-inserted into trades_raw (30-day rolling) for debugging and
-developing new aggregates.
+One READER process owns the single Alpaca market-data websocket (one connection per
+account is the hard limit) and routes ticks to N WORKER processes by symbol-hash.
+Each worker owns a symbol shard and does the CPU-heavy per-minute quantlib aggregation
++ DB writes for it — the parity cornerstone, identical to the single-process path,
+just scoped to a shard. Bars stream for the whole universe (the reader persists them
+and forwards minute-close signals to workers); trades/quotes stream for the top-ADV
+OFI names (the order-flow tier), partitioned across the workers.
 
-Single-threaded asyncio, so the shared buffers need no locks.
+This scales 50 -> >=500 trade/quote names: at 500 a single asyncio process doing
+all the aggregation becomes CPU-bound and a slow minute-flush backs up the receive
+loop, dropping ticks. Sharding the aggregation across worker processes removes that
+bottleneck; the reader stays light (receive + route only).
+
+A live coverage invariant (streamed == subscribed, alarmed) runs per shard from day
+one so a capture regression at scale is caught immediately, not in a later backfill
+diff. See services/ingestor/coverage.py.
 """
 import logging
 import os
-from collections import defaultdict
-from datetime import datetime, timezone
+import signal
+import time
+from multiprocessing import Event, Process
+from multiprocessing.synchronize import Event as EventType
 
-import psycopg
-from alpaca.data.enums import DataFeed
-from alpaca.data.live import StockDataStream
-
-from quantlib.aggregates import (
-    QuoteTick,
-    TickState,
-    TradeTick,
-    aggregate_quotes,
-    aggregate_trades,
-    bucket_minute,
-)
+from app_ingestor.reader import run_reader
+from app_ingestor.shard import make_queues
+from app_ingestor.subscription import load_subscription
+from app_ingestor.worker import run_worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("ingestor")
 
-DEFAULT_SYMBOLS = "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
-# Trades/quotes are far higher volume than bars; subscribe them only for this
-# subset to keep a single ingestor process healthy. Bars are streamed for the
-# whole universe. Expand TRADE_QUOTE_SYMBOLS as we sharded/optimize ingestion.
-TQ_SYMBOLS = [
-    s.strip().upper()
-    for s in os.environ.get("TRADE_QUOTE_SYMBOLS", DEFAULT_SYMBOLS).split(",")
-    if s.strip()
-]
-FEED = os.environ.get("ALPACA_DATA_FEED", "sip").lower()
+N_SHARDS = int(os.environ.get("INGESTOR_SHARDS", "4"))
+QUEUE_MAXSIZE = int(os.environ.get("INGESTOR_QUEUE_MAXSIZE", "200000"))
+SUPERVISE_INTERVAL_S = 5.0
 
-DB_KWARGS = {
+DB_KWARGS: dict[str, str | int] = {
     "host": os.environ["DB_HOST"],
     "port": int(os.environ.get("DB_PORT", "5432")),
     "dbname": os.environ["DB_NAME"],
@@ -49,169 +44,79 @@ DB_KWARGS = {
     "password": os.environ["DB_PASSWORD"],
 }
 
-BAR_SQL = """
-INSERT INTO bars_1m (symbol, ts, open, high, low, close, volume, vwap, trade_count, source)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'stream')
-ON CONFLICT (symbol, ts, source) DO NOTHING
-"""
-TRADE_AGG_SQL = """
-INSERT INTO trade_agg_1m
-    (symbol, ts, signed_volume, buy_volume, sell_volume, large_print_cnt,
-     trade_intensity, median_size, p95_size, n_trades, source)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'stream')
-ON CONFLICT (symbol, ts, source) DO NOTHING
-"""
-QUOTE_AGG_SQL = """
-INSERT INTO quote_agg_1m
-    (symbol, ts, mean_spread_bps, median_spread_bps, mean_bid_size, mean_ask_size,
-     quote_imbalance, n_quotes, source)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'stream')
-ON CONFLICT (symbol, ts, source) DO NOTHING
-"""
-RAW_SQL = """
-INSERT INTO trades_raw (symbol, ts, price, size, exchange, conditions, tape)
-VALUES (%s,%s,%s,%s,%s,%s,%s)
-"""
 
-# Per symbol -> per minute-epoch -> buffered ticks. defaultdict avoids key checks.
-trades_buf: dict[str, dict[int, list[TradeTick]]] = defaultdict(lambda: defaultdict(list))
-quotes_buf: dict[str, dict[int, list[QuoteTick]]] = defaultdict(lambda: defaultdict(list))
-raw_buf: dict[str, dict[int, list[tuple]]] = defaultdict(lambda: defaultdict(list))
-tick_state: dict[str, TickState] = defaultdict(TickState)
-
-_conn: psycopg.Connection | None = None
-_bar_count = 0
-
-
-def get_conn() -> psycopg.Connection:
-    global _conn
-    if _conn is None or _conn.closed:
-        _conn = psycopg.connect(**DB_KWARGS, autocommit=True)
-    return _conn
-
-
-def load_bar_symbols() -> list[str]:
-    """Bars are streamed for the whole current universe; fall back to the default
-    set if the universe hasn't been built yet."""
-    try:
-        with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT symbol FROM universe_membership WHERE trade_date = "
-                "(SELECT max(trade_date) FROM universe_membership) ORDER BY symbol"
-            )
-            symbols = [row[0] for row in cur.fetchall()]
-        if symbols:
-            return symbols
-    except psycopg.Error as exc:
-        logger.warning("could not load universe, using default symbols: %s", exc)
-    return [s.strip().upper() for s in DEFAULT_SYMBOLS.split(",")]
-
-
-def flush_minute(conn: psycopg.Connection, symbol: str, minute_epoch: int) -> None:
-    """Aggregate and persist one closed minute for one symbol, then drop it."""
-    minute_ts = datetime.fromtimestamp(minute_epoch, tz=timezone.utc)
-    trades = trades_buf[symbol].pop(minute_epoch, [])
-    quotes = quotes_buf[symbol].pop(minute_epoch, [])
-    raw = raw_buf[symbol].pop(minute_epoch, [])
-
-    with conn.cursor() as cur:
-        if trades:
-            agg = aggregate_trades(trades, tick_state[symbol])
-            cur.execute(
-                TRADE_AGG_SQL,
-                (
-                    symbol, minute_ts, agg.signed_volume, agg.buy_volume,
-                    agg.sell_volume, agg.large_print_cnt, agg.trade_intensity,
-                    agg.median_size, agg.p95_size, agg.n_trades,
-                ),
-            )
-        if quotes:
-            qagg = aggregate_quotes(quotes)
-            cur.execute(
-                QUOTE_AGG_SQL,
-                (
-                    symbol, minute_ts, qagg.mean_spread_bps, qagg.median_spread_bps,
-                    qagg.mean_bid_size, qagg.mean_ask_size, qagg.quote_imbalance,
-                    qagg.n_quotes,
-                ),
-            )
-        if raw:
-            cur.executemany(RAW_SQL, raw)
-
-
-def flush_through(conn: psycopg.Connection, symbol: str, minute_epoch: int) -> None:
-    """Flush every buffered minute <= minute_epoch in time order (so the trade
-    tick-rule state is threaded correctly even if a minute had no bar)."""
-    pending = sorted(
-        set(trades_buf[symbol]) | set(quotes_buf[symbol]) | set(raw_buf[symbol])
+def spawn_worker(
+    shard_id: int,
+    queue: object,
+    expected_symbols: list[str],
+    stop: EventType,
+) -> Process:
+    proc = Process(
+        target=run_worker,
+        args=(shard_id, queue, DB_KWARGS, expected_symbols, stop),
+        name=f"worker-{shard_id}",
+        daemon=False,
     )
-    for minute in pending:
-        if minute > minute_epoch:
-            break
-        flush_minute(conn, symbol, minute)
-
-
-async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
-    global _conn, _bar_count
-    try:
-        conn = get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                BAR_SQL,
-                (
-                    bar.symbol, bar.timestamp, bar.open, bar.high, bar.low,
-                    bar.close, int(bar.volume), bar.vwap, bar.trade_count,
-                ),
-            )
-        flush_through(conn, bar.symbol, bucket_minute(bar.timestamp.timestamp()))
-        _bar_count += 1
-        if _bar_count % 10 == 0:
-            logger.info("bars stored: %d (latest %s %s)", _bar_count, bar.symbol, bar.timestamp.isoformat())
-    except psycopg.Error as exc:
-        logger.error("DB error on bar %s: %s", bar.symbol, exc)
-        _conn = None
-
-
-async def on_trade(trade) -> None:  # type: ignore[no-untyped-def]
-    minute = bucket_minute(trade.timestamp.timestamp())
-    trades_buf[trade.symbol][minute].append(
-        TradeTick(trade.timestamp.timestamp(), float(trade.price), float(trade.size))
-    )
-    raw_buf[trade.symbol][minute].append(
-        (
-            trade.symbol, trade.timestamp, float(trade.price), float(trade.size),
-            getattr(trade, "exchange", None),
-            ",".join(trade.conditions) if getattr(trade, "conditions", None) else None,
-            getattr(trade, "tape", None),
-        )
-    )
-
-
-async def on_quote(quote) -> None:  # type: ignore[no-untyped-def]
-    minute = bucket_minute(quote.timestamp.timestamp())
-    quotes_buf[quote.symbol][minute].append(
-        QuoteTick(
-            quote.timestamp.timestamp(),
-            float(quote.bid_price), float(quote.ask_price),
-            float(quote.bid_size), float(quote.ask_size),
-        )
-    )
+    proc.start()
+    return proc
 
 
 def main() -> None:
-    bar_symbols = load_bar_symbols()
+    bar_symbols, ofi_symbols, shard_symbol_lists = load_subscription(
+        DB_KWARGS, N_SHARDS
+    )
     logger.info(
-        "ingestor starting: bars for %d symbols, trades/quotes for %d, feed=%s",
-        len(bar_symbols), len(TQ_SYMBOLS), FEED,
+        "ingestor (sharded): bars=%d ofi=%d shards=%d (per-shard %s)",
+        len(bar_symbols), len(ofi_symbols), N_SHARDS,
+        [len(shard) for shard in shard_symbol_lists],
     )
-    feed_enum = DataFeed.SIP if FEED == "sip" else DataFeed.IEX
-    stream = StockDataStream(
-        os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], feed=feed_enum
+
+    queues = make_queues(N_SHARDS, QUEUE_MAXSIZE)
+    stop: EventType = Event()
+
+    workers: list[Process] = [
+        spawn_worker(shard_id, queues[shard_id], shard_symbol_lists[shard_id], stop)
+        for shard_id in range(N_SHARDS)
+    ]
+
+    reader = Process(
+        target=run_reader,
+        args=(queues, bar_symbols, ofi_symbols, DB_KWARGS),
+        name="reader",
+        daemon=False,
     )
-    stream.subscribe_bars(on_bar, *bar_symbols)
-    stream.subscribe_trades(on_trade, *TQ_SYMBOLS)
-    stream.subscribe_quotes(on_quote, *TQ_SYMBOLS)
-    stream.run()
+    reader.start()
+
+    def handle_signal(signum: int, frame: object) -> None:
+        logger.info("signal %d -> shutting down", signum)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    while not stop.is_set():
+        time.sleep(SUPERVISE_INTERVAL_S)
+        if not reader.is_alive():
+            logger.error("reader died (exit %s) -> failing so the container restarts", reader.exitcode)
+            stop.set()
+            break
+        for shard_id, proc in enumerate(workers):
+            if not proc.is_alive():
+                logger.error(
+                    "worker %d died (exit %s) -> respawning", shard_id, proc.exitcode
+                )
+                workers[shard_id] = spawn_worker(
+                    shard_id, queues[shard_id], shard_symbol_lists[shard_id], stop
+                )
+
+    if reader.is_alive():
+        reader.terminate()
+    reader.join(timeout=10)
+    for proc in workers:
+        proc.join(timeout=10)
+        if proc.is_alive():
+            proc.terminate()
+    logger.info("ingestor stopped")
 
 
 if __name__ == "__main__":

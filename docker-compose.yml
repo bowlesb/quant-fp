@@ -35,9 +35,22 @@ services:
       dockerfile: services/ingestor/Dockerfile
     <<: *common
     environment:
-      # Bars stream for the whole universe (loaded from DB); trades/quotes only
-      # for this liquid subset to keep one process healthy.
-      TRADE_QUOTE_SYMBOLS: "MU,NVDA,TSLA,SNDK,AMD,INTC,AAPL,MSFT,GOOGL,AVGO,MRVL,AMZN,META,GOOG,PLTR,LITE,QCOM,TSM,ORCL,NBIS,AMAT,DELL,ARM,WDC,LLY,NOW,RKLB,IREN,CRWV,CSCO,STX,LRCX,ASML,BE,IBM,WMT,GLW,MSTR,UNH,APP,CRM,JPM,XOM,GEV,BRK.B,V,CAT,COHR,TXN,AAOI"
+      # M2 topology A: one reader owns the single websocket; trades/quotes for the
+      # top-ADV OFI names (derived dynamically from universe_membership) are sharded
+      # across INGESTOR_SHARDS aggregation-worker processes. Bars stream for the
+      # whole equities universe (+ market-context ETFs). No static symbol list — the
+      # OFI set self-maintains as the universe churns.
+      INGESTOR_SHARDS: "4"
+      OFI_SYMBOL_COUNT: "512"
+      MARKET_CONTEXT_SYMBOLS: "QQQ,SPY,IWM"
+      # Per-worker Prometheus coverage metrics on BASE_PORT + shard_id (9101..9104).
+      WORKER_METRICS_BASE_PORT: "9101"
+      COVERAGE_SILENCE_ALARM_MIN: "10"
+    expose:
+      - "9101"
+      - "9102"
+      - "9103"
+      - "9104"
     depends_on:
       timescaledb:
         condition: service_healthy

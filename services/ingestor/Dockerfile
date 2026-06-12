@@ -6,6 +6,7 @@ WORKDIR /app
 COPY services/ingestor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY quantlib ./quantlib
+COPY services/ingestor/app_ingestor ./app_ingestor
 COPY services/ingestor/main.py .
 
 # task #11: bake build-time git SHA for content-based running==intended checks.
