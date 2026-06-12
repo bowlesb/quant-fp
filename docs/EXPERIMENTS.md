@@ -1189,3 +1189,45 @@ likely be the official daily close / adjusted basis). Refine the denominator in 
 DIRECTION + verdict are unaffected; only the last ~5bps of precision. The ex-div label hygiene is still
 worth shipping (Tier-1 PR, qa-2 to review) because it removes a known mechanical contaminant from every
 overnight experiment — but it is a CORRECTNESS fix, not an edge.
+| 2026-06-12T19:54:38+00:00 | C11_loo_mom_1d | fwd_30m | raw | 7 | 4840765 | -0.0016 | -1.077 | -0.00052 | Leave-one-out: momentum minus mom_1d. Marginal contribution of mom_1d — does dropping it move IC? |
+| 2026-06-12T19:56:30+00:00 | C11_loo_mom_3d | fwd_30m | raw | 7 | 4840765 | -0.00113 | -0.741 | 0.00106 | Leave-one-out: momentum minus mom_3d. Marginal contribution of mom_3d — does dropping it move IC? |
+| 2026-06-12T19:58:28+00:00 | C11_loo_mom_5d | fwd_30m | raw | 7 | 4840765 | -0.00129 | -0.86 | -0.00012 | Leave-one-out: momentum minus mom_5d. Marginal contribution of mom_5d — does dropping it move IC? |
+
+## TASK #22 — composable label/feature materialization: MODELLER REQUIREMENTS (2026-06-12)
+
+I'm the requirements partner; prod-architect-2 (Architect hat) designs. These are what I, the research
+CONSUMER, need from a composable label/feature layer — grounded in the THREE workarounds I needed in ONE
+session today (in-memory ex-div label correction; sandbox Family B derived features; in-experiment new
+open-to-close/ten-to-close labels), each because the panel is a monolithic rebuild.
+
+THE PROBLEM (concrete): adding a new LABEL (open-to-close, event-anchored, fwd_120m) or a new FEATURE
+GROUP (dispersion, sector-demeaned, OFI) currently requires either (a) a full panel rebuild — hours,
+prod-owned, serialized, blocks everyone — or (b) an in-experiment hack that doesn't persist, can't be
+shared, and re-computes every run. Neither scales to Ben's "more strategies, more labels, more tickers"
+standing order. "Iterate on any strategy cheaply" is FALSE at the label layer today.
+
+REQUIREMENTS (what would make me 10x faster):
+1. LABEL VERSIONING (the first brick, already flagged): labels need a (basis/version) column so multiple
+   label definitions coexist — canonical fwd_30m AND ex-div-corrected fwd_30m AND open_to_close — without
+   overwriting (the trap that destroyed v1.1.0's labels). A label is keyed (symbol, ts, horizon, version).
+2. INCREMENTAL MATERIALIZATION: I define a new label/feature as a pure function over existing stored
+   inputs (bars, existing features, CA/news/sector tables) and materialize it for the EXISTING panel
+   WITHOUT recomputing the 5.5M-row feature panel. A new label should cost minutes (its own compute), not
+   a full rebuild.
+3. COMPOSABILITY: features and labels are independent layers joined at experiment time. Adding feature
+   group X must not touch labels; adding label Y must not touch features. (Today they're entangled in one
+   feature_vectors+labels rebuild.)
+4. PROVENANCE: each materialized label/feature records its definition + input versions + computed_at, so a
+   verdict maps to an exact, reproducible (feature_version × label_version) pair — preserving the M1-style
+   pinned-artifact discipline that let me freeze v1.1.1 for the verdict.
+5. SELF-SERVE FOR THE MODELLER: I can define + materialize a Tier-2 EXPLORATORY label/feature in the
+   sandbox (my lane, fast), and PROMOTE it to a Tier-1 production materialization via PR when it proves
+   out — same flow as code. The exploratory→production path must be a promotion, not a rewrite.
+NICE-TO-HAVE: a registry/catalog of available labels+features so I (and the experimenter queue) can
+reference them by name. CONSTRAINT to preserve: the experimenter's load_panel reads feature_sets.names +
+joins labels — whatever the design, keep a clean "give me (features, labels) for version pair P" loader.
+
+PRIORITY ORDER for the design memo: label-versioning column FIRST (unblocks the ex-div hygiene PR + every
+new-label shape), then incremental label materialization, then the feature side. The ex-div correctness
+PR is the immediate forcing function — it NEEDS label-versioning to persist the corrected labels without
+overwriting the frozen canonical ones.
