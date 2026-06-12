@@ -124,3 +124,34 @@ NOTE for the Lead when he runs them: 001/005 import the cost_liquidity_tier.py /
 (collect_oos, load_panel, per_symbol_demean, shuffle_within_groups) — same harness, run from /app via
 the experimenter container. 003 is standalone (only needs corporate_actions + bars_1m, read-only).
 NEXT (when helper-000 lands): build 002 (gap fade/follow) + 004 (ORB) together on the shared open-anchored machinery.
+
+## 2026-06-12 (cont.) — helper-000 LANDED; built + SMOKE-RAN 002 + 004. Two real results.
+
+Shared research layer went LIVE (read-only lifted for research.); Lead validated/EXPLAIN'd helper-000
+and ran it: research.common_daily_session_price = 741,174 rows / 1,213 symbols / 634 dates / 9,055
+NULL closes (early-close days honestly NULL'd). Wider than v1.1.1 (it's all backfill bars, not panel
+members) — fine for open-anchored shapes. Built 002 + 004 against it (no bars_1m re-scan — the whole
+point of the helper). Both ruff+black clean, py_compile-OK. SMOKE-RAN both:
+
+002 GAP FADE/FOLLOW — a REAL CONDITIONAL SIGN-FLIP (the hypothesized structure):
+  aggregate gap->open_to_close IC = -0.0273 (NW t -3.54) — but this HIDES a regime flip:
+    low_vol gaps: IC -0.0866, FADE Sharpe@2bps +4.12   (light-volume gaps REVERT — noise gaps)
+    high_vol gaps: IC +0.0195, FOLLOW Sharpe@2bps +1.24 (heavy-volume gaps CONTINUE — information)
+  The two regimes CANCEL in aggregate, which is exactly why nobody saw it as a cross-sectional signal.
+  This CLEARS my pre-registered bar (sign-coherent, |IC|>0.01, t>2 in BOTH regimes). CANDIDATE.
+  BUT — HONEST CAVEAT, NOT a finding yet: these are GROSS/flat-2bps Sharpes with NO gates. The +4.1
+  fade Sharpe is SUSPICIOUSLY strong and almost certainly part survivorship + in-sample. Needs the
+  full gate stack (shuffle canary, survivorship per-symbol demean, per-name measured cost, walk-forward
+  OOS) before any verdict. Handing to the Lead as the strongest candidate to GATE, not to believe.
+
+004 OPENING-RANGE BREAKOUT — clean PREDICTED DEATH (~30% prior):
+  break_UP mean ten_to_close +0.00109 (t +11.15, n 50,070) — a REAL but TINY continuation.
+  break_DOWN +(-0.00005) t -0.57 — nothing. position_in_range corr +0.0027 — nothing.
+  long-only up-break book net Sharpe: -0.064 @1.4bps / -0.175 @2.0 / -0.303 @2.7 — NET-NEGATIVE at
+  every realistic cost. The micro-continuation (11bps) is real but smaller than the spread. DEAD as a
+  tradeable shape — a clean falsification (valuable: closes ORB). Matches the cost reality exactly:
+  another real-but-uneconomic price effect.
+
+NET: 002 is the first conditional shape with sign-coherent structure that SURVIVES a first look — but
+unverified. 004 dies cleanly. Both committed with results jsonl. Reporting to the Lead with the gate
+gap on 002 explicit (verdicts his).
