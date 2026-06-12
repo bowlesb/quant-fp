@@ -109,6 +109,18 @@ parity-overlap, both being fixed).
   + terminal-blind `orders_log.status`. Reported to Manager; fix owned by Exec/Risk; QA to add
   a `fill_reconciliation` invariant after the fix lands.
 
+## KLAC re-fetch verification baseline (captured 2026-06-12 12:49 ET, BEFORE prod #17 re-fetch)
+
+Pre-re-fetch backfill state to diff against tonight: 217,382 bars, close range 188.65–2097.50.
+The artifact is a clean **~9.95× DOWN-step on 2026-06-01**: 5/29 daily-avg close 1933.98 →
+6/01 192.25 (and 6/02..6/12 stay in the ~190–240 band). The real KLAC 10:1 split ex-date is
+**6/12**, so 6/01–6/11 backfill is deflated ~10× — those month-windows were fetched on the
+post-split adjustment basis while late-May kept the pre-split basis (mixed-basis confirmed,
+boundary = 6/01). **#14/#17 GREEN CONDITION after re-fetch:** KLAC backfill is internally
+consistent on ONE basis (no 9.95× step at 6/01), `no_extreme_backfill_jump` stops flagging
+KLAC, and parity overlap for KLAC closes. That green is the GATE for exec pulling the KLAC
+denylist — do NOT signal it until verified.
+
 ## Data provenance facts (encode so we don't re-derive them)
 
 - **Intraday bars/features (v1.1.x panel)** come from BACKFILL fetched in month windows →
