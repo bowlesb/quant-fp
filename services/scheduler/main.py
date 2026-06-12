@@ -284,9 +284,30 @@ def main() -> None:
         time.sleep(LOOP_SECONDS)
 
 
+def et_session_date(now: datetime) -> date:
+    """ET-local calendar date for an instant. The session date must come from ET wall-clock,
+    NOT UTC: near midnight UTC during US daytime (e.g. 20:00 ET = 00:00 UTC next day) the UTC
+    date is already tomorrow, which would build the WRONG session's universe. Pure + testable:
+    pass a near-midnight-UTC datetime and assert the ET date."""
+    return now.astimezone(NY).date()
+
+
+def current_trading_session() -> date | None:
+    """Today's ET trading-session date, or None if today is not a trading day (weekend/holiday).
+    Authoritative via the Alpaca calendar — never builds a universe row for a non-session date."""
+    today_et = et_session_date(datetime.now(timezone.utc))
+    calendar = trading.get_calendar(GetCalendarRequest(start=today_et, end=today_et))
+    for session in calendar:
+        if coerce_date(session.date) == today_et:
+            return today_et
+    return None
+
+
 def maybe_build_universe() -> None:
-    """Build today's universe once per day (skip if already present)."""
-    today = datetime.now(timezone.utc).date()
+    """Build today's universe once per ET trading day (skip if already present or non-trading)."""
+    today = current_trading_session()
+    if today is None:
+        return  # not a trading session today — don't create a spurious membership row
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
