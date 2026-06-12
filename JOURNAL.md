@@ -6,6 +6,26 @@ why.
 
 ---
 
+- ===== M1 CLEAN v1.1.1 PANEL DONE — exit criteria GREEN (2026-06-12 ~07:05, Prod/Architect) =====
+  Task #2 COMPLETE. Clean equities-only panel rebuilt as set_version **v1.1.1** (v1.1.0 features left
+  frozen as dirty evidence; labels overwritten since they have no version column). Two script bugs
+  hit + fixed first: (1) `docker compose run` STOLE the while-loop's stdin -> only month 1 built;
+  fix = bash-array iteration + `</dev/null`. (2) build_labels OOM'd on Postgres locks (612-chunk
+  hypertable, full-range executemany > max_locks_per_transaction=64); fix = chunk labels monthly
+  (~21 chunks/run; per-ts cross-sectional demean is self-contained, so chunking is correctness-neutral).
+  EVIDENCE (all exit criteria green):
+  - feature_vectors v1.1.1: **5,525,040 rows / 613 dates / 785 symbols / 2024-01-02..2026-06-11**;
+    per-date breadth min 696 / avg 742 / max 784 (matches the clean ~742-name universe).
+  - labels: fwd_30m 4,840,765 (613d) / fwd_60m 4,416,876 (613d) / overnight 428,024 (600d).
+    Modeller's gate PASSES: min(computed_at) = 06:43Z (today, after the rebuild start) for all 3.
+  - **NaN coverage: 0.000% on ALL 21 features** (no silent degradation; momentum warm from the
+    2023-12 backfill so even mom_10d is 0% NaN at the 2024-01-02 start).
+  - overnight is 600/613 dates: ~13 month-boundary-Friday + end-of-history gaps from monthly
+    chunking (next session in the next month not in the +1day fetch). ~2%, secondary horizon —
+    noted to Modeller; patchable with overlapping windows if it matters.
+  Usable training window = 2024-01-02..2026-06-11 (momentum pre-warm; last-day late-cadence rows
+  unlabeled by forward horizon). Handing Modeller the v1.1.1 go-signal -> unblocks battery #4.
+
 - ===== M1 CLEAN-UNIVERSE REBUILD DONE + STALE-IMAGE BUG CAUGHT (2026-06-12 ~04:25, Prod/Architect) =====
   Task #1 COMPLETE. **STALE-IMAGE TRAP (running!=intended), caught before it poisoned everything:**
   the first build-universe-history ran on a backfiller image built 06-11 14:08 PDT — ~6.5h BEFORE the
