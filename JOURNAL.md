@@ -1022,3 +1022,20 @@ Tier-1 PR under the new review flow, qa-2 adversarial reviewer. (3) qa-2 assigne
 independent verification of the diagnostic (PIT ex-date alignment, residual 15%,
 multi-class double-count) before corrected results are interpreted.
 Anticipation features off the table (Alpaca CA feed lacks declaration dates) — #21-class.
+
+## 2026-06-12 — Manager: ex-div diagnostic VERIFIED; DB-locks ceiling owned; close window re-sequenced
+qa-2 verified the ex-div finding on all 4 adversarial angles (0b5756b): buckets
+reproduced digit-for-digit; PIT alignment PROVEN by directional split (drop lands only
+where fwd-open==ex-morning; absent when label_date==ex_date — off-by-one would put it
+in the wrong bucket); no multi-class double-counts; magnitude dimensionally consistent
+($0.69 avg div / ~$130 avg price). Residual ~15% = slight OVER-correction (+4.8bps,
+yield denominator), NOT a second mechanism. Modeller's interpretation hold LIFTED;
+production labels.py fix (with denominator refinement) = first Tier-1 PR, qa reviews.
+NEW STANDING ITEM (qa coverage Q -> prod owns): max_locks_per_transaction has blocked
+3 full-history queries today + OOM'd the first corrected-battery run — a growing
+ceiling. RAISE TONIGHT, FIRST in the post-close window (TimescaleDB restart while
+nothing heavy is mid-flight): BOOK FLAT -> DB restart+verify -> exec executor deploy ->
+rebuild-batch (one ingestor restart + subscription verify) -> #12 + grinds resume.
+Research day net: Family B DISCARD (survivorship), OFI pipeline validated (no read),
+signed_vol_z_30 norm bug caught, ex-div hygiene verified. #21 news scoping pulled to
+6/13 morning — queued-signal inventory if OFI fails is otherwise empty.
