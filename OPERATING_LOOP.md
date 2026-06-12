@@ -374,3 +374,11 @@ experiments/journals/. The Manager wakes the five at period boundaries and on gr
 results; any lens blocked on data/compute escalates immediately. WEEKEND BAR (Ben):
 come back Monday with a DIVERSE set of COMPLETED experiments and a ranked promising-
 leads list — every lens ≥3 completed runs, plus the kill list with reasons.
+
+## Compute saturation (Ben's directive 2026-06-12)
+GPU AND CPU must both be utilized at all times when motivated work exists. The
+experimenter becomes a resource-aware coordinator (gpu/cpu-tagged queue lanes,
+utilization metrics, idle-lane alarm — task #7). Until then the Research Lead saturates
+CPU manually (parallel analysis scripts alongside the GPU grind). Manager wakes check
+BOTH lanes the way they check queue depth: an idle lane with compatible queued work is
+a journaled failure, same as an empty queue.
