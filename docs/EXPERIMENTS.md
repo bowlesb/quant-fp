@@ -1076,3 +1076,23 @@ every chunk in range — multiplied by parallel workers ("out of shared memory /
 touches ~1 month of chunks, under the lock budget). Verified 3409 yields load cleanly. LESSON for future
 sandbox queries against bars_1m: never scan it panel-wide in one statement with a non-pruning predicate;
 chunk by month and kill parallel workers. (Re-running now; interpretation still held for qa-2's verify.)
+| 2026-06-12T19:49:55+00:00 | C11_60m_raw_nocal | fwd_60m | raw | 19 | 4416876 | 0.0196 | 11.554 | 0.00238 | Clean 60m baseline: raw nocalendar (19 feats). Longer horizon, full price+mom set. |
+
+### STRATEGIC FRAMING CORRECTION (Manager, 2026-06-12) — signal inventory + #21 pulled forward
+
+Manager refined my "single-threaded on OFI" framing (it was slightly too pessimistic). HONEST inventory
+of our queued/live signal sources after Family B's discard:
+- ONE NEW DATA CLASS queued: OFI (v1.2.0, pilot ~6/26).
+- ONE in SCOPING: news/event flags (#21) — prod's scoping half PULLED FORWARD to TOMORROW MORNING
+  (my pre-empt accepted: with Family B discarded, the queued-signal inventory if OFI fails is empty, so
+  price the news option BEFORE we need it; doesn't compete with tonight's batch).
+- TWO DERIVED THREADS LIVE (not new data classes, but real): Family A ex-div (may BOTH clean the
+  overnight picture AND yield realized features) and #20 sector-neutralization (may extract more from
+  existing momentum).
+So: not zero-Plan-B. The accurate line is "1 new data class + 1 in scoping + 2 derived threads," not
+"single-threaded on OFI." Keep this honest framing in reports.
+
+FORMAL COMMITMENT (Manager): if the ex-div correction CHANGES the overnight survivorship picture, Family
+B gets ONE RE-LOOK on the ex-div-corrected labels before its discard is FINAL. (Family B's overnight
+survivorship -1.61 was measured on ex-div-CONTAMINATED labels; removing the artifact could in principle
+change it. The corrected battery answers this — pending qa-2's verify before interpretation.)
