@@ -919,3 +919,14 @@ Manager rulings: (1) "single-threaded on OFI" risk RATIFIED -> #20 GICS sector m
 prod scopes; not a build commitment; post-M2-start). News stream now has an owner.
 (2) OFI sequencing unchanged: tonight's #15 proof gates #10 panel investment.
 Post-close window order: batch ~13:05 PT -> #16 staging review -> exp queue >=15:30 PT.
+
+## 2026-06-12 — Manager: b856aa7 absorption incident — ruling + policy patch
+Incident: prod's `git add -A` for #20 absorbed exec's UNCOMMITTED #19 Tier-1 executor
+diff (66 lines) into one co-mingled commit — un-reviewed Tier-1 code on master. Exec's
+containment was correct: running executor unchanged, deploy HELD = the real gate.
+RULING: post-hoc review-before-deploy (revert rejected — co-mingled). Exec extracts the
+isolated #19 hunk -> prod-architect-2 reviews schema/runtime + qa-2 reviews the
+reconcile/fill_reconciliation contract -> both approvals logged in ledgers -> Manager
+bless -> deploy rides the one post-flatten executor rebuild with the #18 guard.
+ROOT CAUSE patched in REVIEW_POLICY.md: shared-worktree staging discipline — never
+add -A/commit -a; explicit paths only; absorbed-WIP remedy documented.

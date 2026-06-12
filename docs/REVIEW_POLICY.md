@@ -55,6 +55,17 @@ prefix `HOTFIX:`; the mapped reviewer reviews AFTER, within the same day, and th
 outcome is logged in the PR-equivalent: a ledger entry + Manager journal line. Fast-path
 abuse (using HOTFIX for non-incidents) is a P1 process regression.
 
+## Shared-worktree staging discipline (added 2026-06-12 after the b856aa7 absorption incident)
+
+All agents share ONE working tree, so unstaged WIP from one agent is visible to all:
+- **NEVER `git add -A`, `git add .`, or `git commit -a`.** Stage EXPLICIT paths only —
+  files YOU changed for YOUR commit. b856aa7 ("prod #20") silently absorbed 66 lines of
+  execution-risk's un-reviewed Tier-1 executor WIP this way.
+- Before committing, `git status` and confirm every staged file is yours and on-topic.
+  A file you don't recognize = a peer's WIP — leave it alone and flag them.
+- If you absorb peer WIP anyway: do NOT deploy/rebuild the affected service; report to
+  the Manager; default remedy = post-hoc review-before-deploy by the mapped reviewers.
+
 ## Manager duties under this policy
 - Merge Tier 1 PRs only after the mapped reviewer's explicit approval.
 - Keep this policy current; re-check compliance every wake (spot-check `git log` authorship).
