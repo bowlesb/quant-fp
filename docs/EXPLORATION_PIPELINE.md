@@ -36,6 +36,19 @@ Lead's synthesis cycle. The edge hunt never idles; this is its engine room.
    entry). Same rule for any signal computed from a price you also book the return from: the
    entry must lag the signal observation. The Lead independently re-runs any candidate before
    promotion (a too-good net Sharpe at high cost is the tell).
+
+   ORIGIN STORY (why this rule exists — labels/signals anchored at an execution-impossible price
+   are the house's most seductive lie). On 2026-06-12 it killed TWO apparent edges in one day:
+   (1) the conditional gap-fade — the weekend's most exciting lead, which passed canary +
+   survivorship + walk-forward + measured open-cost at +2.6 net Sharpe — collapsed to −1.38 Sharpe
+   the moment the entry moved from the un-executable 09:30 open print to the tradeable 10:00 price
+   (the entire "edge" lived in the un-tradeable first minutes); (2) the open-cadence "signal" —
+   gap_from_open IC was −2.9 t against a 09:30-anchored label but −0.8 t (noise) against a tradeable
+   10:00 entry, flipping the modeling recommendation from keep-as-regime to EXCLUDE. Both looked real
+   under every statistical gate; both were artifacts of booking returns at a price you cannot trade.
+   The statistical gates (canary/survivorship/OOS) operate ABOVE the label — they cannot catch a
+   label that itself look-aheads. Only an execution-realistic entry price catches it, which is why
+   the Lead's independent re-run-before-promotion is a distinct, non-optional layer.
 5. **Verdicts are the Lead's:** explorers propose and interpret; the Lead (with the full
    multiple-testing picture — track the global experiment count) declares findings,
    promotes them to docs/EXPERIMENTS.md, and kills lore that fails replication.
