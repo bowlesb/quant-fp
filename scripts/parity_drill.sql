@@ -5,10 +5,13 @@
 --   docker compose exec -T timescaledb psql -U quant -d quant -f - < scripts/parity_drill.sql
 --
 -- FINDINGS (2026-06-12, 678,288 overlap bars, 1.14% mismatch >0.2%):
---   * Driver 1 (~11%): KLAC stream close is a persistent EXACTLY-10x the backfill close
---     (e.g. 2312.47 vs 231.01) across BOTH settled days -> a standing stream feed scaling/
---     decimal bug for KLAC, NOT a split-date artifact. All 833 KLAC overlap bars, the entire
---     >10% band. Discrete, fixable. CHECK other symbols for similar Nx ratios.
+--   * Driver 1 (~11%): KLAC shows a persistent EXACTLY-10x divergence (stream 2312.47 vs
+--     backfill 231.01) across BOTH days, all 833 KLAC overlap bars = the entire >10% band.
+--     ** DIRECTION (prod deep-dive vs Alpaca live ~2429): the BACKFILL is 10x-DEFLATED, the
+--     STREAM is CORRECT. ** Root cause: a split landing mid-backfill leaves pre-split months on
+--     the OLD adjustment basis (mixed split-adjustment states). The drill correctly DETECTED the
+--     10x gap; the source is backfill, not stream. A >3x day-jump sweep flagged 11 names (KLAC
+--     confirmed artifact; 10 others likely real moves/reverse-splits — see no_extreme_backfill_jump).
 --   * Driver 2 (~87%): ~15-20 symbols (SPYM, ALB, WMB, GPN, NDAQ, CB, AMT, ADP, BR, DKS, ...)
 --     mismatch 100% of their bars but SMALL (<1%, the 0.2-1% bands). A consistent per-symbol
 --     offset across every bar = a methodological close-price difference (consolidated/official

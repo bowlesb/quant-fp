@@ -1,0 +1,15 @@
+# Curated CORPORATE-ACTION allowlist for no_extreme_backfill_jump (task #17).
+#
+# A >3x day-over-day jump in a backfill daily close is EITHER a real corporate action
+# (forward/reverse split) OR a mixed split-adjustment artifact (a split landing mid-backfill
+# leaves pre-split months on the old adjustment basis — the KLAC class). We have NO corporate-
+# action data feed yet, so confirmed-REAL actions are listed here so they don't false-positive;
+# everything else >3x is flagged as a candidate artifact to fix + re-fetch.
+#
+# Maintenance: prod verifies each flagged name under task #17; add the confirmed-REAL ones here
+# (artifacts like KLAC are NOT added — they must stay flagged until the backfill is re-fetched).
+# Format: SYMBOL            (exempts that symbol's jumps), or
+#         SYMBOL<TAB>DATE   (exempts only the jump on that ET session date — preferred).
+#
+# (none confirmed yet — the 11 names from the 2026-06-12 sweep are pending prod verification
+#  under task #17; KLAC is a confirmed ARTIFACT and is intentionally NOT listed.)

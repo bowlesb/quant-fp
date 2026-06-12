@@ -20,6 +20,8 @@ Invariants (map to docs/QA_LEDGER.md):
   calendar_et_correct        — I1: stored minute_of_day/day_of_week equal true ET wall-clock and
                                are RTH (ACTIVE set only). UTC-calendar-leak catch.
   bars_integrity             — OHLC + minute-grid sanity (extended-hours bars reported, not failed).
+  no_extreme_backfill_jump   — task #17: no >3× unexplained backfill daily-close day-over-day jump
+                               (mixed split-adjustment artifacts; allowlist exempts real splits).
   backfill_realtime_parity   — I2: stream vs backfill bars agree on overlap (replay-equiv).
   trade_agg_parity           — I2b: trade-agg stream vs backfill within tolerance on overlap.
   pit_universe_membership    — I3: ACTIVE-set feature rows exist ONLY for that date's members.
@@ -77,7 +79,9 @@ SESSION_FORWARD_SLACK_DAYS = (
     4  # member trade_date may lead the latest bar by at most this
 )
 
+EXTREME_JUMP_RATIO = 3.0  # backfill daily-close day-over-day ratio beyond this -> flag
 DENYLIST_PATH = REPO / "tests" / "fixtures" / "known_funds.txt"
+CORP_ACTIONS_PATH = REPO / "tests" / "fixtures" / "known_corporate_actions.txt"
 
 # Independent leverage/inverse/structure tokens, maintained HERE and deliberately NOT identical
 # to quantlib.universe's regex, so this gate can flag a fund the builder's classifier misses
@@ -175,6 +179,88 @@ def _load_denylist() -> dict[str, str]:
         symbol, _, name = line.partition("\t")
         denylist[symbol.strip()] = name.strip()
     return denylist
+
+
+def _load_corporate_actions() -> tuple[set[str], set[tuple[str, str]]]:
+    """Allowlist of CONFIRMED-REAL corporate actions so legit splits don't false-positive.
+
+    Returns (symbol_wide_exemptions, (symbol, date)_exemptions). A bare 'SYMBOL' line exempts all
+    that symbol's jumps; 'SYMBOL<TAB>DATE' exempts only the jump on that ET session date.
+    """
+    symbol_wide: set[str] = set()
+    dated: set[tuple[str, str]] = set()
+    if not CORP_ACTIONS_PATH.exists():
+        return symbol_wide, dated
+    for line in CORP_ACTIONS_PATH.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        symbol, _, date = line.partition("\t")
+        symbol = symbol.strip()
+        if date.strip():
+            dated.add((symbol, date.strip()))
+        else:
+            symbol_wide.add(symbol)
+    return symbol_wide, dated
+
+
+def check_no_extreme_backfill_jump() -> Result:
+    """Price integrity (task #17): no >3× UNEXPLAINED day-over-day jump in a backfill daily close.
+
+    A split landing mid-backfill leaves pre-split months on the old adjustment basis, deflating
+    prices (the KLAC 10× class). This reaches the PANEL (momentum/return features), not just the
+    parity overlap, so it must be caught at the bars level. Real splits/reverse-splits are exempted
+    via the curated corporate-action allowlist (we have no corporate-action feed yet).
+
+    HEAVY: aggregates bars_1m (~253M rows) to daily RTH last-close. Part of the post-rebuild
+    battery, not the light wake run. Scope to recent history with env QA_JUMP_SINCE=YYYY-MM-DD.
+    """
+    symbol_wide, dated = _load_corporate_actions()
+    since = os.environ.get("QA_JUMP_SINCE")
+    et = "(ts AT TIME ZONE 'America/New_York')"
+    since_clause = f"AND ts >= '{since}'" if since else ""
+    rows = sql(
+        "WITH daily AS ("
+        "  SELECT symbol, ts::date AS dt, last(close, ts) AS close "
+        f"  FROM bars_1m WHERE source='backfill' {since_clause} "
+        f"    AND {et}::time >= '09:30' AND {et}::time < '16:00' "
+        "  GROUP BY symbol, ts::date"
+        "), jumps AS ("
+        "  SELECT symbol, dt, close, lag(close) OVER (PARTITION BY symbol ORDER BY dt) AS prev "
+        "  FROM daily"
+        ") "
+        "SELECT symbol, dt, prev, close, round((close/prev)::numeric,2) AS ratio FROM jumps "
+        f"WHERE prev > 0 AND (close/prev > {EXTREME_JUMP_RATIO} OR close/prev < {1.0/EXTREME_JUMP_RATIO}) "
+        "ORDER BY symbol, dt"
+    )
+    flagged = [
+        (sym, dt, prev, close, ratio)
+        for sym, dt, prev, close, ratio in rows
+        if sym not in symbol_wide and (sym, dt) not in dated
+    ]
+    exempted = len(rows) - len(flagged)
+    if flagged:
+        details = [
+            f"{sym:8s} {dt}: {prev} -> {close} ({ratio}×)"
+            for sym, dt, prev, close, ratio in flagged[:40]
+        ]
+        if len(flagged) > 40:
+            details.append(f"... and {len(flagged) - 40} more")
+        details.append(
+            f"({exempted} jump(s) exempted by the corporate-action allowlist)"
+        )
+        return Result(
+            "no_extreme_backfill_jump",
+            "FAIL",
+            f"{len(flagged)} unexplained >{EXTREME_JUMP_RATIO}× backfill daily-close jump(s) "
+            f"(mixed split-adjustment artifacts — the KLAC class — corrupt panel features)",
+            details,
+        )
+    return Result(
+        "no_extreme_backfill_jump",
+        "PASS",
+        f"no unexplained >{EXTREME_JUMP_RATIO}× backfill daily-close jumps "
+        f"({exempted} known corporate action(s) exempted)",
+    )
 
 
 def _calendar_indices() -> tuple[int, int]:
@@ -717,6 +803,7 @@ INVARIANTS: dict[str, Callable[[], Result]] = {
     "universe_sessions_valid": check_universe_sessions_valid,
     "calendar_et_correct": check_calendar_et_correct,
     "bars_integrity": check_bars_integrity,
+    "no_extreme_backfill_jump": check_no_extreme_backfill_jump,
     "backfill_realtime_parity": check_backfill_realtime_parity,
     "trade_agg_parity": check_trade_agg_parity,
     "pit_universe_membership": check_pit_universe_membership,
