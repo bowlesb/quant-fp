@@ -1271,3 +1271,20 @@ RECORDING for when I build the per-name cost curve — NOT usable yet (n=4, drif
   fill-rate next session; they're tracking it. Revisit once short fill-rate stabilizes.
 This TIGHTENS the M3 net-of-cost gate further (the flat-2bps was already optimistic; now add fill
 asymmetry). Consistent with the price-only verdict: another reason the thin price signal is uneconomic.
+
+### EX-DIV DIAGNOSTIC — qa-2 FULLY VERIFIED on all 3 adversarial angles (2026-06-12, QA_LEDGER 06065fb)
+
+qa-2 independently confirmed the ex-div diagnostic end-to-end (closes the verification loop; my
+corrected-battery interpretation bb0659b now stands on fully-verified ground):
+1. DATE ALIGNMENT correct (NOT off-by-one) — proven by the directional split: the -51.6bps lands ONLY
+   in label_date+1==ex_date, ABSENT in label_date==ex_date (+0.000157). Off-by-one would mis-bucket it.
+2. RESIDUAL ~15% BENIGN — NOT date-clustering (3,291 ex-nights over 462 distinct dates, avg 7.1/date,
+   busiest date 1.09% of total). The +0.00047 overshoot = cross-sectional demean + 15:59-vs-official-close
+   proxy. No hidden second mechanism.
+3. COVERAGE clean — cash_dividend is PURE (splits/stock_dividends are separate action_types, zero leak);
+   607/785 panel symbols (77%) pay dividends in-window, broad not large-cap-skewed -> fair baseline.
+qa-2 reproduced Query 2 exactly (mean_label -0.005157, neg_div_yield -0.006103, corrected +0.000946,
+missing_px=0) and noted my time='15:59' filter fixed the OOM their last(close) agg hit. ACTION: when I
+write the production ex-div label fix (Tier-1 quantlib/labels.py), qa-2 reviews (label semantics = their
+map). That PR waits on label-versioning (#22 first brick) so the corrected labels persist without
+overwriting the frozen canonical ones.
