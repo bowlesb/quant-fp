@@ -167,7 +167,7 @@ def report(name: str, panel: dict[str, list]) -> None:
     clears = isinstance(breakeven, float) and breakeven == breakeven and breakeven > MEASURED_LIQUID_HALF_SPREAD_BPS
     print(f"  VERDICT vs measured liquid half-spread: breakeven {breakeven:.2f}bps "
           f"vs {OPTIMISTIC_LIQUID_HALF_SPREAD_BPS}bps(optimistic) / {MEASURED_LIQUID_HALF_SPREAD_BPS}bps(median) "
-          f"-> {'CLEARS' if clears else 'BELOW'} median")
+          f"-> {'CLEARS' if clears else 'BELOW'} median", flush=True)
 
 
 def load_regime_tiers(conn: psycopg.Connection) -> dict[date, int]:
@@ -199,19 +199,21 @@ def report_by_regime(panel: dict[str, list], regime: dict[date, int]) -> None:
 
 
 def main() -> None:
+    print("loading panel...", flush=True)
     with psycopg.connect(**DB_KWARGS) as conn:
         panel = load_liquid_reversal_panel(conn)
         regime = load_regime_tiers(conn)
     is_idx, oos_idx = split_oos(panel)
     print(f"Loaded {len(panel['ts'])} liquid-tier rows. "
-          f"IS={len(is_idx)} (<{OOS_START}) OOS={len(oos_idx)} (>={OOS_START}).")
+          f"IS={len(is_idx)} (<{OOS_START}) OOS={len(oos_idx)} (>={OOS_START}).", flush=True)
+    # OOS is the verdict window — compute it FIRST so the binding result lands even if the rest is slow.
+    report("OUT-OF-SAMPLE (verdict window — H1 judged HERE)", subset(panel, oos_idx))
+    print("\nOOS monthly IC (sign-stability gate — should be consistently negative):", flush=True)
+    for month, ic in monthly_ic(subset(panel, oos_idx)).items():
+        print(f"  {month}: {ic:+.4f}", flush=True)
+    report_by_regime(subset(panel, oos_idx), regime)
     report("FULL PANEL", panel)
     report("IN-SAMPLE (observe window)", subset(panel, is_idx))
-    report("OUT-OF-SAMPLE (verdict window — H1 judged HERE)", subset(panel, oos_idx))
-    print("\nOOS monthly IC (sign-stability gate — should be consistently negative):")
-    for month, ic in monthly_ic(subset(panel, oos_idx)).items():
-        print(f"  {month}: {ic:+.4f}")
-    report_by_regime(subset(panel, oos_idx), regime)
 
 
 if __name__ == "__main__":
