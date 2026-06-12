@@ -1155,3 +1155,37 @@ SHAPE 7 — HORIZON ENSEMBLE (30m signal GATES overnight holds). ★★ cheap, c
 3. SHAPE 7 (horizon ensemble) — no new label; compose existing 30m + overnight. Pure harness work.
 These 3 need NEW LABELS (open-to-close, 10:00-anchored) — spec'd below for the label builder.
 | 2026-06-12T19:51:58+00:00 | C11_overnight_rank_nocal | overnight | rank | 19 | 428024 | 0.01891 | 2.121 | 0.00012 | Overnight rank label nocalendar. Trading-aligned overnight ranking on clean data. |
+| 2026-06-12T19:52:41+00:00 | C11_overnight_lambdarank_nocal | overnight | lambdarank | 19 | 428024 | 0.03583 | 2.766 | 0.00202 | Overnight lambdarank nocalendar. The config that looked best (pre-survivorship) — re-check IC/canary on clean panel. |
+
+## ★ EX-DIV CORRECTED OVERNIGHT BATTERY — VERDICT (Modeller, 2026-06-12, qa-2-verified, hold lifted)
+
+qa-2 verified the ex-div diagnostic on all 4 angles (bucket reproduction, PIT alignment, no double-counts,
+magnitude) — interpretation hold LIFTED. Ran the corrected overnight battery (experiments/
+exdiv_corrected_battery.py): RAW v1.1.1 overnight labels vs EX-DIV-CORRECTED (dividend yield added back
+to the 3,291 affected nights, 0.769% of labels, IN-MEMORY — frozen labels NEVER written). 4 labels × 2 bases:
+
+  label       | RAW: IC   canary  bkeven SURV  || FIX: IC   canary  bkeven SURV
+  raw         | +0.01420 -0.0056  3.2bps -1.79 || +0.00956 -0.0061  2.32bps -2.18
+  rank        | +0.01891 +0.0001  2.91bps -1.20 || +0.01657 -0.0023  2.88bps -1.39
+  vol_scaled  | +0.00761 -0.0046  0.97bps -1.68 || +0.00656 -0.0065  1.72bps -1.70
+  lambdarank  | +0.03583 +0.0020  9.65bps -0.35 || +0.03386 +0.0091  9.64bps -0.15
+
+VERDICT: removing the ex-div artifact LOWERS the apparent overnight IC on EVERY config (e.g. raw
+0.0142->0.0096, lambdarank 0.0358->0.0339) — CONFIRMING part of the raw overnight "signal" was the
+model predicting the mechanical, predictable ex-div drop, NOT alpha. BUT the survivorship-neutralized
+sharpe stays NEGATIVE everywhere (raw -1.79->-2.18, lambdarank -0.35->-0.15) — if anything slightly more
+negative. So the overnight signal was SURVIVORSHIP before correction and remains survivorship after. The
+ex-div correction is a genuine LABEL-HYGIENE improvement (removes a known contaminant, deflates spuriously-
+inflated IC) but reveals NO hidden overnight alpha. No tradeable overnight edge, corrected or not.
+
+FAMILY B RE-LOOK RESOLVED: the formal commitment was "re-look Family B on corrected labels IF the
+correction CHANGES the overnight survivorship picture." It did NOT — survivorship stays negative
+everywhere. So Family B's DISCARD is FINAL; no re-look warranted (its overnight survivorship -1.61 was not
+an ex-div artifact).
+
+PRODUCTION-FIX NUANCE (qa-2, for the Tier-1 quantlib/labels.py PR): the correction slightly OVER-corrects
+(+4.8bps net vs baseline — the yield denominator is marginally off; I use the 15:59 prior close, should
+likely be the official daily close / adjusted basis). Refine the denominator in the production fix. The
+DIRECTION + verdict are unaffected; only the last ~5bps of precision. The ex-div label hygiene is still
+worth shipping (Tier-1 PR, qa-2 to review) because it removes a known mechanical contaminant from every
+overnight experiment — but it is a CORRECTNESS fix, not an edge.
