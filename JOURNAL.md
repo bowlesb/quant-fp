@@ -1057,3 +1057,19 @@ the label layer; #22 makes it true.
 Close window mid-flight: BOOK FLAT received; max_locks=2048 staged; DB restart pending
 modeller pause-ack (10-min deadline set, then kill-and-restart); exec deploy + rebuild-
 batch + #12 serialized behind it.
+
+## 2026-06-12 — Manager: CLOSE REPORT — terminated flat; #19+#18 LIVE; regression caught in live-verify
+Exec: EOD flatten 19:48:13Z -> broker FLAT in 20s; day P&L -$7.25 (noise); per-name sums
+to the cent. Fill rate 3L/1S of 3L/3S — the NEW reconcile fires correctly on day one
+(intended-vs-filled, unfilled=[AMPX,FLY], net_notional +$353), surfacing what the old
+ok:true hid. #19+#18 deployed+verified live (terminal status writeback working; ex-date
+guard live returning ['KLAC']). Shorts-don't-fill (1/3 again) = top execution-quality
+item; spread-scaled cross gets its first test Monday.
+REGRESSION caught in LIVE-VERIFY, fixed fast-follow (899c72c): #19's status writeback
+broke the #7 slippage view (filtered status='submitted'); ALL THREE reviewers missed
+the cross-view interaction. POLICY LESSON recorded: Tier-1 review covers the diff;
+deploy verification covers the SYSTEM; both mandatory, neither substitutes.
+-dirty provenance hole: tracked results.jsonl makes every image stamp dishonest ->
+gitignore generated outputs = #11 completion requirement.
+KLAC lift PRE-CONFIRMED + board-reflected (#17 metadata); exec drops manual entry on
+their re-confirm; double-excluded meanwhile.
