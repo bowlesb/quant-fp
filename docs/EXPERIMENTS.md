@@ -1777,3 +1777,39 @@ Ben's FMP key is next-in-line). Pending Manager rulings: who builds ofi_marginal
 >=10-session trigger (proposed: me); pre-build sector_map now as the OFI-null hedge?
 NEXT WAKE: interpret the W12 position-group solos (do vwap_dev/range_pct/gap carry standalone signal,
 or is it ret_5m? the W11 GROUP IC 0.029 says the position features matter — settle it).
+| 2026-06-12T22:22:55+00:00 | W11_pair_mom_5d_rel_mom_10d_rel_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00241 | -1.757 | 0.00061 | Momentum term-structure: mom_5d_rel+mom_10d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:23:27+00:00 | W11_pair_mom_5d_rel_mom_10d_rel_overnight | overnight | raw | 2 | 428024 | 0.00921 | 2.099 | -0.00294 | Momentum term-structure: mom_5d_rel+mom_10d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:25:17+00:00 | W11_pair_mom_1d_rel_mom_10d_rel_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00181 | -1.2 | -0.00108 | Momentum term-structure: mom_1d_rel+mom_10d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:25:48+00:00 | W11_pair_mom_1d_rel_mom_10d_rel_overnight | overnight | raw | 2 | 428024 | 0.008 | 1.843 | -0.00225 | Momentum term-structure: mom_1d_rel+mom_10d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+
+## ★ RESEARCH LEAD TRANSITION + PROPOSAL DISPOSITIONS (Modeller=Lead, 2026-06-12 evening)
+
+Ben spun up the 5-mind exploration pipeline (docs/EXPLORATION_PIPELINE.md). I am now RESEARCH LEAD:
+single writer of queue.json + EXPERIMENTS.md, proposal validator, verdict-declarer, synthesizer.
+Four explorers (features/ml/shapes/data) filed 15 proposals; all dispositioned (recorded in the
+proposal files). Global experiment count = 143 (multiple-testing tracker).
+
+DISPOSITIONS (approve + build-order; full reasons in experiments/proposals/<agent>/*.md):
+- features: 002 volume-surprise (BUILD FIRST — panel has ZERO volume features) + 001 highlow-vol
+  (Parkinson/GK + range-pctile) APPROVED runnable; 003 splits APPROVED low-pri (survivorship proxy);
+  004 sector + 005 quotes APPROVED-AS-SPEC, BLOCKED (sector map / M2 scale — sector escalated to Mgr).
+- ml: 003 pos-carrier economics ENQUEUED NOW (ML003_ret5m_only/pos_only/ret5m_pos_30m, after W12 pos
+  block); 001 ridge (BUILD FIRST — validates 'momentum dead' isn't a GBM artifact; sklearn ABSENT ->
+  numpy closed-form) + 002 turnover-smoothed-target + 004 multihorizon APPROVED runnable.
+- shapes: 000 daily-session-price helper -> research.common_daily_session_price (catalog table; explorer
+  delivers builder SQL, I run+register); 001 conditional-participation + 003 post-exdiv-drift + 005
+  volume-shock-overnight APPROVED runnable NOW; 002 gap + 004 ORB sequenced behind 000.
+- data: no formal proposals yet (observation lens) but 2 LOAD-BEARING journal findings: (a) panel
+  NaN-rate 13-20% on top intraday features vs the '0.000% NaN' claim — flag to QA; (b) ret_5m is a
+  REVERSAL concentrated in the ILLIQUID tier — independently corroborates task #5. Told them to formalize >=3.
+
+MONDAY 06:00 PT BAR (Ben): every lens >=3 COMPLETED runs + ranked promising-leads + kill list. Path:
+ml gets there via ML003(3)+ridge+smoothed+multihorizon; features via volume+highlow+splits; shapes via
+participation+postexdiv+volumeshock (+gap/ORB if helper lands); data via the formalized observations.
+KILL LIST so far (my verdicts this session): Family-C dividend timing (NO edge); cost-lever-rescues-
+price (NO — task #5); + the standing price-panel nulls. PROMISING-LEADS so far: NONE proven — the honest
+state is the whole thesis rests on OFI's marginal IC over ret_5m (data not yet deep enough). The explorer
+families are the diversification against an OFI null.
+
+SHARED-DB: research.catalog live; common_spread_at_cadence registered (mine, first entry). Explorers are
+read-only -> they deliver builder SQL, I EXPLAIN+run+register. NEXT: synthesis at the period boundary.
