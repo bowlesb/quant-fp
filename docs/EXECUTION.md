@@ -266,6 +266,34 @@ Both mapped reviewers engaged (REVIEW_POLICY post-hoc review-before-deploy, Mana
 Deploy gated on qa-2 re-green + Manager bless → one post-flatten targeted `make rebuild S=executor`
 (folds in #18 ex-date guard + #19). Re-review diff sent: /tmp/exec_19_fixes.diff.
 
+### 2026-06-12 CLOSE — termination verified + #19/#18 deployed & verified live
+- **TERMINATION ✅** EOD flatten fired 19:48:13Z → book FLAT (0 pos / 0 open orders) by 19:48:33Z,
+  equity $100,019.97 = cash. Day P&L **−$7.25** (noise; no edge). Bets terminated cleanly again.
+- **Fill rate:** intended 3L/3S (6 legs); filled 4 — longs 3/3 (KEEL/SATS/UUUU), shorts **1/3** (W
+  only; AMPX/FLY never filled). The SHORT leg is the fill problem (wide-spread small-caps resting) —
+  exactly what #19's spread-scaled cross targets next session.
+- **Per-name realized P&L** (`realized_pnl_by_name`): SATS −8.84, KEEL −3.40, UUUU +0.27, W +4.74;
+  sum −7.23 ≈ day −7.25 (fees/borrow).
+- **nbbo slippage** (`execution_slippage`): 4 nbbo legs, mean −112bps — DRIFT NOISE at n=4, NOT a
+  cost signal (needs ~5–10 sessions). Infra proven (all arrival_src='nbbo').
+- **#19 + #18 DEPLOYED & verified live** (post-flatten, targeted `make rebuild S=executor`):
+  symmetric reconcile fires `intended 3L/3S, filled 3L/1S, unfilled=[AMPX,FLY], net_notional=+$353`
+  (the dollar-skew the old name-count hid — old reconcile said ok:true all day); terminal status
+  written back (orders_log filled/canceled, was stuck 'submitted'); ex-date guard returns ['KLAC']
+  LIVE. RUNNING==intended verified by direct code grep in the container.
+- **REGRESSION caught in live-verify + fixed (899c72c):** #19's terminal-status writeback flipped
+  orders_log.status submitted→filled/canceled, which the task-#7 `execution_slippage` view filtered
+  on (`status='submitted'`) → 0 slippage rows. Fixed the filter to `alpaca_order_id IS NOT NULL`
+  (the inner join to fills_log already restricts to filled legs); redeployed; slippage recovered.
+  The #19 cross-review (all of us) missed this view interaction — argues for the live-verify step.
+- **PROVENANCE GAP (#11):** `assert_image_fresh executor` = `899c72c-dirty` — from the experimenter
+  perpetually rewriting `experiments/results.jsonl` (tracked file), NOT executor code (services/
+  executor clean). Every image stamps -dirty until prod gitignores generated experiment outputs.
+  Verified RUNNING==intended by direct code inspection instead. Flagged to prod.
+- **KLAC** now excluded by BOTH layers (manual denylist + live ex-date guard). Lift (drop manual)
+  sequenced: guard proven live ✓ → verify ratification board-reflection + re-confirm → drop. Not
+  urgent (double-excluded, market closed).
+
 ## Active live-basket exclusions (remove when the condition clears — don't let these rot)
 - **KLAC — excluded since 2026-06-12 (Manager pre-open directive).** Reason: KLAC's LIVE STREAM
   bars are persistently exactly 10× the true price (feed scaling bug, QA finding). The v1.1.x
