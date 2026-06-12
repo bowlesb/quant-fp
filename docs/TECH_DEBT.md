@@ -16,10 +16,18 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 | P3 | experimenter writes host files as root | permission paper-cuts | add user:uid to the service |
 
 ## Scheduled core-rebuilds (maintenance windows)
-- **POST-CLOSE 6/12 (~13:00 PT): `make rebuild-all`** — first build with GIT_SHA baked in; brings
-  EVERY service to running==intended in one batched restart (also picks up clean bar-subscription
-  membership, #13 scheduler already-live, and the ingestor quantlib-drift below). Batched to ONE
-  ingestor restart per the QA settled-day constraint.
+### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
+Prereqs before starting: market closed (≥16:00 ET); Modeller battery done (✓ guard satisfied);
+Manager go on #12; Modeller GO on #16 swap + #12 panel rebuild. Sequence (any successor can run this):
+1. **Apply #18 DDL** (idempotent, instant): `docker compose exec -T timescaledb psql -U quant -d quant -f /dev/stdin < db/init/05_corporate_actions.sql` (or paste the CREATE TABLE). Verify table exists.
+2. **#18 first CA fetch** (cheap): `BACKFILL_SYMBOLS=universe docker compose --profile tools run --rm backfiller fetch-corporate-actions` → confirms KLAC forward_split ex-6/12 lands; note new-action symbols.
+3. **#17 KLAC re-fetch** (one consistent Adjustment.ALL pass): `BACKFILL_SYMBOLS=KLAC BACKFILL_START=2023-12-01 docker compose --profile tools run --rm backfiller backfill-bars` → then recompute KLAC v1.1.1 momentum cells. Verify no >3× internal jump (QA invariant should flip green). Tell QA + execution-risk (denylist-removal GATED on QA parity green).
+4. **#12 Part A** (optional, if Manager go): one-shot deepen the 222 thin universe names (BACKFILL_START=2023-12-01) — see docs/BACKFILL_SCOPE.md.
+5. **#16 model swap** (if Modeller GO): drop models/model_fwd_30m_v1.1.1.txt, point model-server at the versioned file, include in the rebuild below.
+6. **`make rebuild-all`** — FIRST build with GIT_SHA baked into every image (running==intended); ONE ingestor restart; picks up clean bar-subscription membership + clears the benign ingestor quantlib-drift (OFI/is_etf_like/v1.1.1 commits the running ingestor predates).
+7. **Verify**: `scripts/assert_image_fresh.sh` → all "fresh ... baked <sha>"; ingestion resumes fresh (last bar within tolerance); model-server scores on next cadence.
+8. **#12 Part B** (gated on Modeller): monthly-chunked v1.1.1 panel rebuild over full 1000-name universe (DELETE-then-insert) + labels + QA re-validate.
+Post-close wiring still to build (code, then a later restart): backfill-manager CA-triggered full-history re-fetch; scheduler daily CA fetch (see docs/CORPORATE_ACTIONS.md "Build status").
 
 ## Incident log (running==intended)
 - **2026-06-12: STALE-IMAGE re-contamination caught.** The first M1 clean-universe rebuild ran
