@@ -1157,3 +1157,14 @@ session. Lesson for the platform: duplicate coordinators are survivable when (a)
 rulings live on a shared board, (b) provenance rules gate consequential actions,
 (c) ledgers are append-only. Lesson for ops: session managers must be killable and
 findable — Ben had to do this by hand.
+
+## 2026-06-12 — Manager: TEAM REBUILT as quant-team-2 after full teardown
+Killing the duplicate team-lead tore down the ENTIRE team (config, task board, all 4
+teammate sessions). Damage assessment: ZERO work lost — ledgers/rulings/milestones all
+in git; Docker services never blinked; experimenter kept grinding (never-idle held at
+the service layer). Board reconstructed (3 tasks: M2 sharding critical path, exploration
+standing order, QA standing order). Respawned prod-architect / modeller / qa with
+ledger-continuity packets; execution-risk respawns Sunday night for Monday pre-open
+(nothing in its lane over the weekend — nameable reason). Lesson logged: teammate
+sessions are coupled to the team object; the ledgers+git+board pattern is the ONLY
+durable layer — keep it that way.
