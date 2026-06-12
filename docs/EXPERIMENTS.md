@@ -629,6 +629,15 @@ WHAT IT CHANGES: I add a v1.3.0-candidate feature group (sector-demeaned momentu
 within-sector-within-timestamp mean). NOT in the queue yet — needs this table first. This is the FAST
 win that improves momentum REGARDLESS of OFI's fate.
 
+FINALIZED CONTRACT (prod committed b856aa7, then renamed): the live table is
+`sector_map(symbol PK, sector, industry, source, updated_at)` — NOT asset_sector, and the columns are
+plain `sector`/`industry` (prod dropped the gics_ prefix since FMP's taxonomy isn't strict GICS — same
+categorical grouping I asked for, cleaner names). My v1.3.0 join targets sector_map.sector. Fetch is
+DEFERRED post-batch + gated on the FMP key landing in quant .env (flagged to Ben). At populate-time prod
+pings me (a) null-sector rate vs the <5% gate AND (b) the DISTINCT sector-label SET so I can eyeball ~11
+coherent buckets and catch FMP "N/A"/""/fragmented-30-bucket failure BEFORE building the feature; the
+fetcher also snapshots the distinct-label set each refresh so QA can alarm on label drift.
+
 ### #21 — news/event-flag data: requirements memo (what would change a verdict)
 
 THE GAP: every honest signal so far is price-derived and uneconomic; the whole edge bet is OFI. News/
