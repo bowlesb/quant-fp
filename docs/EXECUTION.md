@@ -179,3 +179,23 @@ Ran every check against FRESH broker truth (not asserted):
   next open (ledger §0.foot-gun) rather than flattening now — only bites if a position ever
   lingers past close, which hasn't happened. Open items still: partial-basket cancel-replace,
   broker-side LOC EOD net.
+
+### 2026-06-12 — per-leg execution slippage (MEASURED one-way cost) shipped
+Built the measured cost curve the cost-gate battery only ASSUMED (cost_bps_oneway=2.0).
+- Executor now persists the **arrival NBBO bid/ask/mid at submit** on orders_log (new cols);
+  `marketable_limit` returns mid too. This is the only correct arrival benchmark — captured at
+  the decision instant.
+- Views (self-healing DDL + db/init/01_schema.sql): `execution_slippage` (per leg:
+  `slippage_bps` = signed (fill − arrival_mid)/mid ×1e4, positive = cost paid; +`slippage_usd`;
+  `arrival_src` ∈ {nbbo, bar_proxy}) and `execution_slippage_daily`
+  (`oneway_cost_bps_mean/median` — the number to feed `long_short_backtest(cost_bps_oneway=)`).
+- **HONEST CAVEAT (do not fool ourselves):** 6/11 legs predate the NBBO capture →
+  `arrival_src='bar_proxy'` (bars_1m close of the last completed minute before submit). For the
+  thin wide-spread names we actually trade (DXYZ, LUNR, UMAC), the minute-bar close is NOT a
+  usable mid proxy — intra-minute noise (±50–125 bps) swamps the half-spread, producing
+  nonsensical NEGATIVE "cost" (6/11 mean −41.7 bps is an ARTIFACT, NOT price improvement).
+  Lesson: execution cost CANNOT be backfilled from minute bars; it must be captured live at the
+  decision instant. The trustworthy one-way cost arrives 6/12+ from `arrival_src='nbbo'`.
+- Modeller guidance: keep cost_bps_oneway=2.0 until several `nbbo`-sourced sessions accrue;
+  then use `execution_slippage_daily.oneway_cost_bps_mean` (one-way, mid-referenced — directly
+  comparable to the battery's breakeven_cost_bps). Round-trip ≈ 2× (entry + exit half-spread).

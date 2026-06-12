@@ -179,7 +179,10 @@ CREATE TABLE orders_log (
     status            text,
     features_snapshot jsonb,                      -- exactly what the model saw
     prediction        double precision,
-    model_version     text
+    model_version     text,
+    nbbo_bid          numeric,                    -- live NBBO at submit (arrival benchmark)
+    nbbo_ask          numeric,
+    nbbo_mid          numeric                     -- arrival mid: per-leg slippage reference
 );
 CREATE INDEX orders_intended_idx ON orders_log (intended_at);
 
@@ -206,6 +209,36 @@ SELECT fill_ts::date AS day,
 FROM fills_log
 WHERE symbol IS NOT NULL
 GROUP BY 1, 2;
+
+-- Per-leg execution slippage = our MEASURED one-way cost, directly comparable to the
+-- battery's assumed cost_bps_oneway=2.0. slippage_bps = signed (fill - arrival_mid)/mid in
+-- bps; positive = cost paid (bought above / sold below the arrival mid). arrival_mid is the
+-- live NBBO mid captured at submit (arrival_src='nbbo'); for legs predating that capture it
+-- falls back to the bars_1m close at the submit minute (arrival_src='bar_proxy').
+CREATE VIEW execution_slippage AS
+SELECT o.intended_at::date AS day, o.symbol, o.side, f.qty, f.price AS fill_price,
+       o.limit_price, COALESCE(o.nbbo_mid, bar.close::numeric) AS arrival_mid,
+       CASE WHEN o.nbbo_mid IS NOT NULL THEN 'nbbo' ELSE 'bar_proxy' END AS arrival_src,
+       round((CASE WHEN o.side = 'buy' THEN f.price - COALESCE(o.nbbo_mid, bar.close::numeric)
+                   ELSE COALESCE(o.nbbo_mid, bar.close::numeric) - f.price END)
+             / NULLIF(COALESCE(o.nbbo_mid, bar.close::numeric), 0) * 10000, 2) AS slippage_bps,
+       round((CASE WHEN o.side = 'buy' THEN f.price - COALESCE(o.nbbo_mid, bar.close::numeric)
+                   ELSE COALESCE(o.nbbo_mid, bar.close::numeric) - f.price END) * f.qty, 2) AS slippage_usd
+FROM orders_log o
+JOIN fills_log f ON f.alpaca_order_id = o.alpaca_order_id
+LEFT JOIN LATERAL (SELECT close FROM bars_1m b
+                   WHERE b.symbol = o.symbol AND b.ts < date_trunc('minute', o.submitted_at)
+                   ORDER BY b.ts DESC LIMIT 1) bar ON true
+WHERE o.status = 'submitted';
+
+-- Daily roll-up: oneway_cost_bps_* is the real number to feed long_short_backtest(cost_bps_oneway=).
+CREATE VIEW execution_slippage_daily AS
+SELECT day, count(*) AS n_legs,
+       round(avg(slippage_bps), 2) AS oneway_cost_bps_mean,
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY slippage_bps))::numeric, 2) AS oneway_cost_bps_median,
+       round(sum(slippage_usd), 2) AS slippage_usd_total,
+       round(sum(qty * fill_price), 2) AS gross_traded_usd
+FROM execution_slippage GROUP BY day ORDER BY day;
 
 CREATE TABLE reconciliation_log (
     ts     timestamptz PRIMARY KEY,

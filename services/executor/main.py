@@ -58,11 +58,13 @@ trading = TradingClient(
 data_client = StockHistoricalDataClient(os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"])
 
 
-def marketable_limit(symbols: list[str], fallback: dict[str, float]) -> dict[str, dict[str, float]]:
+def marketable_limit(symbols: list[str], fallback: dict[str, float]) -> dict[str, dict[str, float | None]]:
     """Per-symbol marketable-limit prices from the LIVE NBBO (buy=ask+1tick, sell=bid-1tick)
     so orders actually CROSS — the morning's resting buys came from pricing off a stale bar
-    close. Falls back to last_close ±0.5% if a quote is missing."""
-    out: dict[str, dict[str, float]] = {}
+    close. Also returns the arrival NBBO bid/ask/mid captured at submit; we persist mid on
+    orders_log so per-leg slippage (fill vs arrival mid = our measured one-way cost) is
+    computable. Falls back to last_close ±0.5% (mid=close) if a quote is missing."""
+    out: dict[str, dict[str, float | None]] = {}
     try:
         quotes = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbols))
     except APIError:
@@ -72,10 +74,12 @@ def marketable_limit(symbols: list[str], fallback: dict[str, float]) -> dict[str
         ask = float(q.ask_price) if q and q.ask_price else 0.0
         bid = float(q.bid_price) if q and q.bid_price else 0.0
         if ask > 0 and bid > 0:
-            out[symbol] = {"buy": round(ask + 0.01, 2), "sell": round(bid - 0.01, 2)}
+            out[symbol] = {"buy": round(ask + 0.01, 2), "sell": round(bid - 0.01, 2),
+                           "bid": bid, "ask": ask, "mid": round((bid + ask) / 2, 4)}
         else:
             close = fallback[symbol]
-            out[symbol] = {"buy": round(close * 1.005, 2), "sell": round(close * 0.995, 2)}
+            out[symbol] = {"buy": round(close * 1.005, 2), "sell": round(close * 0.995, 2),
+                           "bid": None, "ask": None, "mid": round(close, 4)}
     return out
 
 STATE_DDL = """
@@ -87,11 +91,14 @@ CREATE TABLE IF NOT EXISTS pnl_daily (
     day date PRIMARY KEY, start_equity numeric, equity numeric, unrealized numeric,
     n_positions int, updated_at timestamptz)
 """
-# Self-healing: 01_schema.sql only runs on a fresh DB, so add the per-name attribution
-# columns + view here (idempotent) for already-initialized databases.
-FILLS_DDL = [
+# Self-healing: 01_schema.sql only runs on a fresh DB, so add the attribution columns + views
+# here (idempotent) for already-initialized databases.
+EXEC_DDL = [
     "ALTER TABLE fills_log ADD COLUMN IF NOT EXISTS symbol text",
     "ALTER TABLE fills_log ADD COLUMN IF NOT EXISTS side text",
+    "ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS nbbo_bid numeric",
+    "ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS nbbo_ask numeric",
+    "ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS nbbo_mid numeric",
     """CREATE OR REPLACE VIEW realized_pnl_by_name AS
        SELECT fill_ts::date AS day, symbol,
               round(sum(CASE WHEN side='sell' THEN qty*price ELSE -qty*price END), 2) AS realized_pnl,
@@ -99,12 +106,40 @@ FILLS_DDL = [
               sum(CASE WHEN side='sell' THEN qty ELSE 0 END) AS sold_qty,
               count(*) AS n_fills
        FROM fills_log WHERE symbol IS NOT NULL GROUP BY 1, 2""",
+    # Per-leg execution slippage = our MEASURED one-way cost (directly comparable to the
+    # battery's assumed cost_bps_oneway=2.0). slippage_bps = signed (fill - arrival_mid)/mid
+    # in bps; positive = cost paid (bought above / sold below mid). arrival_mid is the live
+    # NBBO mid stored at submit (arrival_src='nbbo'); for legs predating that capture it falls
+    # back to the bars_1m close at the submit minute (arrival_src='bar_proxy').
+    """CREATE OR REPLACE VIEW execution_slippage AS
+       SELECT o.intended_at::date AS day, o.symbol, o.side, f.qty, f.price AS fill_price,
+              o.limit_price, COALESCE(o.nbbo_mid, bar.close::numeric) AS arrival_mid,
+              CASE WHEN o.nbbo_mid IS NOT NULL THEN 'nbbo' ELSE 'bar_proxy' END AS arrival_src,
+              round((CASE WHEN o.side='buy' THEN f.price - COALESCE(o.nbbo_mid, bar.close::numeric)
+                          ELSE COALESCE(o.nbbo_mid, bar.close::numeric) - f.price END)
+                    / NULLIF(COALESCE(o.nbbo_mid, bar.close::numeric), 0) * 10000, 2) AS slippage_bps,
+              round((CASE WHEN o.side='buy' THEN f.price - COALESCE(o.nbbo_mid, bar.close::numeric)
+                          ELSE COALESCE(o.nbbo_mid, bar.close::numeric) - f.price END) * f.qty, 2) AS slippage_usd
+       FROM orders_log o
+       JOIN fills_log f ON f.alpaca_order_id = o.alpaca_order_id
+       LEFT JOIN LATERAL (SELECT close FROM bars_1m b
+                          WHERE b.symbol = o.symbol AND b.ts < date_trunc('minute', o.submitted_at)
+                          ORDER BY b.ts DESC LIMIT 1) bar ON true
+       WHERE o.status = 'submitted'""",
+    # Daily roll-up: oneway_cost_bps_* is the real number to feed long_short_backtest(cost_bps_oneway=).
+    """CREATE OR REPLACE VIEW execution_slippage_daily AS
+       SELECT day, count(*) AS n_legs,
+              round(avg(slippage_bps), 2) AS oneway_cost_bps_mean,
+              round((percentile_cont(0.5) WITHIN GROUP (ORDER BY slippage_bps))::numeric, 2) AS oneway_cost_bps_median,
+              round(sum(slippage_usd), 2) AS slippage_usd_total,
+              round(sum(qty * fill_price), 2) AS gross_traded_usd
+       FROM execution_slippage GROUP BY day ORDER BY day""",
 ]
 INTENT_SQL = """
 INSERT INTO orders_log
     (client_order_id, symbol, side, qty, order_type, limit_price, mode, intended_at, status,
-     prediction, model_version)
-VALUES (%s,%s,%s,%s,'limit',%s,%s,%s,'intended',%s,%s)
+     prediction, model_version, nbbo_bid, nbbo_ask, nbbo_mid)
+VALUES (%s,%s,%s,%s,'limit',%s,%s,%s,'intended',%s,%s,%s,%s,%s)
 ON CONFLICT (client_order_id) DO NOTHING
 """
 
@@ -179,10 +214,12 @@ def submit_basket(conn: psycopg.Connection, ts: datetime, today: object) -> None
     prices = marketable_limit([leg["symbol"] for leg in legs], {leg["symbol"]: leg["price"] for leg in legs})
     for leg, side in [(x, "buy") for x in longs] + [(x, "sell") for x in shorts]:
         coid = f"{MODEL_VERSION}-{rb}-{leg['symbol']}-{side}"
-        limit = prices[leg["symbol"]][side]                # marketable limit from live NBBO
-        with conn.cursor() as cur:                            # persist INTENT before submit
+        px = prices[leg["symbol"]]
+        limit = px[side]                                      # marketable limit from live NBBO
+        with conn.cursor() as cur:                            # persist INTENT + arrival NBBO before submit
             cur.execute(INTENT_SQL, (coid, leg["symbol"], side, leg["qty"], limit, MODE,
-                                     datetime.now(timezone.utc), leg["score"], MODEL_VERSION))
+                                     datetime.now(timezone.utc), leg["score"], MODEL_VERSION,
+                                     px["bid"], px["ask"], px["mid"]))
         if DRY_RUN:
             continue
         try:
@@ -269,7 +306,7 @@ def main() -> None:
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(STATE_DDL)
         cur.execute(PNL_DDL)
-        for stmt in FILLS_DDL:
+        for stmt in EXEC_DDL:
             cur.execute(stmt)
     while True:
         try:
