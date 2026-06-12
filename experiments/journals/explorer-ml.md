@@ -240,3 +240,33 @@ IC/canary. Reported the diagnosis to the Lead.
    the ridge L2 IS the shrinkage answer on the FEATURE side (001). Not pursuing a separate probe.
 LITERATURE INFORMS, never replaces gates: GKX's published linear-vs-tree result and the smoothing
 Sharpe numbers are HYPOTHESES here, decided by our canary + net-of-cost gates at full depth.
+
+---
+
+## 2026-06-12 — Wake 1 WRAP: deliverables + open threads
+
+DELIVERED this wake (all committed as explorer-ml):
+- 4 pre-registered proposals (experiments/proposals/explorer-ml/001-004).
+- 3 built + smoke-validated scripts: ml_ridge_baseline.py (001), ml_turnover_smoothed_target.py
+  (002), ml_multihorizon_composite.py (004). All reuse the battery's 4 gates byte-for-byte.
+- ridge-canary flag DIAGNOSED (smoke-depth noise, all 3 Lead hypotheses ruled out) — no code change.
+- Literature logged (GKX 2020; cost-aware-ML + Garleanu-Pedersen) per new protocol.
+- 3 reports filed (experiments/reports/2026-06-12_explorer-ml_*).
+- ML003 (my 3 pos-vs-ret5m configs) enqueued by the Lead; 1/3 landed (ret5m_only breakeven 0.38).
+
+SMOKE READS (directional, full-depth = verdict): 004 is the most promising (composite breakeven
+60cad 1.48 dominates pure_30m 1.12 / pure_60m 0.74 + best survivorship). 002 mechanism validated
+(monotone turnover drop, IC>canary). 001 ridge recovers ~76% of GBM rank IC (linear captures most)
+but leans on the POSITION group, not ret_5m — a model-dependency flag on "momentum is dead."
+
+OPEN THREADS (both will notify me):
+1. Lead to run the 3 full-depth commands (001/002/004) — verdicts are his.
+2. ML003 pos_only + ret5m_pos to land (monitor armed) → then write the ML003 report (the pos-vs-
+   ret5m breakeven COMPARISON is the headline). EARLY: ret5m_only breakeven 0.38 < full-signal 1.4
+   (ret5m = maximal turnover, as expected); pos_only breakeven is the number that decides 003.
+
+NEXT-WAKE PROPOSAL CANDIDATES (parked, contingent on full-depth results):
+- If 002/004 clear cost: a combined smoothed-composite target (one lever proven at a time first).
+- If ridge IC gap vs GBM is impute-driven: drop-NaN-rows robustness cut.
+- Post-#5 cost-tier: recency/liquidity SAMPLE WEIGHTING (weight by the right liquidity cut).
+- Multi-seed ENSEMBLING only AFTER a base config clears cost (ensemble of uneconomic = uneconomic).
