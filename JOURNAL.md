@@ -633,3 +633,21 @@ order-flow scaling runs IN PARALLEL — Prod's queue after #6/#8 is M2 work whil
 panel grinds; (3) delisted-name backfill orphan -> task #9 feasibility memo (Prod,
 post-M1; Modeller specs requirements); (4) suggested unattached 50-name OFI pilot
 panel to Modeller's queue (early read before M2 500-name scale-up).
+
+## 2026-06-12 (pre-open) — Manager: slippage attribution SHIPPED; label-overwrite tripwire; pilot trigger-gated
+Exec/Risk task #7 DONE (4c3c46a): executor now persists arrival NBBO at submit;
+execution_slippage(_daily) views give measured one-way cost in bps, format agreed with
+Modeller. HONEST negative finding: 6/11 backfill via minute-bar proxy is UNUSABLE on
+thin names (±50-125bps intra-minute noise -> artifactual negative cost) => execution
+cost must be captured at decision time, never backfilled from bars. Real nbbo numbers
+start at the 6/12 open. If real cost > 2bps on our microcaps, every M3 breakeven tightens.
+Modeller (8bc0bbd, 3975ead): pre-registered breadth tripwire (judge IC+breakeven, never
+t alone — wider cross-section inflates t mechanically); flat-2bps stays for the M1 re-run
+(apples-to-apples), per-name ADV/spread cost model post-M1 calibrated to #7's measured
+curve. Label-staleness tripwire relayed to Prod: recompute MUST overwrite (not insert-
+only); acceptance gate = min(computed_at) after rebuild for all 3 horizons. Delisted spec
+written (per-symbol demean = conservative proxy; honest test restores delisted losers).
+OFI pilot trigger-gated (52 syms x 2 days = noise; needs ~10 days + v1.2.0 panel —
+which had 0 ROWS, never computed -> task #10, Prod).
+Manager: task #6 split — Prod owns upstream (membership pre-open, model-server fires
+09:30), Exec owns executor-side (stale->fresh transition + first live nbbo slippage rows).
