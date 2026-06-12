@@ -69,7 +69,7 @@ PER query (user-cpu is <1s). A future optimization is batching queries / a persi
 | `backfill_realtime_parity` | I2 | stream vs backfill close agree within 0.2% on overlap (≤1% mismatch). |
 | `trade_agg_parity` | I2b | trade-agg stream vs backfill ≥98% within 2% on overlap (SKIPs if no overlap). |
 | `pit_universe_membership` | I3 | ACTIVE set: every (symbol,date) feature row is an in-universe member that date. |
-| `warmup_coverage` | I4 | ACTIVE set: no ragged-warmup / dead feature. Legacy sets reported, not gated. |
+| `warmup_coverage` | I4 | ACTIVE set: no ragged-warmup / dead feature / **steady-state mid-session NaN >10%** (the explorer-data 2026-06-13 gap — a constant moderate NaN escapes ragged+dead; now scanned full-panel excluding the by-construction warmup hour). Legacy sets reported, not gated. |
 | `no_inf_no_degenerate` | I5 | no Inf; predictions not score-degenerate; per-ts labels demeaned (avg, not max). |
 | `live_feature_coverage` | I4-live | **NEW (Ben's 2026-06-12 ask "how many features have values for today?").** Same-day source='live' per-FAMILY valued% vs DERIVED expectation: price/vol ≥ warmup-adequate fraction−slack; trade/quote ≥ captured-name fraction−slack; calendar exact 100%; symbol deficit EXPLAINED by warmup, not silent. Fails on a family DROP vs trailing baseline (>5%) or unexplained symbol-count loss. The live serving path was previously UNCHECKED on the day it's produced — only the research panel was scoped. Baseline: tests/fixtures/live_feature_coverage_baseline.json, rolled via `--update-baseline` post-close. |
 
@@ -92,8 +92,22 @@ UTC-calendar leakage is confined to v1.0.0 (32,220 rows); v1.1.0 and v1.1.1 are 
 land. `backfill_realtime_parity` read borderline 1.14% mismatch (just over the 1% gate) — see
 below.
 
+**⚠️ CORRECTION (2026-06-13, explorer-data caught this — the "0.000% NaN" below was WRONG):**
+the per-feature IN-VECTOR NaN rate on v1.1.1 is NOT 0 — ret_5m 13.4% / ret_15m 13.5% / ret_30m
+12.4% / **ret_60m 20.1%** / vol_30m/60m/vol_z_30 16.9% / rel_ret_30m 12.4% (the other 13 features
+genuinely ~0). I reproduced these digit-for-digit (`u.val='NaN'::float8` over all 5.5M rows). The
+"0.000%" was a stale rebuild-time measurement of the WRONG thing (NULL/whole-vector-missing, not the
+in-vector sentinel). **VERDICT UNAFFECTED:** the NaN is HONEST missing-data, not a pipeline bug —
+ret_60m is 100% NaN at the 09:30/10:00 open cadences (no 60m lookback yet, correct-by-construction)
+and only 4.8-9.5% mid-session (thin-name lagged-bar gaps); LightGBM took NaN natively, NO rows
+dropped, "no edge" isn't fabricated by a degraded subset. **INVARIANT GAP FOUND + FIXED:** the
+ragged/dead pair was BLIND to a steady moderate NaN (early≈late, 20%<95%) — added a steady-state
+mid-session NaN check (>10% post-warmup FAILs; v1.1.1 PASSES at 4.8-9.5%; commit b3f9359). OPEN
+MODELING Q (routed to Manager/Research Lead): should the 100%-NaN 09:30 open cross-section be in the
+trained/traded panel at all? Ranking the open on a degraded feature subset is suboptimal (not leakage).
+
 **POST-REBUILD full-suite evidence (2026-06-12, v1.1.1 COMPLETE: 5,525,040 rows / 613 dates /
-785 symbols / 0.000% NaN, all 3 label sets recomputed):** 9 PASS / 2 FAIL. The clean panel
+785 symbols / [0.000% NaN ← SEE CORRECTION ABOVE], all 3 label sets recomputed):** 9 PASS / 2 FAIL. The clean panel
 passes EVERY integrity axis — calendar ET-correct (0 bad / 5.5M), PIT-correct, no ragged/dead
 feature, no Inf, and the **label-demean sub-check re-activated and PASSES** (fwd_30m/60m
 avg|per-ts median|=0.000000, overnight 0.000076 — the avg-based threshold clears the lone
