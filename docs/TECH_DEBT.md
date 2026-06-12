@@ -26,8 +26,17 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
   2023-12-01→now). Max day-over-day jump now 1.19×/0.86× (was ~10×) — discontinuity gone. QA re-verify
   requested (gates denylist removal). Momentum-cell recompute: PENDING Modeller's (A) in-place-v1.1.1 vs
   (B) let-v1.1.2-carry-it call (recommended B — don't mutate the pinned verdict panel).
+- [x] **#10 v1.2.0 OFI panel DONE LIVE + VERIFIED:** 1516 vectors / 50 names / 3-day stream window
+  (set_version v1.2.0, separate from v1.1.x — no clobber). OFI features REAL: 1298/1516 (85.6%)
+  non-NaN (NB Postgres NaN=NaN, so detect NaN via `=‘NaN’::float8`), mean ofi_30m -0.0197, sensible
+  intraday imbalances. Momentum NaN-degraded at window start (only 3d stream, needs 10d) = the
+  PLUMBING-GRADE caveat, as labeled. Optional follow-up: register v1.2.0 in feature_sets (not needed
+  for Modeller to query by set_version).
+- [ ] **#12 backfill — DEFERRED to the close (CONCRETE reason, not habit):** deepening the 222 thin
+  names = thousands of paginated data-API requests sustained; during RTH that contends with the live
+  executor's NBBO calls (risking bad fills on the live basket). Market close is ~36 min out (executor
+  flattens) — start #12 then, no contention. Per the Manager's own rate-limit caveat.
 - [ ] Remaining (still gated on close): rebuild-batch (ingestor restart) + executor deploy (exec).
-- [ ] In progress per DO-IT-NOW: #10 OFI panel, #12 backfill (rate-cap check vs live executor NBBO).
 
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
 Prereqs before starting: market closed (≥16:00 ET); Manager go on #12; **THE GUN = exec's
