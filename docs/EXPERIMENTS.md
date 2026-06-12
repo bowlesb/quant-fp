@@ -1485,3 +1485,33 @@ uneconomic at current cost. EVERY data thread we fund attacks exactly that confi
 (refine the signal), measured NBBO costs + fill-probability (price whether it survives execution),
 ex-div hygiene (clean the labels). The bet is internally consistent: refine the short-horizon signal,
 then prove it beats cost. That's the whole game now.
+| 2026-06-12T21:02:10+00:00 | W11_grp_mom_fwd_60m_rank | fwd_60m | rank | 8 | 4416876 | 0.00403 | 2.399 | 0.0014 | Feature-group isolation: mom group (8 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:02:41+00:00 | W11_grp_mom_overnight_raw | overnight | raw | 8 | 428024 | 0.00741 | 1.019 | -0.00839 | Feature-group isolation: mom group (8 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:03:14+00:00 | W11_grp_mom_overnight_rank | overnight | rank | 8 | 428024 | 0.00935 | 1.207 | -0.00751 | Feature-group isolation: mom group (8 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:04:58+00:00 | W11_grp_momrel_fwd_30m_raw | fwd_30m | raw | 4 | 4840765 | -0.00336 | -2.161 | -0.0003 | Feature-group isolation: momrel group (4 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:06:58+00:00 | W11_grp_momrel_fwd_30m_rank | fwd_30m | rank | 4 | 4840765 | -0.00049 | -0.418 | 0.0007 | Feature-group isolation: momrel group (4 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:08:35+00:00 | W11_grp_momrel_fwd_60m_raw | fwd_60m | raw | 4 | 4416876 | -0.00402 | -1.947 | 0.0008 | Feature-group isolation: momrel group (4 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:10:26+00:00 | W11_grp_momrel_fwd_60m_rank | fwd_60m | rank | 4 | 4416876 | -0.00033 | -0.208 | 0.00033 | Feature-group isolation: momrel group (4 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:10:58+00:00 | W11_grp_momrel_overnight_raw | overnight | raw | 4 | 428024 | 0.00869 | 1.532 | -0.00106 | Feature-group isolation: momrel group (4 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:11:30+00:00 | W11_grp_momrel_overnight_rank | overnight | rank | 4 | 428024 | 0.00507 | 0.97 | -0.00471 | Feature-group isolation: momrel group (4 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:13:15+00:00 | W11_grp_momabs_fwd_30m_raw | fwd_30m | raw | 4 | 4840765 | -0.00125 | -0.88 | -0.00037 | Feature-group isolation: momabs group (4 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:15:16+00:00 | W11_grp_momabs_fwd_30m_rank | fwd_30m | rank | 4 | 4840765 | 0.00207 | 1.894 | 0.0015 | Feature-group isolation: momabs group (4 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:16:56+00:00 | W11_grp_momabs_fwd_60m_raw | fwd_60m | raw | 4 | 4416876 | -0.00118 | -0.624 | 0.00063 | Feature-group isolation: momabs group (4 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:18:51+00:00 | W11_grp_momabs_fwd_60m_rank | fwd_60m | rank | 4 | 4416876 | 0.00336 | 2.382 | 9e-05 | Feature-group isolation: momabs group (4 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:19:22+00:00 | W11_grp_momabs_overnight_raw | overnight | raw | 4 | 428024 | 0.009 | 1.355 | -0.00463 | Feature-group isolation: momabs group (4 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:19:55+00:00 | W11_grp_momabs_overnight_rank | overnight | rank | 4 | 428024 | 0.00764 | 1.048 | -0.00186 | Feature-group isolation: momabs group (4 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:21:42+00:00 | W11_grp_ret_fwd_30m_raw | fwd_30m | raw | 4 | 4840765 | 0.00968 | 6.754 | 0.00028 | Feature-group isolation: ret group (4 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:23:46+00:00 | W11_grp_ret_fwd_30m_rank | fwd_30m | rank | 4 | 4840765 | 0.01669 | 10.173 | 0.00061 | Feature-group isolation: ret group (4 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:25:26+00:00 | W11_grp_ret_fwd_60m_raw | fwd_60m | raw | 4 | 4416876 | 0.008 | 5.144 | -0.00076 | Feature-group isolation: ret group (4 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+
+### v1.1.2 BREADTH FLOOR — 988/1000 deep post-#12 (prod, 2026-06-12)
+
+#12 done: universe now 988/1000 names ≥120 days deep (up from 778; 210 of 222 thin names deepened). The
+residual 12 thin / 7 very-thin are genuinely-young IPOs (all available history fetched — they just don't
+have 120 days of existence; not a gap, nothing to fetch). So the v1.1.2 rebuild draws from ~988 deep
+names; the breadth measurement I owe the Manager is a clean 785 (v1.1.1) → 988 (v1.1.2) battery
+comparison, with the 12 young names correctly cross-section-sparse on early dates via the PIT universe.
+Sequencing settled: v1.1.2 AFTER the M2 build (my input — OFI is higher-value; v1.1.1 frozen, my
+grind/shapes run on it fine). When v1.1.2 rebuilds: bake in ex-div-corrected overnight labels (new
+label-version, needs #22) + the 11 split-discontinuity names corrected from re-fetched bars. Expected
+breadth result: neutral-to-slightly-negative (the ~200 newly-deep names are noisier thin-history names).
