@@ -65,13 +65,30 @@ small (intraday rows autocorrelate within a day), so the noise floor is ~±0.01 
 canary noise floor (~0.01) is comparable to the real IC (~0.02), so IC/canary separation is marginal
 on ANY smoke regardless of model — the full ~600d panel is what makes the canary a trustworthy arbiter.
 
-(b) **Directional support for H1 + a model-dependency FLAG for H3.** Ridge/rank IC 0.0179 vs GBM/rank
-0.0235 on the same window = ridge recovers ~76% of the GBM rank IC → a linear model captures most of
-the signal (consistent with GKX). BUT the ridge coefficients lean on the POSITION group (vwap_dev,
-gap_from_open) + a momentum-RELATIVE term — a DIFFERENT attribution from the GBM's "ret_5m is
-everything" gain story. So "momentum is dead / signal = ret_5m" may be partly model-dependent; do not
-harden it as model-independent until the full-depth ridge coefficients are read. (This also motivates
-ML003 — the linear model already leans on the position group.)
+(b) **Directional support for H1 + a model-dependency FLAG for H3 — NOW CONFIRMED INDEPENDENTLY.**
+Ridge/rank IC 0.0179 vs GBM/rank 0.0235 on the same window = ridge recovers ~76% of the GBM rank IC →
+a linear model captures most of the signal (consistent with GKX). BUT the ridge coefficients lean on
+the POSITION group (vwap_dev, gap_from_open) + a momentum-RELATIVE term — a DIFFERENT attribution from
+the GBM's "ret_5m is everything" gain story, so I flagged "momentum is dead / signal = ret_5m" as
+possibly model-dependent and recommended not hardening it.
+
+**This flag was right, and the W12 full-panel position-group solos confirmed it (modeller, 2026-06-12):**
+| W12 solo (full panel) | IC | NW t | note |
+|---|---|---|---|
+| vwap_dev SOLO | 0.0284 | 21.3 | clean canary — carries ~the WHOLE 30m signal ALONE |
+| pos-minus-ret5m | 0.0291 | — | the position group without ret_5m loses nothing |
+| ret_5m added to pos | +0.0007 | — | ret_5m is REDUNDANT given position |
+| ret_5m SOLO | 0.0106 | — | the "carrier" the GBM gain story credited |
+
+So the 30m cross-sectional signal is **VWAP MEAN-REVERSION (vwap_dev), not ret_5m.** The GBM's gain
+attribution had credited ret_5m and declared momentum/position secondary; the LINEAR view disagreed,
+and the targeted solo confirmed the linear view. **This is the cleanest possible justification for the
+linear baseline (001): it overturned a GBM-derived lore that was about to shape the OFI bet** (OFI was
+being mechanistically motivated as "ret_5m is a crude order-book proxy" — but if the real signal is
+vwap_dev mean-reversion, the OFI thesis must be re-grounded on the mechanism behind VWAP reversion, not
+the 5-min return). A GBM can bury a clean linear driver inside split-gain; ridge attributes additively
+and cannot. The full-depth ridge coefs will close H3 quantitatively (is momentum |coef| < 20% of
+vwap_dev? — confirming momentum dead MODEL-INDEPENDENTLY).
 
 CAVEAT (NaN-impute): the roadmap NaN correction (12-20% by-construction NaN on return/vol features,
 LightGBM-native) means ridge's fold-local median-impute is touching ~15% of cells on the DOMINANT

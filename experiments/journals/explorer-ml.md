@@ -270,3 +270,28 @@ NEXT-WAKE PROPOSAL CANDIDATES (parked, contingent on full-depth results):
 - If ridge IC gap vs GBM is impute-driven: drop-NaN-rows robustness cut.
 - Post-#5 cost-tier: recency/liquidity SAMPLE WEIGHTING (weight by the right liquidity cut).
 - Multi-seed ENSEMBLING only AFTER a base config clears cost (ensemble of uneconomic = uneconomic).
+
+---
+
+## 2026-06-12 — Wake 1: ridge-coef flag CONFIRMED by W12 (the linear baseline earned its keep)
+
+The Lead ran the W12 position-group solos (full panel) and they CONFIRM my ridge-coefficient flag:
+  vwap_dev SOLO   IC 0.0284 t21.3 (clean canary) — carries ~the WHOLE 30m signal alone
+  pos-minus-ret5m IC 0.0291 | ret_5m adds only +0.0007 | ret_5m solo 0.0106 = REDUNDANT
+=> the 30m signal is VWAP MEAN-REVERSION (vwap_dev), NOT ret_5m. The GBM gain story credited ret_5m;
+the LINEAR view (my ridge coefs: vwap_dev top, -0.0089) disagreed; the targeted solo settled it FOR
+the linear view. This is exactly the model-dependency I flagged and asked the Lead not to harden.
+
+WHY THIS MATTERS (the linear baseline's payoff, in one line): it overturned a GBM-derived lore that
+was about to mis-shape the OFI bet. OFI had been motivated as "ret_5m is a crude order-book proxy" —
+but if the real signal is vwap_dev mean-reversion, the OFI thesis must be re-grounded on the mechanism
+behind VWAP reversion, not the 5-min return. A GBM buries clean linear drivers in split-gain; ridge
+attributes additively. Updated the 001 report with this (the Lead asked me to — it's the cleanest
+example of why the linear baseline matters). Lead launched 001 full-depth (/tmp/ml_ridge_full.out),
+will verdict on: ridge-vs-GBM IC, ridge-vs-GBM breakeven, and full-depth coefs (momentum |coef| <20%
+of vwap_dev => momentum dead model-independently). 002 then 004 serial after.
+
+CROSS-LANE CONSEQUENCE I should surface: if the 30m signal is VWAP mean-reversion (not momentum/return
+continuation), my 002 smoothed-target and 004 composite both still apply (they're target transforms,
+agnostic to which feature carries) — BUT the mechanism story for OFI shifts, and explorer-features /
+the OFI pilot should know the carrier is vwap_dev. Flagged to the Lead.
