@@ -55,7 +55,12 @@ modeller "pause the grind" (pause authority); (3) exec HOLDS the executor rebuil
 exec -T timescaledb psql -U quant -d quant -c "ALTER SYSTEM SET max_locks_per_transaction = 2048;"` then
 `docker compose restart timescaledb`; (5) VERIFY: `SHOW max_locks_per_transaction` = 2048, timescaledb
 extension loaded, services reconnected, ingestion resumes (post-close, no bar loss), and ONE previously-
-blocked full-history query COMPLETES (e.g. the feature_vectors⨝labels full join). Then proceed to the
+blocked full-history query COMPLETES (e.g. the feature_vectors⨝labels full join). **CRITICAL post-restart
+check (learned 6/12): `docker compose ps` — confirm ALL services are Up, not just the DB.** A targeted
+`docker compose restart timescaledb` can SIGKILL a peer container, and if that peer was explicitly
+`docker compose stop`'ed (e.g. modeller pausing the experimenter), `restart: unless-stopped` will NOT
+bring it back — it sits silently DOWN (the experimenter was idle ~10 min this way). Verify Up; `up -d`
+any that aren't. Don't trust a recent log tail as "alive" — it can be stale from before the kill. Then proceed to the
 rest of the batch; modeller resumes grind; exec proceeds. IaC follow-up: add `command: postgres -c
 max_locks_per_transaction=2048` to the timescaledb compose service via a reviewed Tier-1 PR tomorrow
 (ALTER SYSTEM already persists it in postgresql.auto.conf in the data volume).
