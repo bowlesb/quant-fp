@@ -41,9 +41,12 @@ leveraged funds; the price-only "no edge" verdict is therefore suspect.
 - [x] Clean equity panel rebuilt over the full ~600-day history, PIT-correct — **~715
       equities/date** (~715-742 range, ~742 avg) as set_version **v1.1.1** (labels
       recomputed too, DELETE-then-insert). ✅ 2026-06-12: 5,525,040 rows / 613 dates /
-      785 symbols / 2024-01-02→2026-06-11; NaN 0.000% on all 21 features; labels fwd_30m
+      785 symbols / 2024-01-02→2026-06-11; labels fwd_30m
       4.84M + fwd_60m 4.42M (613d) + overnight 428K (600d, ~2% month-boundary gaps);
-      computed_at acceptance gate passed.
+      computed_at acceptance gate passed. (NaN CORRECTION 2026-06-12, explorer-data+qa:
+      the original "0.000% NaN" headline measured the wrong sentinel; true in-vector NaN
+      is 12-20% on return/vol features — honest by-construction open-cadence/thin-name
+      NaN, LightGBM-native, VERDICT UNAFFECTED; steady-state NaN invariant added at 10%.)
       (CORRECTED 2026-06-12: an earlier "~885 with ~160 un-crowded equities" reading came
       from a stale-image rebuild that ran pre-fix code; contamination was purely ADDITIVE
       ETFs — old ~933/date ≈ ~210 funds + ~723 equities. Note: v1.1.0 feature rows stay
