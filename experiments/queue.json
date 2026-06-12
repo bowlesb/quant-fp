@@ -2822,5 +2822,176 @@
       "gap_from_open"
     ],
     "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_grp_pos_fwd_30m_lambdarank",
+    "hypothesis": "GAP: pos group at fwd_30m under LAMBDARANK (the only untested label per group; trading-aligned loss historically gave the only positive overnight results). Does loss alignment lift the pos carrier's net P&L vs raw/rank?",
+    "horizon": "fwd_30m",
+    "label": "lambdarank",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_grp_pos_fwd_60m_lambdarank",
+    "hypothesis": "GAP: pos group at fwd_60m under LAMBDARANK (the only untested label per group; trading-aligned loss historically gave the only positive overnight results). Does loss alignment lift the pos carrier's net P&L vs raw/rank?",
+    "horizon": "fwd_60m",
+    "label": "lambdarank",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_grp_pos_overnight_lambdarank",
+    "hypothesis": "GAP: pos group at overnight under LAMBDARANK (the only untested label per group; trading-aligned loss historically gave the only positive overnight results). Does loss alignment lift the pos carrier's net P&L vs raw/rank?",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_grp_ret_fwd_30m_lambdarank",
+    "hypothesis": "GAP: ret group at fwd_30m under LAMBDARANK (the only untested label per group; trading-aligned loss historically gave the only positive overnight results). Does loss alignment lift the ret carrier's net P&L vs raw/rank?",
+    "horizon": "fwd_30m",
+    "label": "lambdarank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_grp_ret_fwd_60m_lambdarank",
+    "hypothesis": "GAP: ret group at fwd_60m under LAMBDARANK (the only untested label per group; trading-aligned loss historically gave the only positive overnight results). Does loss alignment lift the ret carrier's net P&L vs raw/rank?",
+    "horizon": "fwd_60m",
+    "label": "lambdarank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_grp_ret_overnight_lambdarank",
+    "hypothesis": "GAP: ret group at overnight under LAMBDARANK (the only untested label per group; trading-aligned loss historically gave the only positive overnight results). Does loss alignment lift the ret carrier's net P&L vs raw/rank?",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_carrier_fwd_30m_lambdarank",
+    "hypothesis": "Combined carrier (ret group + position group, 7 feats) at fwd_30m lambdarank. The two families that DO carry within-ts signal, under the turnover/loss configs not yet swept. Net P&L is the gate (price signal dies on cost \u2014 does loss/horizon/vol-scaling rescue breakeven?).",
+    "horizon": "fwd_30m",
+    "label": "lambdarank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_carrier_fwd_30m_vol_scaled",
+    "hypothesis": "Combined carrier (ret group + position group, 7 feats) at fwd_30m vol_scaled. The two families that DO carry within-ts signal, under the turnover/loss configs not yet swept. Net P&L is the gate (price signal dies on cost \u2014 does loss/horizon/vol-scaling rescue breakeven?).",
+    "horizon": "fwd_30m",
+    "label": "vol_scaled",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_carrier_fwd_60m_lambdarank",
+    "hypothesis": "Combined carrier (ret group + position group, 7 feats) at fwd_60m lambdarank. The two families that DO carry within-ts signal, under the turnover/loss configs not yet swept. Net P&L is the gate (price signal dies on cost \u2014 does loss/horizon/vol-scaling rescue breakeven?).",
+    "horizon": "fwd_60m",
+    "label": "lambdarank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_carrier_fwd_60m_vol_scaled",
+    "hypothesis": "Combined carrier (ret group + position group, 7 feats) at fwd_60m vol_scaled. The two families that DO carry within-ts signal, under the turnover/loss configs not yet swept. Net P&L is the gate (price signal dies on cost \u2014 does loss/horizon/vol-scaling rescue breakeven?).",
+    "horizon": "fwd_60m",
+    "label": "vol_scaled",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_carrier_overnight_lambdarank",
+    "hypothesis": "Combined carrier (ret group + position group, 7 feats) at overnight lambdarank. The two families that DO carry within-ts signal, under the turnover/loss configs not yet swept. Net P&L is the gate (price signal dies on cost \u2014 does loss/horizon/vol-scaling rescue breakeven?).",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12b_carrier_overnight_vol_scaled",
+    "hypothesis": "Combined carrier (ret group + position group, 7 feats) at overnight vol_scaled. The two families that DO carry within-ts signal, under the turnover/loss configs not yet swept. Net P&L is the gate (price signal dies on cost \u2014 does loss/horizon/vol-scaling rescue breakeven?).",
+    "horizon": "overnight",
+    "label": "vol_scaled",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
   }
 ]
