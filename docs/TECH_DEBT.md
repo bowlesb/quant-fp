@@ -46,6 +46,20 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 - [ ] Remaining (still gated on close): rebuild-batch (ingestor restart) + executor deploy (exec, lifts KLAC denylist).
 
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
+**STEP 0 — FIRST, immediately after BOOK FLAT, BEFORE everything else (DB restart):** raise
+`max_locks_per_transaction` 64 → 2048. ROOT CAUSE: 64×100conn = 6400 lock slots; a full-history join
+over feature_vectors(614)+labels(613)+bars_1m(693) chunks ≈ 1920 chunks ×~3 locks ≈ 5760 ≈ ceiling →
+today's 3 blocked queries + the battery OOM. 2048 → 204,800 slots (~60MB shm, within the 2gb shm_size),
+32× headroom for the 6yr chunk-growth trajectory. SEQUENCE: (1) exec confirms BOOK FLAT; (2) tell
+modeller "pause the grind" (pause authority); (3) exec HOLDS the executor rebuild; (4) `docker compose
+exec -T timescaledb psql -U quant -d quant -c "ALTER SYSTEM SET max_locks_per_transaction = 2048;"` then
+`docker compose restart timescaledb`; (5) VERIFY: `SHOW max_locks_per_transaction` = 2048, timescaledb
+extension loaded, services reconnected, ingestion resumes (post-close, no bar loss), and ONE previously-
+blocked full-history query COMPLETES (e.g. the feature_vectors⨝labels full join). Then proceed to the
+rest of the batch; modeller resumes grind; exec proceeds. IaC follow-up: add `command: postgres -c
+max_locks_per_transaction=2048` to the timescaledb compose service via a reviewed Tier-1 PR tomorrow
+(ALTER SYSTEM already persists it in postgresql.auto.conf in the data volume).
+
 Prereqs before starting: market closed (≥16:00 ET); Manager go on #12; **THE GUN = exec's
 broker-CONFIRMED-flat signal** after the ~15:48 ET EOD-flatten (exec reports 0 positions / 0 open
 orders from a FRESH broker snapshot). Do NOT run step 1 before that signal. If exec's flatten report
