@@ -22,7 +22,7 @@ Run inside the experimenter container as a module from /app:
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import numpy as np
 import psycopg
@@ -46,43 +46,62 @@ DB_KWARGS = {
 }
 
 
+def _month_starts(start: date, end: date) -> list[tuple[date, date]]:
+    """[(month_start, next_month_start), ...] spanning [start, end) — one bounded window per
+    statement so the bars_1m scan touches only ~1 month of chunks (lock-budget safe)."""
+    windows: list[tuple[date, date]] = []
+    cur = date(start.year, start.month, 1)
+    while cur < end:
+        nxt = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
+        windows.append((cur, nxt))
+        cur = nxt
+    return windows
+
+
 def load_exdiv_yields(conn: psycopg.Connection) -> dict[tuple[str, object], float]:
     """Map (symbol, label_date) -> dividend yield for nights whose forward open is the ex-morning.
 
     Keyed by the LABEL's local date D (the night close(D)->open(D+1)); the artifact hits when
     ex_date == D+1. Yield = cash_amount / prior RTH close (15:59 ET backfill bar). READ-ONLY.
     """
-    # The bars_1m hypertable is 253M rows over many chunks; an unbounded scan with a
-    # time-of-day predicate touches every chunk and exhausts the lock table (out of shared
-    # memory). Bound the raw ts to the panel window so TimescaleDB prunes chunks, and pull only
-    # the daily LAST close per (symbol, date) via DISTINCT ON (cheaper + robust if 15:59 is missing).
+    # bars_1m is a 693-chunk hypertable; a panel-wide scan with a time-of-day predicate locks
+    # every chunk in range and, under parallel workers, exhausts max_locks_per_transaction (=64)
+    # -> "out of shared memory". Fix: (a) disable parallel workers (they multiply per-chunk lock
+    # usage), and (b) query MONTH-BY-MONTH so each statement touches only ~1 month of chunks,
+    # well under the lock budget. The yield is cash_amount / prior RTH close (15:59 ET bar).
+    yields: dict[tuple[str, object], float] = {}
+    months = _month_starts(date(2024, 1, 1), date(2026, 6, 14))
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            WITH div AS (
-              SELECT symbol, ex_date, cash_amount
-              FROM corporate_actions_pit
-              WHERE action_type = 'cash_dividend'
-                AND ex_date BETWEEN %(start)s AND %(end)s
-            ),
-            px AS (
-              SELECT symbol, (ts AT TIME ZONE 'America/New_York')::date AS d, close
-              FROM bars_1m
-              WHERE source = 'backfill'
-                AND ts >= %(start)s::timestamptz
-                AND ts <  (%(end)s::date + 1)::timestamptz
-                AND (ts AT TIME ZONE 'America/New_York')::time = '15:59'
+        cur.execute("SET max_parallel_workers_per_gather = 0")
+        for month_start, month_end in months:
+            cur.execute(
+                """
+                WITH div AS (
+                  SELECT symbol, ex_date, cash_amount
+                  FROM corporate_actions_pit
+                  WHERE action_type = 'cash_dividend'
+                    AND (ex_date - 1) >= %(start)s AND (ex_date - 1) < %(end)s
+                ),
+                px AS (
+                  SELECT symbol, (ts AT TIME ZONE 'America/New_York')::date AS d, close
+                  FROM bars_1m
+                  WHERE source = 'backfill'
+                    AND ts >= %(start)s::timestamptz
+                    AND ts <  %(end)s::timestamptz
+                    AND (ts AT TIME ZONE 'America/New_York')::time = '15:59'
+                )
+                SELECT d.symbol, (d.ex_date - 1) AS label_date,
+                       d.cash_amount / NULLIF(px.close, 0) AS yield
+                FROM div d
+                JOIN px ON px.symbol = d.symbol AND px.d = d.ex_date - 1
+                WHERE px.close > 0 AND d.cash_amount IS NOT NULL
+                """,
+                {"start": month_start, "end": month_end},
             )
-            SELECT d.symbol, (d.ex_date - 1) AS label_date,
-                   d.cash_amount / NULLIF(px.close, 0) AS yield
-            FROM div d
-            JOIN px ON px.symbol = d.symbol AND px.d = d.ex_date - 1
-            WHERE px.close > 0 AND d.cash_amount IS NOT NULL
-            """,
-            {"start": "2024-01-01", "end": "2026-06-14"},
-        )
-        return {(sym, label_date): float(yld)
-                for sym, label_date, yld in cur.fetchall() if yld is not None}
+            for sym, label_date, yld in cur.fetchall():
+                if yld is not None:
+                    yields[(sym, label_date)] = float(yld)
+    return yields
 
 
 def apply_correction(y: np.ndarray, ts: list, symbols: list[str],
