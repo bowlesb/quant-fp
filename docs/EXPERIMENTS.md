@@ -1251,3 +1251,23 @@ time predicate is non-indexable. Better path = precompute a small (symbol, date)
 DAILY-PRICE helper table once (this is exactly the kind of derived artifact task #22's composable layer
 should make cheap), rather than re-scanning bars_1m for every shape experiment. For now: run post-batch
 when the DB is quiet; longer-term: a daily-OHLC materialized view.
+| 2026-06-12T20:06:26+00:00 | C11_loo_mom_5d_rel | fwd_30m | raw | 7 | 4840765 | -0.00095 | -0.629 | 0.00098 | Leave-one-out: momentum minus mom_5d_rel. Marginal contribution of mom_5d_rel — does dropping it move IC? |
+
+### COST-MODEL INPUTS from exec/risk — first NBBO data + fill asymmetry (2026-06-12, NOT yet usable)
+
+Exec/risk relayed the first live arrival_src='nbbo' measured execution-cost data into my cost-gate feed.
+RECORDING for when I build the per-name cost curve — NOT usable yet (n=4, drift noise):
+- 6/12 measured one-way cost (execution_slippage_daily, day=2026-06-12, arrival_src='nbbo'): mean -112bps
+  / median -69bps across 4 nbbo legs (KEEL +26, UUUU +6, W -145, SATS -338 bps vs arrival mid). This is
+  pure submit->fill DRIFT, NOT spread cost — needs ~5-10 sessions before fitting the bucketed
+  ADV×price cost curve. Filter WHERE arrival_src='nbbo' (bar_proxy rows are intra-minute noise, unusable).
+- ⭐ FILL ASYMMETRY is a real cost-model input I must REPRESENT (not just spread): 6/12 filled 3L/1S of
+  intended 3L/3S — the SHORT leg under-fills badly (wide-spread shorts AMPX/FLY rested unfilled). So the
+  REALIZED book is net-LONG-skewed ($513 long vs $160 short), NOT the neutral L/S my battery assumes.
+  IMPLICATION: my net-of-cost backtest assumes symmetric fills; reality is longs fill, wide-spread shorts
+  don't -> a structural long-skew drag beyond spread cost. When I build the per-name cost model, model
+  the SHORT-LEG FILL PROBABILITY (keyed by spread/ADV), not just the cost per filled share — an unfilled
+  short is a missed hedge, which is its own cost. Exec's #19 spread-scaled cross should lift short
+  fill-rate next session; they're tracking it. Revisit once short fill-rate stabilizes.
+This TIGHTENS the M3 net-of-cost gate further (the flat-2bps was already optimistic; now add fill
+asymmetry). Consistent with the price-only verdict: another reason the thin price signal is uneconomic.
