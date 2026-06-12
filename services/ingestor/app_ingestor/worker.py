@@ -168,16 +168,23 @@ def run_worker(
     metrics_port = int(os.environ["WORKER_METRICS_BASE_PORT"]) + shard_id
     worker = Worker(shard_id, db_kwargs)
     coverage = ShardCoverage(shard_id, set(expected_symbols), metrics_port)
+    coverage.heartbeat()
     logger.info(
         "worker %d up: %d expected symbols, metrics :%d",
         shard_id, len(expected_symbols), metrics_port,
     )
 
     while not stop.is_set():
+        # Bump liveness every iteration (incl. the idle path below) so a wedged
+        # worker is caught as a stale heartbeat even when no messages arrive.
+        coverage.heartbeat()
+        try:
+            coverage.set_queue_depth(in_queue.qsize())
+        except NotImplementedError:
+            pass  # qsize() is unsupported on some platforms (macOS); skip the gauge
         try:
             kind, payload = in_queue.get(timeout=1.0)
         except queue_mod.Empty:
-            coverage.maybe_emit()
             continue
         if kind == KIND_TRADE:
             worker.on_trade(payload)
@@ -185,4 +192,29 @@ def run_worker(
             worker.on_quote(payload)
         elif kind == KIND_BAR:
             worker.on_bar(payload, coverage)
-        coverage.maybe_emit()
+
+    flush_pending_on_stop(worker)
+
+
+def flush_pending_on_stop(worker: Worker) -> None:
+    """On a GRACEFUL stop (SIGTERM / planned deploy), flush every buffered minute so
+    a coordinated restart doesn't drop the in-flight minute's aggregates. A crash
+    can't run this — that gap is recoverable via the backfill (source='backfill')
+    and visible in the coverage gauges; a planned restart should lose nothing."""
+    conn = worker.get_conn()
+    pending_symbols = (
+        set(worker.trades_buf) | set(worker.quotes_buf) | set(worker.raw_buf)
+    )
+    flushed = 0
+    for symbol in pending_symbols:
+        minutes = (
+            set(worker.trades_buf[symbol])
+            | set(worker.quotes_buf[symbol])
+            | set(worker.raw_buf[symbol])
+        )
+        if not minutes:
+            continue
+        worker.flush_through(conn, symbol, max(minutes))
+        flushed += 1
+    if flushed:
+        logger.info("worker %d flushed %d symbols' buffers on stop", worker.shard_id, flushed)

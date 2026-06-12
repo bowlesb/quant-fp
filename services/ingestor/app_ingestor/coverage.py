@@ -15,9 +15,25 @@ Genuinely no-trade minutes for illiquid names are real, not a regression — so 
 alarm is on CONSECUTIVE silent RTH minutes per symbol (default >K), not on any single
 empty minute. The Prometheus gauges expose the live streamed/subscribed ratio and the
 worst per-symbol silent streak so the regression is visible immediately.
+
+TWO worker-level failure modes the per-symbol silence alarm CANNOT see, so they get
+their own first-class signals (the "10-vs-50" lesson: a healthy reader subscribed to
+50 while a wedged worker aggregates only 10, and nothing screams):
+  - **A wedged worker** stops calling record_bar entirely, so _emit_minute never
+    fires and no per-symbol streak ever increments. The HEARTBEAT gauge
+    (`..._worker_heartbeat_unixtime`, bumped every loop iteration incl. the idle
+    path) goes stale -> Prometheus alarms on `time() - heartbeat > K`, independent of
+    record_bar. This is the observed-set check: liveness of the AGGREGATION, not just
+    of subscriptions.
+  - **A reader outpacing a worker** shows as growing `..._shard_queue_depth` — the
+    backpressure that precedes drops, made measurable before any tick is lost.
+A respawned worker also resets its silent-streak/heartbeat state cleanly; the restart
+gap is visible as a coverage dip + a one-trade tick-rule cold start (self-healing, the
+same as any process boot).
 """
 import logging
 import os
+import time
 
 from prometheus_client import Counter, Gauge, start_http_server
 
@@ -44,6 +60,21 @@ _max_silent_streak = Gauge(
 _dropped_alarms = Counter(
     "ingestor_shard_dropped_alarms_total",
     "Total times a subscribed symbol crossed the silence alarm threshold",
+    ["shard"],
+)
+# Worker liveness: a wedged worker (healthy reader, stuck aggregation) shows as a
+# STALE heartbeat — Prometheus alarms on time() - heartbeat, no per-symbol signal
+# needed. This is what catches the 10-vs-50 case the silence alarm is blind to.
+_worker_heartbeat = Gauge(
+    "ingestor_worker_heartbeat_unixtime",
+    "Unix time of this worker's last processing-loop iteration (stale => wedged)",
+    ["shard"],
+)
+# Reader->worker backpressure: a worker falling behind shows as rising depth BEFORE
+# any tick is dropped (mp queue is bounded, so this also bounds memory).
+_queue_depth = Gauge(
+    "ingestor_shard_queue_depth",
+    "Approximate reader->worker queue depth for this shard (rising => worker behind)",
     ["shard"],
 )
 
@@ -79,11 +110,16 @@ class ShardCoverage:
         if had_trade:
             self._traded_this_minute.add(symbol)
 
-    def maybe_emit(self) -> None:
-        """No-op hook for the worker's idle path; the minute roll in record_bar is
-        what actually emits. Kept so the worker can call it without knowing the
-        internals (and so a future wall-clock flush has a home)."""
-        return
+    def heartbeat(self) -> None:
+        """Bump the worker-liveness gauge. Called every processing-loop iteration —
+        INCLUDING the idle (queue-empty) path — so a wedged worker is detectable as a
+        stale heartbeat even when no bars arrive to drive the per-symbol coverage."""
+        _worker_heartbeat.labels(shard=str(self.shard_id)).set(time.time())
+
+    def set_queue_depth(self, depth: int) -> None:
+        """Publish the reader->worker queue depth so backpressure (a worker falling
+        behind the reader) is visible before any tick is dropped."""
+        _queue_depth.labels(shard=str(self.shard_id)).set(depth)
 
     def _emit_minute(self) -> None:
         if not self._seen_this_minute:

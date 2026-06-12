@@ -20,6 +20,7 @@ diff. See services/ingestor/coverage.py.
 import logging
 import os
 import signal
+import sys
 import time
 from multiprocessing import Event, Process
 from multiprocessing.synchronize import Event as EventType
@@ -87,27 +88,41 @@ def main() -> None:
     )
     reader.start()
 
+    shutdown_clean = {"value": False}
+
     def handle_signal(signum: int, frame: object) -> None:
-        logger.info("signal %d -> shutting down", signum)
+        logger.info("signal %d -> graceful shutdown", signum)
+        shutdown_clean["value"] = True
         stop.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    # A dead worker can't be surgically respawned onto its existing queue: a process
+    # killed mid-get() dies holding the mp.Queue read lock, permanently wedging that
+    # queue for any replacement consumer (verified in the dry-run — the respawned
+    # worker drained 0 messages, silently losing its shard). The only correct recovery
+    # with the mp substrate is a FULL restart with fresh queues, so on ANY child death
+    # we exit non-zero and let `restart: unless-stopped` rebuild the whole topology.
+    # The ~1-minute stream gap is recoverable via the backfill (source='backfill') and
+    # visible in the coverage gauges; a silently-wedged shard would not be. (If a
+    # future multi-host substrate with consumer-group semantics lands, single-worker
+    # respawn becomes safe again — that's the swappable-seam payoff.)
     while not stop.is_set():
         time.sleep(SUPERVISE_INTERVAL_S)
         if not reader.is_alive():
-            logger.error("reader died (exit %s) -> failing so the container restarts", reader.exitcode)
+            logger.error("reader died (exit %s) -> full ingestor restart", reader.exitcode)
             stop.set()
             break
         for shard_id, proc in enumerate(workers):
             if not proc.is_alive():
                 logger.error(
-                    "worker %d died (exit %s) -> respawning", shard_id, proc.exitcode
+                    "worker %d died (exit %s) -> full ingestor restart (mp queue can't "
+                    "be safely reused after a consumer death)",
+                    shard_id, proc.exitcode,
                 )
-                workers[shard_id] = spawn_worker(
-                    shard_id, queues[shard_id], shard_symbol_lists[shard_id], stop
-                )
+                stop.set()
+                break
 
     if reader.is_alive():
         reader.terminate()
@@ -116,7 +131,15 @@ def main() -> None:
         proc.join(timeout=10)
         if proc.is_alive():
             proc.terminate()
-    logger.info("ingestor stopped")
+
+    if shutdown_clean["value"]:
+        logger.info("ingestor stopped (clean shutdown)")
+        return
+    # Abnormal stop (a child died) — exit non-zero so restart:unless-stopped rebuilds
+    # the whole topology with fresh queues. Exiting 0 here would leave the container
+    # stopped with a wedged queue.
+    logger.error("ingestor exiting non-zero to force a clean full restart")
+    sys.exit(1)
 
 
 if __name__ == "__main__":
