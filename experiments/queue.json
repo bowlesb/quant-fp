@@ -4,70 +4,80 @@
     "hypothesis": "Baseline: regression on raw fwd_30m excess, all 18 features. Reproduces the trainer result; reference point.",
     "horizon": "fwd_30m",
     "label": "raw",
-    "features": "all"
+    "features": "all",
+    "resource": "cpu"
   },
   {
     "id": "E0p_rank_18",
     "hypothesis": "Rank label should align loss with how we trade (deciles) and be fat-tail robust; expect >= raw IC.",
     "horizon": "fwd_30m",
     "label": "rank",
-    "features": "all"
+    "features": "all",
+    "resource": "cpu"
   },
   {
     "id": "E0p_rank_13",
     "hypothesis": "Drop the 5 micro features (identity-leak risk); 13-feature universe set. Should hold IC while removing leakage.",
     "horizon": "fwd_30m",
     "label": "rank",
-    "features": "nomicro"
+    "features": "nomicro",
+    "resource": "cpu"
   },
   {
     "id": "E_raw_13",
     "hypothesis": "Regression on 13 non-micro features; isolates whether micro columns were carrying (leaked) signal.",
     "horizon": "fwd_30m",
     "label": "raw",
-    "features": "nomicro"
+    "features": "nomicro",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_60m_rank_13",
     "hypothesis": "For-fun long shot: does the 60m horizon rank model show anything different? (sparse 60m labels expected; exploratory).",
     "horizon": "fwd_60m",
     "label": "rank",
-    "features": "nomicro"
+    "features": "nomicro",
+    "resource": "cpu"
   },
   {
     "id": "E_raw_13_imp",
     "hypothesis": "(A) Re-run raw/13 WITH gain importances to diagnose WHICH features carry the signal \u2014 start of feature-improvement work.",
     "horizon": "fwd_30m",
     "label": "raw",
-    "features": "nomicro"
+    "features": "nomicro",
+    "resource": "cpu"
   },
   {
     "id": "E_60m_raw_13",
     "hypothesis": "Fair 60m comparison: RAW label, 13 features (vs the earlier 60m-rank long-shot). Does a longer horizon help raw regression?",
     "horizon": "fwd_60m",
     "label": "raw",
-    "features": "nomicro"
+    "features": "nomicro",
+    "resource": "cpu"
   },
   {
     "id": "DIAG_nocalendar_11",
     "hypothesis": "(A) Importances show calendar features (day_of_week, minute_of_day) rank high, but they're constant within a cross-section so can't discriminate names. Drop calendar+micro (11 features): if within-ts IC survives, the signal is real cross-sectional; if it collapses, the IC was a time-of-day artifact.",
     "horizon": "fwd_30m",
     "label": "raw",
-    "features": "nocalendar"
+    "features": "nocalendar",
+    "resource": "cpu"
   },
   {
     "id": "E_60m_raw_nocal",
     "hypothesis": "Modeller: 60m raw, no-calendar (11 feats). Does ANY price signal survive at the longer horizon without the calendar crutch?",
     "horizon": "fwd_60m",
     "label": "raw",
-    "features": "nocalendar"
+    "features": "nocalendar",
+    "resource": "cpu"
   },
   {
     "id": "E_30m_rank_nocal",
     "hypothesis": "Modeller: rank label, no-calendar 11 feats. Honest within-ts cross-sectional test of price features under a trading-aligned-ish loss.",
     "horizon": "fwd_30m",
     "label": "rank",
-    "features": "nocalendar"
+    "features": "nocalendar",
+    "resource": "cpu"
   },
   {
     "id": "E_mom_raw_nocal_v11",
@@ -75,7 +85,8 @@
     "horizon": "fwd_30m",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "E_mom_raw_all_v11",
@@ -83,7 +94,8 @@
     "horizon": "fwd_30m",
     "label": "raw",
     "features": "all",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "E_mom_60m_raw_nocal_v11",
@@ -91,7 +103,8 @@
     "horizon": "fwd_60m",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "E_overnight_raw_nocal_v11",
@@ -99,7 +112,8 @@
     "horizon": "overnight",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "E_overnight_raw_all_v11",
@@ -107,7 +121,8 @@
     "horizon": "overnight",
     "label": "raw",
     "features": "all",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "DEEP_overnight_volscaled_nocal_v11",
@@ -115,7 +130,8 @@
     "horizon": "overnight",
     "label": "vol_scaled",
     "features": "nocalendar",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "DEEP_30m_volscaled_nocal_v11",
@@ -123,7 +139,8 @@
     "horizon": "fwd_30m",
     "label": "vol_scaled",
     "features": "nocalendar",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "DEEP_overnight_lambdarank_nocal_v11",
@@ -131,7 +148,8 @@
     "horizon": "overnight",
     "label": "lambdarank",
     "features": "nocalendar",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "DEEP_30m_lambdarank_nocal_v11",
@@ -139,7 +157,8 @@
     "horizon": "fwd_30m",
     "label": "lambdarank",
     "features": "nocalendar",
-    "set_version": "v1.1.0"
+    "set_version": "v1.1.0",
+    "resource": "cpu"
   },
   {
     "id": "C11_30m_raw_nocal",
@@ -147,7 +166,8 @@
     "horizon": "fwd_30m",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_30m_rank_nocal",
@@ -155,7 +175,8 @@
     "horizon": "fwd_30m",
     "label": "rank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_30m_raw_all",
@@ -163,7 +184,8 @@
     "horizon": "fwd_30m",
     "label": "raw",
     "features": "all",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_ret_5m",
@@ -173,7 +195,8 @@
     "features": [
       "ret_5m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_ret_15m",
@@ -183,7 +206,8 @@
     "features": [
       "ret_15m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_ret_30m",
@@ -193,7 +217,8 @@
     "features": [
       "ret_30m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_ret_60m",
@@ -203,7 +228,8 @@
     "features": [
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_vol_30m",
@@ -213,7 +239,8 @@
     "features": [
       "vol_30m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_vol_60m",
@@ -223,7 +250,8 @@
     "features": [
       "vol_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_vol_z_30",
@@ -233,7 +261,8 @@
     "features": [
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_vwap_dev",
@@ -243,7 +272,8 @@
     "features": [
       "vwap_dev"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_range_pct",
@@ -253,7 +283,8 @@
     "features": [
       "range_pct"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_gap_from_open",
@@ -263,7 +294,8 @@
     "features": [
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_rel_ret_30m",
@@ -273,7 +305,8 @@
     "features": [
       "rel_ret_30m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_1d",
@@ -283,7 +316,8 @@
     "features": [
       "mom_1d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_3d",
@@ -293,7 +327,8 @@
     "features": [
       "mom_3d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_5d",
@@ -303,7 +338,8 @@
     "features": [
       "mom_5d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_10d",
@@ -313,7 +349,8 @@
     "features": [
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_1d_rel",
@@ -323,7 +360,8 @@
     "features": [
       "mom_1d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_3d_rel",
@@ -333,7 +371,8 @@
     "features": [
       "mom_3d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_5d_rel",
@@ -343,7 +382,8 @@
     "features": [
       "mom_5d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_solo_mom_10d_rel",
@@ -353,7 +393,8 @@
     "features": [
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_mom_all_30m",
@@ -370,7 +411,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_mom_abs_30m",
@@ -383,7 +425,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_mom_rel_30m",
@@ -396,7 +439,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_mom_short_30m",
@@ -407,7 +451,8 @@
       "mom_1d",
       "mom_1d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_mom_long_30m",
@@ -418,7 +463,8 @@
       "mom_10d",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_price_only_30m",
@@ -426,7 +472,8 @@
     "horizon": "fwd_30m",
     "label": "raw",
     "features": "drop:mom_1d,mom_3d,mom_5d,mom_10d,mom_1d_rel,mom_3d_rel,mom_5d_rel,mom_10d_rel",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_mom_60m",
@@ -443,7 +490,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_60m_raw_nocal",
@@ -451,7 +499,8 @@
     "horizon": "fwd_60m",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_overnight_raw_nocal",
@@ -459,7 +508,8 @@
     "horizon": "overnight",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_overnight_mom_rel",
@@ -472,7 +522,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_overnight_rank_nocal",
@@ -480,7 +531,8 @@
     "horizon": "overnight",
     "label": "rank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_overnight_lambdarank_nocal",
@@ -488,7 +540,8 @@
     "horizon": "overnight",
     "label": "lambdarank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_1d",
@@ -504,7 +557,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_3d",
@@ -520,7 +574,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_5d",
@@ -536,7 +591,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_10d",
@@ -552,7 +608,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_1d_rel",
@@ -568,7 +625,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_3d_rel",
@@ -584,7 +642,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_5d_rel",
@@ -600,7 +659,8 @@
       "mom_3d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_loo_mom_10d_rel",
@@ -616,7 +676,8 @@
       "mom_3d_rel",
       "mom_5d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_30m_volscaled_nocal",
@@ -624,7 +685,8 @@
     "horizon": "fwd_30m",
     "label": "vol_scaled",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "C11_overnight_volscaled_nocal",
@@ -632,7 +694,8 @@
     "horizon": "overnight",
     "label": "vol_scaled",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_C11_reversal_short",
@@ -643,7 +706,8 @@
       "ret_5m",
       "ret_15m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_C11_range_vwap",
@@ -655,7 +719,8 @@
       "vwap_dev",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_C11_mom_vol_interaction",
@@ -671,7 +736,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_C11_mom_only_lambdarank",
@@ -688,7 +754,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_30m_raw_nocal",
@@ -696,7 +763,8 @@
     "horizon": "fwd_30m",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_30m_rank_nocal",
@@ -704,7 +772,8 @@
     "horizon": "fwd_30m",
     "label": "rank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_30m_vol_scaled_nocal",
@@ -712,7 +781,8 @@
     "horizon": "fwd_30m",
     "label": "vol_scaled",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_30m_lambdarank_nocal",
@@ -720,7 +790,8 @@
     "horizon": "fwd_30m",
     "label": "lambdarank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_60m_raw_nocal",
@@ -728,7 +799,8 @@
     "horizon": "fwd_60m",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_60m_rank_nocal",
@@ -736,7 +808,8 @@
     "horizon": "fwd_60m",
     "label": "rank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_60m_vol_scaled_nocal",
@@ -744,7 +817,8 @@
     "horizon": "fwd_60m",
     "label": "vol_scaled",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_fwd_60m_lambdarank_nocal",
@@ -752,7 +826,8 @@
     "horizon": "fwd_60m",
     "label": "lambdarank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_overnight_raw_nocal",
@@ -760,7 +835,8 @@
     "horizon": "overnight",
     "label": "raw",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_overnight_rank_nocal",
@@ -768,7 +844,8 @@
     "horizon": "overnight",
     "label": "rank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_overnight_vol_scaled_nocal",
@@ -776,7 +853,8 @@
     "horizon": "overnight",
     "label": "vol_scaled",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grid_overnight_lambdarank_nocal",
@@ -784,7 +862,8 @@
     "horizon": "overnight",
     "label": "lambdarank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_mom_fwd_30m_raw",
@@ -801,7 +880,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_mom_fwd_30m_rank",
@@ -818,7 +898,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_mom_fwd_60m_raw",
@@ -835,7 +916,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_mom_fwd_60m_rank",
@@ -852,7 +934,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_mom_overnight_raw",
@@ -869,7 +952,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_mom_overnight_rank",
@@ -886,7 +970,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momrel_fwd_30m_raw",
@@ -899,7 +984,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momrel_fwd_30m_rank",
@@ -912,7 +998,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momrel_fwd_60m_raw",
@@ -925,7 +1012,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momrel_fwd_60m_rank",
@@ -938,7 +1026,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momrel_overnight_raw",
@@ -951,7 +1040,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momrel_overnight_rank",
@@ -964,7 +1054,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momabs_fwd_30m_raw",
@@ -977,7 +1068,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momabs_fwd_30m_rank",
@@ -990,7 +1082,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momabs_fwd_60m_raw",
@@ -1003,7 +1096,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momabs_fwd_60m_rank",
@@ -1016,7 +1110,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momabs_overnight_raw",
@@ -1029,7 +1124,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_momabs_overnight_rank",
@@ -1042,7 +1138,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_ret_fwd_30m_raw",
@@ -1055,7 +1152,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_ret_fwd_30m_rank",
@@ -1068,7 +1166,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_ret_fwd_60m_raw",
@@ -1081,7 +1180,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_ret_fwd_60m_rank",
@@ -1094,7 +1194,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_ret_overnight_raw",
@@ -1107,7 +1208,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_ret_overnight_rank",
@@ -1120,7 +1222,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_vol_fwd_30m_raw",
@@ -1132,7 +1235,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_vol_fwd_30m_rank",
@@ -1144,7 +1248,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_vol_fwd_60m_raw",
@@ -1156,7 +1261,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_vol_fwd_60m_rank",
@@ -1168,7 +1274,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_vol_overnight_raw",
@@ -1180,7 +1287,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_vol_overnight_rank",
@@ -1192,7 +1300,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_pos_fwd_30m_raw",
@@ -1204,7 +1313,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_pos_fwd_30m_rank",
@@ -1216,7 +1326,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_pos_fwd_60m_raw",
@@ -1228,7 +1339,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_pos_fwd_60m_rank",
@@ -1240,7 +1352,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_pos_overnight_raw",
@@ -1252,7 +1365,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_grp_pos_overnight_rank",
@@ -1264,7 +1378,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_1d_fwd_60m",
@@ -1274,7 +1389,8 @@
     "features": [
       "mom_1d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_1d_overnight",
@@ -1284,7 +1400,8 @@
     "features": [
       "mom_1d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_3d_fwd_60m",
@@ -1294,7 +1411,8 @@
     "features": [
       "mom_3d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_3d_overnight",
@@ -1304,7 +1422,8 @@
     "features": [
       "mom_3d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_5d_fwd_60m",
@@ -1314,7 +1433,8 @@
     "features": [
       "mom_5d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_5d_overnight",
@@ -1324,7 +1444,8 @@
     "features": [
       "mom_5d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_10d_fwd_60m",
@@ -1334,7 +1455,8 @@
     "features": [
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_10d_overnight",
@@ -1344,7 +1466,8 @@
     "features": [
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_1d_rel_fwd_60m",
@@ -1354,7 +1477,8 @@
     "features": [
       "mom_1d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_1d_rel_overnight",
@@ -1364,7 +1488,8 @@
     "features": [
       "mom_1d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_3d_rel_fwd_60m",
@@ -1374,7 +1499,8 @@
     "features": [
       "mom_3d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_3d_rel_overnight",
@@ -1384,7 +1510,8 @@
     "features": [
       "mom_3d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_5d_rel_fwd_60m",
@@ -1394,7 +1521,8 @@
     "features": [
       "mom_5d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_5d_rel_overnight",
@@ -1404,7 +1532,8 @@
     "features": [
       "mom_5d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_10d_rel_fwd_60m",
@@ -1414,7 +1543,8 @@
     "features": [
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_solo_mom_10d_rel_overnight",
@@ -1424,7 +1554,8 @@
     "features": [
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_mom_3d_fwd_30m",
@@ -1435,7 +1566,8 @@
       "mom_1d",
       "mom_3d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_mom_3d_overnight",
@@ -1446,7 +1578,8 @@
       "mom_1d",
       "mom_3d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_3d_mom_5d_fwd_30m",
@@ -1457,7 +1590,8 @@
       "mom_3d",
       "mom_5d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_3d_mom_5d_overnight",
@@ -1468,7 +1602,8 @@
       "mom_3d",
       "mom_5d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_5d_mom_10d_fwd_30m",
@@ -1479,7 +1614,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_5d_mom_10d_overnight",
@@ -1490,7 +1626,8 @@
       "mom_5d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_mom_10d_fwd_30m",
@@ -1501,7 +1638,8 @@
       "mom_1d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_mom_10d_overnight",
@@ -1512,7 +1650,8 @@
       "mom_1d",
       "mom_10d"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_rel_mom_3d_rel_fwd_30m",
@@ -1523,7 +1662,8 @@
       "mom_1d_rel",
       "mom_3d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_rel_mom_3d_rel_overnight",
@@ -1534,7 +1674,8 @@
       "mom_1d_rel",
       "mom_3d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_3d_rel_mom_5d_rel_fwd_30m",
@@ -1545,7 +1686,8 @@
       "mom_3d_rel",
       "mom_5d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_3d_rel_mom_5d_rel_overnight",
@@ -1556,7 +1698,8 @@
       "mom_3d_rel",
       "mom_5d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_5d_rel_mom_10d_rel_fwd_30m",
@@ -1567,7 +1710,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_vwap_dev_fwd_30m",
@@ -1577,7 +1721,8 @@
     "features": [
       "vwap_dev"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_vwap_dev_fwd_60m",
@@ -1587,7 +1732,8 @@
     "features": [
       "vwap_dev"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_range_pct_fwd_30m",
@@ -1597,7 +1743,8 @@
     "features": [
       "range_pct"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_range_pct_fwd_60m",
@@ -1607,7 +1754,8 @@
     "features": [
       "range_pct"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_gap_from_open_fwd_30m",
@@ -1617,7 +1765,8 @@
     "features": [
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_gap_from_open_fwd_60m",
@@ -1627,7 +1776,8 @@
     "features": [
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_rel_ret_30m_fwd_30m",
@@ -1637,7 +1787,8 @@
     "features": [
       "rel_ret_30m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_solo_rel_ret_30m_fwd_60m",
@@ -1647,7 +1798,8 @@
     "features": [
       "rel_ret_30m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_pos_minus_ret5m_30m",
@@ -1659,7 +1811,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_ret5m_plus_pos_30m",
@@ -1672,7 +1825,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_ret5m_plus_pos_30m_rank",
@@ -1685,7 +1839,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "ML003_ret5m_only_30m",
@@ -1693,7 +1848,8 @@
     "label": "raw",
     "features": "keep:ret_5m",
     "set_version": "v1.1.1",
-    "hypothesis": "explorer-ml 003 (Lead-approved): ret_5m-only breakeven/turnover baseline for the pos-vs-ret5m economic comparison."
+    "hypothesis": "explorer-ml 003 (Lead-approved): ret_5m-only breakeven/turnover baseline for the pos-vs-ret5m economic comparison.",
+    "resource": "cpu"
   },
   {
     "id": "ML003_pos_only_30m",
@@ -1701,7 +1857,8 @@
     "label": "raw",
     "features": "keep:vwap_dev,range_pct,gap_from_open",
     "set_version": "v1.1.1",
-    "hypothesis": "explorer-ml 003 (Lead-approved): pos-only \u2014 is the position group a LOWER-turnover, HIGHER-breakeven carrier than ret_5m? Headline = pos-only breakeven vs ret_5m-only; does pos clear 1.4bps?"
+    "hypothesis": "explorer-ml 003 (Lead-approved): pos-only \u2014 is the position group a LOWER-turnover, HIGHER-breakeven carrier than ret_5m? Headline = pos-only breakeven vs ret_5m-only; does pos clear 1.4bps?",
+    "resource": "cpu"
   },
   {
     "id": "ML003_ret5m_pos_30m",
@@ -1709,7 +1866,8 @@
     "label": "raw",
     "features": "keep:ret_5m,vwap_dev,range_pct,gap_from_open",
     "set_version": "v1.1.1",
-    "hypothesis": "explorer-ml 003 (Lead-approved): ret_5m+pos combined \u2014 IC lift vs turnover cost; breakeven between the two legs?"
+    "hypothesis": "explorer-ml 003 (Lead-approved): ret_5m+pos combined \u2014 IC lift vs turnover cost; breakeven between the two legs?",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_5d_rel_mom_10d_rel_overnight",
@@ -1720,7 +1878,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_rel_mom_10d_rel_fwd_30m",
@@ -1731,7 +1890,8 @@
       "mom_1d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_pair_mom_1d_rel_mom_10d_rel_overnight",
@@ -1742,7 +1902,8 @@
       "mom_1d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_vol_fwd_30m",
@@ -1758,7 +1919,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_vol_fwd_60m",
@@ -1774,7 +1936,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_vol_overnight",
@@ -1790,7 +1953,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_ret_fwd_30m",
@@ -1807,7 +1971,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_ret_fwd_60m",
@@ -1824,7 +1989,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_ret_overnight",
@@ -1841,7 +2007,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_pos_fwd_30m",
@@ -1857,7 +2024,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_pos_fwd_60m",
@@ -1873,7 +2041,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_pos_overnight",
@@ -1889,7 +2058,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_volz_fwd_30m",
@@ -1903,7 +2073,8 @@
       "mom_10d_rel",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_volz_fwd_60m",
@@ -1917,7 +2088,8 @@
       "mom_10d_rel",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_mom_x_volz_overnight",
@@ -1931,7 +2103,8 @@
       "mom_10d_rel",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_momabs_x_vol_fwd_30m",
@@ -1947,7 +2120,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_momabs_x_vol_fwd_60m",
@@ -1963,7 +2137,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_momabs_x_vol_overnight",
@@ -1979,7 +2154,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_ret_x_vol_fwd_30m",
@@ -1995,7 +2171,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_ret_x_vol_fwd_60m",
@@ -2011,7 +2188,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_ret_x_vol_overnight",
@@ -2027,7 +2205,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_pos_x_vol_fwd_30m",
@@ -2042,7 +2221,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_pos_x_vol_fwd_60m",
@@ -2057,7 +2237,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_int_pos_x_vol_overnight",
@@ -2072,7 +2253,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_mom_overnight_raw",
@@ -2089,7 +2271,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_mom_overnight_rank",
@@ -2106,7 +2289,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_mom_overnight_vol_scaled",
@@ -2123,7 +2307,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_mom_overnight_lambdarank",
@@ -2140,7 +2325,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_momrel_overnight_raw",
@@ -2153,7 +2339,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_momrel_overnight_rank",
@@ -2166,7 +2353,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_momrel_overnight_vol_scaled",
@@ -2179,7 +2367,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_lab_momrel_overnight_lambdarank",
@@ -2192,7 +2381,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_ret_5m",
@@ -2219,7 +2409,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_ret_15m",
@@ -2246,7 +2437,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_ret_30m",
@@ -2273,7 +2465,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_ret_60m",
@@ -2300,7 +2493,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_vol_30m",
@@ -2327,7 +2521,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_vol_60m",
@@ -2354,7 +2549,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_vol_z_30",
@@ -2381,7 +2577,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_vwap_dev",
@@ -2408,7 +2605,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_range_pct",
@@ -2435,7 +2633,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_gap_from_open",
@@ -2462,7 +2661,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_rel_ret_30m",
@@ -2489,7 +2689,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_1d",
@@ -2516,7 +2717,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_3d",
@@ -2543,7 +2745,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_5d",
@@ -2570,7 +2773,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_10d",
@@ -2597,7 +2801,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_1d_rel",
@@ -2624,7 +2829,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_3d_rel",
@@ -2651,7 +2857,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_5d_rel",
@@ -2678,7 +2885,8 @@
       "mom_3d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W11_loo19_mom_10d_rel",
@@ -2705,7 +2913,8 @@
       "mom_3d_rel",
       "mom_5d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W11_gap_only_overnight",
@@ -2715,7 +2924,8 @@
     "features": [
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W11_vol_as_signal",
@@ -2727,7 +2937,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W11_range_overnight",
@@ -2738,7 +2949,8 @@
       "range_pct",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W11_kitchen_sink_lambdarank_60m",
@@ -2746,7 +2958,8 @@
     "horizon": "fwd_60m",
     "label": "lambdarank",
     "features": "all",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W11_momrel_volscaled_60m",
@@ -2759,7 +2972,8 @@
       "mom_5d_rel",
       "mom_10d_rel"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W11_single_ret60_overnight",
@@ -2769,7 +2983,8 @@
     "features": [
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_ret5m_pos_fwd_60m",
@@ -2782,7 +2997,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_ret5m_pos_fwd_60m_rank",
@@ -2795,7 +3011,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_pos_vol_overnight_raw",
@@ -2810,7 +3027,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12_pos_vol_overnight_rank",
@@ -2825,7 +3043,8 @@
       "vol_60m",
       "vol_z_30"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W12_allprice_lambdarank_60m",
@@ -2833,7 +3052,8 @@
     "horizon": "fwd_60m",
     "label": "lambdarank",
     "features": "nocalendar",
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "LONGSHOT_W12_volscaled_pos_30m",
@@ -2845,7 +3065,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_grp_pos_fwd_30m_lambdarank",
@@ -2857,7 +3078,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_grp_pos_fwd_60m_lambdarank",
@@ -2869,7 +3091,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_grp_pos_overnight_lambdarank",
@@ -2881,7 +3104,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_grp_ret_fwd_30m_lambdarank",
@@ -2894,7 +3118,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_grp_ret_fwd_60m_lambdarank",
@@ -2907,7 +3132,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_grp_ret_overnight_lambdarank",
@@ -2920,7 +3146,8 @@
       "ret_30m",
       "ret_60m"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_carrier_fwd_30m_lambdarank",
@@ -2936,7 +3163,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_carrier_fwd_30m_vol_scaled",
@@ -2952,7 +3180,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_carrier_fwd_60m_lambdarank",
@@ -2968,7 +3197,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_carrier_fwd_60m_vol_scaled",
@@ -2984,7 +3214,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_carrier_overnight_lambdarank",
@@ -3000,7 +3231,8 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   },
   {
     "id": "W12b_carrier_overnight_vol_scaled",
@@ -3016,6 +3248,7 @@
       "range_pct",
       "gap_from_open"
     ],
-    "set_version": "v1.1.1"
+    "set_version": "v1.1.1",
+    "resource": "cpu"
   }
 ]
