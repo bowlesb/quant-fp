@@ -376,3 +376,33 @@ WHAT THIS CHANGES IN MY PRE-REGISTRATION:
   predictable names dominating the traded extremes) are now the WHOLE delta. My original predictions
   hold: 30m real-but-net-negative; overnight = survivorship; primary verdict "no tradeable edge holds"
   UNCHANGED at ~70%. The result that would flip it remains the low-turnover tail, gated by full M3 criteria.
+
+## OFI CLOSE-MINUTE EXCLUSION — feature-definition spec (Modeller → prod featurestore, 2026-06-12)
+
+QA settled-day trade-agg proof at 52 names (f868896): core RTH aggregation is trustworthy (n_trades
+within-2% = 98.05% / corr 0.9997; tick-rule SIGN agreement 99.82%) — the OFI thesis survives its first
+hard test. BUT live-vs-REST n_trades-within-2% COLLAPSES at the close: 93% at 15:00 ET → 14% at 16:00 ET
+(closing cross / MOC + late & out-of-sequence prints). Any OFI feature consuming those minutes is
+computed on untrustworthy LIVE data → live/backfill skew exactly where parity matters most.
+
+SPEC (binds in the SHARED featurestore path so live == backfill, per parity discipline):
+1. **Drop minutes ≥ 15:50:00 ET from the trade_agg input to OFI aggregation.** OFI windows (ofi_5m,
+   ofi_15m, ofi_30m, signed_vol_z_30) MUST NOT include any minute in [15:50, 16:00] ET. A window
+   anchored before 15:50 truncates at 15:50 (use the clean minutes; if too few remain for the window,
+   emit NaN rather than a partial-window value).
+2. **Do NOT compute OFI features at any cadence timestamp ≥ 15:50 ET.** With the current 30-min cadence
+   the last OFI-bearing cadence is 15:30 ET (whose ofi_30m window 15:00–15:30 is fully clean). 16:00 has
+   no forward intraday return anyway.
+3. **16:00 ET (closing cross) stays PERMANENTLY excluded** for intraday OFI even after prod fixes
+   close-hour aggregation — it's a distinct auction liquidity event, not continuous order flow.
+RATIONALE for the 15:50 boundary: the MOC imbalance period begins ~15:50 ET and the cross prints at
+16:00; 15:50 is the conservative line that avoids both. We lose only the final 10 min of OFI signal —
+the most auction-distorted, least-trustworthy slice.
+REFINEMENT (needs data): I only have 15:00 (93%) and 16:00 (14%). Requesting per-minute within-2%
+parity for 15:30 / 15:45 / 15:55 ET. **15:30 is material** — the overnight label AND the last intraday
+cadence both anchor there; if 15:30 parity is degraded that's a bigger problem than the close window.
+Once prod's close-hour fix lands, re-measure 15:50–15:59 and potentially reclaim those minutes (16:00
+stays out). Scope = OFI features only; price/bar features are far more robust (bars validated well) and
+are a separate, lower-concern question for QA.
+PILOT: the trigger-gated 50-name OFI pilot inherits this exclusion — all its cadence points anchor
+≤ 15:30 ET so no OFI window touches the bad minutes. Pre-registered here so the pilot never consumes them.
