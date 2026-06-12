@@ -895,3 +895,16 @@ BUG: teams routing mislabels original prod's messages as "team-lead" — risk of
 notes being read as managerial directives. Mitigation broadcast: task board is the
 authoritative record for rulings; verify with Manager when provenance is ambiguous.
 (Flag for Ben: teams-feature rough edges today — phantom respawn + sender mislabeling.)
+
+## 2026-06-12 — Manager: QA probe P1 — reconcile is ONE-DIRECTIONAL (exec lane); task #19
+qa-2 (QA respawn; now owns the QA lane) unprovoked probe: 6/12 basket intended 3L/3S,
+holds 2L/1S (KEEL/FLY/AMPX never filled) while reconciliation_log read ok:true all
+session — reconcile() flags only UNEXPECTED positions, blind to submitted-but-unfilled.
+Causes: fixed $0.01 NBBO cross non-marketable on low-priced/wide-spread names; orders_log
+terminal-blind (filled=0 all-time). The ETF failure mode (asymmetric check = false
+confidence) reproduced in the EXECUTION lane; fatal to M4 track-record validity if
+unfixed. Task #19 (exec): symmetric reconcile + spread-scaled cross + terminal status
+writeback; build now, deploy post-flatten; QA then encodes fill_reconciliation invariant.
+Coverage assigned: exec-side data integrity = exec implements/QA gates; post-restart
+bar-subscription swap VERIFICATION added to -2's runbook (count + ETF-absence spot-check).
+Noted Ben's new P-series process-milestone ladder in ROADMAP — will report both ladders.
