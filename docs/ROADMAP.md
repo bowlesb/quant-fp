@@ -172,12 +172,17 @@ milestone can REGRESS — the Manager re-checks these, not just the M-series, ev
 ---
 
 ## Current focus (the Manager updates this line every wake)
-**M1 DECLARED DONE 2026-06-12 (a day early) — driving toward M2 (order-flow at scale, 6/20).**
-Tonight's post-close batch (prod owns, ONE ingestor restart): #17 KLAC re-fetch, #11 structural
-stale-image fix, clean-membership pickup, then #12 backfill + #16 model train/review/swap (outside
-RTH) + QA's #15 first full-50-name settled-day parity proof. M2 work: sharding design with live
-coverage invariant, capture 50→500, #10 v1.2.0 OFI panel, #18 CA feed, OFI pilot ~6/26 (gated on
-#15). Standing reds under drill: bar-parity 1.14% (#14).
+**M2 in flight (sharded 512-name capture: built + reviewed, Monday pre-open deploy) — and the
+edge thesis is now SINGLE-PATH: M3 = OFI-or-bust on current data (decided 2026-06-12 eve).**
+The fork question is CLOSED: full-depth re-gate shows ret_5m+position does NOT survive on the
+liquid tier (liquid-50 IC 0.009, breakeven 0.82bps vs ~3bps measured median cost; only 11 names
+<1.4bps — signal and cheap names are DISJOINT; random-50 control 0.017 confirms partly
+liquidity-specific). OFI's job, precisely: lift breakeven ~1-2bps to unlock the 19-29-name
+liquid tier. Tempering: literature says OFI's predictive content is <3min → pilot MUST test
+native 5m/15m horizons; prior honestly 35%. Diversification if OFI nulls = explorer families
+(volume/vol-structure/shapes — note shapes/002 low-vol fade showing early liquid-tier promise)
++ sector/news axes (sector map landing via #8). Weekend: 5-mind pipeline grinding toward the
+Monday bar (every lens ≥3 completed runs + ranked leads + kill list).
 
 ---
 
