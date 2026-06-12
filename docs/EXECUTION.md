@@ -213,6 +213,10 @@ Built the measured cost curve the cost-gate battery only ASSUMED (cost_bps_onewa
   **REMOVAL CONDITION:** prod-architect confirms the KLAC ingestion fix is LIVE *and* QA's parity
   check shows KLAC stream==backfill. Then drop KLAC from the denylist default. If the Nx-sibling
   sweep finds other symbols with Nx stream ratios, add them here with the same condition.
+  NX-SWEEP RESULT (prod, 2026-06-12 pre-open): KLAC is the ONLY scale-anomalous symbol (median
+  ratio 10.0000; no other symbol with ≥30 overlap bars deviates >10%; sub-1% canonical-close
+  offsets deliberately don't qualify — they don't corrupt scores). => denylist is COMPLETE for the
+  open; no additions needed.
 
 ## Standing future items (open exec work, by gating milestone)
 - **[M4/M5 — mandatory before real money] Settled-day reconciliation vs broker statements.**
