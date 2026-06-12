@@ -146,6 +146,44 @@ parity-overlap, both being fixed).
   confirmation = MONDAY's open (re-run this probe at ~09:35 ET: 0 ETF symbols in stream bars after the
   open). Logged so the verification isn't assumed-complete.
 
+- **2026-06-13 #3 — Model-server LIVE prediction-serving path consistency (a part I'd never poked).**
+  The whole edge thesis routes through `predictions` (model-server writes ranked deciles each
+  cadence) yet I'd only ever validated the research panel + execution, never the SCORING BRIDGE.
+  Four adversarial checks on lgbm_fwd_30m_v1.0.0 (23,500 rows / 27 ts / 6-10–6-12):
+  (1) **rank↔score consistency: CLEAN** — 0 inversions / 23,500 (rank is 0-indexed, score-desc,
+  decile 0=top). FIRST cut showed 23,455 "mismatches" — that was MY 1-indexed `row_number()`
+  off-by-one, NOT a bug; caught it by inspecting actual rows before reporting (P1 evidence-first).
+  (2) **look-ahead: CLEAN** — 0 / 23,500 rows written before their ts; min lag +2m05s (model writes
+  a ts-labeled score only AFTER that minute closes), median 141s. PIT-honest at write time.
+  (3) **stale-reuse: CLEAN** — only 3.97% of consecutive-ts score pairs byte-identical (coincidental
+  ties, not wholesale batch copying).
+  (4) **score degeneracy — REFINED a stale ledger claim.** The old `preds-degenerate` P1 says
+  "~80% within 1bp of 0 → basket is tie-break noise." TRUE for the panel as a whole (only ~142
+  distinct scores / 776 names per batch, ~18%) BUT the degeneracy is confined to the DEAD MIDDLE:
+  deciles 2-7 (~460 names) span just -0.000027..-0.000002 (deciles 2/5/6 have exactly ONE distinct
+  score — every name tied), while the TRADED EXTREMES are genuinely differentiated — decile 0 (top
+  longs) 65% distinct up to +0.0088, decile 9 (top shorts) 48% distinct down to -0.0010 (~100× the
+  middle's range). **So the executor's actual basket (top/bottom deciles) is NOT tie-break noise on
+  this model — the middle being flat is the correct "no opinion" expression of a no-edge price model.**
+  This is a MORE PRECISE and less pessimistic picture than the blanket ledger claim for the *traded*
+  names. Net: serving path is internally sound (rank/PIT/no-reuse); degeneracy is real but middle-only.
+
+## Canonical-close residual characterization (2026-06-13, #14 driver — prod owns the fix, I quantify)
+
+Independent scoped re-drill (6/11 settled day, per-symbol, schema `bars_1m` source='stream' vs
+'backfill' on (symbol,ts)) confirms the 0.97% parity residual is purely the close-methodology
+offset, unchanged: ~10-15 large-caps each mismatch **~100% of their bars by a small CONSISTENT
+<1% amount** — SPYM 0.28%, ALB 0.26%, GPN 0.38%, NDAQ 0.36%, WMB 0.74%, AMT 0.96%, CB 0.31%,
+ADP 0.76%, BR 0.68%, DKS 0.56% (avg_rel per name, ~100% of bars, same direction every bar). This
+is the official/consolidated minute-close vs stream last-trade-minute-close difference, NOT random
+tick loss. KLAC still shows its 9.0× split artifact on 6/11 (pre-ex day) — correctly EXCLUDED from
+the gate by `_split_cutoffs()` (KLAC ex=6/12). **FORWARD-LOOKING M2 RISK (flagged to prod/modeller):**
+these same ~10-15 names will be in the top-500-by-ADV order-flow universe. If trade-agg/OFI uses
+last-trade prices at the minute boundary but the panel/labels reference consolidated close, the OFI
+sign on exactly these large-caps is computed against an inconsistent close reference — a 25-95bps
+per-name systematic basis. prod's #14 canonical-close decision should pick ONE close convention used
+identically by trade-agg, bars, and labels, or OFI inherits this basis on the most-liquid names.
+
 ## #15 full-50 coverage PRE-CONFIRMED (2026-06-12 live, before settle)
 
 Checked trade_agg_1m live coverage today: **all 50 names captured every hour 04:00→12:00 ET**
