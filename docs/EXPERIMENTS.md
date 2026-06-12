@@ -233,3 +233,44 @@ must ALSO probe lower-turnover intraday variants, not merely reproduce the 30m/o
 real edge here would most plausibly show up as "modest IC + low turnover," not "high IC." If that
 appears, it does NOT get called edge until it passes the full M3 gate (NW t>3, clean canary,
 positive net-of-cost, survives survivorship neutralization, multiple-testing deflated).
+
+### PRE-REGISTRATION ADDENDUM (Modeller, 2026-06-12) — wider clean universe + recomputed labels
+
+Manager relayed two facts from prod-architect's rebuild. Folding them in WHILE STILL BLIND to results.
+
+**The clean panel differs from the dirty one in TWO directions, not one** (~885-900 equities/date,
+not the ~790 I assumed): 213 funds REMOVED **and** ~160 real equities/date ADDED that the 1000-cap
+had displaced. Those added names are BY CONSTRUCTION lower-ADV than the funds they replace.
+6. **Added lower-ADV names — IC:** ambiguous and probably modest. More genuine single-name dispersion
+   could RAISE within-ts IC (more nameable alpha), but lower-ADV names have noisier prices/features,
+   which adds cross-sectional noise. **PREDICTION — small net effect on IC magnitude; I do NOT expect
+   the added names to manufacture a clean intraday edge.**
+7. **Added lower-ADV names — COST (the decisive one):** lower-ADV ⇒ WIDER spreads. The battery charges
+   a flat 2bps one-way; for the newly-included tail that assumption is now OPTIMISTIC. The L/S basket
+   trades top/bottom deciles (~89 names/leg), and volatile lower-ADV names are MORE likely to sit in
+   those extremes ⇒ higher real cost on exactly the names we trade. **PREDICTION — net-of-cost for 30m
+   gets HARDER, not easier; "real but uneconomic at turnover" is reinforced.** (Flag: a future battery
+   variant should cost per-name by ADV/spread, not flat 2bps — the flat charge flatters the result.)
+8. **Breadth ⇒ t-stat MECHANICAL inflation (tripwire):** ~885-900 names/ts gives less-noisy per-ts IC
+   estimates than the 1000-cap's effective breadth, so the Newey-West t can RISE even if true IC is
+   unchanged. **DO NOT read a higher t as stronger edge.** Judge on IC MAGNITUDE vs the canary AND on
+   breakeven_cost_bps — never on t alone. A t that rises while IC and breakeven stay flat = breadth, not alpha.
+9. **Recomputed labels (all 3 horizons) — demean baseline shifts:** labels are excess-vs-universe-median,
+   so changing membership changes every value. Funds (esp. leveraged/inverse) had extreme returns that
+   pulled the median/tails; removing them makes the demean baseline more representative ⇒ the label
+   distribution should TIGHTEN (less fat-tailed). **PREDICTION — overnight's fat-tail/earnings-gap blow-up
+   eases slightly, but earnings gaps and the SURVIVORSHIP component remain; overnight timing alpha still ~0.**
+
+**Stale-label tripwire (verified mechanics):** `labels_pkey = (symbol, ts, horizon)`, 0 dup rows today,
+so a recompute that DELETE-then-inserts (or ON CONFLICT DO UPDATE) replaces cleanly. The battery's
+`load_panel` runs a fresh SQL JOIN on every invocation — it caches NOTHING — and the JOIN is
+feature_vectors-DRIVEN (filtered to the clean set_version), so any stale label rows for DROPPED names
+are inert (no fv row to join). The ONE real risk: if the recompute only INSERTS the newly-added names
+and does NOT overwrite the EXISTING names' values, those existing rows keep their dirty-universe-demeaned
+values = silent contamination. **Pre-run check I will run before trusting the clean battery:**
+`SELECT horizon, min(computed_at), max(computed_at) FROM labels GROUP BY 1` — min(computed_at) must be
+AFTER the rebuild timestamp for ALL three horizons (proves every value was recomputed, not just new rows).
+
+**Net effect on the PRIMARY prediction:** UNCHANGED / mildly reinforced (~70%). The cost asymmetry from
+the added lower-ADV names pushes AGAINST a tradeable 30m edge, and the tighter labels don't rescue
+overnight from survivorship. The result that would still flip it is the same low-turnover tail flagged above.
