@@ -62,9 +62,13 @@ def load_liquid_reversal_panel(conn: psycopg.Connection) -> dict[str, list]:
     with conn.cursor() as cur:
         cur.execute(
             """
+            -- Liquidity tier from a single recent month's ADV (cheap window) — a static name
+            -- property; scoped to avoid the full-history bars_1m scan that contends with battery loads.
             WITH dv AS (
                 SELECT symbol, avg(close * volume) AS adv
-                FROM bars_1m WHERE source='backfill' GROUP BY symbol
+                FROM bars_1m
+                WHERE source='backfill' AND ts::date BETWEEN '2026-05-01' AND '2026-05-31'
+                GROUP BY symbol
             ),
             tier AS (SELECT symbol, ntile(4) OVER (ORDER BY adv) AS liq_q FROM dv)
             SELECT fv.ts, fv.symbol, fv.vector[%s] AS ret_5m, l.value AS y
