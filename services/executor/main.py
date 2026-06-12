@@ -305,7 +305,10 @@ def sync_orders_and_fills(conn: psycopg.Connection, orders: list) -> None:
             cur.execute("UPDATE orders_log SET status=%s, filled_qty=%s WHERE alpaca_order_id=%s",
                         (order.status.value, filled_qty, str(order.id)))
             if order.status.value in TERMINAL_ORDER_STATES and filled_qty > 0 and order.filled_avg_price:
-                fill_ts = order.filled_at or order.canceled_at or order.updated_at
+                # submitted_at (not updated_at) is the IMMUTABLE fallback: a partial that ends
+                # done_for_day/expired has neither filled_at nor canceled_at, and updated_at mutates
+                # on any broker touch -> two syncs -> two fills_log rows -> double-counted P&L (qa-2).
+                fill_ts = order.filled_at or order.canceled_at or order.submitted_at
                 cur.execute(
                     "INSERT INTO fills_log (alpaca_order_id, fill_ts, qty, price, symbol, side) "
                     "VALUES (%s,%s,%s,%s,%s,%s) "
@@ -341,17 +344,20 @@ def reconcile(conn: psycopg.Connection, positions: list, orders: list, today: ob
       - orphaned_open: an OPEN broker order whose coid isn't ours (e.g. a stale prior-day order
         reserving BP) -> warned + recorded (not ok-breaking, so the EOD flatten's own transient
         close orders don't flap ok);
-      - basket neutrality: intended vs realized L/S counts, so lopsidedness is visible.
+      - basket neutrality: intended vs realized L/S counts AND realized per-side dollar notional,
+        so both count- and exposure-lopsidedness are visible.
     The rich detail lets QA's per-day fill_reconciliation invariant assert submitted == filled+accounted."""
     broker = {p.symbol: round(float(p.qty), 4) for p in positions}
+    fill_px = {str(order.id): float(order.filled_avg_price) for order in orders if order.filled_avg_price}
     with conn.cursor() as cur:
-        cur.execute("SELECT client_order_id, symbol, side, qty, status, COALESCE(filled_qty, 0) "
+        cur.execute("SELECT client_order_id, alpaca_order_id, symbol, side, qty, status, COALESCE(filled_qty, 0) "
                     "FROM orders_log WHERE intended_at::date=%s AND mode=%s AND alpaca_order_id IS NOT NULL",
                     (today, MODE))
         rows = cur.fetchall()
     submitted = [{"coid": coid, "symbol": symbol, "side": side, "qty": float(qty),
-                  "status": status, "filled": float(filled)}
-                 for coid, symbol, side, qty, status, filled in rows]
+                  "status": status, "filled": float(filled),
+                  "fill_price": (fill_px[aid] if aid in fill_px else 0.0)}
+                 for coid, aid, symbol, side, qty, status, filled in rows]
     our_coids = {leg["coid"] for leg in submitted}
     expected_syms = {leg["symbol"] for leg in submitted}
     unexpected = sorted(symbol for symbol in broker if symbol not in expected_syms)
@@ -365,10 +371,17 @@ def reconcile(conn: psycopg.Connection, positions: list, orders: list, today: ob
     filled_long = sum(1 for leg in submitted if leg["side"] == "buy" and leg["filled"] > 0)
     filled_short = sum(1 for leg in submitted if leg["side"] == "sell" and leg["filled"] > 0)
     basket_neutral = filled_long == filled_short
+    # Realized DOLLAR exposure per side (filled_qty x avg fill price) — the count above passes a
+    # 1-share long vs 100-share short as "neutral" while the book is dollar-skewed (qa-2). The
+    # per-day fill_reconciliation invariant asserts realized neutrality on these, post-flatten.
+    filled_long_notional = round(sum(leg["filled"] * leg["fill_price"] for leg in submitted if leg["side"] == "buy"), 2)
+    filled_short_notional = round(sum(leg["filled"] * leg["fill_price"] for leg in submitted if leg["side"] == "sell"), 2)
     ok = not unexpected and not rejected
     detail = {"mode": "dry_run" if DRY_RUN else MODE, "broker": broker, "unexpected": unexpected,
               "n_submitted": len(submitted), "intended_long": intended_long, "intended_short": intended_short,
               "filled_long": filled_long, "filled_short": filled_short, "basket_neutral": basket_neutral,
+              "filled_long_notional": filled_long_notional, "filled_short_notional": filled_short_notional,
+              "net_notional": round(filled_long_notional - filled_short_notional, 2),
               "partial": partial, "unfilled": unfilled, "rejected": rejected, "orphaned_open": orphaned}
     with conn.cursor() as cur:
         cur.execute("INSERT INTO reconciliation_log (ts, ok, detail) VALUES (now(), %s, %s)",
