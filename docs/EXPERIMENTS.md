@@ -2085,3 +2085,32 @@ WHAT CHANGES / WHAT DOESN'T:
 LEAD NOTE: this is why the Manager's "settle it before it hardens into lore" instinct was right — the
 ret_5m framing was about to shape the entire OFI bet on a mis-attribution. vwap_dev mean-reversion is the
 real thing to refine/beat.
+| 2026-06-12T23:00:31+00:00 | W12_ret5m_plus_pos_30m_rank | fwd_30m | rank | 4 | 4840765 | 0.03141 | 22.627 | 0.00152 | ret_5m + position group at 30m RANK (trading-aligned). Best-available 30m feature set under the rank loss — does the combined carrier set push breakeven toward the ~2bps cost line? |
+
+## ★ OPEN-CADENCE RE-CHECK (Manager ruling #2) — tradeable-entry COLLAPSES it → recommend EXCLUDE (Lead, 2026-06-12)
+
+The Manager correctly applied my own new tradeable-entry rule to my own open-cadence recommendation: the
+gap_from_open open-signal was measured vs labels anchored at the SAME 09:30 cadence (un-tradeable entry),
+the exact bug class the gap-fade kill just exposed. RE-MEASURED with a tradeable entry:
+
+  gap_from_open within-date rank-IC vs:
+    09:30->close (LOOK-AHEAD entry):  IC -0.0222  t -2.9   (real)
+    10:00->close (TRADEABLE entry):   IC -0.0061  t -0.8   (COLLAPSES to noise)
+
+VERDICT: the open-regime signal does NOT survive a tradeable entry — it collapses from t -2.9 to t -0.8,
+same as the gap-fade. The open cadence's apparent strength was the un-tradeable first-minutes fade. So
+KEEPING the open cadence would have the model rank on gap_from_open, whose edge is UN-CAPTURABLE.
+
+RECOMMENDATION FLIPPED → (a) EXCLUDE the 09:30 open cadence (min_of_day=570) from the trained+traded panel.
+Rationale: at the open every intraday-RETURN feature is NaN AND the only feature that discriminates there
+(gap_from_open) carries no TRADEABLE signal. Trading the open cadence = ranking ~450K name-days on a
+non-tradeable feature. Excluding it removes a degraded, un-tradeable cross-section from train+serve. (The
+regime-split-head idea from my first recommendation is RETRACTED — there's no tradeable open signal to give
+its own head.) Research: the battery should re-run EXCLUDING the open cadence as a robustness pass (explorer-
+data already pre-registered this as the NaN-flag falsifier — fold them together). LIVE: exec stops trading
+the 09:30 cadence basket (needs exec sign-off Monday; until then it's ranking on a non-tradeable feature =
+churning cost for no edge — mild priority to halt).
+
+SECOND TIME the tradeable-entry rule killed an apparent open-anchored edge today (gap-fade + this). Strong
+validation that the rule belongs in the permanent checklist. The Manager's "apply your own rule to your own
+recommendation" was exactly right — I'd cited the look-ahead IC as the reason to keep it.
