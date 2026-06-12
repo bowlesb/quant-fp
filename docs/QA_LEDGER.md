@@ -32,16 +32,57 @@ even if reported before. Forward-looking: anticipate what breaks given where we'
 - **I5 — Values/tradeability:** no Inf; bounded outliers (vol_z fat tail noted);
   predictions not score-degenerate (distinct scores, no tie-break-decided basket).
 
+## Automated invariant suite (2026-06-12) — invariants are now CHECKS, not prose
+
+The standing invariants above are now an automated, fail-loud suite. **This is the durable
+answer to the lesson that defines this role:** vigilance no longer depends on any agent
+noticing — a violation fails CI with a clear message.
+
+- **`scripts/qa_invariants.py`** — CI-able runner. `python3 scripts/qa_invariants.py`
+  (exit 1 on any FAIL), `--list`, `--only a,b`. DB access via the documented
+  `docker compose exec psql`; override with env `QA_PSQL` for in-network/CI runs.
+- **`tests/test_invariants.py`** — the same checks as pytest (one source of truth); SKIPs when
+  the DB is unreachable so the clean `make test` container stays green.
+- **`tests/test_session_date.py`** — near-midnight-UTC ET-session-date regression (task #13).
+- **`tests/fixtures/known_funds.txt`** — frozen 5,284-name fund denylist (independent gate input).
+
+| invariant | maps to | gates |
+|-----------|---------|-------|
+| `universe_is_equities_only` | composition | latest universe has 0 is_etf_like members. **NECESSARY-NOT-SUFFICIENT** — shares the builder's regex, so tautologically green on a fresh build; guards only against the builder dropping the classifier. |
+| `universe_no_known_funds` | composition | **INDEPENDENT gate** — 0 members on the frozen denylist (catches re-introduction even if the regex is weakened) + warns on a separately-maintained leverage/inverse token heuristic. |
+| `universe_sessions_valid` | I1/calendar | no weekend member trade_dates; latest member date doesn't lead the latest ingested ET session (UTC-vs-ET session-date bug, task #13). |
+| `calendar_et_correct` | I1 | ACTIVE set: minute_of_day/day_of_week == ET wall-clock; all RTH. Legacy sets reported, not gated. |
+| `bars_integrity` | values | OHLC/minute-grid sanity (extended-hours bars are expected, reported not failed). |
+| `backfill_realtime_parity` | I2 | stream vs backfill close agree within 0.2% on overlap (≤1% mismatch). |
+| `trade_agg_parity` | I2b | trade-agg stream vs backfill ≥98% within 2% on overlap (SKIPs if no overlap). |
+| `pit_universe_membership` | I3 | ACTIVE set: every (symbol,date) feature row is an in-universe member that date. |
+| `warmup_coverage` | I4 | ACTIVE set: no ragged-warmup / dead feature. Legacy sets reported, not gated. |
+| `no_inf_no_degenerate` | I5 | no Inf; predictions not score-degenerate; per-ts labels demeaned (avg, not max). |
+
+**Set scoping:** calendar/warmup/pit gate the ACTIVE set (`QA_ACTIVE_SET` or the highest
+set_version present; currently **v1.1.1**). Legacy sets (v1.0.0, the frozen-dirty v1.1.0
+fixture) are reported informationally — target one with `QA_ACTIVE_SET=v1.1.0` to reproduce its
+historical FAIL (the suite's own regression fixture).
+
+**First full-run evidence (2026-06-12, pre-panel-rebuild-completion):** the
+`universe_is_equities_only` check FAILED on the dirty 209-fund universe and now PASSES (0/1000)
+on the clean rebuild — the before/after proof. The suite also localized the legacy dirt:
+UTC-calendar leakage is confined to v1.0.0 (32,220 rows); v1.1.0 and v1.1.1 are ET-clean. The
+117k-row PIT leak is 96% (209/217) the ETF symbols — it resolves when the clean panel + history
+land. `backfill_realtime_parity` read borderline 1.14% mismatch (just over the 1% gate) — see
+below.
+
 ## Open concerns — severity-ranked (update status each wake)
 
 | sev | id | concern | status |
 |-----|----|---------|--------|
-| P0 | etf-contamination | ~207 of 1000 universe members (~21%) are ETFs/ETNs/leveraged-inverse/VIX-futures funds (SOXL, TQQQ, SQQQ, TNA, UVXY, VXX, UPRO, SPXU, TSLL...), NOT single-name equities. They reached the feature panel (1.59M feature_vector rows / 207 symbols) and were RANKED cross-sectionally against stocks. The price-only "no edge" verdict was drawn on this contaminated cross-section -> NOT trustworthy until re-run clean. **ROOT CAUSE:** the ETF filter `is_etf_like` EXISTS and is wired into the executor (main.py:112) but is NEVER called in `quantlib.universe.select_universe` — the function that builds universe_membership. Filter applied at order layer, skipped at research/universe layer (asymmetry hid it: live trading clean, offline panel polluted). **REAL FIX:** thread asset name into SymbolStats + filter `is_etf_like` in select_universe (clean on every rebuild) — not the one-off SQL exclusion (band-aid). Classifier + clean scaling list staged in scripts/etf_exclusion.sql. | OPEN — SUPERVISED open: fix select_universe, rebuild clean panel, RE-RUN price-only cost-gated battery, THEN order-flow |
-| P0 | UTC-today | today's (2026-06-10) historical panel has ~4477 UTC-calendar rows reaching training_data (insert-not-replace) | OPEN — fix = rebuild DELETE-then-insert + purge |
-| P0 | UTC-stream | feature-computer wrote UTC-calendar `stream` rows (stale pre-DST code) | OPEN — purge + add serving-path ET assertion |
-| P1 | warmup-unmonitored | per-feature warmup/coverage was UNMONITORED and the build has no warmup guard (momentum worked only because the panel starts 22 trading days after bars start — luck, not enforced) | OPEN — add NaN-by-feature-by-date probe + build-time warmup assert |
+| P1 | parity-1.14 | `backfill_realtime_parity` reads 1.14% of 678k overlapping stream↔backfill bars disagree >0.2% on close (just over the 1% gate). Either mild live/backfill divergence or a slightly-too-tight tolerance. Needs a which-symbols/which-dates drill (is it a few names, late ticks, or split/adjust edges?) before trusting bar-derived features at scale. | OPEN — automated (fail-loud); investigate drivers, then re-tune gate or fix divergence |
+| P2 | denylist-regex-dependence | The frozen known-fund denylist (5,284) and `is_etf_like` are both NAME-regex derived, so a fund whose name evades the regex slips BOTH the builder and the denylist. True independence needs an external issuer/share-class metadata source (Alpaca classes stock & ETF alike as us_equity — no broker-side split). | OPEN — tracked upgrade: wire an external fund/share-class signal; until then the denylist is necessary-not-sufficient |
+| P0 | etf-contamination | ~207 of 1000 universe members (~21%) are ETFs/ETNs/leveraged-inverse/VIX-futures funds (SOXL, TQQQ, SQQQ, TNA, UVXY, VXX, UPRO, SPXU, TSLL...), NOT single-name equities. They reached the feature panel (1.59M feature_vector rows / 207 symbols) and were RANKED cross-sectionally against stocks. The price-only "no edge" verdict was drawn on this contaminated cross-section -> NOT trustworthy until re-run clean. **ROOT CAUSE:** the ETF filter `is_etf_like` EXISTS and is wired into the executor (main.py:112) but is NEVER called in `quantlib.universe.select_universe` — the function that builds universe_membership. Filter applied at order layer, skipped at research/universe layer (asymmetry hid it: live trading clean, offline panel polluted). **REAL FIX:** thread asset name into SymbolStats + filter `is_etf_like` in select_universe (clean on every rebuild) — not the one-off SQL exclusion (band-aid). Classifier + clean scaling list staged in scripts/etf_exclusion.sql. | PARTIAL — select_universe fixed (814e548); universe rebuilt clean & now **AUTOMATED-GREEN on the live universe** (`universe_is_equities_only` + independent `universe_no_known_funds`, 0/1000 at 2026-06-12, was 209). Remaining: clean panel (v1.1.1) + full history (tasks #2/#12), then RE-RUN the battery (task #4). |
+| P1 | UTC-calendar-legacy | UTC-calendar leakage now AUTOMATED (`calendar_et_correct`) and LOCALIZED: 30,970 v1.0.0-historical + 1,250 v1.0.0-stream rows; **active v1.1.0 and v1.1.1 are 0/ET-clean.** The serving path is clean; the dirt is confined to the deprecated v1.0.0 set. | OPEN-LOW — purge v1.0.0 to clear the legacy red; active sets gated green |
+| P1 | warmup-unmonitored | now AUTOMATED (`warmup_coverage`): ragged-warmup + dead-feature detector, gated on the active set. Confirms v1.0.0's 5 micro features are 99.5% NaN (dead); active set carries none. | MITIGATED — monitored fail-loud; build-time warmup assert still desirable (defense in depth) |
 | P1 | preds-degenerate | predictions ~80% within 1bp of 0 → basket was tie-break noise | MITIGATED — executor degeneracy guard added; preds still non-tradeable |
-| P2 | pit-leak | ~14 non-member (derived/leveraged) rows leak into training_data | OPEN — hard-filter members + exclude derived tickers |
+| P1 | pit-leak | now AUTOMATED (`pit_universe_membership`): the leak is far bigger than the earlier ~14 estimate — **117,047 (symbol,date) feature rows in v1.1.0 are not in-universe members for that date, across 217 symbols of which 209 (96%) are the ETFs.** The panel was built over a current symbol set across all history, not strict PIT membership. Resolves when the clean v1.1.1 panel + history land (tasks #2/#12). | OPEN — gated on active set; will go green when v1.1.1 history is PIT-correct |
 | P2 | view-fanout | training_data 2× horizon fan-out | LOW — trainer filters horizon; harden the view |
 
 ## Resolved (kept for history)
