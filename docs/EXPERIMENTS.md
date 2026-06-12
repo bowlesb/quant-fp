@@ -406,3 +406,25 @@ stays out). Scope = OFI features only; price/bar features are far more robust (b
 are a separate, lower-concern question for QA.
 PILOT: the trigger-gated 50-name OFI pilot inherits this exclusion — all its cadence points anchor
 ≤ 15:30 ET so no OFI window touches the bad minutes. Pre-registered here so the pilot never consumes them.
+
+## OFI PILOT — trigger correction + at-scale-parity prerequisite (Modeller, 2026-06-12)
+
+QA's 15:30 answer (b137128): 15:30/15:45/15:55 ET = 100%/100% within-2%/sign — the overnight-label
+anchor is CLEAN (overnight verdict is NOT parity-tainted), and my ≥15:50 OFI exclusion line is confirmed
+safe (do not move earlier; 16:00 stays out — and backfill trade-agg is RTH-bounded so post-close OFI has
+no validation reference at all, reinforcing the hard close-stop). NOTE: this concerns the LIVE stream;
+the M1 price-only battery is all backfill-sourced and was never affected.
+
+CAVEAT that revises the pilot (NOT M1): QA found the proof was thinner than labeled — the live stream
+captured only ~10 of 50 names until the 10→50 subscription expansion deployed ~15:51 ET on 6/11. So the
+parity numbers are a ~10-name FULL-DAY proof + a ~10-minute 50-name window. Sign quality on captured
+names is solid (the hard part), but AT-SCALE (50-name) parity is NOT yet proven.
+
+REVISIONS to the trigger-gated OFI pilot:
+- **NEW prerequisite (d): at-scale 50-name trade-agg parity PROVEN on a settled session** (QA invariant)
+  before any pilot result is trusted — sign quality is proven on ~10 names, not 50.
+- **CORRECTED trigger clock:** the "≥10 OFI days" count starts from the first CONFIRMED full-session
+  50-name capture day (~6/12), NOT from 6/10. Earliest pilot ≈ 6/26 (was ~6/24). Don't count the
+  partial-capture days.
+- Unchanged: needs v1.2.0 feature_vectors built (task #10), experimenter fixed (done), and the ≥15:50
+  OFI exclusion baked into the shared featurestore. Still a curiosity read at 50 names, never a verdict.
