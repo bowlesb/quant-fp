@@ -50,10 +50,22 @@ Per shard, each minute: assert `symbols_with_a_tick_this_minute ⊇ subscribed_s
 to Prometheus; ALARM when a subscribed liquid name goes silent for >K minutes during RTH (the
 capture-regression signal qa-2 watches). This is the acceptance gate at each scale step.
 
-## 500-name selection (coordinate with modeller-2)
-Top-500 by ADV$ from the CURRENT clean universe (the same is_etf_like-filtered equity set #1 produced).
-modeller-2 owns whether it's pure ADV or ADV-with-a-sector-spread for cross-sectional breadth — that's
-a research-relevance call. Prod provides the ranked list; modeller-2 signs off on the 500 cut.
+## 500-name selection — DECIDED (modeller-2, 2026-06-12)
+**Pure top-by-ADV from the clean is_etf_like-filtered universe** (modeller-2's call; ADV range rank-1 MU
+$47.3B → rank-500 QXO $281M; clean liquidity floor that supports OFI). The LIVE mechanism derives this
+DYNAMICALLY from universe_membership by ADV at subscription build time (self-maintains as the universe
+churns) — NOT a static committed list; modeller-2's /tmp CSV is the reference snapshot.
+- **Soft boundary → size the cut for EVEN sharding, not exactly 500.** Rank 501 (IR $281.0M) ≈ rank 500
+  (QXO $281.2M), so ±20 names costs ~nothing in liquidity. WORKING COUNT: **512 names / 4 shards =
+  128/shard** (clean power-of-two; +12 vs 500, within tolerance). Final count tracks the Manager's
+  shard-count answer.
+- **⭐ Continuity (modeller-2): keep QQQ/SPY as a SEPARATE market-context stream.** Of the current 52
+  streamed OF names, 50 are equities (ALL in the top-500 — no OF name dropped by the cut) + QQQ/SPY
+  (index ETFs, correctly excluded from the equities universe). When the sharded subscription is rebuilt
+  off the EQUITIES universe, QQQ/SPY would silently VANISH — but they're a useful market-beta reference
+  for features (never traded). ADOPT: a tiny separate "market-context" subscription (QQQ/SPY/IWM) on the
+  reader, routed to its own light path, kept OUT of the equities OFI panel. Prevents silent loss of the
+  market-context feed at the rebuild.
 
 ## Build plan (Tier-1 PR — the policy's first real one)
 1. Verify the Alpaca connection limit (weekend, careful off-hours test).
