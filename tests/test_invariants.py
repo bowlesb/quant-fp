@@ -55,6 +55,13 @@ def test_live_feature_coverage_is_registered() -> None:
     assert "live_feature_coverage" in qa.INVARIANTS
 
 
+def test_capture_set_composition_is_registered() -> None:
+    # The capture-set ETF-leak guard must exist by this exact name (modeller task #5; the gate
+    # that confirms the 512 OFI tier is equities-only at the Monday deploy). FAST-tier.
+    assert "capture_set_composition" in qa.INVARIANTS
+    assert "capture_set_composition" in qa.FAST_INVARIANTS
+
+
 def test_fill_reconciliation_is_registered() -> None:
     # The live-basket execution gate must exist by this exact name (exec-recon-one-directional).
     assert "fill_reconciliation" in qa.INVARIANTS

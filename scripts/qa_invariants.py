@@ -15,6 +15,10 @@ Invariants (map to docs/QA_LEDGER.md):
                                fund denylist (tests/fixtures/known_funds.txt) + a separately-
                                maintained leverage/inverse token heuristic (warn). This is the
                                anti-tautology check that can catch a re-introduced fund.
+  capture_set_composition    — composition: the trade/quote capture set's non-equity-universe
+                               members are EXACTLY the declared context-ETF allowlist (SPY/QQQ/
+                               IWM); a NEW non-equity in the order-flow tier fails loud (guards
+                               the 512 OFI deploy). Capture is NOT equities-only by design.
   universe_sessions_valid    — I1/calendar: no weekend member trade_dates; latest member date
                                doesn't lead the latest ingested ET session (UTC-vs-ET bug).
   calendar_et_correct        — I1: stored minute_of_day/day_of_week equal true ET wall-clock and
@@ -106,6 +110,20 @@ STEADY_STATE_WARMUP_EXCLUDE_MIN = (
     60  # skip the first 60 min/session (ret_60m by-construction NaN)
 )
 RTH_OPEN_MIN_OF_DAY = 570  # 09:30 ET
+# Declared market-context ETFs intentionally in the trade/quote CAPTURE set (bars-level market
+# beta), NOT equity-universe members (modeller flagged 2026-06-13 / task #5: SPY+QQQ showed up as
+# the tightest-spread "names"). The capture set is therefore NOT equities-only; any equity cross-
+# section over it must drop these. capture_set_composition asserts the capture set's non-universe
+# members are EXACTLY this allowlist — a NEW non-equity (e.g. a leveraged ETF leaking into the 512
+# OFI tier at the Monday deploy) fails loud. Env override for the IWM-or-others case.
+CONTEXT_ETF_ALLOWLIST: set[str] = {
+    s.strip().upper()
+    for s in os.environ.get("QA_CONTEXT_ETFS", "SPY,QQQ,IWM").split(",")
+    if s.strip()
+}
+CAPTURE_LOOKBACK_DAYS = (
+    7  # window of recent stream trade-aggs that defines "the capture set"
+)
 PRED_MIN_DISTINCT_SCORES = (
     50  # latest model_version must have at least this many scores
 )
@@ -559,6 +577,56 @@ def check_universe_no_known_funds() -> Result:
         "PASS",
         f"0/{len(rows)} members at {latest} are on the frozen known-fund denylist "
         f"(independent of the builder's classifier)",
+        details,
+    )
+
+
+def check_capture_set_composition() -> Result:
+    """The trade/quote CAPTURE set is NOT equities-only by design — it carries declared
+    market-context ETFs (SPY/QQQ/IWM) for market beta. This asserts its non-equity-universe
+    members are EXACTLY the declared CONTEXT_ETF_ALLOWLIST, so:
+      (1) no analysis silently treats the capture set as equities-only (modeller task #5: SPY+QQQ
+          were the two tightest-spread 'names' and had to be hand-dropped from the cost analysis);
+      (2) a NEW non-equity leaking into capture fails loud — the guard that matters at Monday's
+          512-name OFI deploy, where the OFI tier MUST be top-ADV equities, not the context-ETF-
+          inclusive bars set. A leveraged/sector ETF in trade_agg would poison any OFI cross-section.
+    Capture set = distinct symbols with source='stream' trade_agg over the last CAPTURE_LOOKBACK_DAYS;
+    compared to the latest in_universe equity membership. (IWM is allowlisted even if not currently
+    captured — declared-intent, not presence.)"""
+    latest = scalar("SELECT max(trade_date) FROM universe_membership")
+    rows = sql(
+        "WITH cap AS ("
+        "  SELECT DISTINCT symbol FROM trade_agg_1m "
+        f"  WHERE source='stream' AND ts > now() - interval '{CAPTURE_LOOKBACK_DAYS} days'"
+        "), uni AS ("
+        "  SELECT DISTINCT symbol FROM universe_membership "
+        f"  WHERE trade_date='{latest}' AND in_universe"
+        ") "
+        "SELECT c.symbol FROM cap c LEFT JOIN uni u USING (symbol) "
+        "WHERE u.symbol IS NULL ORDER BY c.symbol"
+    )
+    non_members = {r[0] for r in rows}
+    unexpected = sorted(non_members - CONTEXT_ETF_ALLOWLIST)
+    present_context = sorted(non_members & CONTEXT_ETF_ALLOWLIST)
+    details = [
+        f"capture non-universe members: {sorted(non_members) or '(none)'}",
+        f"declared context-ETF allowlist: {sorted(CONTEXT_ETF_ALLOWLIST)}",
+        f"present context ETFs (expected, must be dropped from equity cross-sections): {present_context or '(none)'}",
+    ]
+    if unexpected:
+        return Result(
+            "capture_set_composition",
+            "FAIL",
+            f"{len(unexpected)} UNEXPECTED non-equity symbol(s) in the trade/quote capture set "
+            f"(not equity-universe members, not declared context ETFs): {unexpected} — an ETF/"
+            f"non-equity leaked into the order-flow tier (check the 512 OFI selection)",
+            details,
+        )
+    return Result(
+        "capture_set_composition",
+        "PASS",
+        f"capture set's non-equity members are exactly the declared context ETFs "
+        f"({present_context or 'none present'}); no unexpected non-equity in the order-flow tier",
         details,
     )
 
@@ -1358,6 +1426,7 @@ def update_coverage_baseline() -> None:
 INVARIANTS: dict[str, Callable[[], Result]] = {
     "universe_is_equities_only": check_universe_is_equities_only,
     "universe_no_known_funds": check_universe_no_known_funds,
+    "capture_set_composition": check_capture_set_composition,
     "universe_sessions_valid": check_universe_sessions_valid,
     "calendar_et_correct": check_calendar_et_correct,
     "bars_integrity": check_bars_integrity,
@@ -1378,6 +1447,7 @@ INVARIANTS: dict[str, Callable[[], Result]] = {
 FAST_INVARIANTS: set[str] = {
     "universe_is_equities_only",
     "universe_no_known_funds",
+    "capture_set_composition",
     "universe_sessions_valid",
     "live_feature_coverage",
     "fill_reconciliation",
