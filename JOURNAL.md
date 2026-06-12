@@ -1073,3 +1073,15 @@ deploy verification covers the SYSTEM; both mandatory, neither substitutes.
 gitignore generated outputs = #11 completion requirement.
 KLAC lift PRE-CONFIRMED + board-reflected (#17 metadata); exec drops manual entry on
 their re-confirm; double-excluded meanwhile.
+
+## 2026-06-12 (post-close) — Manager: batch core DONE — locks fixed, fleet rebuilt, clean subscription live
+Prod-2: STEP 0 verified (max_locks 2048; blocked 1227-chunk join now 10.02s; experimenter
+auto-reconnected, queue RESUMED — never-idle held through the restart). rebuild-batch: 7
+services on baked SHA dbab3fc, #11 gate auto-asserted running==intended IN PRODUCTION.
+Ingestor's ONE restart spent: subscribed 1000 CLEAN equities (ETF spot-check zero), 50
+trade/quote, SIP, clean. #11 -dirty check re-scoped to image-relevant source (the
+never-idle grind's continuous ledger/results writes no longer poison builds) — QA asked
+to independently eyeball the exclusion list. In flight: #12 backfill long tail; exec
+deploying executor (#19 + ex-date guard + ratified KLAC lift). QA unleashed on post-
+restart suite + live_feature_coverage baseline + #15 settled proof + unprovoked probe.
+Board: tasks #3, #12 completed.
