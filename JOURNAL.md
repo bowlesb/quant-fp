@@ -845,3 +845,14 @@ GREEN + M1 declared. Task #17: adjustment-consistent backfill + per-name artifac
 verification + QA >3x-jump invariant (corp-action cross-checked). QA ledger corrected
 (detection right, direction wrong). Denylist stays (live mixed-basis garbage either
 way); removal condition now points at #17.
+
+## 2026-06-12 (open) — Manager: #6 VERIFIED LIVE at the open — all green (6f38dd8)
+Stale->fresh transition worked (idle-rejected overnight, submitted on first 13:30Z
+cadence, age ~3min): 3L KEEL/SATS/UUUU, 3S AMPX/FLY/W. First live arrival_src='nbbo'
+slippage rows confirmed (W: fill 80.00 vs arrival_mid 78.86; n=1 -> drift noise, NOT
+cost signal yet; capture infra proven). KLAC denylist BINDING (scored decile-9 short
+candidate, 0 orders). Scores non-degenerate (782 names, sep 0.0134). KLAC stream now
+~238 post-split (10:1 took effect as predicted; denylist stays until #17 re-fetch).
+Upstream #6 de-facto green (membership existed, model-server fired). Task #6 CLOSED.
+Modeller still frozen on teams permission dialog (Ben to unblock); M1 declaration
+held on the 11-name sensitivity pass only.
