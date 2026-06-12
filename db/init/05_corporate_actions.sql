@@ -24,3 +24,29 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
 
 -- Executor ex-date guard + backfill re-fetch trigger both scan recent actions by date.
 CREATE INDEX IF NOT EXISTS corporate_actions_ex_date_idx ON corporate_actions (ex_date);
+
+-- PIT-correct consumer view for Family A ex-div/CA features (Modeller-2's #18 consumer spec).
+-- Normalized shape keyed (symbol, ex_date): clean action_type, per-share cash_amount, split_ratio
+-- (forward factor = new_rate/old_rate), and a BEST-EFFORT announcement_date pulled from the raw
+-- payload (Alpaca's declaration/process date — may be NULL; a missing key degrades to NULL, which the
+-- consumer accepts and falls back to ex_date for realized flags). ex_date is a calendar fact → no
+-- live/backfill skew. PIT DISCIPLINE IS THE CONSUMER'S: at a feature-compute cadence ts, JOIN this
+-- view at compute time (like sector_map, NOT baked into feature_vectors) and reveal only rows with
+-- announcement_date <= ts (anticipation features) or ex_date <= ts (realized flags) — never let the
+-- model see a dividend before it's announced/ex. (announcement_date field name/format to be verified
+-- against a live CA payload at populate-time; view is CREATE OR REPLACE so refining it is free.)
+CREATE OR REPLACE VIEW corporate_actions_pit AS
+SELECT
+    symbol,
+    ex_date,
+    CASE
+        WHEN action_type = 'cash_dividends' THEN 'cash_dividend'
+        WHEN action_type IN ('forward_splits', 'reverse_splits', 'unit_splits') THEN 'split'
+        ELSE action_type
+    END AS action_type,
+    cash_rate AS cash_amount,                                       -- per-share $, NULL for splits
+    CASE WHEN old_rate > 0 THEN new_rate / old_rate END AS split_ratio,  -- forward factor, NULL for dividends
+    COALESCE((raw ->> 'declaration_date')::date, (raw ->> 'process_date')::date) AS announcement_date,
+    record_date,
+    payable_date
+FROM corporate_actions;
