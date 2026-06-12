@@ -13,9 +13,13 @@ cd "$(dirname "$0")/.."
 
 svc="${1:?usage: run_tool.sh <service> <args...>}"; shift || true
 
+# -dirty reflects uncommitted IMAGE-RELEVANT source only (matches the Makefile's IMG_SRC) — docs/
+# ledgers + experiments/ output churn continuously and never enter an image, so they must not flag it.
 git_sha() {
   printf '%s' "$(git rev-parse --short HEAD)"
-  git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || printf -- '-dirty'
+  git diff --quiet -- services quantlib docker-compose.yml Makefile 2>/dev/null \
+    && git diff --cached --quiet -- services quantlib docker-compose.yml Makefile 2>/dev/null \
+    || printf -- '-dirty'
 }
 
 # The GIT_SHA baked into an image (empty if none) — for explicit old->new provenance logging.
@@ -46,4 +50,14 @@ else
   echo "run_tool: $svc image fresh (== source) — running" >&2
 fi
 
-exec docker compose --profile tools run --rm "$svc" "$@"
+# `docker compose run` does NOT inherit arbitrary host env — forward the runtime knobs explicitly.
+# `-e VAR` (no value) tells compose to pass VAR's value through from the caller's environment.
+# Allowlist by prefix so the runbook's `BACKFILL_SYMBOLS=... scripts/run_tool.sh backfiller ...` works.
+env_args=()
+while IFS='=' read -r k _; do
+  case "$k" in
+    BACKFILL_*|FEATURE_*|CA_*|MODEL_*|TRAIN_*|USE_PIT_UNIVERSE) env_args+=(-e "$k") ;;
+  esac
+done < <(env)
+
+exec docker compose --profile tools run --rm "${env_args[@]}" "$svc" "$@"
