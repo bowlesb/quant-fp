@@ -323,3 +323,28 @@ worth a slot — but it is NOT runnable now and must be TRIGGER-GATED to avoid a
   clean canary AND OFI features ranking high in importance. Anything marginal = "wait for the 500-name
   scale-up," not "OFI works." NO edge claim comes out of 50 names regardless.
 - PURPOSE: a cheap early YES/NO/MAYBE to inform whether M2's 500-name investment is well-aimed.
+
+## BACKLOG (post-M1): per-name measured-cost battery variant (Modeller ↔ execution-risk task #7)
+
+The M1 clean re-run stays FLAT 2bps one-way for apples-to-apples with the contaminated run (verdict
+notes the optimism caveat). Post-M1, replace the flat charge with a cost MODEL calibrated to measured
+fills (execution-risk's `execution_slippage` / `execution_slippage_daily`, commit 4c3c46a).
+
+DESIGN:
+- Per-day mean alone is INSUFFICIENT — it can't separate the wide-spread short-leg microcaps from
+  liquid names, which is the entire point (pre-registered prediction: added lower-ADV names cost MORE
+  and that's what kills 30m net-of-cost). A single daily scalar just shifts the flat assumption.
+- Right granularity = **per-name one-way cost keyed by liquidity**. Consume per-LEG `execution_slippage`
+  rows (slippage_bps, arrival_src) joined with each name's ADV$ + price AT SUBMIT, filtered to
+  `arrival_src='nbbo'` (bar_proxy is intra-minute noise, ±50-125bps, unusable). From those, fit a
+  BUCKETED lookup `cost_bps(ADV_bucket × price_bucket)` (or a simple monotone regression), then apply
+  per-name across the full ~890 universe by each name's PIT ADV/price — generalizes measured cost to
+  names we've never traded.
+- HARNESS CHANGE: extend `quantlib.backtest.long_short_backtest` to accept `cost_bps_by_symbol`
+  (dict or callable) and charge `sum(cost_bps[sym] * abs(Δweight[sym]))` instead of `flat * turnover`.
+  Backward-compatible: scalar default = today's behavior.
+- ACCEPTANCE: re-run the battery with the measured per-name model; if a config that cleared FLAT-2bps
+  breakeven NO LONGER clears its per-name measured cost, the flat gate was too lenient (expected for
+  microcap-heavy baskets). This only TIGHTENS the M3 net-of-cost bar — never loosens it.
+- Format request to execution-risk: per-leg slippage_bps + ADV$ + price at submit (nbbo only). I build
+  the bucketed curve; the daily aggregate is fine as a sanity scalar but not the model input.
