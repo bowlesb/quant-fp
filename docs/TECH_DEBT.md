@@ -29,7 +29,9 @@ Manager go on #12; Modeller GO on #16 swap + #12 panel rebuild. Sequence (any su
    the trainer image (so Modeller's guarded clean code trains, not the stale image), then Modeller
    trains to a STAGING path. HAZARD: the staging artifact must NOT be models/model_fwd_30m.txt (the
    LIVE model-server path) — a 21-feat file there breaks live 18-feat scoring on reload. Train to a
-   versioned path (e.g. models/model_fwd_30m_v1.1.1.txt). model-server stays on v1.0.0; QA v1.0.0 purge stays deferred.
+   versioned path: `MODEL_FILENAME=model_fwd_30m_v1.1.1.txt FEATURE_SET_VERSION=v1.1.1 docker compose
+   --profile tools run --rm trainer fwd_30m` (MODEL_FILENAME override added in 4b6b7fe so the staging
+   train can't clobber the live model_fwd_30m.txt). model-server stays on v1.0.0; QA v1.0.0 purge stays deferred.
 6. **`make rebuild-all`** — FIRST build with GIT_SHA baked into every image (running==intended); ONE ingestor restart; picks up clean bar-subscription membership + clears the benign ingestor quantlib-drift (OFI/is_etf_like/v1.1.1 commits the running ingestor predates).
 7. **Verify**: `scripts/assert_image_fresh.sh` → all "fresh ... baked <sha>"; ingestion resumes fresh (last bar within tolerance); model-server scores on next cadence.
 8. **#12 Part B** (gated on Modeller): monthly-chunked v1.1.1 panel rebuild over full 1000-name universe (DELETE-then-insert) + labels + QA re-validate.
