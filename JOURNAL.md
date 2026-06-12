@@ -760,3 +760,17 @@ LIVE-path residual risk (model-server computes live features from STREAM bars): 
 Manager directive to Exec/Risk: EXCLUDE KLAC from today's live basket (cost ~0 at 3L/3S),
 removal condition = Prod's ingestion fix live + QA parity shows KLAC stream==backfill;
 logged in EXECUTION.md; siblings from the Nx sweep get same treatment.
+
+## 2026-06-12 (pre-open 7) — Manager: open fully de-risked; KLAC contained as sole anomaly
+Exec: KLAC denylist LIVE + verified (SYMBOL_DENYLIST, candidate_pool 784 names sans
+KLAC; KLAC had ranked 957/993 = real short candidate on garbage feed — the exclusion
+genuinely prevented trading on it). Removal condition logged in EXECUTION.md.
+KLAC rank also DISPROVES "uniform 10x cancels": live features mix stream bars with
+historical daily bars -> fake 10x gap/momentum. Relayed to Prod; they ran the Nx sweep
+EARLY: KLAC is the ONLY scale anomaly (median ratio 10.0000; no other symbol >10%
+deviation, ≥30 overlap bars) => denylist covers the full known surface for the open.
+QA: suite default now ACTIVE-SET scoped (7/7 green on v1.1.1); legacy dirty sets are
+opt-in fixtures (verified to still reproduce their FAILs). Purge-denied reasoning fully
+respected. Modeller: OFI close exclusion spec'd (drop >=15:50 ET; 16:00 permanent);
+requested the 15:30 parity number (overnight-label anchor) — QA folds into post-rebuild
+wake. Panel ~8-9/30 months. Everything holds for: panel lands -> battery go-signal.
