@@ -1447,3 +1447,41 @@ NEXT from the grind (when those ids land): the W11 INTERACTION probes (momentum�
 overnight momentum groups — does momentum carry at overnight where it's dead at 30m? And the long-shot
 reversal_short (ret_5m+ret_15m rank) should be ~the whole signal given this. Keep reading as the queue
 grinds.
+| 2026-06-12T21:00:15+00:00 | W11_grp_mom_fwd_60m_raw | fwd_60m | raw | 8 | 4416876 | -0.00093 | -0.475 | 0.00049 | Feature-group isolation: mom group (8 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+
+## ★ OFI PILOT PRE-REGISTRATION REFINEMENT — headline metric = OFI's MARGINAL IC over ret_5m (Manager, 2026-06-12)
+
+The grind finding (30m signal IS ret_5m; momentum dead weight) sharpens the OFI pilot's PRIMARY question
+into its cleanest form (Manager-directed): the pilot's headline metric is NO LONGER "does OFI have IC"
+but **"what is OFI's MARGINAL IC OVER ret_5m?"** — does directly-measured order-flow beat the crude
+5-min-return proxy it mechanistically explains?
+
+WHY THIS IS THE RIGHT TEST: ret_5m (the only price signal that exists at 30m, IC 0.011) is a crude proxy
+for "what just happened in the order book." OFI measures that directly + at higher resolution. So the
+pilot is a clean head-to-head: OFI vs its own proxy.
+- If OFI's marginal IC over ret_5m is ~0 -> the bet DIES CLEANLY (OFI adds nothing beyond the proxy;
+  no false edge, documented honestly).
+- If OFI's marginal IC over ret_5m is POSITIVE and survives the gates -> the signal is real, and the
+  problem becomes ENGINEERING: a 5-min-class signal lives or dies on EXECUTION COST. The fill-probability
+  cost-model work with exec/risk (spread-keyed fill_prob, Monday data) becomes the DECISIVE thread —
+  whether the refined short-horizon signal clears realistic per-name cost at its (high) turnover.
+
+PRE-REGISTRATION CHANGE (bake into the pilot design): the pre-registered configs already include
+price-only vs price+OFI vs OFI-only. ELEVATE the price+OFI-minus-price-only DELTA (marginal OFI IC,
+specifically marginal over ret_5m/ret_15m) to the HEADLINE number. The price-only baseline for the
+delta must INCLUDE ret_5m (so we measure OFI's lift over the proxy, not over a strawman). Gates unchanged
+(within-ts IC + NW t>3 + clean canary + net-of-cost L/S + survivorship). Pilot still ~6/26, gated on
+≥10 full-session 50-name days + at-scale parity + the ≥15:50 close exclusion + the signed_vol_z_30
+clip/floor fix (prod's PR tomorrow).
+
+#20 DISPOSITION (Manager-accepted): sector-neutral-momentum DEMOTED from near-term-win to cheap-option
+(momentum is dead at 30m, so sector-demeaning it creates nothing there). The FMP-key ask to Ben STANDS
+(sector_map also feeds dispersion/beta + future shapes). RE-CHECK before final framing: the W11 OVERNIGHT
+momentum-group results — if momentum carries at OVERNIGHT (where it may behave differently than 30m),
+#20 re-rises for the overnight book. Check when those ids land.
+
+STRATEGIC LEDGER (coherent now): ONE real price signal = 5-min reversal, mechanistically OFI-shaped,
+uneconomic at current cost. EVERY data thread we fund attacks exactly that configuration — OFI capture
+(refine the signal), measured NBBO costs + fill-probability (price whether it survives execution),
+ex-div hygiene (clean the labels). The bet is internally consistent: refine the short-horizon signal,
+then prove it beats cost. That's the whole game now.
