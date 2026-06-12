@@ -73,6 +73,28 @@ eyeball ~11 coherent buckets, no "N/A"/"" pseudo-sector fragmenting the demean g
 add the <5% null-sector coverage invariant. Consumer = Modeller's v1.3.0 sector-neutral momentum
 (JOIN by symbol at compute time, NOT a feature_vectors column).
 
+## Cross-agent reviews (REVIEW_POLICY)
+- **2026-06-12 — #19 executor (the diff my `git add -A` absorbed into b856aa7). My lane =
+  schema/runtime (qa-2 owns the reconcile/fill_reconciliation CONTRACT). VERDICT: APPROVE, no
+  blocking findings.** Verified the two real risks and cleared both:
+  1. RUNTIME — the absorbed hunk *calls* sync_orders_and_fills / TERMINAL_ORDER_STATES /
+     GetOrdersRequest / QueryOrderStatus / dtime; confirmed ALL are defined/imported in current
+     executor/main.py (def L292, L69, imports L19/27/28). `git add -A` captured a COMPLETE executor,
+     not a half-written WIP — no NameError/crash on rebuild. The cycle except-clause is appropriately
+     broad for transient broker/DB errors.
+  2. SCHEMA — reconcile reads `COALESCE(filled_qty,0)` but the LIVE orders_log lacks filled_qty
+     (01_schema.sql L186 is fresh-init only). NOT blocking: the executor's idempotent EXEC_DDL list
+     (L121, executed at startup L392 BEFORE the first reconcile) includes
+     `ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS filled_qty numeric` (L127) — the same proven
+     self-heal that put the live nbbo_* columns there. So filled_qty lands automatically at the #19
+     executor rebuild, before it's read. No manual ALTER needed.
+  Also confirmed b856aa7 did NOT touch db/init/01_schema.sql — my #20 (06_sector_map.sql) and exec's
+  orders_log work are independent files; a fresh DB init runs both cleanly. Deploy rides the one
+  post-flatten executor rebuild (with the #18 guard). Approval to be blessed by Manager after qa-2's
+  contract review.
+- LESSON (my fault): NEVER `git add -A` in the shared worktree — it absorbed exec's WIP. Switched to
+  explicit-path staging per the REVIEW_POLICY patch.
+
 ## Incident log (running==intended)
 - **2026-06-12: STALE-IMAGE re-contamination caught.** The first M1 clean-universe rebuild ran
   on a STALE `quant-backfiller` image (built 06-11 14:08 PDT, ~6.5h BEFORE the is_etf_like fix
