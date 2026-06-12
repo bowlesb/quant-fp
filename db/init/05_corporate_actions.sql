@@ -46,7 +46,13 @@ SELECT
     END AS action_type,
     cash_rate AS cash_amount,                                       -- per-share $, NULL for splits
     CASE WHEN old_rate > 0 THEN new_rate / old_rate END AS split_ratio,  -- forward factor, NULL for dividends
-    COALESCE((raw ->> 'declaration_date')::date, (raw ->> 'process_date')::date) AS announcement_date,
+    -- VERIFIED at populate 2026-06-12: Alpaca's CA payload has NO declaration/announcement date
+    -- (declaration_date absent; process_date is POST-ex = a settlement date, e.g. ex 7/09 / process
+    -- 7/17). The earliest PIT-safe date is ex_date itself, so announcement_date is NULL here:
+    -- ANTICIPATION features (days_to_ex_div before ex) are NOT supportable from this source — they'd
+    -- need a true declaration/earnings feed (FMP / #21). Consumer reveals on ex_date<=ts (realized).
+    NULL::date AS announcement_date,
+    (raw ->> 'process_date')::date AS process_date,                 -- honest name; POST-ex, do NOT treat as announcement
     record_date,
     payable_date
 FROM corporate_actions;
