@@ -12,6 +12,7 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 | P2 | build_feature_store ~4k sequential round-trips/cadence + per-symbol daily-close query | N+1; fine at 30m, won't scale to tighter cadence/universe | batch bar/daily-close loads (ANY(array)); hoist shared queries |
 | P2 | trades/quotes only for 10 symbols | blocks universe-wide order-flow features (modeling roadmap) | the Architect's sharded ingestion-tier decision (see JOURNAL) |
 | P2 | ETF exclusion is a name-regex stopgap | fragile; may miss/over-match | proper ETF reference list |
+| P2 | `signed_vol_z_30` (v1.2.0 OFI) has fat tails (range [-3158,+1234], std 141 vs expected ~[-5,5]) | quantlib `_flow_zscore` (L148) is formula-correct but a 30-min rolling z on BURSTY signed-vol blows up when the prior window is quiet (denominator≈0); not a norm bug, more data won't fix the tail. Misleadingly named, fragile outliers. Found 6/12 by modeller-2 on the OFI plumbing panel. NOT fatal (GBM scale-invariant), NOT a pilot blocker. | clip output (±10) + floor the stdev denominator. Tier-1 quantlib feature-def change → PR with modeller review (threshold chosen off the >10-day trade_agg distribution). NOT a pre-batch hot-patch. |
 | P3 | feature_vectors/labels/predictions uncompressed | storage growth at scale | enable compression once panel-rebuild churn settles |
 | P3 | experimenter writes host files as root | permission paper-cuts | add user:uid to the service |
 
