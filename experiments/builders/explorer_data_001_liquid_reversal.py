@@ -170,9 +170,38 @@ def report(name: str, panel: dict[str, list]) -> None:
           f"-> {'CLEARS' if clears else 'BELOW'} median")
 
 
+def load_regime_tiers(conn: psycopg.Connection) -> dict[date, int]:
+    """trade_date -> PIT disp_tier (1=calm..5=volatile) from research.common_regime_labels.
+
+    Nagel (2012) predicts reversal RETURNS concentrate in high-dispersion (high-VIX) regimes;
+    disp_tier is the PIT regime proxy (prior-session cross-sectional dispersion percentile)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT trade_date, disp_tier FROM research.common_regime_labels WHERE disp_tier IS NOT NULL")
+        return {row[0]: int(row[1]) for row in cur.fetchall()}
+
+
+def report_by_regime(panel: dict[str, list], regime: dict[date, int]) -> None:
+    """Nagel test: split the OOS reversal into dispersion tiers; report IC + breakeven per tier.
+    Nagel predicts the strategy RETURN (breakeven) is highest in high-dispersion regimes even if IC isn't."""
+    print("\nNAGEL REGIME SPLIT (OOS) — reversal by PIT dispersion tier (1=calm..5=volatile):")
+    print("  tier  rank-IC   breakeven  turnover  sharpe_net   n_ts   (Nagel: return concentrates in tier 5)")
+    for tier in range(1, 6):
+        idx = [i for i, t in enumerate(panel["ts"]) if regime.get(t.date()) == tier]
+        if len(idx) < 100:
+            print(f"  {tier}     (insufficient rows: {len(idx)})")
+            continue
+        sub = subset(panel, idx)
+        mean_ic, _, n_ts = rank_ic_stats(sub)
+        bt = long_short_backtest(sub["signal"], sub["y"], sub["ts"], sub["symbol"],
+                                 frac=0.1, cost_bps_oneway=0.0, periods_per_year=PERIODS_PER_YEAR_60M)
+        print(f"  {tier}    {mean_ic:+.4f}   {bt.get('breakeven_cost_bps', float('nan')):7.2f}bps  "
+              f"{bt.get('mean_turnover', float('nan')):.2f}     {bt.get('sharpe_net', float('nan')):+.2f}      {n_ts}")
+
+
 def main() -> None:
     with psycopg.connect(**DB_KWARGS) as conn:
         panel = load_liquid_reversal_panel(conn)
+        regime = load_regime_tiers(conn)
     is_idx, oos_idx = split_oos(panel)
     print(f"Loaded {len(panel['ts'])} liquid-tier rows. "
           f"IS={len(is_idx)} (<{OOS_START}) OOS={len(oos_idx)} (>={OOS_START}).")
@@ -182,6 +211,7 @@ def main() -> None:
     print("\nOOS monthly IC (sign-stability gate — should be consistently negative):")
     for month, ic in monthly_ic(subset(panel, oos_idx)).items():
         print(f"  {month}: {ic:+.4f}")
+    report_by_regime(subset(panel, oos_idx), regime)
 
 
 if __name__ == "__main__":
