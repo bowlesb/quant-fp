@@ -5,6 +5,7 @@ Phase 0 job: compute per-symbol data-quality coverage (received vs expected
 data_quality_daily, so the dashboard can show ingestion health. Later phases add
 streamed-vs-REST verification, gap repair, weekly retrain, and NAS backups.
 """
+
 import logging
 import os
 import time
@@ -19,11 +20,9 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest, GetCalendarRequest
 
-from quantlib.universe import SymbolStats, select_universe
+from quantlib.universe import SymbolStats, is_etf_like, select_universe
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("scheduler")
 
 NY = ZoneInfo("America/New_York")
@@ -70,6 +69,7 @@ def tradable_equities() -> list[str]:
         if asset.tradable
         and str(getattr(asset.exchange, "value", asset.exchange)) in keep_exchanges
         and "/" not in asset.symbol
+        and not is_etf_like(asset.name)  # single-name equities only — no ETFs/leveraged
     )
 
 
@@ -86,8 +86,14 @@ def fetch_symbol_stats(symbols: list[str], start: date) -> list[SymbolStats]:
             if not bars:
                 continue
             adv = sum(bar.close * bar.volume for bar in bars) / len(bars)
-            stats.append(SymbolStats(symbol=symbol, price=bars[-1].close, adv_dollar=adv))
-        logger.info("universe stats: %d/%d symbols processed", min(i + UNIVERSE_CHUNK, len(symbols)), len(symbols))
+            stats.append(
+                SymbolStats(symbol=symbol, price=bars[-1].close, adv_dollar=adv)
+            )
+        logger.info(
+            "universe stats: %d/%d symbols processed",
+            min(i + UNIVERSE_CHUNK, len(symbols)),
+            len(symbols),
+        )
     return stats
 
 
@@ -98,10 +104,14 @@ def refresh_asset_metadata(conn: psycopg.Connection) -> int:
     )
     rows = [
         (
-            asset.symbol, asset.name,
+            asset.symbol,
+            asset.name,
             str(getattr(asset.exchange, "value", asset.exchange)),
-            asset.tradable, asset.marginable, asset.shortable,
-            asset.easy_to_borrow, asset.fractionable,
+            asset.tradable,
+            asset.marginable,
+            asset.shortable,
+            asset.easy_to_borrow,
+            asset.fractionable,
         )
         for asset in assets
     ]
@@ -137,10 +147,14 @@ def maybe_refresh_asset_metadata() -> None:
 def build_universe(conn: psycopg.Connection, trade_date: date) -> int:
     symbols = tradable_equities()
     logger.info("universe: %d tradable equities to screen", len(symbols))
-    stats = fetch_symbol_stats(symbols, trade_date - timedelta(days=UNIVERSE_LOOKBACK_DAYS * 2))
+    stats = fetch_symbol_stats(
+        symbols, trade_date - timedelta(days=UNIVERSE_LOOKBACK_DAYS * 2)
+    )
     chosen = select_universe(stats, max_symbols=UNIVERSE_MAX_SYMBOLS)
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM universe_membership WHERE trade_date = %s", (trade_date,))
+        cur.execute(
+            "DELETE FROM universe_membership WHERE trade_date = %s", (trade_date,)
+        )
         for stat in chosen:
             cur.execute(
                 """
@@ -160,7 +174,7 @@ def coerce_time(value: object) -> dtime:
     if isinstance(value, dtime):
         return value
     text = str(value)
-    if " " in text:                      # e.g. "2026-06-03 09:30:00"
+    if " " in text:  # e.g. "2026-06-03 09:30:00"
         text = text.split(" ")[-1]
     parts = text.split(":")
     return dtime(int(parts[0]), int(parts[1]))
@@ -174,9 +188,15 @@ def coerce_date(value: object) -> date:
     return date.fromisoformat(str(value).split(" ")[0])
 
 
-def session_window(session_date: date, open_t: object, close_t: object) -> tuple[datetime, datetime]:
-    open_utc = datetime.combine(session_date, coerce_time(open_t), tzinfo=NY).astimezone(timezone.utc)
-    close_utc = datetime.combine(session_date, coerce_time(close_t), tzinfo=NY).astimezone(timezone.utc)
+def session_window(
+    session_date: date, open_t: object, close_t: object
+) -> tuple[datetime, datetime]:
+    open_utc = datetime.combine(
+        session_date, coerce_time(open_t), tzinfo=NY
+    ).astimezone(timezone.utc)
+    close_utc = datetime.combine(
+        session_date, coerce_time(close_t), tzinfo=NY
+    ).astimezone(timezone.utc)
     return open_utc, close_utc
 
 
@@ -195,7 +215,9 @@ def pick_session() -> tuple[date, datetime, datetime] | None:
     return chosen
 
 
-def write_coverage(conn: psycopg.Connection, session_date: date, open_utc: datetime, end_utc: datetime) -> list[tuple[str, int, int]]:
+def write_coverage(
+    conn: psycopg.Connection, session_date: date, open_utc: datetime, end_utc: datetime
+) -> list[tuple[str, int, int]]:
     expected = max(1, int((end_utc - open_utc).total_seconds() // 60))
     results = []
     with conn.cursor() as cur:

@@ -11,6 +11,7 @@ uses) is the next step; bars parity is validated first.
 
 Usage: python main.py <command>   (config via env, see below)
 """
+
 import logging
 import math
 import os
@@ -59,6 +60,7 @@ data_client = StockHistoricalDataClient(
     os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
 )
 
+
 def universe_symbols(conn: psycopg.Connection) -> list[str]:
     with conn.cursor() as cur:
         cur.execute(
@@ -68,7 +70,7 @@ def universe_symbols(conn: psycopg.Connection) -> list[str]:
         return [row[0] for row in cur.fetchall()]
 
 
-UNIVERSE_ADV_LOOKBACK = 20      # trading sessions of trailing ADV
+UNIVERSE_ADV_LOOKBACK = 20  # trading sessions of trailing ADV
 UNIVERSE_MAX_SYMBOLS = 1000
 
 
@@ -96,26 +98,41 @@ def build_universe_history() -> None:
         daily: dict[str, list[tuple]] = {}
         all_days: set = set()
         for symbol, day, dollar_vol, last_close in cur.fetchall():
-            daily.setdefault(symbol, []).append((day, float(dollar_vol or 0), float(last_close)))
+            daily.setdefault(symbol, []).append(
+                (day, float(dollar_vol or 0), float(last_close))
+            )
             all_days.add(day)
         for symbol in daily:
             daily[symbol].sort()
         sessions = sorted(all_days)
+        # Asset names so select_universe can screen out ETF/leveraged products (the historical
+        # membership we read from is itself contaminated, so the filter must run here).
+        cur.execute("SELECT symbol, name FROM asset_metadata")
+        names = {symbol: name for symbol, name in cur.fetchall()}
 
         built = 0
         for idx in range(UNIVERSE_ADV_LOOKBACK, len(sessions)):
             trade_date = sessions[idx]
-            window = set(sessions[idx - UNIVERSE_ADV_LOOKBACK:idx])  # strictly prior
+            window = set(sessions[idx - UNIVERSE_ADV_LOOKBACK : idx])  # strictly prior
             stats = []
             for symbol, rows in daily.items():
                 prior = [(dv, close) for (day, dv, close) in rows if day in window]
-                if len(prior) < UNIVERSE_ADV_LOOKBACK // 2:    # need enough history
+                if len(prior) < UNIVERSE_ADV_LOOKBACK // 2:  # need enough history
                     continue
                 adv = sum(dv for dv, _ in prior) / len(prior)
                 price = prior[-1][1]
-                stats.append(SymbolStats(symbol=symbol, price=price, adv_dollar=adv))
+                stats.append(
+                    SymbolStats(
+                        symbol=symbol,
+                        price=price,
+                        adv_dollar=adv,
+                        name=names.get(symbol),
+                    )
+                )
             chosen = select_universe(stats, max_symbols=UNIVERSE_MAX_SYMBOLS)
-            cur.execute("DELETE FROM universe_membership WHERE trade_date=%s", (trade_date,))
+            cur.execute(
+                "DELETE FROM universe_membership WHERE trade_date=%s", (trade_date,)
+            )
             for stat in chosen:
                 cur.execute(
                     """INSERT INTO universe_membership
@@ -125,8 +142,12 @@ def build_universe_history() -> None:
                 )
             built += 1
             if built % 10 == 0:
-                logger.info("universe-history: built %d dates (latest %s, %d symbols)",
-                            built, trade_date, len(chosen))
+                logger.info(
+                    "universe-history: built %d dates (latest %s, %d symbols)",
+                    built,
+                    trade_date,
+                    len(chosen),
+                )
         logger.info("universe-history complete: %d trade_dates", built)
 
 
@@ -149,7 +170,18 @@ def resolve_symbols(conn: psycopg.Connection) -> list[str]:
         return universe_symbols(conn)
     if env:
         return [s.strip().upper() for s in env.split(",") if s.strip()]
-    return ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "SPY", "QQQ", "JPM"]
+    return [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AMZN",
+        "GOOGL",
+        "META",
+        "TSLA",
+        "SPY",
+        "QQQ",
+        "JPM",
+    ]
 
 
 def backfill_bars() -> None:
@@ -158,7 +190,9 @@ def backfill_bars() -> None:
     start, end = resolve_window()
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
         symbols = resolve_symbols(conn)
-        logger.info("backfilling bars for %d symbols, %s .. %s", len(symbols), start, end)
+        logger.info(
+            "backfilling bars for %d symbols, %s .. %s", len(symbols), start, end
+        )
         total = fetch_and_store_bars(data_client, conn, symbols, start, end)
         logger.info("backfill complete: %d bars upserted (source=backfill)", total)
 
@@ -192,7 +226,9 @@ def backfill_aggregates() -> None:
     start, end = resolve_window()
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
         symbols = resolve_symbols(conn)
-        logger.info("backfilling aggregates for %d symbols, %s .. %s", len(symbols), start, end)
+        logger.info(
+            "backfilling aggregates for %d symbols, %s .. %s", len(symbols), start, end
+        )
         for symbol in symbols:
             trades_resp = data_client.get_stock_trades(
                 StockTradesRequest(symbol_or_symbols=symbol, start=start, end=end)
@@ -207,7 +243,11 @@ def backfill_aggregates() -> None:
             for trade in trade_ticks:
                 minute = bucket_minute(trade.timestamp.timestamp())
                 trades_by_min.setdefault(minute, []).append(
-                    TradeTick(trade.timestamp.timestamp(), float(trade.price), float(trade.size))
+                    TradeTick(
+                        trade.timestamp.timestamp(),
+                        float(trade.price),
+                        float(trade.size),
+                    )
                 )
             quotes_by_min: dict[int, list[QuoteTick]] = {}
             for quote in quote_ticks:
@@ -215,8 +255,10 @@ def backfill_aggregates() -> None:
                 quotes_by_min.setdefault(minute, []).append(
                     QuoteTick(
                         quote.timestamp.timestamp(),
-                        float(quote.bid_price), float(quote.ask_price),
-                        float(quote.bid_size), float(quote.ask_size),
+                        float(quote.bid_price),
+                        float(quote.ask_price),
+                        float(quote.bid_size),
+                        float(quote.ask_size),
                     )
                 )
 
@@ -227,23 +269,42 @@ def backfill_aggregates() -> None:
                     ts = datetime.fromtimestamp(minute, tz=timezone.utc)
                     cur.execute(
                         TRADE_AGG_SQL,
-                        (symbol, ts, agg.signed_volume, agg.buy_volume, agg.sell_volume,
-                         agg.large_print_cnt, agg.trade_intensity, agg.median_size,
-                         agg.p95_size, agg.n_trades),
+                        (
+                            symbol,
+                            ts,
+                            agg.signed_volume,
+                            agg.buy_volume,
+                            agg.sell_volume,
+                            agg.large_print_cnt,
+                            agg.trade_intensity,
+                            agg.median_size,
+                            agg.p95_size,
+                            agg.n_trades,
+                        ),
                     )
                 for minute in sorted(quotes_by_min):
                     qagg = aggregate_quotes(quotes_by_min[minute])
                     ts = datetime.fromtimestamp(minute, tz=timezone.utc)
                     cur.execute(
                         QUOTE_AGG_SQL,
-                        (symbol, ts, qagg.mean_spread_bps, qagg.median_spread_bps,
-                         qagg.mean_bid_size, qagg.mean_ask_size, qagg.quote_imbalance,
-                         qagg.n_quotes),
+                        (
+                            symbol,
+                            ts,
+                            qagg.mean_spread_bps,
+                            qagg.median_spread_bps,
+                            qagg.mean_bid_size,
+                            qagg.mean_ask_size,
+                            qagg.quote_imbalance,
+                            qagg.n_quotes,
+                        ),
                     )
             logger.info(
                 "%s: %d trades -> %d trade-min, %d quotes -> %d quote-min",
-                symbol, len(trade_ticks), len(trades_by_min),
-                len(quote_ticks), len(quotes_by_min),
+                symbol,
+                len(trade_ticks),
+                len(trades_by_min),
+                len(quote_ticks),
+                len(quotes_by_min),
             )
     logger.info("aggregate backfill complete")
 
@@ -270,7 +331,9 @@ def validate_aggregates() -> None:
         if total:
             logger.info(
                 "trade_agg: %d overlapping min | within 2%%/2-trade: %.1f%% | mean rel n_trades diff %.3f",
-                total, 100.0 * close / total, mean_rel or 0.0,
+                total,
+                100.0 * close / total,
+                mean_rel or 0.0,
             )
         else:
             logger.warning("no overlapping trade_agg to validate")
@@ -289,7 +352,8 @@ def validate_aggregates() -> None:
         if qtotal:
             logger.info(
                 "quote_agg: %d overlapping min | spread within 10%%/0.5bps: %.1f%%",
-                qtotal, 100.0 * qclose / qtotal,
+                qtotal,
+                100.0 * qclose / qtotal,
             )
         else:
             logger.warning("no overlapping quote_agg to validate")
@@ -302,16 +366,40 @@ def build_features() -> None:
     bar_source = os.environ.get("FEATURE_BAR_SOURCE", "stream")
     set_version = os.environ.get("FEATURE_SET_VERSION", "v1.0.0")
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
-        membership = load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        membership = (
+            load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        )
         symbols = (
             sorted({s for members in membership.values() for s in members})
-            if membership else resolve_symbols(conn)
+            if membership
+            else resolve_symbols(conn)
         )
-        cadence = int(os.environ["FEATURE_CADENCE_MIN"]) if os.environ.get("FEATURE_CADENCE_MIN") else None
-        logger.info("building features for %d symbols, %s..%s (src=%s, pit=%s, cadence=%s, set=%s)",
-                    len(symbols), start, end, bar_source, membership is not None, cadence, set_version)
-        total = build_feature_store(conn, symbols, start, end, bar_source, "historical",
-                                    membership, cadence, set_version)
+        cadence = (
+            int(os.environ["FEATURE_CADENCE_MIN"])
+            if os.environ.get("FEATURE_CADENCE_MIN")
+            else None
+        )
+        logger.info(
+            "building features for %d symbols, %s..%s (src=%s, pit=%s, cadence=%s, set=%s)",
+            len(symbols),
+            start,
+            end,
+            bar_source,
+            membership is not None,
+            cadence,
+            set_version,
+        )
+        total = build_feature_store(
+            conn,
+            symbols,
+            start,
+            end,
+            bar_source,
+            "historical",
+            membership,
+            cadence,
+            set_version,
+        )
         logger.info("feature build complete: %d vectors", total)
 
 
@@ -322,13 +410,22 @@ def build_labels() -> None:
     start, end = resolve_window()
     bar_source = os.environ.get("FEATURE_BAR_SOURCE", "stream")
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
-        membership = load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        membership = (
+            load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        )
         symbols = (
             sorted({s for members in membership.values() for s in members})
-            if membership else resolve_symbols(conn)
+            if membership
+            else resolve_symbols(conn)
         )
-        logger.info("building labels for %d symbols, %s..%s, horizons=%s, pit=%s",
-                    len(symbols), start, end, LABEL_HORIZONS, membership is not None)
+        logger.info(
+            "building labels for %d symbols, %s..%s, horizons=%s, pit=%s",
+            len(symbols),
+            start,
+            end,
+            LABEL_HORIZONS,
+            membership is not None,
+        )
         # close-by-ts per symbol (extend past `end` so forward windows resolve)
         closes: dict[str, dict[datetime, float]] = {}
         with conn.cursor() as cur:
@@ -354,13 +451,17 @@ def build_labels() -> None:
             }
             # Pivot to per-ts cross-sections, then demean by the universe median.
             all_ts = {ts for series in fwd_by_symbol.values() for ts in series}
-            cadence = int(os.environ["FEATURE_CADENCE_MIN"]) if os.environ.get("FEATURE_CADENCE_MIN") else None
+            cadence = (
+                int(os.environ["FEATURE_CADENCE_MIN"])
+                if os.environ.get("FEATURE_CADENCE_MIN")
+                else None
+            )
             rows = []
             for ts in all_ts:
                 if ts > end:
                     continue
                 if cadence is not None and not on_cadence(ts, cadence):
-                    continue                   # match the feature panel's cadence
+                    continue  # match the feature panel's cadence
                 members = membership.get(ts.date()) if membership else None
                 section = {
                     symbol: fwd[ts]
@@ -395,16 +496,25 @@ def build_overnight_labels() -> None:
     bar_source = os.environ.get("FEATURE_BAR_SOURCE", "backfill")
     cadence = int(os.environ.get("FEATURE_CADENCE_MIN", "30"))
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn:
-        membership = load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        membership = (
+            load_membership(conn) if os.environ.get("USE_PIT_UNIVERSE") else None
+        )
         symbols = (
             sorted({s for members in membership.values() for s in members})
-            if membership else resolve_symbols(conn)
+            if membership
+            else resolve_symbols(conn)
         )
-        logger.info("building overnight labels (split-only basis) for %d symbols, %s..%s, pit=%s",
-                    len(symbols), start, end, membership is not None)
+        logger.info(
+            "building overnight labels (split-only basis) for %d symbols, %s..%s, pit=%s",
+            len(symbols),
+            start,
+            end,
+            membership is not None,
+        )
         # SPLIT-only daily prices = the correct overnight basis (no dividend look-ahead).
-        split_daily = fetch_daily_bars(data_client, symbols, start, end + timedelta(days=1),
-                                       Adjustment.SPLIT)
+        split_daily = fetch_daily_bars(
+            data_client, symbols, start, end + timedelta(days=1), Adjustment.SPLIT
+        )
         overnight_by_symbol: dict[str, dict[date, float]] = {}
         last_cadence_ts: dict[str, dict[date, datetime]] = {}
         with conn.cursor() as cur:
@@ -420,7 +530,9 @@ def build_overnight_labels() -> None:
                        ORDER BY ts""",
                     (symbol, bar_source, start, end),
                 )
-                last_cad: dict[date, datetime] = {row[0].date(): row[0] for row in cur.fetchall()}
+                last_cad: dict[date, datetime] = {
+                    row[0].date(): row[0] for row in cur.fetchall()
+                }
                 daily = split_daily.get(symbol, {})
                 opens = {day: oc[0] for day, oc in daily.items()}
                 closes = {day: oc[1] for day, oc in daily.items()}
@@ -470,8 +582,11 @@ def validate_features() -> None:
         if not total:
             logger.warning("no overlapping stream/historical feature vectors")
             return
-        logger.info("feature replay-equivalence: %d overlapping vectors | identical %.3f%%",
-                    total, 100.0 * identical / total)
+        logger.info(
+            "feature replay-equivalence: %d overlapping vectors | identical %.3f%%",
+            total,
+            100.0 * identical / total,
+        )
         if identical < total:
             cur.execute(
                 """SELECT s.symbol, s.ts FROM feature_vectors s
@@ -513,7 +628,9 @@ def validate_bars() -> None:
             return
         logger.info(
             "validation: %d overlapping bars | OHLC match %.3f%% | OHLC+volume match %.3f%%",
-            total, 100.0 * ohlc_ok / total, 100.0 * full_ok / total,
+            total,
+            100.0 * ohlc_ok / total,
+            100.0 * full_ok / total,
         )
         cur.execute(
             """
@@ -525,8 +642,15 @@ def validate_bars() -> None:
             """
         )
         for row in cur.fetchall():
-            logger.info("  mismatch %s %s stream(close=%s vol=%s) backfill(close=%s vol=%s)",
-                        row[0], row[1], row[2], row[4], row[3], row[5])
+            logger.info(
+                "  mismatch %s %s stream(close=%s vol=%s) backfill(close=%s vol=%s)",
+                row[0],
+                row[1],
+                row[2],
+                row[4],
+                row[3],
+                row[5],
+            )
 
 
 def main() -> None:
