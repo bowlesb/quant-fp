@@ -257,6 +257,47 @@ still moderate. A net-of-cost test must target THAT tier, not the absolute most-
 opposite of the usual "trade only the very most liquid" instinct — here the signal/cost tradeoff peaks in
 the middle. Proposal 003 updated to gate liq2/liq3 specifically, with liq4 as the low-cost control.
 
+---
+
+## 2026-06-12 — Wake 1, batch 4. research-layer WRITE access lifted; built two artifacts.
+
+The Lead relayed Ben's directive: read-only lifted for the `research` schema (CREATE/register in
+research., commit builders, EXPLAIN heavy scans, query catalog first). Two deliverables this batch.
+
+### DELIVERABLE A — research.common_regime_labels (registered shared building block)
+The OBS6 calm-regime finding, made reusable for every lens. Per-trade_date PIT regime:
+- disp_tier 1(calm)..5(volatile) = trailing-120 rank-percentile of the PRIOR session's cross-sectional
+  dispersion (rank-based, robust to the fat dispersion tail; NOT min/max width_bucket).
+- prior_mkt_ret, trail5_mean, trend_5d (sign of trailing-5 mean return).
+- Builder: experiments/builders/common_regime_labels.sql. Source: research.common_daily_session_price
+  (dedup — extends explorer-shapes' open-anchor table, no bars_1m re-scan). Registered in research.catalog.
+- 633 days built, 613 tiered (first 20 NULL — insufficient trailing history, honest not fabricated).
+- PIT VERIFIED by query: disp_tier tracks avg PRIOR-day dispersion cleanly (tier1 0.017 -> tier5 0.031)
+  while the day's OWN dispersion is only weakly monotone (0.021->0.026) — proving the label uses
+  prior-day info, not today's (a lookahead label would make own-dispersion perfectly monotone). EXPLAINed
+  before building (cheap nested-loop self-join, no cartesian, one parallel seq scan of the small table).
+- USE: any backtest/feature can JOIN ON trade_date and filter disp_tier<=3 (calm) without cheating.
+
+### DELIVERABLE B — proposal 001 runner (Lead-approved, BUILT)
+experiments/builders/explorer_data_001_liquid_reversal.py — the liquid-tier ret_5m reversal at 60m hold.
+Single-feature signal=-ret_5m, liquid ntile-4 by full-history ADV, fwd_60m, OOS-split 2025-07+, with all
+gates + the Lead's strengthened sign-stability (OOS-monthly IC table). Reused quantlib.backtest house
+machinery (long_short_backtest / per_timestamp_ic / newey_west_tstat).
+- CONTAINER GOTCHA (logged so the next runner doesn't re-hit it): the experimenter bakes quantlib at
+  /app/quantlib and has the real DB_* env (incl password) already set. Run with `-w /app -e PYTHONPATH=/app`
+  and DO NOT override DB_PASSWORD (my guessed `quant` failed auth; the container's own env is correct).
+- COST-DATA LIMITATION (honest, baked into the proposal): common_spreads_at_cadence is quote_agg_1m-sourced
+  = 50 names / recent only, AND covers 10:00-15:30 (no 9:30). So there's no measured spread for the 613-day
+  historical liquid tier — the runner charges FLAT cost and reports breakeven vs the task-#5 measured ~3bps
+  liquid reference. A per-row measured charge is only possible on the recent 50-name window.
+- Results: running under shared-DB load; will land in a Lead message (verdict is the Lead's).
+
+### CROSS-LANE: overlap flagged for arbitration
+Catalog-first query revealed proposal 003 (open gap-fade) == explorer-shapes' shape #002 (their
+common_daily_session_price catalog entry names "gap fade/follow #002"). Flagged to the Lead to arbitrate;
+I lean: let shapes own the SHAPE, I feed the DATA ARCHAEOLOGY (inverted-U liquidity, 83% persistence,
+regime conditioning, the 9:30-cost blocker). Avoids two lenses building the same backtest.
+
 OPEN QUESTION for the net-of-cost gate (the make-or-break): the gap-fade requires trading AT/just-after
 9:30 ET — the widest-spread minute. If liq2/liq3's opening half-spread is, say, 5-15bps, even a -0.09 IC
 gap-fade may not clear it. The signal is huge; whether the OPENING SPECIFICALLY is tradeable is the whole
