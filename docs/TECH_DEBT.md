@@ -27,7 +27,12 @@ Manager go on #12; Modeller GO on #16 swap + #12 panel rebuild. Sequence (any su
 6. **`make rebuild-all`** — FIRST build with GIT_SHA baked into every image (running==intended); ONE ingestor restart; picks up clean bar-subscription membership + clears the benign ingestor quantlib-drift (OFI/is_etf_like/v1.1.1 commits the running ingestor predates).
 7. **Verify**: `scripts/assert_image_fresh.sh` → all "fresh ... baked <sha>"; ingestion resumes fresh (last bar within tolerance); model-server scores on next cadence.
 8. **#12 Part B** (gated on Modeller): monthly-chunked v1.1.1 panel rebuild over full 1000-name universe (DELETE-then-insert) + labels + QA re-validate.
-Post-close wiring still to build (code, then a later restart): backfill-manager CA-triggered full-history re-fetch; scheduler daily CA fetch (see docs/CORPORATE_ACTIONS.md "Build status").
+NB: the backfill-manager CA fetch + recent-split full-history re-fetch trigger is already CODED
+(commit 5f17db9) and activates automatically at step 6's rebuild-all — its first non-market-hours
+cycle self-populates corporate_actions and re-fetches any recent-split name. The explicit
+`fetch-corporate-actions` in step 2 just front-runs that for an immediate populate. Remaining #18
+consumers are in other lanes: QA jump-invariant + executor candidate_pool guard (signature handed
+to exec), plus a QA unit test for the parser.
 
 ## Incident log (running==intended)
 - **2026-06-12: STALE-IMAGE re-contamination caught.** The first M1 clean-universe rebuild ran
