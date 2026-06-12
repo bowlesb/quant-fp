@@ -32,11 +32,17 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
   intraday imbalances. Momentum NaN-degraded at window start (only 3d stream, needs 10d) = the
   PLUMBING-GRADE caveat, as labeled. Optional follow-up: register v1.2.0 in feature_sets (not needed
   for Modeller to query by set_version).
-- [ ] **#12 backfill — DEFERRED to the close (CONCRETE reason, not habit):** deepening the 222 thin
-  names = thousands of paginated data-API requests sustained; during RTH that contends with the live
-  executor's NBBO calls (risking bad fills on the live basket). Market close is ~36 min out (executor
-  flattens) — start #12 then, no contention. Per the Manager's own rate-limit caveat.
-- [ ] Remaining (still gated on close): rebuild-batch (ingestor restart) + executor deploy (exec).
+- [x] **#11 BLOCKING freshness gate DONE:** `scripts/run_tool.sh` (wraps every tools-profile run —
+  CONTENT-STALE→rebuild+block, -dirty→warn+run) + rebuild-batch asserts running==intended after up -d.
+  Run tools via `scripts/run_tool.sh <svc> <args>` or `make run-tool S=<svc> A="<args>"` so a stale
+  image can't be hand-run again (the 4th near-miss). Manager design-call pending: auto-rebuild (chosen)
+  vs hard-fail.
+- [x] **KLAC denylist condition MET:** QA no_extreme_backfill_jump GREEN + #17 verified + #18 CA live.
+  Signaled exec to lift post-deploy (KLAC stays excluded via the data-driven ex-date guard); Manager ratifies.
+- [ ] **#12 backfill — at the close (CONCRETE reason):** 222 thin names = sustained paginated data-API
+  load that contends with the live executor NBBO during RTH. Run AT CLOSE via the gate:
+  `BACKFILL_SYMBOLS=<thin list> BACKFILL_START=2023-12-01 scripts/run_tool.sh backfiller backfill-bars`.
+- [ ] Remaining (still gated on close): rebuild-batch (ingestor restart) + executor deploy (exec, lifts KLAC denylist).
 
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
 Prereqs before starting: market closed (≥16:00 ET); Manager go on #12; **THE GUN = exec's
