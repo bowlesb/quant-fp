@@ -975,3 +975,37 @@ GO-FORWARD: v1.1.2 (the #12B full-universe rebuild) is the next research panel; 
 re-run the battery on it to RE-CONFIRM "no edge" on fully un-caveated data (a v1.1.2 task). The ex-div
 overnight-label hygiene (Family A) should also fold into the v1.1.2 label build so the go-forward panel
 has clean overnight labels from the start.
+| 2026-06-12T19:34:08+00:00 | C11_solo_vol_30m | fwd_30m | raw | 1 | 4840765 | -0.00124 | -1.357 | -0.00119 | Single-feature interrogation: vol_30m ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:36:22+00:00 | C11_solo_vol_60m | fwd_30m | raw | 1 | 4840765 | -0.00115 | -1.312 | -0.00037 | Single-feature interrogation: vol_60m ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+
+### FAMILY B FULL-PANEL VERDICT (2026-06-12) — DISCARD (survivorship at overnight; nothing at 30m)
+
+Full v1.1.1 panel (experiments/family_b_results.jsonl, gitignored):
+
+  variant               horizon    nf      IC     canary  breakeven  surv_sharpe
+  baseline_price_only   fwd_30m    19  +0.02698  -0.00175   1.42bps    -3.51
+  plus_family_b         fwd_30m    23  +0.02666  -0.00233   1.42bps    -3.29
+  family_b_only         fwd_30m     4  +0.00681  +0.00043   0.12bps    -6.57
+  baseline_price_only   overnight  19  +0.01420  -0.00557   3.20bps    -1.79
+  plus_family_b         overnight  23  +0.01244  -0.00555   2.79bps    -1.48
+  family_b_only         overnight   4  +0.01930  -0.00013   2.45bps    -1.61
+
+READ (honest, full panel):
+- 30m: Family B adds NOTHING. +family_b 0.0267 vs baseline 0.0270 (a hair LOWER); family_b_only 0.0068
+  ≈ weak. Confirms the smoke. The idiosyncratic-residual/dispersion features carry no 30m signal.
+- overnight: the EYE-CATCHER — family_b_only IC 0.0193 (> the 19-feat baseline 0.0142), CLEAN canary
+  (-0.0001), breakeven 2.45bps (CLEARS ~2bps cost). BUT survivorship-neutralized sharpe = -1.61 (deeply
+  negative) => it is SURVIVORSHIP, not timing alpha. The idio-residual ranks persistent per-symbol drift
+  (ex-post survivors), exactly like every other overnight "signal" we've found. Per-symbol demean kills it.
+- VERDICT = DISCARD under the gates. Family B is the genuinely-NEW FREE signal this weekend and it fails
+  — SHARPENS "data-starved, not model-starved." The price panel (+ derived combinations of it) is
+  exhausted; only new DATA (OFI/news/ex-div) can move us.
+
+⚠️ CAVEAT (why the ex-div corrected battery matters NOW): this overnight run uses the UNCORRECTED labels,
+which contain the confirmed -52bps ex-div artifact. The overnight family_b_only "signal" could be PARTLY
+the ex-div contamination (idio-residual on ex-div names = the dividend drop dressed as idiosyncratic
+return). The ex-div-corrected overnight battery (experiments/exdiv_corrected_battery.py) tests exactly
+this: does removing the dividend artifact change the overnight picture? INTERPRETATION of that is HELD
+until qa-2 verifies the ex-div diagnostic. NOTE on the proxy: Family B's within-snapshot beta is a cheap
+4-horizon-vector proxy; the discard is firm enough that the expensive rolling-regression beta is NOT
+worth building (a proxy showing survivorship is weak evidence FOR the costly version).
