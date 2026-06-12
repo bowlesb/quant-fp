@@ -348,3 +348,31 @@ DESIGN:
   microcap-heavy baskets). This only TIGHTENS the M3 net-of-cost bar — never loosens it.
 - Format request to execution-risk: per-leg slippage_bps + ADV$ + price at submit (nbbo only). I build
   the bucketed curve; the daily aggregate is fine as a sanity scalar but not the model input.
+
+### PRE-REGISTRATION CORRECTION (Modeller, 2026-06-12) — clean panel is ~715 names, NOT ~885
+
+prod-architect corrected the panel scope (the earlier "~885/date, +160 newly-included names" was a
+misread of a stale ETF-included run). GROUND TRUTH for the clean v1.1.1 panel:
+- **set_version = v1.1.1** (same 21-feature v1.1.0 contract, clean equities-only membership).
+- **Cross-section ≈ 715 equities/date, NOT ~885.** The clean equity set ≈ the old equity portion
+  (~715 vs ~723) — contamination was ~210 ETFs ADDED ON TOP of the equities, now removed. So NO new
+  equities enter the ranking. The dirty panel was ~715 equities + ~210 funds ≈ the 1000-cap.
+- **Labels = DELETE-then-insert full overwrite, all 3 horizons**, re-demeaned over the clean ~715
+  cross-section; `computed_at=now()` → my acceptance gate passes. Battery v1.1.1 features ⨝ fresh
+  labels. Do NOT battery old v1.1.0 feature rows (their matching dirty labels are being overwritten →
+  inconsistent). The canonical "before" is the existing v1.1.0 results.jsonl rows.
+
+WHAT THIS CHANGES IN MY PRE-REGISTRATION:
+- **SUPERSEDED — addendum hyps #6 and #7** (effects of "added lower-ADV names"): VOID, no names added.
+  The flat-2bps-is-optimistic caveat SURVIVES but now rests solely on execution-risk's measured-microcap
+  finding (real one-way cost on the names we trade may exceed 2bps), NOT on any universe-composition change.
+- **CORRECTED — addendum hyp #8 (breadth/t-stat), DIRECTION REVERSES:** the cross-section SHRINKS
+  1000→715 (fewer names/ts), so per-timestamp IC is NOISIER and t-stats may mechanically FALL, not rise.
+  The tripwire STANDS but flips: do NOT read a t-stat DROP as "signal weakened" — ~285 fewer names/ts
+  alone lowers t at unchanged true IC. Still judge on IC magnitude vs canary AND breakeven, never t.
+- **REAFFIRMED as the substantive change — re-demeaned labels (was hyp #9):** every equity's
+  excess-return label shifts because the cross-sectional median/ranking no longer includes fund returns.
+  This + the original fund-removal hypotheses (#1-#5: funds were the highest-|return|, mechanically-
+  predictable names dominating the traded extremes) are now the WHOLE delta. My original predictions
+  hold: 30m real-but-net-negative; overnight = survivorship; primary verdict "no tradeable edge holds"
+  UNCHANGED at ~70%. The result that would flip it remains the low-turnover tail, gated by full M3 criteria.
