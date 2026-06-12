@@ -1330,3 +1330,36 @@ it on v1.1.2: re-run the battery on v1.1.2 (785→~1000 names) vs v1.1.1 (785) a
 canary. If IC holds or improves -> breadth helps, keep 1000; if it degrades -> the thin names are noise,
 consider a quality floor. This is a v1.1.2 task (gated on #12 backfill + rebuild), NOT now. Universe
 ticker COUNT is unchanged at 1000 — the lever is the panel's per-date breadth, not the universe cap.
+| 2026-06-12T20:20:12+00:00 | C11_loo_mom_10d_rel | fwd_30m | raw | 7 | 4840765 | -0.00045 | -0.302 | -0.00019 | Leave-one-out: momentum minus mom_10d_rel. Marginal contribution of mom_10d_rel — does dropping it move IC? |
+| 2026-06-12T20:23:13+00:00 | C11_30m_volscaled_nocal | fwd_30m | vol_scaled | 19 | 4840765 | 0.02679 | 19.788 | -0.00141 | Clean 30m vol_scaled label nocalendar. Does scaling the label by realized vol surface alpha hidden under vol-ranking? |
+| 2026-06-12T20:23:47+00:00 | C11_overnight_volscaled_nocal | overnight | vol_scaled | 19 | 428024 | 0.00761 | 0.998 | -0.00457 | Clean overnight vol_scaled nocalendar. Vol-normalized overnight target. |
+| 2026-06-12T20:25:50+00:00 | LONGSHOT_C11_reversal_short | fwd_30m | rank | 2 | 4840765 | 0.01708 | 10.36 | 0.00065 | LONG-SHOT: short-horizon ret_5m+ret_15m ONLY at 30m, rank label. Pure intraday reversal/continuation play — do recent intraday returns predict next 30m cross-sectionally? |
+| 2026-06-12T20:27:39+00:00 | LONGSHOT_C11_range_vwap | fwd_30m | raw | 3 | 4840765 | 0.0291 | 22.049 | 0.00318 | LONG-SHOT: range_pct + vwap_dev + gap_from_open ONLY. Intraday positioning (where price sits in its range) as a standalone signal. |
+| 2026-06-12T20:29:25+00:00 | LONGSHOT_C11_mom_vol_interaction | fwd_30m | raw | 7 | 4840765 | -0.00453 | -2.728 | 0.0007 | LONG-SHOT: relative momentum + vol features (mom_*_rel + vol_30m + vol_z_30). Momentum conditioned on volatility regime — does vol context sharpen momentum? (GBM captures the interaction.) |
+| 2026-06-12T20:32:31+00:00 | LONGSHOT_C11_mom_only_lambdarank | fwd_30m | lambdarank | 8 | 4840765 | -0.00143 | -0.61 | 0.00197 | LONG-SHOT: momentum-only with lambdarank at 30m. Learning-to-rank on pure momentum — does the ranking objective extract more from momentum than regression? |
+| 2026-06-12T20:34:28+00:00 | W11_grid_fwd_30m_raw_nocal | fwd_30m | raw | 19 | 4840765 | 0.02698 | 19.988 | -0.00175 | Baseline grid cell: fwd_30m x raw label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:36:45+00:00 | W11_grid_fwd_30m_rank_nocal | fwd_30m | rank | 19 | 4840765 | 0.03179 | 21.404 | -0.00083 | Baseline grid cell: fwd_30m x rank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:38:46+00:00 | W11_grid_fwd_30m_vol_scaled_nocal | fwd_30m | vol_scaled | 19 | 4840765 | 0.02679 | 19.788 | -0.00141 | Baseline grid cell: fwd_30m x vol_scaled label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:42:07+00:00 | W11_grid_fwd_30m_lambdarank_nocal | fwd_30m | lambdarank | 19 | 4840765 | 0.00097 | 0.33 | -0.00148 | Baseline grid cell: fwd_30m x lambdarank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:43:55+00:00 | W11_grid_fwd_60m_raw_nocal | fwd_60m | raw | 19 | 4416876 | 0.0196 | 11.554 | 0.00238 | Baseline grid cell: fwd_60m x raw label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:46:03+00:00 | W11_grid_fwd_60m_rank_nocal | fwd_60m | rank | 19 | 4416876 | 0.02473 | 13.986 | 0.00354 | Baseline grid cell: fwd_60m x rank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+| 2026-06-12T20:48:09+00:00 | W11_grid_fwd_60m_vol_scaled_nocal | fwd_60m | vol_scaled | 19 | 4416876 | 0.01906 | 11.424 | 0.0027 | Baseline grid cell: fwd_60m x vol_scaled label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives. |
+
+### M2 SHARDING — ADV-500 name selection delivered (Modeller piece of #15, 2026-06-12)
+
+#15 settled-day parity PASSED at 50 names (99.79% count / 99.85% sign) -> 500-name sharding gate MET.
+The build is prod's (Tier-1 ingestor); my lane piece = the 500-name selection by ADV from the clean
+universe. DELIVERED to prod (/tmp/of_500_by_adv.csv, ranked):
+- Top-500 by ADV, latest clean universe (2026-06-12): rank 1 MU $47.3B -> rank 500 QXO $281M. The
+  ~$281M ADV floor comfortably supports OFI features. Rank 500/501 are ~tied, so 500 is a SOFT cut —
+  prod picks the count that shards EVENLY (e.g. 480/512), ±20 names costs ~0 liquidity.
+- ⭐ CONTINUITY FINDING: of the 52 current order-flow names, 50 are single-name equities (ALL in the
+  top-500, clean continuity) and 2 are QQQ + SPY (index ETFs, correctly excluded from the equities-only
+  universe per M1). REC to prod: keep QQQ/SPY on a SEPARATE market-context subscription (useful market-
+  beta reference for features, never traded) so they don't silently vanish when the subscription list
+  rebuilds off the equities universe. Decision is prod's.
+LANE NOTE: "complete all open tasks" can't mean cross-lane takeover (single-owner rule). My contributions
+to the open tasks are all delivered: #15 ADV-500 (this), #10 OFI pipeline validated, #20/#21/#22
+requirements specced, ex-div/signed_vol_z PRs queued. The rest (sharding build, backfills, #19 exec) are
+owners' to execute. I continue MY never-idle work = the strategy-shape backlog (batch-safe shapes while
+prod's bars_1m batch runs).
