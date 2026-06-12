@@ -1404,3 +1404,46 @@ picked shapes' cheap composition (Shape 7) reads as no-edge — consistent with 
 price panel and its compositions are exhausted; new DATA (OFI/news/ex-div/sector) is the path. Open-gap
 (Shape 1) is the one with a genuinely NEW label (open-to-close) that might behave differently — it's the
 most interesting remaining cheap shape; run it first when bars are quiet.
+| 2026-06-12T20:58:31+00:00 | W11_grp_mom_fwd_30m_rank | fwd_30m | rank | 8 | 4840765 | 0.00253 | 2.038 | 1e-05 | Feature-group isolation: mom group (8 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+
+## ★ C11/W11 GRIND SYNTHESIS — the 30m signal is ret_5m, NOT momentum (Modeller, 2026-06-12)
+
+First synthesis of the clean-panel exploration grind (80 results in). The "why is the 30m signal weak /
+what carries it" interrogation Ben asked for — and the answer is sharp and actionable:
+
+SINGLE-FEATURE 30m IC (solo, sorted |IC|):
+  ret_5m    +0.01056 (canary +0.0011)  <- THE carrier, by far the strongest single feature
+  ret_15m   +0.00428 (canary +0.0007)  <- second, much weaker
+  ret_60m   -0.00177 | vol_30m -0.00124 | vol_60m -0.00115 | ret_30m -0.00073 | vol_z_30 -0.00029
+  => everything except ret_5m/ret_15m is AT or BELOW its canary (≈ zero).
+
+FEATURE-GROUP isolation (the clincher):
+  C11_price_only_30m (momentum DROPPED)  IC +0.0282  <- SAME as the full set (0.027)!
+  C11_30m_raw_nocal  (full 19 feats)     IC +0.0270
+  C11_mom_rel_30m    (rel momentum only) IC -0.0034  (NEGATIVE)
+  C11_mom_short_30m / mom_long_30m       IC ~0 (-0.0007 / +0.0003)
+  Leave-one-out on momentum: dropping ANY mom feature leaves momentum-only at IC ~-0.001 to -0.002.
+
+THE FINDING (airtight): dropping ALL momentum features leaves the 30m IC UNCHANGED (0.0282 vs 0.0270).
+MOMENTUM (mom_1d..10d, abs AND rel) CONTRIBUTES NOTHING at 30m — it has been DEAD WEIGHT in the panel.
+The entire 30m cross-sectional signal is INTRADAY SHORT-HORIZON RETURNS, dominated by ret_5m (last 5 min
+predicts next 30 min). This is a very-short-horizon reversal/continuation effect.
+
+WHY THIS MATTERS (3 consequences):
+1. Explains the UNECONOMIC verdict mechanically: a 5-min-return-driven signal = maximal turnover (you're
+   chasing the freshest tick), so breakeven (~1.4bps) < cost. It's real (clean canary, NW t~20 on depth)
+   but structurally high-turnover. Not a modeling failure — a horizon-mismatch with our cost structure.
+2. VALIDATES THE OFI BET on mechanism, not just hope: OFI (signed order-flow imbalance) is the
+   MICROSTRUCTURE mechanism BEHIND short-horizon return predictability. ret_5m is a crude proxy for
+   "what just happened in the order book"; OFI measures it directly and at higher resolution. So OFI is
+   the right next bet precisely because the price signal that DOES exist is the short-horizon one OFI
+   refines. This is the strongest mechanistic argument for OFI we have.
+3. Momentum being dead weight means the sector-neutral-momentum idea (#20) is LOWER priority than I
+   thought at 30m — sector-demeaning a zero-signal feature won't create signal. (It may still matter at
+   OVERNIGHT, where momentum could behave differently — check the W11 overnight momentum-group results
+   when they land before deprioritizing #20 entirely.)
+
+NEXT from the grind (when those ids land): the W11 INTERACTION probes (momentum×vol etc.) and the
+overnight momentum groups — does momentum carry at overnight where it's dead at 30m? And the long-shot
+reversal_short (ret_5m+ret_15m rank) should be ~the whole signal given this. Keep reading as the queue
+grinds.
