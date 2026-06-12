@@ -1052,3 +1052,27 @@ it divides by ~0 or not at all). NOT fatal for GBM (tree splits are scale-invari
 misleadingly named; the ofi_5m/15m/30m features ARE correctly in [-1,1]. Worth fixing in the v1.2.0
 feature definition before the pilot interprets signed_vol_z_30. Re-check once there's >10 days of
 trade_agg history (the rolling z-window may simply need more data).
+| 2026-06-12T19:42:20+00:00 | C11_mom_short_30m | fwd_30m | raw | 2 | 4840765 | -0.00074 | -0.62 | 0.00131 | Short-lookback momentum (mom_1d, mom_1d_rel) at 30m. Does recent (1d) momentum dominate? |
+| 2026-06-12T19:44:18+00:00 | C11_mom_long_30m | fwd_30m | raw | 2 | 4840765 | 0.00033 | 0.307 | -2e-05 | Long-lookback momentum (mom_10d, mom_10d_rel) at 30m. Does the 10d lookback carry more than 1d? |
+| 2026-06-12T19:46:15+00:00 | C11_price_only_30m | fwd_30m | raw | 13 | 4840765 | 0.02819 | 20.918 | -0.00248 | Price/calendar features WITHOUT momentum (drop all mom_*). Isolate the intraday-price contribution alone on clean data. |
+| 2026-06-12T19:48:00+00:00 | C11_mom_60m | fwd_60m | raw | 8 | 4416876 | -0.00093 | -0.475 | 0.00049 | Momentum-only at 60m horizon raw. Momentum decays slower than 30m noise — does IC strengthen at 60m? |
+
+### OPERATING PROCEDURE — use scripts/run_tool.sh for trainer/tools runs (2026-06-12)
+
+After my #16 stale-image catch (the built trainer was 14h behind the MODEL_FILENAME commit and would
+have clobbered the live model), prod committed scripts/run_tool.sh (Manager #11 req): a BLOCKING
+freshness gate wrapping every tools-profile run (trainer/backfiller) — it auto-rebuilds a content-stale
+image to source before running, refuses if it can't, and tolerates -dirty (built-from-WIP = ahead, not
+behind). ADOPT IT: future trainer/backfiller runs go through `scripts/run_tool.sh trainer fwd_30m ...`
+(or `make run-tool S=trainer A=fwd_30m`) instead of raw `docker compose run` — then a stale image can't
+bite a 5th time. My manual diff-before-run is now the backstop, not the only line.
+
+### EX-DIV CORRECTED BATTERY — DB lock OOM, fixed (2026-06-12)
+
+The corrected-overnight battery's yield query (close from bars_1m) OOM'd twice: bars_1m is a 693-chunk
+hypertable, max_locks_per_transaction=64, and a panel-window scan with a time-of-day predicate locks
+every chunk in range — multiplied by parallel workers ("out of shared memory / parallel worker"). FIX
+(commit 8faabec): SET max_parallel_workers_per_gather=0 + query bars_1m MONTH-BY-MONTH (each statement
+touches ~1 month of chunks, under the lock budget). Verified 3409 yields load cleanly. LESSON for future
+sandbox queries against bars_1m: never scan it panel-wide in one statement with a non-pruning predicate;
+chunk by month and kill parallel workers. (Re-running now; interpretation still held for qa-2's verify.)
