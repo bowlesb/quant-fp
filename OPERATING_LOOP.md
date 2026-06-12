@@ -8,6 +8,12 @@ last — so the discipline must be on disk, not in my head.
 
 ## Mission (the high-level goal — keep this in mind every cycle)
 
+> **The dated, quantifiable milestone ladder lives in `docs/ROADMAP.md` — the Manager's #1
+> artifact. Read it every wake: the north-star vision, the milestone we're driving toward NOW
+> (with quantifiable exit criteria), and the up/down communication protocol. Everything below
+> serves that roadmap.**
+
+
 Build and operate a trustworthy, extensible automated trading system: real-time +
 historical data with proven parity, a fast research/backtest harness, hard
 statistical gates before any real capital, paper-first. The durable prize is the
@@ -16,12 +22,34 @@ quality over speed: a false edge is worse than no edge.
 
 ## The loop (run every wake)
 
-0. **Convene the standing 4-role team (Ben's directive — EVERY wake).** Operate as a
-   team that examines the SHARED STATE (`STATE.md`, `JOURNAL.md`, `ARCHITECTURE.md`,
-   the code, and the live DB) from all angles and takes coordinated action. I am the
-   **Engineering Manager**; at the start of every wake I launch the four specialists
-   as PARALLEL background subagents (read-only — they analyze and recommend; the
-   manager executes, to avoid concurrent-edit conflicts).
+0. **Convene the standing role team via Claude Code AGENT TEAMS (Ben's directive — EVERY
+   wake).** I am the **Manager / team lead**. At each wake I create a team (`TeamCreate`) of
+   the four role agents defined in `.claude/agents/` (`qa`, `modeller`, `prod-architect`,
+   `execution-risk`) and coordinate them with the shared task list + direct messaging
+   (`SendMessage`). They are independent sessions with their own context — not read-only
+   subagents whose output only returns to me. (Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
+   already set; the feature needs a session start to activate.)
+
+   **The operating model Ben specified:**
+   - **Long-lived per-role context = each role's owned ledger file** (QA→`QA_LEDGER.md`,
+     Modeller→`EXPERIMENTS.md`, Prod/Architect→`TECH_DEBT.md`, Exec/Risk→`EXECUTION.md`). A role
+     READS its ledger at wake (its accumulated memory) and APPENDS as it learns. This is how
+     context survives across overnight wakes even though teammate processes are fresh each time.
+   - **Fresh context every wake =** each role also reads `docs/ROADMAP.md` (current milestone +
+     exit criteria), `STATE.md`, and runs `scripts/team_brief.sh --advance` + live probes.
+   - **Two-way Q&A:** teammates develop their own context and **ask the Manager questions**
+     (`SendMessage`); the Manager answers, re-assigns, and resolves cross-lane coverage gaps.
+   - **Roadmap-driven (the Manager's #1 job):** I keep `docs/ROADMAP.md` current and brief the
+     team DOWN with the milestone we're driving toward NOW + each role's assignment toward its
+     exit criteria, and report UP to Ben (which milestone, quantifiable progress, blockers,
+     decisions needed, next resume). Everyone knows how their work ladders to the goal.
+   - **Unattended heartbeat:** the `ScheduleWakeup` timer re-spawns this team each wake so the
+     loop runs overnight; per-role ledgers give continuity across spawns.
+
+   Avoid concurrent-edit conflicts: assign each teammate a disjoint set of files/areas; the
+   Manager sequences any shared-file work. I synthesize all reports + my manager view into the
+   execution plan, act on the highest-value items, update `STATE.md`/`ROADMAP.md`, and log
+   decisions/disagreements in `JOURNAL.md`.
 
    **MANDATORY agent context (do NOT hand-relay — give every agent the same packet):**
    Every specialist prompt MUST open by having the agent read `docs/MISSION.md` (the goal +
