@@ -599,3 +599,66 @@ synthesis (which solo features carry IC; does momentum isolation beat price-only
 read); (b) seed the next 2-4 long-shots; (c) spec the lowest-lead-time new features (#3 dispersion/beta,
 #6 borrow, #2 reversal label) as concrete featurestore additions for prod-architect-2; (d) chase the
 OFI pilot prerequisites (#10 v1.2.0 panel, at-scale parity).
+
+## PLAN-B DATA SPECS (Modeller, 2026-06-12) — #20 GICS sector map + #21 news-flag scoping
+
+Manager ratified the "single-threaded on OFI" concern and created two tasks; I own requirements,
+prod-architect-2 owns acquisition/feasibility. Specs below (also sent to prod). Neither needs heavy
+DB reads, so written mid-session without touching the post-close batch window.
+
+### #20 — GICS sector map (requirements for prod's FMP fetch)
+
+PURPOSE: sector-neutral momentum. Raw relative momentum (mom_*_rel) demeans each name vs the WHOLE
+universe; but the dominant cross-sectional factor on any given day is usually SECTOR (energy up, tech
+down). Demeaning momentum within GICS sector removes that factor and should leave cleaner
+idiosyncratic momentum — a well-known improvement. Also powers future dispersion/beta features.
+
+FIELDS I NEED (per symbol):
+- symbol (text, PK)
+- gics_sector (text) — the 11 GICS sectors (the level I'll demean within). REQUIRED.
+- gics_industry (text, nullable) — finer granularity for later; nice-to-have, not blocking.
+- updated_at (timestamptz default now()).
+STORAGE SHAPE: follow asset_metadata exactly — symbol-keyed, slowly-changing, ONE row/symbol,
+refreshed periodically (sector rarely changes; a daily/weekly refresh in the scheduler is fine).
+A new table `asset_sector` (symbol PK + updated_at) OR add gics_sector/gics_industry columns to
+asset_metadata — prod's call; I just need to JOIN on symbol at panel-build time.
+COVERAGE GATE (QA): NaN/null sector rate < 5% over the live universe. Names FMP can't map (ADRs,
+recent listings) -> sector NULL is acceptable; I'll treat NULL-sector names as their own "UNKNOWN"
+bucket for demeaning (don't drop them). Flag if coverage is materially worse than 95%.
+WHAT IT CHANGES: I add a v1.3.0-candidate feature group (sector-demeaned momentum: mom_Xd minus the
+within-sector-within-timestamp mean). NOT in the queue yet — needs this table first. This is the FAST
+win that improves momentum REGARDLESS of OFI's fate.
+
+### #21 — news/event-flag data: requirements memo (what would change a verdict)
+
+THE GAP: every honest signal so far is price-derived and uneconomic; the whole edge bet is OFI. News/
+event flags are an INDEPENDENT signal class (not price, not order-flow) — the Plan B that de-risks the
+single-thread. This is SCOPING ONLY (memo, not a build) — prod scopes sources/latency/cost; I define
+what the data must support to be worth collecting.
+
+REQUIREMENTS (what the data must let me build/test):
+1. EVENT TABLE, PIT-CORRECT: per (symbol, event_ts) — the headline/event timestamp must be the
+   REAL publication time (not ingestion time), so features are point-in-time honest in backtest.
+   Minimum columns: symbol, event_ts (timestamptz, the PIT anchor), event_type (text: news/earnings/
+   filing/etc.), source (text). A headline string is nice for inspection, not required for features.
+2. FEATURES IT WOULD POWER (the verdict-movers):
+   - is_news_today / is_event_today (binary flag at the cadence ts) — does the ranking behave
+     differently on event vs non-event names?
+   - minutes_since_last_news (continuous) — recency of information.
+   - news_burst_intensity (count of headlines in a trailing window, z-scored cross-sectionally) —
+     attention spikes; the most plausible alpha-bearing one.
+   These are GATING/CONDITIONING features (interact with momentum/reversal) more than standalone
+   rankers — GBM can split on them. I'd test them as additions to the existing feature set AND as a
+   regime split (IC on event-days vs non-event-days).
+3. WHAT WOULD CHANGE A VERDICT (the bar for "worth building"): the memo should let me judge whether
+   the data could plausibly produce a feature that (a) has non-trivial within-ts IC on its own OR (b)
+   materially sharpens momentum/reversal IC when interacted — under the SAME 4-gate battery (net-of-
+   cost, canary, survivorship). If coverage is too sparse (e.g. only mega-caps get news) or latency
+   too poor (events stamped at ingestion not publication), it CAN'T be PIT-honest -> not worth it.
+SOURCE CANDIDATES (prod compares): Alpaca news API (our broker, free, websocket+historical — FIRST
+candidate); FMP news endpoints (key exists); EDGAR filings feed (structured, event-typed, but filings-
+only). Compare on: PIT-correct publication timestamps, symbol coverage across the ~1000 universe (not
+just mega-caps), historical depth (need ~600 days to backtest on our panel), latency, cost.
+MEMO DELIVERABLE (prod): source comparison table on those axes + recommended source + storage shape +
+lead time to first experiment. Then Manager decides whether/when to build. Sequence: AFTER M2 capture
+scaling is underway — do not preempt M2.
