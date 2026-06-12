@@ -692,3 +692,96 @@ quiet-window guard / resolve_feature_idx changes are now LIVE without a prod adv
 Flagging to the Manager for prod-architect's RETROACTIVE review; future experimenter/compose edits go
 through a PR. (The change is low-risk — isolated sandbox service, no order/data-corruption path — but
 the policy maps it to prod regardless and I won't self-exempt.)
+
+## ★ WEEKEND FEATURE-EXPLORATION SPRINT (Modeller, 2026-06-12) — queue + NEW feature families
+
+Ben directive: weekend = uninterrupted feature-exploration sprint (experimenter + 3090, zero RTH
+constraints Sat/Sun). Two deliverables logged here: (A) the deep weekend queue, (B) 3 NEW feature
+families spec'd for collection. Data inventory verified live before proposing (grounded, not guessed):
+- bars_1m source='backfill': 253M rows / 1213 syms / back to 2023-12-01 (~2.5yr) — the momentum + CA
+  feature source; deep enough for everything below.
+- quote_agg_1m: mean/median_spread_bps, mean_bid/ask_size, quote_imbalance, n_quotes — but only 52
+  names / ~2.5 days (same live-stream subset as OFI -> same M2 scaling gate, plumbing-grade now).
+- asset_metadata: shortable/easy_to_borrow/marginable/fractionable — NO float/market-cap (needs FMP).
+- news table EXISTS (empty): id, created_at (publication anchor), headline, summary, source, url,
+  symbols[] — the #21 landing table is already scaffolded.
+- corporate_actions: NOT yet (lands tonight, #18 — splits AND dividends). sector_map: DDL committed,
+  not yet populated (#20, post-batch+key).
+
+### (A) WEEKEND QUEUE — 134 new W11_*/LONGSHOT_W11_* on v1.1.1 (total queue now 201; ~182 unrun)
+
+At ~2-5 min/experiment on the 5.5M-row panel this is ~6-15h of grind — fills Fri-night into the
+weekend; the engine re-reads the queue each cycle so I can deepen it. Families (all set_version v1.1.1):
+- grid (12): full horizon×label sweep on price-only (nocalendar) — systematic baseline map.
+- grp (36): feature-GROUP isolation (momentum/momrel/momabs/ret/vol/positioning) × 3 horizons × {raw,
+  rank} — which FAMILY carries within-ts signal where.
+- solo (16): momentum single-features at 60m + overnight (extends C11's 30m solos to longer horizons).
+- pair (16): momentum term-structure (adjacent-lookback pairs) at 30m + overnight.
+- int (21): INTERACTION probes — momentum×vol, momentum×ret, momentum×positioning, ret×vol, etc.
+  (GBM splits on the cross-term; does conditioning sharpen IC vs either group alone?) × 3 horizons.
+- lab (8): label sweep on momentum-only & momrel-only at overnight (lowest-turnover horizon).
+- loo19 (19): leave-one-out on the full price-only set — each feature's marginal contribution.
+- LONGSHOT (6): gap-only-overnight, vol-as-signal, range-overnight-reversal, kitchen-sink-lambdarank-
+  60m, momrel-volscaled-60m, ret_60m→overnight carryover. Deliberately weird, expect failure, logged.
+DISCIPLINE: all Tier-2 sandbox (experiments/); IC-level exploration, NOT edge claims — verdicts still
+need the 4-gate battery. No accidental "early reads" promoted to belief.
+
+### (B) THREE NEW FEATURE FAMILIES — spec'd for collection (idea→data→experiment→keep/discard)
+
+Beyond sector (#20) and news (#21). Ranked by lead-time-to-first-experiment (Ben wants NEW collection
+spec'd TODAY so prod can start Monday open, or tonight if API-historical):
+
+**FAMILY A — EX-DIVIDEND / CORPORATE-ACTION BEHAVIOR (lowest lead time — CA feed lands TONIGHT).**
+- HYPOTHESIS: names going ex-dividend have mechanical overnight price drops (~the dividend amount) and
+  documented ex-div-day return anomalies (dividend-capture flows, reinvestment). An is_ex_div_today /
+  days_to_ex_div / div_yield flag could (a) clean the overnight label (the ex-div drop is not alpha —
+  it's a known mechanical move we may want to NEUTRALIZE, like survivorship) and (b) be a conditioning
+  feature for overnight ranking. Splits similarly: days_since_split for post-split drift.
+- DATA SOURCE: the #18 corporate_actions table (Alpaca CA API, splits+dividends) landing tonight —
+  API-HISTORICAL, so backfillable over the ~2.5yr panel immediately, no waiting for live collection.
+- COLLECTION COST: near-zero incremental — #18 already fetches it tonight for adjustment-gating; I just
+  need it exposed as a PIT (symbol, ex_date, type, amount) lookup joinable at feature-compute time.
+- PARITY PLAN: ex-dates are calendar facts (no live/backfill skew risk); the only PIT discipline is
+  "known as-of the cadence ts" — use ex_date strictly, announcement_date if available for anticipation.
+  Cheapest, most defensible new family; mostly a LABEL-HYGIENE win (neutralize the mechanical ex-div
+  overnight drop) even if it's not standalone alpha.
+
+**FAMILY B — DISPERSION / BETA-TO-UNIVERSE (ZERO new collection — pure derived from existing bars).**
+- HYPOTHESIS: each name's beta to the universe move and its idiosyncratic residual are distinct from
+  raw momentum. Low-beta/high-idio-residual names may carry cleaner cross-sectional signal; the
+  residual-from-universe return is the "alpha" component that momentum conflates with market beta.
+  Also: realized cross-sectional DISPERSION as a regime feature (high-dispersion days = more rankable).
+- DATA SOURCE: NONE NEW — computed from bars_1m backfill (rolling regression of name return on
+  universe-median return -> beta + residual; dispersion = cross-sectional std of returns per ts).
+- COLLECTION COST: zero. It's a featurestore computation (like momentum). Lead time = my dev time to
+  add the feature group, not data acquisition. Candidate v1.3.0/v1.4.0 group.
+- PARITY PLAN: same as existing price features (derived from the same backfill bars that are already
+  parity-validated; live==backfill holds because it's the same quantlib computation). The ONLY new
+  discipline: the universe-median must be computed PIT over the same membership the labels use (already
+  solved for labels — reuse that path). I can prototype this in experiments/ THIS WEEKEND as a derived
+  column without prod, then propose the production feature group via Tier-1 PR if it shows promise.
+
+**FAMILY C — QUOTE / NBBO MICROSTRUCTURE (data collects now, but M2-gated like OFI).**
+- HYPOTHESIS: spread, quote_imbalance (bid vs ask size), and quote intensity are microstructure
+  signals distinct from trade-based OFI — quote imbalance can lead trades. spread_bps as a liquidity/
+  cost proxy doubles as a per-name cost-model input (improves the battery's net-of-cost gate).
+- DATA SOURCE: quote_agg_1m ALREADY COLLECTS (mean/median_spread_bps, bid/ask sizes, quote_imbalance,
+  n_quotes) — but only the 52 order-flow names, ~2.5 days.
+- COLLECTION COST: zero NEW (already streaming) BUT same M2 scaling gate as OFI — pilot-grade only
+  after 50->500 + at-scale parity (#15). Bundle quote features INTO the v1.2.0/OFI panel build (#10)
+  so they ride the same scaling, rather than a separate pipeline.
+- PARITY PLAN: identical to OFI — settled-day quote-agg parity at scale (QA), close-minute exclusion
+  (≥15:50 ET, same as OFI). Folds into the OFI pilot discipline; NOT a separate weekend item.
+
+RECOMMENDATION TO MANAGER: prioritize FAMILY A (ex-div, free once #18 lands tonight, immediate label-
+hygiene value) and FAMILY B (dispersion/beta, zero collection, I can prototype this weekend). FAMILY C
+rides the OFI pipeline — no separate spend. Float/market-cap (FMP, like sector) is a possible FAMILY D
+later but lower priority than these three.
+
+### (C) OFI PIPELINE VALIDATION (weekend, plumbing-grade ONLY — no early reads)
+Prod builds the v1.2.0 OFI panel over 52 names TONIGHT (~2.5 days data = PLUMBING-GRADE, NOT pilot).
+Weekend goal: validate the OFI experiment pipeline END-TO-END (panel loads, 4 gates run, cost model
+applies) so the real trigger-gated pilot (~6/26) has ZERO pipeline risk. I will run v1.2.0 experiments
+LABELED "PIPELINE-VALIDATION — NOT A READ" and record any IC as plumbing-status only; the ~2.5-day
+sample is far too thin for ANY belief. Pilot discipline (≥10 full-session 50-name days from the
+confirmed-capture clock + the ≥15:50 exclusion + at-scale parity prerequisite) stands unchanged.

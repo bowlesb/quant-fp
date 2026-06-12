@@ -689,5 +689,1944 @@
       "mom_10d_rel"
     ],
     "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_30m_raw_nocal",
+    "hypothesis": "Baseline grid cell: fwd_30m x raw label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_30m_rank_nocal",
+    "hypothesis": "Baseline grid cell: fwd_30m x rank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_30m_vol_scaled_nocal",
+    "hypothesis": "Baseline grid cell: fwd_30m x vol_scaled label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_30m",
+    "label": "vol_scaled",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_30m_lambdarank_nocal",
+    "hypothesis": "Baseline grid cell: fwd_30m x lambdarank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_30m",
+    "label": "lambdarank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_60m_raw_nocal",
+    "hypothesis": "Baseline grid cell: fwd_60m x raw label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_60m_rank_nocal",
+    "hypothesis": "Baseline grid cell: fwd_60m x rank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_60m_vol_scaled_nocal",
+    "hypothesis": "Baseline grid cell: fwd_60m x vol_scaled label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_60m",
+    "label": "vol_scaled",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_fwd_60m_lambdarank_nocal",
+    "hypothesis": "Baseline grid cell: fwd_60m x lambdarank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "fwd_60m",
+    "label": "lambdarank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_overnight_raw_nocal",
+    "hypothesis": "Baseline grid cell: overnight x raw label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_overnight_rank_nocal",
+    "hypothesis": "Baseline grid cell: overnight x rank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_overnight_vol_scaled_nocal",
+    "hypothesis": "Baseline grid cell: overnight x vol_scaled label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "overnight",
+    "label": "vol_scaled",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grid_overnight_lambdarank_nocal",
+    "hypothesis": "Baseline grid cell: overnight x lambdarank label, price-only (nocalendar 19 feats). Systematic horizon x label sweep to map where any IC/breakeven lives.",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_mom_fwd_30m_raw",
+    "hypothesis": "Feature-group isolation: mom group (8 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_mom_fwd_30m_rank",
+    "hypothesis": "Feature-group isolation: mom group (8 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_mom_fwd_60m_raw",
+    "hypothesis": "Feature-group isolation: mom group (8 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_mom_fwd_60m_rank",
+    "hypothesis": "Feature-group isolation: mom group (8 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_mom_overnight_raw",
+    "hypothesis": "Feature-group isolation: mom group (8 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_mom_overnight_rank",
+    "hypothesis": "Feature-group isolation: mom group (8 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momrel_fwd_30m_raw",
+    "hypothesis": "Feature-group isolation: momrel group (4 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momrel_fwd_30m_rank",
+    "hypothesis": "Feature-group isolation: momrel group (4 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momrel_fwd_60m_raw",
+    "hypothesis": "Feature-group isolation: momrel group (4 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momrel_fwd_60m_rank",
+    "hypothesis": "Feature-group isolation: momrel group (4 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momrel_overnight_raw",
+    "hypothesis": "Feature-group isolation: momrel group (4 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momrel_overnight_rank",
+    "hypothesis": "Feature-group isolation: momrel group (4 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momabs_fwd_30m_raw",
+    "hypothesis": "Feature-group isolation: momabs group (4 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momabs_fwd_30m_rank",
+    "hypothesis": "Feature-group isolation: momabs group (4 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momabs_fwd_60m_raw",
+    "hypothesis": "Feature-group isolation: momabs group (4 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momabs_fwd_60m_rank",
+    "hypothesis": "Feature-group isolation: momabs group (4 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momabs_overnight_raw",
+    "hypothesis": "Feature-group isolation: momabs group (4 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_momabs_overnight_rank",
+    "hypothesis": "Feature-group isolation: momabs group (4 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_ret_fwd_30m_raw",
+    "hypothesis": "Feature-group isolation: ret group (4 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_ret_fwd_30m_rank",
+    "hypothesis": "Feature-group isolation: ret group (4 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_ret_fwd_60m_raw",
+    "hypothesis": "Feature-group isolation: ret group (4 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_ret_fwd_60m_rank",
+    "hypothesis": "Feature-group isolation: ret group (4 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_ret_overnight_raw",
+    "hypothesis": "Feature-group isolation: ret group (4 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_ret_overnight_rank",
+    "hypothesis": "Feature-group isolation: ret group (4 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_vol_fwd_30m_raw",
+    "hypothesis": "Feature-group isolation: vol group (3 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_vol_fwd_30m_rank",
+    "hypothesis": "Feature-group isolation: vol group (3 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_vol_fwd_60m_raw",
+    "hypothesis": "Feature-group isolation: vol group (3 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_vol_fwd_60m_rank",
+    "hypothesis": "Feature-group isolation: vol group (3 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": [
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_vol_overnight_raw",
+    "hypothesis": "Feature-group isolation: vol group (3 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_vol_overnight_rank",
+    "hypothesis": "Feature-group isolation: vol group (3 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_pos_fwd_30m_raw",
+    "hypothesis": "Feature-group isolation: pos group (3 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_pos_fwd_30m_rank",
+    "hypothesis": "Feature-group isolation: pos group (3 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_pos_fwd_60m_raw",
+    "hypothesis": "Feature-group isolation: pos group (3 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_pos_fwd_60m_rank",
+    "hypothesis": "Feature-group isolation: pos group (3 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_pos_overnight_raw",
+    "hypothesis": "Feature-group isolation: pos group (3 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_grp_pos_overnight_rank",
+    "hypothesis": "Feature-group isolation: pos group (3 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_1d_fwd_60m",
+    "hypothesis": "Single-feature mom_1d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_1d_overnight",
+    "hypothesis": "Single-feature mom_1d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_3d_fwd_60m",
+    "hypothesis": "Single-feature mom_3d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_3d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_3d_overnight",
+    "hypothesis": "Single-feature mom_3d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_3d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_5d_fwd_60m",
+    "hypothesis": "Single-feature mom_5d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_5d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_5d_overnight",
+    "hypothesis": "Single-feature mom_5d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_5d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_10d_fwd_60m",
+    "hypothesis": "Single-feature mom_10d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_10d_overnight",
+    "hypothesis": "Single-feature mom_10d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_1d_rel_fwd_60m",
+    "hypothesis": "Single-feature mom_1d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_1d_rel_overnight",
+    "hypothesis": "Single-feature mom_1d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_3d_rel_fwd_60m",
+    "hypothesis": "Single-feature mom_3d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_3d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_3d_rel_overnight",
+    "hypothesis": "Single-feature mom_3d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_3d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_5d_rel_fwd_60m",
+    "hypothesis": "Single-feature mom_5d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_5d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_5d_rel_overnight",
+    "hypothesis": "Single-feature mom_5d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_5d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_10d_rel_fwd_60m",
+    "hypothesis": "Single-feature mom_10d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_solo_mom_10d_rel_overnight",
+    "hypothesis": "Single-feature mom_10d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_mom_3d_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_1d+mom_3d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_mom_3d_overnight",
+    "hypothesis": "Momentum term-structure: mom_1d+mom_3d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_3d_mom_5d_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_3d+mom_5d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_3d",
+      "mom_5d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_3d_mom_5d_overnight",
+    "hypothesis": "Momentum term-structure: mom_3d+mom_5d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_3d",
+      "mom_5d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_5d_mom_10d_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_5d+mom_10d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_5d_mom_10d_overnight",
+    "hypothesis": "Momentum term-structure: mom_5d+mom_10d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_5d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_mom_10d_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_1d+mom_10d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_mom_10d_overnight",
+    "hypothesis": "Momentum term-structure: mom_1d+mom_10d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_10d"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_rel_mom_3d_rel_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_1d_rel+mom_3d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_rel_mom_3d_rel_overnight",
+    "hypothesis": "Momentum term-structure: mom_1d_rel+mom_3d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_3d_rel_mom_5d_rel_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_3d_rel+mom_5d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_3d_rel",
+      "mom_5d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_3d_rel_mom_5d_rel_overnight",
+    "hypothesis": "Momentum term-structure: mom_3d_rel+mom_5d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_3d_rel",
+      "mom_5d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_5d_rel_mom_10d_rel_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_5d_rel+mom_10d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_5d_rel_mom_10d_rel_overnight",
+    "hypothesis": "Momentum term-structure: mom_5d_rel+mom_10d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_rel_mom_10d_rel_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_1d_rel+mom_10d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_pair_mom_1d_rel_mom_10d_rel_overnight",
+    "hypothesis": "Momentum term-structure: mom_1d_rel+mom_10d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_vol_fwd_30m",
+    "hypothesis": "Interaction probe: mom_x_vol (7 feats) at fwd_30m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_vol_fwd_60m",
+    "hypothesis": "Interaction probe: mom_x_vol (7 feats) at fwd_60m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_vol_overnight",
+    "hypothesis": "Interaction probe: mom_x_vol (7 feats) at overnight. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_ret_fwd_30m",
+    "hypothesis": "Interaction probe: mom_x_ret (8 feats) at fwd_30m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_ret_fwd_60m",
+    "hypothesis": "Interaction probe: mom_x_ret (8 feats) at fwd_60m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_ret_overnight",
+    "hypothesis": "Interaction probe: mom_x_ret (8 feats) at overnight. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_pos_fwd_30m",
+    "hypothesis": "Interaction probe: mom_x_pos (7 feats) at fwd_30m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_pos_fwd_60m",
+    "hypothesis": "Interaction probe: mom_x_pos (7 feats) at fwd_60m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_pos_overnight",
+    "hypothesis": "Interaction probe: mom_x_pos (7 feats) at overnight. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_volz_fwd_30m",
+    "hypothesis": "Interaction probe: mom_x_volz (5 feats) at fwd_30m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_volz_fwd_60m",
+    "hypothesis": "Interaction probe: mom_x_volz (5 feats) at fwd_60m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_mom_x_volz_overnight",
+    "hypothesis": "Interaction probe: mom_x_volz (5 feats) at overnight. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_momabs_x_vol_fwd_30m",
+    "hypothesis": "Interaction probe: momabs_x_vol (7 feats) at fwd_30m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_momabs_x_vol_fwd_60m",
+    "hypothesis": "Interaction probe: momabs_x_vol (7 feats) at fwd_60m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_momabs_x_vol_overnight",
+    "hypothesis": "Interaction probe: momabs_x_vol (7 feats) at overnight. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_ret_x_vol_fwd_30m",
+    "hypothesis": "Interaction probe: ret_x_vol (7 feats) at fwd_30m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_ret_x_vol_fwd_60m",
+    "hypothesis": "Interaction probe: ret_x_vol (7 feats) at fwd_60m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_ret_x_vol_overnight",
+    "hypothesis": "Interaction probe: ret_x_vol (7 feats) at overnight. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_pos_x_vol_fwd_30m",
+    "hypothesis": "Interaction probe: pos_x_vol (6 feats) at fwd_30m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_pos_x_vol_fwd_60m",
+    "hypothesis": "Interaction probe: pos_x_vol (6 feats) at fwd_60m. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_int_pos_x_vol_overnight",
+    "hypothesis": "Interaction probe: pos_x_vol (6 feats) at overnight. GBM can split on the cross-term \u2014 does conditioning sharpen IC vs either group alone?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_mom_overnight_raw",
+    "hypothesis": "Label sweep: mom overnight raw. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_mom_overnight_rank",
+    "hypothesis": "Label sweep: mom overnight rank. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_mom_overnight_vol_scaled",
+    "hypothesis": "Label sweep: mom overnight vol_scaled. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "vol_scaled",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_mom_overnight_lambdarank",
+    "hypothesis": "Label sweep: mom overnight lambdarank. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": [
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_momrel_overnight_raw",
+    "hypothesis": "Label sweep: momrel overnight raw. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_momrel_overnight_rank",
+    "hypothesis": "Label sweep: momrel overnight rank. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_momrel_overnight_vol_scaled",
+    "hypothesis": "Label sweep: momrel overnight vol_scaled. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "vol_scaled",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_lab_momrel_overnight_lambdarank",
+    "hypothesis": "Label sweep: momrel overnight lambdarank. Which loss extracts most from momentum at the overnight horizon (where turnover is lowest)?",
+    "horizon": "overnight",
+    "label": "lambdarank",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_ret_5m",
+    "hypothesis": "Leave-one-out on the full price-only set: drop ret_5m, keep 18. Marginal contribution of ret_5m to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_ret_15m",
+    "hypothesis": "Leave-one-out on the full price-only set: drop ret_15m, keep 18. Marginal contribution of ret_15m to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_ret_30m",
+    "hypothesis": "Leave-one-out on the full price-only set: drop ret_30m, keep 18. Marginal contribution of ret_30m to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_ret_60m",
+    "hypothesis": "Leave-one-out on the full price-only set: drop ret_60m, keep 18. Marginal contribution of ret_60m to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_vol_30m",
+    "hypothesis": "Leave-one-out on the full price-only set: drop vol_30m, keep 18. Marginal contribution of vol_30m to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_vol_60m",
+    "hypothesis": "Leave-one-out on the full price-only set: drop vol_60m, keep 18. Marginal contribution of vol_60m to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_vol_z_30",
+    "hypothesis": "Leave-one-out on the full price-only set: drop vol_z_30, keep 18. Marginal contribution of vol_z_30 to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_vwap_dev",
+    "hypothesis": "Leave-one-out on the full price-only set: drop vwap_dev, keep 18. Marginal contribution of vwap_dev to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_range_pct",
+    "hypothesis": "Leave-one-out on the full price-only set: drop range_pct, keep 18. Marginal contribution of range_pct to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_gap_from_open",
+    "hypothesis": "Leave-one-out on the full price-only set: drop gap_from_open, keep 18. Marginal contribution of gap_from_open to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_rel_ret_30m",
+    "hypothesis": "Leave-one-out on the full price-only set: drop rel_ret_30m, keep 18. Marginal contribution of rel_ret_30m to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_1d",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_1d, keep 18. Marginal contribution of mom_1d to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_3d",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_3d, keep 18. Marginal contribution of mom_3d to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_5d",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_5d, keep 18. Marginal contribution of mom_5d to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_10d",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_10d, keep 18. Marginal contribution of mom_10d to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_1d_rel",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_1d_rel, keep 18. Marginal contribution of mom_1d_rel to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_3d_rel",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_3d_rel, keep 18. Marginal contribution of mom_3d_rel to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_5d_rel",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_5d_rel, keep 18. Marginal contribution of mom_5d_rel to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W11_loo19_mom_10d_rel",
+    "hypothesis": "Leave-one-out on the full price-only set: drop mom_10d_rel, keep 18. Marginal contribution of mom_10d_rel to the 30m IC.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "ret_15m",
+      "ret_30m",
+      "ret_60m",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "rel_ret_30m",
+      "mom_1d",
+      "mom_3d",
+      "mom_5d",
+      "mom_10d",
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W11_gap_only_overnight",
+    "hypothesis": "LONG-SHOT: gap_from_open ALONE at overnight. Does the open gap predict overnight continuation/reversal? Pure gap play.",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W11_vol_as_signal",
+    "hypothesis": "LONG-SHOT: vol features ONLY (vol_30m,vol_60m,vol_z_30) at 30m rank. Does volatility itself rank future returns (low-vol anomaly intraday)?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W11_range_overnight",
+    "hypothesis": "LONG-SHOT: range_pct + vol_z_30 at overnight. Do high-range/high-vol-spike names mean-revert overnight?",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "range_pct",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W11_kitchen_sink_lambdarank_60m",
+    "hypothesis": "LONG-SHOT: ALL 21 feats, lambdarank, 60m. Throw everything at LTR at a mid horizon \u2014 does the ranking objective find structure regression misses?",
+    "horizon": "fwd_60m",
+    "label": "lambdarank",
+    "features": "all",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W11_momrel_volscaled_60m",
+    "hypothesis": "LONG-SHOT: relative momentum vol_scaled at 60m. Vol-normalized momentum at a horizon between 30m noise and overnight.",
+    "horizon": "fwd_60m",
+    "label": "vol_scaled",
+    "features": [
+      "mom_1d_rel",
+      "mom_3d_rel",
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W11_single_ret60_overnight",
+    "hypothesis": "LONG-SHOT: ret_60m ALONE at overnight. Does the last hour's return predict overnight? (intraday-to-overnight momentum carryover).",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "ret_60m"
+    ],
+    "set_version": "v1.1.1"
   }
 ]
