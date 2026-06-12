@@ -1009,3 +1009,46 @@ this: does removing the dividend artifact change the overnight picture? INTERPRE
 until qa-2 verifies the ex-div diagnostic. NOTE on the proxy: Family B's within-snapshot beta is a cheap
 4-horizon-vector proxy; the discard is firm enough that the expensive rolling-regression beta is NOT
 worth building (a proxy showing survivorship is weak evidence FOR the costly version).
+| 2026-06-12T19:38:22+00:00 | C11_solo_vol_z_30 | fwd_30m | raw | 1 | 4840765 | -0.00029 | -0.517 | 2e-05 | Single-feature interrogation: vol_z_30 ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:22+00:00 | C11_solo_vwap_dev | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: vwap_dev ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:22+00:00 | C11_solo_range_pct | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: range_pct ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:22+00:00 | C11_solo_gap_from_open | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: gap_from_open ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:22+00:00 | C11_solo_rel_ret_30m | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: rel_ret_30m ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:22+00:00 | C11_solo_mom_1d | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_1d ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_solo_mom_3d | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_3d ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_solo_mom_5d | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_5d ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_solo_mom_10d | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_10d ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_solo_mom_1d_rel | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_1d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_solo_mom_3d_rel | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_3d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_solo_mom_5d_rel | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_5d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_solo_mom_10d_rel | fwd_30m | raw |  |  |  |  |  | Single-feature interrogation: mom_10d_rel ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+| 2026-06-12T19:38:23+00:00 | C11_mom_all_30m | fwd_30m | raw |  |  |  |  |  | Momentum-only (10 feats) at 30m raw. Standalone momentum IC vs price-only — does cross-sectional momentum carry the signal? |
+| 2026-06-12T19:38:24+00:00 | C11_mom_abs_30m | fwd_30m | raw |  |  |  |  |  | Absolute momentum only (mom_1d..10d). Abs vs rel split: is raw price momentum or universe-relative momentum the carrier? |
+| 2026-06-12T19:40:21+00:00 | C11_mom_rel_30m | fwd_30m | raw | 4 | 4840765 | -0.00336 | -2.161 | -0.0003 | Relative momentum only (mom_*_rel). The universe-demeaned momentum — should be the cleaner cross-sectional signal. |
+
+## ★ OFI PIPELINE VALIDATION (Modeller, 2026-06-12) — PLUMBING PASS + one feature-def finding
+
+⚠️ NOT A SIGNAL READ. v1.2.0 OFI panel (#10, prod): 1516 vectors / 50 names / 3 days — plumbing-grade.
+Goal = prove the experiment pipeline ingests OFI E2E so the real pilot (~6/26) has zero pipeline risk.
+Script: experiments/ofi_pipeline_validation.py (bypasses the min-rows verdict guard ON PURPOSE — this
+is plumbing, not a verdict).
+
+PLUMBING = PASS (all 3 asserts green):
+1. load_panel(v1.2.0) returns the 25-feature vectors; OFI at positions 22-25 (ofi_5m/15m/30m,
+   signed_vol_z_30) exactly as prod laid out. 816 fwd_30m rows / 50 syms / 18 ts; source='historical';
+   v1.2.0 IS registered in feature_sets (25 names) — contra prod's note, the registry entry exists.
+2. All 4 OFI features PRESENT + NON-DEGENERATE: ofi_5m/15m/30m ~640 uniq, range ~[-0.93,+0.93]
+   (sane signed imbalances), NaN 21.6% (thin-window edges; matches prod's ~85% real).
+3. run_experiment ingests all 25 feats incl OFI and completes — gates compute, no error. (IC -0.0396 /
+   canary -0.0139 are PLUMBING NOISE on 3 days / n_test_ts=4 — NOT a read; recorded only to prove the
+   harness runs.)
+=> OFI experiment pipeline validated end-to-end. Pilot pipeline risk = 0.
+
+⚠️ FEATURE-DEFINITION FINDING (flag to prod, real but not pipeline-blocking): signed_vol_z_30 is NOT
+properly normalized. A feature named "_z" (z-score) should be std≈1, range≈[-5,+5]. ACTUAL: mean 5.86,
+STD 141.49, range [-3158, +1234], median 0.10. It's a raw signed-volume quantity (or the rolling-std
+denominator is broken — plausibly the 3-day window lacks the history to compute the normalization, so
+it divides by ~0 or not at all). NOT fatal for GBM (tree splits are scale-invariant) but fragile +
+misleadingly named; the ofi_5m/15m/30m features ARE correctly in [-1,1]. Worth fixing in the v1.2.0
+feature definition before the pilot interprets signed_vol_z_30. Re-check once there's >10 days of
+trade_agg history (the rolling z-window may simply need more data).
