@@ -35,7 +35,9 @@ an open book is the compound failure we don't risk. Sequence (any successor can 
    versioned path: `MODEL_FILENAME=model_fwd_30m_v1.1.1.txt FEATURE_SET_VERSION=v1.1.1 docker compose
    --profile tools run --rm trainer fwd_30m` (MODEL_FILENAME override added in 4b6b7fe so the staging
    train can't clobber the live model_fwd_30m.txt). model-server stays on v1.0.0; QA v1.0.0 purge stays deferred.
-6. **`make rebuild-batch`** (NOT rebuild-all) — GIT_SHA-stamp + restart all long-running BUILT services
+6. **PRE-BUILD: `git status` must be CLEAN** (all peers committed) — a dirty tree bakes `<sha>-dirty`
+   into every image and assert_image_fresh.sh flags DIRTY, defeating the #11 provenance. If a peer has
+   WIP, get them to commit first (or knowingly accept -dirty). Then **`make rebuild-batch`** (NOT rebuild-all) — GIT_SHA-stamp + restart all long-running BUILT services
    EXCEPT the executor (BATCH_SERVICES = ingestor scheduler feature-computer model-server backfill-manager
    experimenter dashboard). ONE ingestor restart; picks up clean bar-subscription membership + clears the
    benign ingestor quantlib-drift. **Executor EXCLUDED on purpose:** #19 is on master (the b856aa7
