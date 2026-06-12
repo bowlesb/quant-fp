@@ -30,6 +30,15 @@ rebuild:
 rebuild-all:
 	docker compose build --build-arg GIT_SHA=$(GIT_SHA) && docker compose up -d
 
+# Tonight's batch rebuild (b856aa7 absorption): GIT_SHA-stamp + restart all long-running BUILT
+# services EXCEPT executor — execution-risk owns the executor deploy via `make rebuild S=executor`
+# AFTER #19 review+bless (that one targeted restart folds in the #18 ex-date guard + #19). This way
+# the ingestor still restarts exactly once and we never deploy un-approved #19.
+BATCH_SERVICES := ingestor scheduler feature-computer model-server backfill-manager experimenter dashboard
+rebuild-batch:
+	docker compose build --build-arg GIT_SHA=$(GIT_SHA) $(BATCH_SERVICES)
+	docker compose up -d $(BATCH_SERVICES)
+
 # Build one or all services with the SHA baked in, no restart: make build-fresh [S=ingestor]
 build-fresh:
 	docker compose build --build-arg GIT_SHA=$(GIT_SHA) $(S)
