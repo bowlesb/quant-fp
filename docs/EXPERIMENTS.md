@@ -959,3 +959,19 @@ ex-div-CORRECTED labels (add yield back on affected nights) and see whether the 
 changes — does removing the dividend artifact clean or kill the residual overnight signal? (Prototype
 next; the diagnostic above already justifies the correction regardless of the battery outcome — a
 known mechanical contaminant should not be in the label.)
+
+### PROVENANCE DECISION — v1.1.1 stays FROZEN, KLAC fix carried by v1.1.2 (Modeller, 2026-06-12)
+
+#17: prod re-fetched KLAC bars clean (max day-jump 10×→1.19×, consistent Adjustment.ALL). The #17 spec
+said "recompute KLAC's v1.1.1 momentum cells"; prod surfaced it as a provenance call (my lane). DECISION
+= (B) leave v1.1.1 frozen; do NOT recompute KLAC's v1.1.1 cells in-place.
+WHY: v1.1.1 (5.5M rows / 06:43Z) is the EXACT pinned artifact my "NO EDGE" verdict was computed on — its
+integrity as a reproducible reference outweighs the correctness of a few KLAC cells. Mutating it would
+break the verdict↔panel mapping. And the KLAC caveat is already MOOT: the sensitivity pass (984e7fa)
+excluded all 11 split-discontinuity names (KLAC incl.) and the verdict moved nothing — so the verdict
+provably doesn't depend on KLAC's cells. Recomputing = pure provenance cost, zero verdict benefit.
+GO-FORWARD: v1.1.2 (the #12B full-universe rebuild) is the next research panel; it inherits clean KLAC
++ the other 10 corrected names automatically from the now-fixed bars. COMMITMENT: when v1.1.2 lands,
+re-run the battery on it to RE-CONFIRM "no edge" on fully un-caveated data (a v1.1.2 task). The ex-div
+overnight-label hygiene (Family A) should also fold into the v1.1.2 label build so the go-forward panel
+has clean overnight labels from the start.
