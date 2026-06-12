@@ -44,6 +44,15 @@ EOD_FLATTEN_MIN = int(os.environ.get("EOD_FLATTEN_MIN", "12"))   # flatten this 
 STALENESS_MAX_MIN = int(os.environ.get("STALENESS_MAX_MIN", "35"))
 MIN_SCORE_SEP = float(os.environ.get("MIN_SCORE_SEP", "0.0005"))
 LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "30"))
+# Symbols barred from the live basket because their LIVE feed is known-bad — the model
+# scores them off corrupt stream bars so their rank is artifact, not signal. KLAC (2026-06-12):
+# stream bars persistently 10x the true price (feed scaling bug); the research panel is
+# backfill-sourced and verified unaffected, but model-server computes live features from stream.
+# REMOVAL CONDITION: out only when prod-architect confirms the KLAC ingestion fix is live AND
+# QA's parity check shows KLAC stream==backfill. Env-extensible for the Nx-sibling sweep.
+SYMBOL_DENYLIST = {
+    sym.strip().upper() for sym in os.environ.get("SYMBOL_DENYLIST", "KLAC").split(",") if sym.strip()
+}
 _NY = ZoneInfo("America/New_York")
 
 DB_KWARGS = {
@@ -158,7 +167,7 @@ def candidate_pool(conn: psycopg.Connection, ts: datetime) -> list[dict]:
         rows = cur.fetchall()
     pool = []
     for symbol, score, easy_to_borrow, name, last_close in rows:
-        if is_etf_like(name) or last_close is None or last_close < 5:
+        if symbol in SYMBOL_DENYLIST or is_etf_like(name) or last_close is None or last_close < 5:
             continue
         pool.append({"symbol": symbol, "score": float(score), "etb": bool(easy_to_borrow),
                      "price": float(last_close)})
@@ -302,8 +311,9 @@ def reconcile(conn: psycopg.Connection, positions: list, today: object) -> None:
 
 
 def main() -> None:
-    logger.info("executor starting: mode=%s dry_run=%s model=%s K=%d/%d notional=%.0f cap=%.0f",
-                MODE, DRY_RUN, MODEL_VERSION, K_LONG, K_SHORT, NOTIONAL_PER_NAME, GROSS_CAP)
+    logger.info("executor starting: mode=%s dry_run=%s model=%s K=%d/%d notional=%.0f cap=%.0f denylist=%s",
+                MODE, DRY_RUN, MODEL_VERSION, K_LONG, K_SHORT, NOTIONAL_PER_NAME, GROSS_CAP,
+                sorted(SYMBOL_DENYLIST))
     with psycopg.connect(**DB_KWARGS, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(STATE_DDL)
         cur.execute(PNL_DDL)

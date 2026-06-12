@@ -200,6 +200,20 @@ Built the measured cost curve the cost-gate battery only ASSUMED (cost_bps_onewa
   then use `execution_slippage_daily.oneway_cost_bps_mean` (one-way, mid-referenced — directly
   comparable to the battery's breakeven_cost_bps). Round-trip ≈ 2× (entry + exit half-spread).
 
+## Active live-basket exclusions (remove when the condition clears — don't let these rot)
+- **KLAC — excluded since 2026-06-12 (Manager pre-open directive).** Reason: KLAC's LIVE STREAM
+  bars are persistently exactly 10× the true price (feed scaling bug, QA finding). The v1.1.x
+  research panel is backfill-sourced and verified unaffected, but model-server computes live
+  features from stream bars — most are scale-invariant ratios (a uniform 10× cancels), but a
+  single non-10× bar spikes KLAC's returns and injects a garbage score into the cross-sectional
+  rank, which could land it in the basket on artifact. At 3L/3S sizing exclusion costs ~0; KLAC
+  was in fact ranked 957/993 (decile 9 = short candidate) on the latest scores. Mechanism:
+  `SYMBOL_DENYLIST` in services/executor/main.py (filtered in `candidate_pool`; env-extensible
+  via `SYMBOL_DENYLIST` for the Nx-sibling sweep). Verified live: pool 784 names, KLAC absent.
+  **REMOVAL CONDITION:** prod-architect confirms the KLAC ingestion fix is LIVE *and* QA's parity
+  check shows KLAC stream==backfill. Then drop KLAC from the denylist default. If the Nx-sibling
+  sweep finds other symbols with Nx stream ratios, add them here with the same condition.
+
 ## Standing future items (open exec work, by gating milestone)
 - **[M4/M5 — mandatory before real money] Settled-day reconciliation vs broker statements.**
   Paper has no statements to reconcile against, so this can't be exercised now — but the muscle
