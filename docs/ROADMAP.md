@@ -30,7 +30,7 @@ Full bet lifecycle on a real market day: submit (NBBO marketable-limit) → fill
 Exit criteria (all met): live paper order round-trip; EOD flatten leaves 0 positions/0 open
 orders; P&L recorded. *Status: complete.*
 
-### M1 — Trustworthy data & a CLEAN research panel 🔴 NOW (target 2026-06-13)
+### M1 — Trustworthy data & a CLEAN research panel ✅ DONE (2026-06-12, a day early)
 The edge verdicts are only as honest as the panel. We found the ~600-day panel was ~21% ETFs/
 leveraged funds; the price-only "no edge" verdict is therefore suspect.
 **Exit criteria (quantifiable):**
@@ -49,14 +49,19 @@ leveraged funds; the price-only "no edge" verdict is therefore suspect.
       ETFs — old ~933/date ≈ ~210 funds + ~723 equities. Note: v1.1.0 feature rows stay
       frozen but their original labels are overwritten — v1.1.0 must NEVER be re-batteried;
       its canonical results live in experiments/results.jsonl.)
-- [ ] Price-only cost-gated battery **RE-RUN on the clean panel**; verdict re-validated and
-      documented (trustworthy, not contaminated) in STATE/EXPERIMENTS.
+- [x] Price-only cost-gated battery **RE-RUN on the clean panel**; verdict re-validated and
+      documented (trustworthy, not contaminated) in STATE/EXPERIMENTS. ✅ 2026-06-12: all 8
+      configs NO EDGE on clean v1.1.1 (30m: IC 0.027-0.032, clean canary, net-NEGATIVE,
+      breakeven ~1.4bps < ~2bps cost; overnight: survivorship, neutralized sharpe ≤ −0.35).
+      Robust to the split-discontinuity caveat: 11-name sensitivity pass moved nothing beyond
+      rounding (e.g. 30m raw IC 0.0270→0.0266). Pre-registered ~70% prediction held. Price-only
+      ENDPOINT; path to edge = order-flow + delisted backfill.
 - [x] All QA invariants are **automated checks** (calendar/DST, parity, PIT, warmup, no-Inf,
       universe-composition), each fail-loud — not prose. ✅ 2026-06-12: scripts/qa_invariants.py,
       10 invariants, CI-able (3f478d7). 9 green / 1 deliberately RED: backfill↔realtime bar
       parity 1.14% vs 1% gate — real divergence under drill (task #14), gates M2 scale-up.
 
-### M2 — Order-flow data at scale (target 2026-06-20)
+### M2 — Order-flow data at scale 🔴 NOW (target 2026-06-20)
 Order flow is the most plausible remaining edge source at our latency. It is wired end-to-end
 but only covers ~50 names.
 **Exit criteria:**
@@ -94,12 +99,12 @@ but only covers ~50 names.
 ---
 
 ## Current focus (the Manager updates this line every wake)
-**Driving toward M1 — criteria 1, 2 & 4 GREEN (2026-06-12); the milestone hinges on #3 (battery
-verdict), RUNNING NOW.** Clean v1.1.1 panel landed (5.5M rows / 613 dates / 0.000% NaN); Modeller's
-4-gate battery is re-validating the price-only verdict on it. Parallel: #13 UTC/ET scheduler fix,
-KLAC root-cause (read-only until post-close ingestor batch), #11 staging. Post-battery: #12
-backfill (pre-approved, DB-heavy), #14 full-depth parity drill, #15 first full-50-name settled-day
-proof (6/12 session, protected by no-RTH-restart constraint).
+**M1 DECLARED DONE 2026-06-12 (a day early) — driving toward M2 (order-flow at scale, 6/20).**
+Tonight's post-close batch (prod owns, ONE ingestor restart): #17 KLAC re-fetch, #11 structural
+stale-image fix, clean-membership pickup, then #12 backfill + #16 model train/review/swap (outside
+RTH) + QA's #15 first full-50-name settled-day parity proof. M2 work: sharding design with live
+coverage invariant, capture 50→500, #10 v1.2.0 OFI panel, #18 CA feed, OFI pilot ~6/26 (gated on
+#15). Standing reds under drill: bar-parity 1.14% (#14).
 
 ---
 

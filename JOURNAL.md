@@ -856,3 +856,18 @@ candidate, 0 orders). Scores non-degenerate (782 names, sep 0.0134). KLAC stream
 Upstream #6 de-facto green (membership existed, model-server fired). Task #6 CLOSED.
 Modeller still frozen on teams permission dialog (Ben to unblock); M1 declaration
 held on the 11-name sensitivity pass only.
+
+## 2026-06-12 — Manager: ★ M1 DECLARED DONE (a day early) ★
+Sensitivity pass (984e7fa): verdict ROBUST — excl-11 moved nothing beyond rounding
+(30m raw IC 0.0270->0.0266, breakeven 1.42->1.41; overnight neutralized sharpe stays
+negative everywhere). All 4 M1 exit criteria GREEN with evidence:
+ #1 universe equities-only (0 violations/614 dates; independent denylist gate),
+ #2 clean v1.1.1 panel (5.5M rows/613d/0.000% NaN, labels recomputed+gated),
+ #3 price-only verdict re-validated on clean data (NO EDGE, all 8 configs, shown-stable
+    vs the split caveat; pre-registered ~70% prediction held),
+ #4 QA invariants automated/fail-loud (panel verified trustworthy on every axis).
+M2 (order-flow at scale, 6/20) is now CURRENT. Tonight post-close: prod's batch
+(#17 KLAC re-fetch, #11, clean-membership pickup, ONE ingestor restart), #16 train+
+review+swap (held entirely post-close — /models hot-reload risk), #12 backfill, QA #15
+first full-50 settled-day proof. prod-architect-2 (joined 07:45, origin unknown) stood
+down to read-only; original prod owns the lane.
