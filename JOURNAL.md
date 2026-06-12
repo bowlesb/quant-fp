@@ -1115,3 +1115,19 @@ DECISION: 500-name sharded-ingestion build GREEN-LIT (prod implements post-weeke
 memos; coverage invariant built in from the start; qa re-proof at each scale step;
 shard-topology plan is my one design checkpoint). ROADMAP M2 criterion annotated
 (ticks when re-proven at >=500). Standing rule: OFI <=15:59 ET.
+
+## 2026-06-12 (night) — Manager: THE LOAD-BEARING RESEARCH READ — 30m signal IS ret_5m
+Grind synthesis (80/201, 5f8d075): dropping ALL momentum leaves 30m IC UNCHANGED
+(0.0282 momentum-free vs 0.0270 full) — momentum is dead weight at 30m. The entire 30m
+signal is ret_5m (solo IC 0.0106; next feature 0.0043) = a pure 5-MIN REVERSAL effect.
+Consequences ratified:
+1. OFI bet upgraded from plausible to MECHANISTIC: ret_5m is a crude proxy for order-
+   book activity; OFI measures the mechanism directly. Pilot headline metric is now
+   OFI's MARGINAL IC over ret_5m (cleanest kill/keep formulation). Also explains the
+   uneconomic verdict (5-min signal = max turnover = horizon/cost mismatch, not a
+   modeling failure) -> fill-probability/measured-cost work is decisive if OFI wins.
+2. #20 sector-neutral momentum demoted near-term (can't create signal by demeaning a
+   dead feature at 30m); overnight momentum check pending before final framing.
+3. Shape 7 DISCARD (intraday/overnight orthogonal: 30m signal IC -0.0019 vs overnight).
+Pattern now explicit: price panel + compositions EXHAUSTED; all edge hope = new data
+(OFI ~6/26, news scoping 6/13, ex-div hygiene, sector option).
