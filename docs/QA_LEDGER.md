@@ -197,6 +197,17 @@ denylist — do NOT signal it until verified.
   types, zero leak); 607/785 panel symbols (77%) pay dividends — broad, not large-cap-skewed, so the
   non-ex baseline is a fair counterfactual. **VERDICT STANDS, now fully reproduced end-to-end. Battery
   interpretation against ex-div-corrected labels is sound.**
+  - **OUTCOME (modeller-2, ea2c1eb): corrected battery DONE.** Removing the ex-div artifact LOWERS
+    apparent overnight IC on every config (raw 0.0142→0.0096; lambdarank 0.0358→0.0339 — the model was
+    partly predicting the mechanical dividend drop) but survivorship-neutralized sharpe stays NEGATIVE
+    everywhere (raw −1.79→−2.18). Net: genuine label-hygiene win, NO hidden overnight alpha; Family B
+    discarded. My full verify puts that on solid ground.
+  - **PENDING TIER-1 REVIEW (routes to qa, label semantics):** modeller-2's production quantlib/labels.py
+    ex-div hygiene fix (add yield back on affected nights). Two things baked in from my+Manager notes:
+    (a) yield DENOMINATOR = official/adjusted daily close, NOT the 15:59 proxy → kills the +4.8bps
+    over-correction I flagged; (b) needs label-VERSIONING (basis/version column, #22's first brick) to
+    persist corrected labels WITHOUT overwriting frozen canonical ones. PR gated on #22 landing — review
+    it when it arrives; specifically check the denominator change actually neutralizes the over-correction.
 
 - **2026-06-12 — 827f478 (modeller's ex-div overnight-label artifact diagnostic), verified by qa.**
   CONFIRMED — the diagnostic holds; it's a real label-hygiene finding, safe to interpret the
