@@ -55,18 +55,27 @@ def register_feature_set(conn: psycopg.Connection, version: str = FEATURE_SET_VE
         )
 
 
-def load_daily_closes(conn: psycopg.Connection, symbol: str, source: str,
+def load_daily_closes(conn: psycopg.Connection, symbol: str,
                       end: datetime) -> dict[date, float]:
     """{date: RTH-session close} for the symbol up to `end`. The session close is the
-    last RTH bar of each day (DST-correct via America/New_York)."""
+    last RTH bar of each day (DST-correct via America/New_York).
+
+    Daily momentum is a MULTI-DAY timescale, so daily closes are loaded from the
+    deepest available history independent of which intraday `bar_source` the rest of
+    the build uses: a stream-source OFI panel only spans a few days, so binding daily
+    closes to source='stream' starved momentum to 100% NaN. We PREFER backfill (the
+    canonical deep daily history) and fall back to stream per date — the same
+    backfill-over-stream preference load_micro/load_flow already use. Parity-safe:
+    momentum uses only completed PRIOR sessions, whose close is identical across
+    sources (the settled session close)."""
     with conn.cursor() as cur:
         cur.execute(
             """SELECT DISTINCT ON (ts::date) ts::date, close FROM bars_1m
-               WHERE symbol=%s AND source=%s AND ts<=%s
+               WHERE symbol=%s AND ts<=%s
                  AND (ts AT TIME ZONE 'America/New_York')::time >= '09:30'
                  AND (ts AT TIME ZONE 'America/New_York')::time <  '16:00'
-               ORDER BY ts::date, ts DESC""",
-            (symbol, source, end),
+               ORDER BY ts::date, ts DESC, (source='backfill') DESC""",
+            (symbol, end),
         )
         return {row[0]: float(row[1]) for row in cur.fetchall()}
 
@@ -151,7 +160,7 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
     # session_open reflect the real session (09:30-16:00 ET), not premarket prints.
     market = [bar for bar in load_bars(conn, MARKET_SYMBOL, bar_source, start, end) if is_rth(bar.ts)]
     market_ts = [bar.ts for bar in market]
-    market_daily = load_daily_closes(conn, MARKET_SYMBOL, bar_source, end) if needs_daily else {}
+    market_daily = load_daily_closes(conn, MARKET_SYMBOL, end) if needs_daily else {}
     # WARMUP ASSERT (QA-I4): momentum needs MAX_MOMENTUM_LOOKBACK prior trading days. If the
     # build window starts without enough pre-window daily history (e.g. just after a data
     # gap), momentum is silently NaN-degraded at the start — surface it loudly, don't hide it.
@@ -170,7 +179,7 @@ def build_feature_store(conn: psycopg.Connection, symbols: list[str],
         if not bars:
             continue
         micro = load_micro(conn, symbol, start, end)
-        daily_closes = load_daily_closes(conn, symbol, bar_source, end) if needs_daily else {}
+        daily_closes = load_daily_closes(conn, symbol, end) if needs_daily else {}
         flow_by_ts = load_flow(conn, symbol, start, end) if needs_flow else {}
         session_open: dict[object, float] = {}
         for bar in bars:
