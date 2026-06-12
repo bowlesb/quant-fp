@@ -281,6 +281,18 @@ denylist — do NOT signal it until verified.
     decision. **STANDING OBLIGATION: Tuesday — re-prove trade_agg_parity ≥98% at 512 on settled 6/15 (the
     M2 exit criterion tick); Monday ~09:35 ET — bars-level clean-subscription probe (expect exactly QQQ/SPY/
     IWM in stream bars, no SOXL/TQQQ class).**
+  - **COLLISION-POLICY RULING (2026-06-13, prod asked: keep ON CONFLICT DO NOTHING on trade_agg/quote_agg
+    at 512, or switch to DELETE-then-insert?). ANSWER: KEEP DO NOTHING — the upsert would be an ACTIVE BUG,
+    not a neutral cleanup. DON'T let a future reviewer "fix" it (same inversion-trap class as the split
+    exemption).** Reasoning: the only stream-source collision is the late-tick-after-bar re-flush. flush_minute
+    POPS the buffer (worker.py:107) so the 2nd flush of minute N sees ONLY the lone late tick, and
+    aggregate_trades MUTATES TickState (last_price advances), so re-aggregating that single tick runs against
+    an already-advanced state → a partial, MIS-SIGNED aggregate. DO NOTHING discards that garbage 2nd write
+    and keeps the correct first full-minute row. DELETE-then-insert would CLOBBER the good row with the
+    mis-signed partial and DROP trade_agg_parity below the measured 99.85% (my proof was measured against
+    DO-NOTHING). The late tick's contribution is genuinely lost (stream-lossy-vs-REST, already inside the
+    99.79/99.85 numbers, same single-process); the correct future fix to RECOVER it is a deferred-flush
+    window (hold a minute ~2-3s past its bar), NOT a different conflict policy. Out of scope for this PR.
 
 - **2026-06-12 — #19 DEPLOYED & VERIFIED LIVE + after-review of hotfix 899c72c (qa).** #19 is live;
   reconciliation_log now carries the rich detail my notional-neutrality condition required — today's
