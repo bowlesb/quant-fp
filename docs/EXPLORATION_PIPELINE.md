@@ -45,3 +45,35 @@ Lead's synthesis cycle. The edge hunt never idles; this is its engine room.
   woken opportunistically when their proposals' results land, idle otherwise.
 - GPU/queue arbitration: the Lead orders the queue by expected information value;
   long-shots get the 2-4/day slots Ben mandated.
+
+## The shared Research DB (Ben's directive 2026-06-12 — common, extensible, deduplicated)
+
+A common database layer all research minds ADD TO and EXTEND — not read-only consumption.
+
+**Schema `research` in the main TimescaleDB.** Rules:
+1. **Any research agent may CREATE tables/views in `research.`** — namespaced
+   `<agent>_<name>` for lens-specific data, `common_<name>` for building blocks intended
+   for shared use (e.g. spreads-at-cadence, regime labels, sector joins, event windows).
+2. **REGISTER EVERYTHING in `research.catalog`** (owner, purpose, builder script path,
+   source tables, PIT-correctness notes, refresh policy) in the SAME transaction/turn
+   you create it. An unregistered table is a defect — the catalog IS the dedup mechanism:
+   **before building any derived dataset, query the catalog first; extend an existing
+   dataset rather than rebuilding it.** Disputes over overlap → Research Lead arbitrates.
+3. **Builder scripts are committed** (experiments/builders/<table_name>.py|.sql) —
+   research tables are REGENERABLE artifacts, never the only home of logic. PIT
+   discipline applies: state lookahead guards in the builder + pit_notes.
+4. **Production schema (`public`) stays read-only for research agents.** Promotion path:
+   when a research dataset matters to a production candidate, the Lead proposes it and
+   prod-architect productionizes via Tier-1 (shared quantlib path + parity + QA).
+5. **Infra awareness (every research agent must know and weigh):**
+   - Locks/chunks: full-history joins lock ~3 locks/chunk; max_locks=2048 makes them
+     cheap but a runaway cartesian join still isn't. EXPLAIN before novel heavy scans.
+   - Disk: research tables count against shared headroom — prefer views where cheap;
+     set status='deprecated' in the catalog when a dataset is dead (the Lead sweeps
+     deprecated tables weekly; nothing lingers "just in case").
+   - The DB is SHARED with live trading: no DDL/heavy writes against `public`, no
+     long-running locks during RTH pre-open/open windows; research load yields to the
+     deploy windows the Manager announces.
+   - Think system-wide: if your dataset would help another lens (or live trading),
+     name it `common_`, document it, and tell the Lead — building FOR the org is the
+     point ("scalable edges": an edge whose data/infra path can scale to production).
