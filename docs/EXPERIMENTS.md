@@ -1980,3 +1980,35 @@ hypothesis. RULING: explorer-shapes OWNS the shape (script + gates + verdict pat
 ARCHAEOLOGY (inverted-U liquidity structure, 83% persistence, regime conditioner, the open-cost blocker) into
 shapes' 002. No duplicate runs. explorer-data stands down on 003-as-a-separate-shape, keeps the archaeology
 as a data-lens report.
+| 2026-06-12T22:49:24+00:00 | W12_solo_gap_from_open_fwd_60m | fwd_60m | raw | 1 | 4416876 | 0.00518 | 4.574 | 0.00037 | RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_60m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+| 2026-06-12T22:51:38+00:00 | W12_solo_rel_ret_30m_fwd_30m | fwd_30m | raw | 1 | 4840765 | 0.0016 | 2.073 | -0.00048 | RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_30m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+
+## ★ OPEN-CADENCE DECISION (Lead, 2026-06-12) — KEEP it, but as a SEPARATE regime (Manager-routed from QA)
+
+QA/explorer-data flagged: at the 09:30 open every intraday-RETURN feature is NaN-by-construction, so the
+open cross-section ranks on a different feature subset than every other cadence — and the live executor
+TRADES that cadence. Manager routed the modeling decision to me. Analyzed with per-cadence univariate IC
+(v1.1.1, 613 days, fwd_30m):
+
+  OPEN 09:30:  gap_from_open IC -0.0718 t -17.8 (n 432,770) | ret_5m = 100% NaN (no lookback) = "too few"
+  NON-open:    gap_from_open IC +0.0005 t  0.25 (noise)     | ret_5m IC -0.0212 t -11.8 (the reversal)
+
+READ: the open and non-open cadences are TWO STRUCTURALLY DIFFERENT signals on TWO different features. The
+open cadence ranks ENTIRELY on gap_from_open — which is the SINGLE STRONGEST signal in the panel (t -17.8,
+the gap-fade) — while ret_5m is dead there. Away from the open, gap is noise and ret_5m carries it.
+
+DECISION (Lead recommendation, pending Manager ratification + exec sign-off for any LIVE change):
+NOT option (a) exclude — that would throw away the strongest signal in the panel.
+NOT option (b) accept-degraded — a single blended LightGBM ranks the open on gap and the rest on ret_5m,
+  diluting BOTH regimes (the open's gap signal is averaged against ret_5m trees that see NaN at the open).
+=> RECOMMEND option (c)-variant: KEEP the open cadence but treat it as its OWN regime — train/serve a
+  minute-of-day-conditioned (or open-specific) model so the gap-fade at the open is modeled by gap features
+  and the intraday reversal by ret_5m, not blended. Minimum viable: a separate open-cadence model head.
+This ALSO is the production home for the gap-fade candidate (shapes 002) IF it clears the open-cost gate —
+the open cadence isn't a degradation to remove, it's a distinct (and the strongest) signal to model properly.
+RESEARCH IMPACT: the battery's single-model "no edge" verdict BLENDED the open regime in; a regime-split
+re-run is worth one slot (does isolating the open cadence change the headline? — likely not for the net-of-
+cost verdict since the open is high-cost, but it's the honest check). LIVE IMPACT: flag to exec — the
+executor currently trades the open cadence on the blended model; until a regime-split model exists, the
+open-cadence basket is ranked on gap_from_open alone (which is at least a REAL signal, not noise — so not
+harmful, just not optimal). No live change without exec sign-off Monday.
