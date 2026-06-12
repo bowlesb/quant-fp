@@ -185,3 +185,24 @@ REMAINING HONEST CAVEATS (handed to the Lead — these are why it's a candidate,
     trade — the same tension the Lead flagged on 001. The liquid-tier-only re-run is the honest cut.
 NEXT: offered the Lead either I add walk-forward+liquid-tier+open-cost myself, or he takes it into his
 harness. Committed the gated script + results.
+
+## 2026-06-12 (cont.) — 002 LIQUID-TIER cut: low-vol fade SURVIVES on the liquid head too.
+
+Added TIER=liquid50 env switch (caveat #3 — my lane, reversible). Ran the liquid-50 cut:
+
+  liquid50, low_vol fade: real +3.10 / canary -0.39 / surv-neutral +3.13   <- SURVIVES both, on liquid
+  liquid50, high_vol follow: real +1.10 / canary +0.14 / surv-neutral +0.99  <- survives both
+  liquid50 AGGREGATE gap IC = -0.0059 (t -0.55) — WEAK (gaps arbitraged out of liquid names, as folklore
+    predicts) BUT the CONDITIONAL low-vol-fade IC is still -0.0911 and its fade Sharpe survives.
+
+KEY UPGRADE: the conditional fade is NOT just an illiquid-microcap artifact — it survives canary +
+survivorship on the LIQUID-50 head (the tradeable names), where the cost is the cheap tier. That kills
+the strongest "it lives where it's expensive" objection (caveat #3). The low-vol-gap fade on liquid
+names is the cleanest cost-advantaged candidate the shapes lens has: low-turnover (1 RT/day),
+conditional, liquid, survives both gates.
+
+REMAINING (the Lead's harness, true verdict): (1) walk-forward OOS — in-sample 3.1 Sharpe must hold
+across folds; (2) OPEN-spread cost — even liquid names have wide OPENING-auction-adjacent spreads, and
+common_spreads_at_cadence excludes the auction, so the open-RT cost needs a dedicated measure. If it
+survives walk-forward + real open-cost, this is a genuine M3-track edge candidate.
+Both cuts (all + liquid50) committed in shape_gap_results.jsonl.

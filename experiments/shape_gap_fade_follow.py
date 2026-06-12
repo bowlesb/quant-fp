@@ -40,6 +40,61 @@ import psycopg
 from quantlib.backtest import mean_ic, newey_west_tstat, per_timestamp_ic
 
 RESULTS = os.environ.get("GAP_RESULTS", "/app/experiments/shape_gap_results.jsonl")
+# TIER=liquid50 restricts to the canonical liquid head (task #5 names) — the honest cost cut, since
+# low-vol gaps skew illiquid. Default ALL = the full helper universe.
+TIER = os.environ.get("TIER", "all")
+LIQUID_TIER = {
+    "AAOI",
+    "AAPL",
+    "AMAT",
+    "AMD",
+    "AMZN",
+    "APP",
+    "ARM",
+    "ASML",
+    "AVGO",
+    "BE",
+    "BRK.B",
+    "CAT",
+    "COHR",
+    "CRM",
+    "CRWV",
+    "CSCO",
+    "DELL",
+    "GEV",
+    "GLW",
+    "GOOG",
+    "GOOGL",
+    "IBM",
+    "INTC",
+    "IREN",
+    "JPM",
+    "LITE",
+    "LLY",
+    "LRCX",
+    "META",
+    "MRVL",
+    "MSFT",
+    "MSTR",
+    "MU",
+    "NBIS",
+    "NOW",
+    "NVDA",
+    "ORCL",
+    "PLTR",
+    "QCOM",
+    "RKLB",
+    "SNDK",
+    "STX",
+    "TSLA",
+    "TSM",
+    "TXN",
+    "UNH",
+    "V",
+    "WDC",
+    "WMT",
+    "XOM",
+}
 SEED = 13
 MIN_CROSS_SECTION = (
     20  # breadth floor per date (matches quantlib.labels.MIN_CROSS_SECTION)
@@ -245,10 +300,13 @@ def main() -> None:
             "research.common_daily_session_price is EMPTY/missing — helper-000 must land first."
         )
 
+    if TIER == "liquid50":
+        by_symbol = {sym: rows for sym, rows in by_symbol.items() if sym in LIQUID_TIER}
+
     ts, symbols, gap, volz, excess = build_records(by_symbol)
     n_dates = len({t.date() for t in ts})
     print(
-        f"{len(symbols)} (symbol,date) rows / {n_dates} dates / "
+        f"TIER={TIER} | {len(symbols)} (symbol,date) rows / {n_dates} dates / "
         f"{len(set(symbols))} symbols from the session-price helper",
         flush=True,
     )
@@ -312,6 +370,7 @@ def main() -> None:
         records.append(
             {
                 "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "tier": TIER,
                 "regime": regime_name,
                 "n_rows": len(idx),
                 "gap_ic": round(mean_ic(r_ic), 5),
