@@ -8,3 +8,5 @@ models/
 .team_review_marker
 experiments/battery_results.jsonl
 experiments/battery_excl11.jsonl
+experiments/family_b_results.jsonl
+experiments/family_b_smoke.jsonl
