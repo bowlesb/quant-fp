@@ -1938,3 +1938,45 @@ failed). KILLED.
 NET: 2 more clean kills. The kill list grows; the dividend-calendar and overnight-label shape classes are
 now both closed. No false edge. (Both ran as 120-200d smokes; verdicts are directional but the survivorship/
 t-stat signals are unambiguous — full-panel confirmation only if a borderline case warranted it; neither does.)
+| 2026-06-12T22:42:49+00:00 | W12_solo_range_pct_fwd_30m | fwd_30m | raw | 1 | 4840765 | -0.0007 | -0.997 | -8e-05 | RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_30m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+| 2026-06-12T22:45:00+00:00 | W12_solo_range_pct_fwd_60m | fwd_60m | raw | 1 | 4416876 | 0.00075 | 0.886 | 0.00019 | RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_60m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+| 2026-06-12T22:47:26+00:00 | W12_solo_gap_from_open_fwd_30m | fwd_30m | raw | 1 | 4840765 | 0.00466 | 5.474 | 2e-05 | RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_30m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+
+## ★★ GAP-FADE CANDIDATE — the strongest lead yet, but the OPEN-MINUTE COST is the decider (Lead, 2026-06-12)
+
+explorer-data + explorer-shapes converged on a CONDITIONAL OPEN-GAP-FADE — the first candidate to pass 3
+of 4 M3 gates. Data archaeology (explorer-data OBS, 613 days): gap_from_open within-ts IC vs fwd_30m is
+-0.0717 (t -18.5) AT the 09:30 open ONLY (+0.0004 = noise every other cadence); inverted-U in liquidity
+(peaks at MID-tier liq2/liq3 t -22, weak at mega-cap liq4 t -7); 83% persistence to 60m. explorer-shapes
+gated it (shape_gap_fade_follow.py): conditioning on first-30-min volume reveals a SIGN FLIP —
+  LIQUID-50 cut:  low-vol gaps FADE  real Sharpe@2bps +3.10 / canary -0.39 / SURV-NEUTRAL +3.13
+                  high-vol gaps FOLLOW real +1.10 / canary +0.14 / surv-neutral +0.99
+  (aggregate gap IC -0.006 t-0.55 on liquid = arbitraged out; the CONDITIONAL low-vol-fade IC -0.091 holds)
+=> passes within-ts IC + clean canary + survivorship-survival + positive-net-on-liquid-tier AT FLAT 2bps.
+3 of 4 M3 gates. The 4th (positive net at REALISTIC cost) + walk-forward OOS are the open questions.
+
+★ THE DECIDER — measured OPEN-MINUTE spread (quote_agg_1m, 50 liquid names, avg spread_bps by ET minute):
+  09:30 = 25.2bps (12.6bps half) | 09:33 = 15.1 (7.5 half) | 09:35 = 13.4 (6.7 half) | 09:40 = 11.9 (6.0 half)
+The gap-fade round-trips AT/just-after the open = the WIDEST-spread minutes of the day. common_spreads_at_cadence
+EXCLUDES the auction and starts at 10:00 (~2.7bps median half) — so the gap-fade's TRUE cost is ~6-12bps
+half-spread, 2-4x the 10:00 number. The +3.1 Sharpe is at FLAT 2bps; at a realistic ~7bps open half-spread
+(round-trip ~14bps) the gross edge almost certainly does NOT clear cost. This is the SAME cost wall (task #5)
+relocated to the open minute — and the open is the worst possible execution window.
+
+LEAD VERDICT (provisional, pending the two gates): the gap-fade is a REAL within-ts signal with a clean
+canary that survives survivorship — genuinely the strongest lead the effort has produced — BUT it is most
+likely UNECONOMIC at the measured open-minute spread, for the same turnover/cost reason every price signal
+dies. The verdict is NOT decidable on flat-2bps numbers. TWO GATES BEFORE PROMOTION (assigned):
+  (1) WALK-FORWARD OOS — explorer-shapes adds fold structure (their in-sample sort can shrink OOS).
+  (2) NET-OF-MEASURED-OPEN-COST — re-backtest charging the measured ~6-12bps open half-spread (sweep
+      09:30/09:33/09:35 entry), liquid-tier only. If the low-vol-fade Sharpe stays POSITIVE at the
+      measured open cost after walk-forward, it's a legitimate M3 candidate and I escalate to the Manager
+      for promotion. If it goes negative at realistic open cost (my prior: ~70% it does), it's a real-but-
+      uneconomic signal — documented, not promoted, and the open-cost wall becomes the lesson.
+This is now the single highest-information pending verdict in the org. NO promotion on flat-cost numbers.
+
+OVERLAP ARBITRATION (Lead ruling): explorer-data 003 (gap-fade) and explorer-shapes 002 are the SAME
+hypothesis. RULING: explorer-shapes OWNS the shape (script + gates + verdict path); explorer-data feeds the
+ARCHAEOLOGY (inverted-U liquidity structure, 83% persistence, regime conditioner, the open-cost blocker) into
+shapes' 002. No duplicate runs. explorer-data stands down on 003-as-a-separate-shape, keeps the archaeology
+as a data-lens report.
