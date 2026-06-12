@@ -715,3 +715,22 @@ Manager decisions on Prod's coverage questions:
    invariant + near-midnight-UTC test).
 4. Delisted stays #9 post-M1. 09:30 first-cadence check covered by Exec/Risk.
 QA pinged for first report (only silent role; #3 in_progress).
+
+## 2026-06-12 (pre-open 4) — Manager: QA suite SHIPPED; M1 criteria 1 & 4 GREEN
+QA task #3 done (3f478d7): scripts/qa_invariants.py — 10 fail-loud invariants, CI-able,
+pytest mirror, 5,284-name frozen fund denylist as the INDEPENDENT gate (anti-tautology
+requirement met; regex check labeled necessary-not-sufficient). Before/after proof:
+universe_is_equities_only FAILED on dirty fixture -> PASSES 0/1000 clean. 9 PASS / 1 FAIL.
+The FAIL is real: backfill<->realtime bar parity 1.14% (7,731/678,288 bars >0.2% close
+disagreement; gate 1%) -> task #14 (QA drills drivers, Prod fixes ingestion). Kept RED
+deliberately. Legacy UTC leakage confined to v1.0.0; v1.1.1 landing ET-clean/PIT-clean.
+Manager decisions:
+1. PURGE DENIED (v1.1.0 = QA's known-dirty fixture + provenance) / DEFERRED (v1.0.0 until
+   clean model replaces lgbm_fwd_30m_v1.0.0). Control = CODE GUARDS: Modeller extending
+   battery/training refusal to v1.0.0. QA scopes default suite run to ACTIVE set (legacy
+   fixture red is opt-in, not standing).
+2. QA's "unseen thing" -> task #15: settled-day trade-agg parity AT SCALE before M2
+   commits to 500-name sharding; FIRST step = settled-day check on current 52 names
+   (failure at 52 redirects M2 cheaply). QA owns proof, Prod owns data path.
+3. ROADMAP: M1 criteria 1 & 4 ticked GREEN with evidence; current-focus updated.
+M1 remaining: #2 panel (grinding, ~2.5h) -> #3 battery verdict. On track for 6/13.

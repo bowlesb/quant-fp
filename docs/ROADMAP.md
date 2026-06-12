@@ -34,8 +34,10 @@ orders; P&L recorded. *Status: complete.*
 The edge verdicts are only as honest as the panel. We found the ~600-day panel was ~21% ETFs/
 leveraged funds; the price-only "no edge" verdict is therefore suspect.
 **Exit criteria (quantifiable):**
-- [ ] Universe = single-name equities ONLY — **0 ETF/leveraged/fund members** (automated
-      invariant `universe_is_equities_only` green in the QA suite & CI).
+- [x] Universe = single-name equities ONLY — **0 ETF/leveraged/fund members** (automated
+      invariant `universe_is_equities_only` green in the QA suite & CI). ✅ 2026-06-12:
+      614 dates / 455,881 members / 0 violations; invariant FAILED on dirty fixture, PASSES
+      0/1000 clean; independent `universe_no_known_funds` (5,284-name frozen denylist) also green.
 - [ ] Clean equity panel rebuilt over the full ~600-day history, PIT-correct — **~715
       equities/date** (~715-742 range, ~742 avg) as set_version **v1.1.1** (labels
       recomputed too, DELETE-then-insert).
@@ -46,8 +48,10 @@ leveraged funds; the price-only "no edge" verdict is therefore suspect.
       its canonical results live in experiments/results.jsonl.)
 - [ ] Price-only cost-gated battery **RE-RUN on the clean panel**; verdict re-validated and
       documented (trustworthy, not contaminated) in STATE/EXPERIMENTS.
-- [ ] All QA invariants are **automated checks** (calendar/DST, parity, PIT, warmup, no-Inf,
-      universe-composition), each fail-loud — not prose.
+- [x] All QA invariants are **automated checks** (calendar/DST, parity, PIT, warmup, no-Inf,
+      universe-composition), each fail-loud — not prose. ✅ 2026-06-12: scripts/qa_invariants.py,
+      10 invariants, CI-able (3f478d7). 9 green / 1 deliberately RED: backfill↔realtime bar
+      parity 1.14% vs 1% gate — real divergence under drill (task #14), gates M2 scale-up.
 
 ### M2 — Order-flow data at scale (target 2026-06-20)
 Order flow is the most plausible remaining edge source at our latency. It is wired end-to-end
@@ -87,10 +91,12 @@ but only covers ~50 names.
 ---
 
 ## Current focus (the Manager updates this line every wake)
-**Driving toward M1.** Immediate: (1) supervised clean-universe rebuild (the `is_etf_like` fix is
-committed and inert — run `build-universe-history`), (2) re-run the price-only battery on the clean
-panel, (3) stand up the automated QA invariant suite (starting with `universe_is_equities_only`).
-M2 (order-flow scaling) proceeds in parallel as data/throughput allow.
+**Driving toward M1 — criteria 1 & 4 GREEN (2026-06-12); 2 in flight; 3 armed.** Clean universe
+rebuilt+verified (0 funds, ~715-742 equities/date); QA suite automated (9/10 green; bar-parity
+1.14% deliberately RED under drill, task #14). NOW: v1.1.1 panel+label rebuild grinding (ETA
+~2-2.5h) → Modeller's one-command battery re-run fires on landing. Then: bar-parity drill (#14),
+settled-day trade-agg parity at current 52 names (#15, gates M2 sharding investment), stale-image
+structural fix (#11). M2 proceeds in parallel as throughput allows.
 
 ---
 
