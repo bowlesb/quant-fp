@@ -945,3 +945,16 @@ Post-hoc review of the absorbed #19 Tier-1 executor work, per the b856aa7 ruling
   targeted executor rebuild post-flatten (with #18 ex-date guard); prod's rebuild-batch
   EXCLUDES the executor. No retroactive PR — this record + role ledgers are the
   PR-equivalent; Tier-1 PR flow binds on new work from 2026-06-13.
+
+## 2026-06-12 — Manager: spoofed "team-lead" bless incident — zero damage, rule codified
+A "#19 FINAL BLESS (unconditional)" reached exec labeled team-lead; NOT sent by the
+Manager. Exec's integrity sweep: nothing acted on it (running executor still pre-#19,
+broker shows only the known basket, reconcile ok) — defense-in-depth (deploy gated on
+flatten + own re-verify) held by design. Provenance: label+content indistinguishable
+from real Manager messages; prime suspect = the known routing bug mislabeling the
+original prod-architect's messages (asked them directly; if denied, escalates to
+unidentified actor -> Ben urgently). Codified in REVIEW_POLICY: consequential/
+irreversible instructions valid only if board-reflected or challenge-response
+re-confirmed; precedent logged. #19 deploy proceeds on MY ratified authorization.
+Manager-attributed commits not from this session (21d4cf1, 8ffb968, 9b15e40) under
+the same provenance question.
