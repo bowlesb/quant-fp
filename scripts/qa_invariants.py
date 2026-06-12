@@ -43,8 +43,17 @@ FAILs, QA_ACTIVE_SET=v1.1.0 reproduces its PIT-leak FAIL (the suite's own regres
 
 Run (from repo root):
     python3 scripts/qa_invariants.py             # all invariants, exit 1 on any FAIL
+    python3 scripts/qa_invariants.py --fast      # FAST tier: cheap composition/calendar/same-day
+                                                 #   coverage checks (every wake + post-close gate)
+    python3 scripts/qa_invariants.py --full      # FULL tier: fast + heavy panel scans (nightly)
     python3 scripts/qa_invariants.py --list      # list invariant names
     python3 scripts/qa_invariants.py --only universe_is_equities_only,calendar_et_correct
+    python3 scripts/qa_invariants.py --update-baseline  # roll live_feature_coverage baseline fwd
+
+Tiering: a monolithic run of ALL invariants exceeds 500s on the 5.5M-row panel. The FAST tier
+(universe composition trio + live_feature_coverage) runs in seconds as a standalone every-wake /
+post-close gate; the FULL tier adds the heavy research-panel scans (parity/warmup/pit/inf/jump/
+bars) for the nightly run.
 
 DB access: by default shells to the documented method
     docker compose exec -T timescaledb psql -U quant -d quant
@@ -140,6 +149,15 @@ class Result:
     status: str  # "PASS" | "FAIL" | "SKIP"
     message: str
     details: list[str] = field(default_factory=list)
+
+
+# Tiers (see --fast/--full): the FAST tier is cheap composition/calendar/same-day checks meant
+# to run EVERY wake + post-close as a standalone gate; the FULL tier adds the heavy 5.5M-row
+# research-panel scans (parity/warmup/pit/inf/jump/bars), which are nightly. A monolithic run of
+# all checks exceeds 500s on the current panel, so the fast tier is what makes the daily live-
+# coverage gate actually runnable.
+FAST = "fast"
+FULL = "full"
 
 
 def sql(query: str) -> list[list[str]]:
@@ -1031,6 +1049,24 @@ INVARIANTS: dict[str, Callable[[], Result]] = {
     "live_feature_coverage": check_live_feature_coverage,
 }
 
+# FAST-tier invariants: sub-second-to-~few-second composition / calendar / same-day checks that
+# run every wake + post-close as a standalone gate. Everything NOT listed here is FULL-only (the
+# heavy panel scans: bars_integrity, no_extreme_backfill_jump, backfill_realtime_parity,
+# trade_agg_parity, pit_universe_membership, warmup_coverage, no_inf_no_degenerate).
+FAST_INVARIANTS: set[str] = {
+    "universe_is_equities_only",
+    "universe_no_known_funds",
+    "universe_sessions_valid",
+    "live_feature_coverage",
+}
+
+
+def select_tier(tier: str) -> list[str]:
+    """Names for a tier: 'fast' = FAST_INVARIANTS in suite order; 'full' = all invariants."""
+    if tier == FAST:
+        return [name for name in INVARIANTS if name in FAST_INVARIANTS]
+    return list(INVARIANTS)
+
 
 def run(selected: list[str]) -> int:
     results: list[Result] = []
@@ -1069,7 +1105,12 @@ def main() -> int:
     if "--update-baseline" in argv:
         update_coverage_baseline()
         return 0
-    selected = list(INVARIANTS)
+    if "--fast" in argv:
+        selected = select_tier(FAST)
+    elif "--full" in argv:
+        selected = select_tier(FULL)
+    else:
+        selected = list(INVARIANTS)
     if "--only" in argv:
         idx = argv.index("--only")
         selected = [n.strip() for n in argv[idx + 1].split(",") if n.strip()]

@@ -45,6 +45,15 @@ noticing — a violation fails CI with a clear message.
   the DB is unreachable so the clean `make test` container stays green.
 - **`tests/test_session_date.py`** — near-midnight-UTC ET-session-date regression (task #13).
 - **`tests/fixtures/known_funds.txt`** — frozen 5,284-name fund denylist (independent gate input).
+- **`tests/fixtures/live_feature_coverage_baseline.json`** — trailing per-day live-coverage rows.
+
+**Tiering (2026-06-12, fixes the P2 `suite-too-slow`):** the all-invariants run exceeds 500s on
+the 5.5M-row panel. `--fast` = FAST_INVARIANTS (universe composition trio + live_feature_coverage)
+as the every-wake / post-close standalone gate; `--full` adds the heavy panel scans (parity/warmup/
+pit/inf/jump/bars) for the nightly run. Default (no flag) still runs all; `--only`/pytest unchanged.
+NOTE: the fast tier wall-time is ~38s NOT ~3s — dominated by `docker compose exec` subprocess spawn
+PER query (user-cpu is <1s). A future optimization is batching queries / a persistent psql conn;
+38s is still a runnable standalone gate (vs the 500s+ monolith). The post-close daily run uses `--fast`.
 
 | invariant | maps to | gates |
 |-----------|---------|-------|
@@ -105,7 +114,7 @@ parity-overlap, both being fixed).
 | P1 | preds-degenerate | predictions ~80% within 1bp of 0 → basket was tie-break noise | MITIGATED — executor degeneracy guard added; preds still non-tradeable |
 | P1 | pit-leak | now AUTOMATED (`pit_universe_membership`): the leak is far bigger than the earlier ~14 estimate — **117,047 (symbol,date) feature rows in v1.1.0 are not in-universe members for that date, across 217 symbols of which 209 (96%) are the ETFs.** The panel was built over a current symbol set across all history, not strict PIT membership. Resolves when the clean v1.1.1 panel + history land (tasks #2/#12). | OPEN — gated on active set; will go green when v1.1.1 history is PIT-correct |
 | P2 | view-fanout | training_data 2× horizon fan-out | LOW — trainer filters horizon; harden the view |
-| P2 | suite-too-slow | **The invariant suite no longer completes as a single gate** — full `qa_invariants.py` exceeds 500s on the 5.5M-row v1.1.1 panel (bars_integrity ~50s + no_inf ~23s + calendar ~32s + jump ~77s + the 4 unmeasured heavy scans parity/trade_agg/pit/warmup). A fail-loud suite that's too slow to run defeats its own purpose (the role's core thesis). Per-invariant `--only` works fine; the all-in-one run times out. | OPEN-LOW — split the heavy panel-scans behind a `--fast`/`--full` flag (composition+calendar+values fast-tier for every-wake/CI; parity+pit+warmup full-tier nightly), or push the scans into indexed SQL. Track for M2 when the panel only grows. |
+| P2 | suite-too-slow | **The invariant suite no longer completes as a single gate** — full `qa_invariants.py` exceeds 500s on the 5.5M-row v1.1.1 panel (bars_integrity ~50s + no_inf ~23s + calendar ~32s + jump ~77s + the 4 unmeasured heavy scans parity/trade_agg/pit/warmup). A fail-loud suite that's too slow to run defeats its own purpose (the role's core thesis). Per-invariant `--only` works fine; the all-in-one run times out. | MITIGATED 2026-06-12 — `--fast`/`--full` tiering shipped: fast tier (universe trio + live_feature_coverage) is the every-wake/post-close standalone gate, full tier (panel scans) nightly. Residual: fast wall-time ~38s is `docker compose exec`-per-query spawn overhead (user-cpu <1s) — future opt = batched queries / persistent conn. Runnable now. |
 
 ## Unprovoked creative probes (Ben's directive — log every probe + result, even clean)
 
