@@ -809,3 +809,19 @@ before demeaning — tests overnight momentum free of the dividend artifact.
 COVERAGE/PARITY: dividends are sparse (most names most days = no action) so "coverage" = did we fetch
 the full 2.5yr of actions for the panel universe; QA check = action counts per month are non-zero and
 stable (a month with 0 dividends = a fetch gap). API-historical so backfillable immediately tonight.
+
+### FAMILY A FINALIZED — corporate_actions_pit VIEW (prod staged to spec, 2026-06-12)
+
+Prod staged the PIT view exactly to spec (db/init/05_corporate_actions.sql, CREATE OR REPLACE over the
+#18 table). My consuming code targets the VIEW `corporate_actions_pit`, columns:
+  (symbol, ex_date, action_type, cash_amount, split_ratio, announcement_date, record_date, payable_date)
+- action_type normalized to my taxonomy: cash_dividends→'cash_dividend'; *_splits→'split'.
+- cash_amount = per-share $ (NULL splits); split_ratio = new/old forward factor (NULL dividends).
+- announcement_date = COALESCE(declaration_date, process_date)::date, NULL if absent → I fall back to
+  ex_date for realized flags. Prod verifies the real Alpaca field at populate-time tonight and may
+  CREATE OR REPLACE the view (so days_to_ex_div anticipation gets a real announcement_date if available).
+PIT discipline is mine by construction: JOIN at feature-compute time (like sector_map), reveal only
+announcement_date<=ts (anticipation) / ex_date<=ts (realized). Live rows land tonight from #18's fetch
+(dividends specifically verified, not just splits, per Ben). Prod pings when queryable; QA owns the
+2.5yr-no-zero-month coverage check. I prototype the overnight-label ex-div hygiene adjustment
+post-weekend-read/#16 per my clock. Zero extra collection.
