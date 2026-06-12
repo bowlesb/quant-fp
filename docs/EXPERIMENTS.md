@@ -1909,3 +1909,32 @@ memory-mapped array or a parquet snapshot in research., reuse across experiments
 re-SELECTing 6M rows. Recommend prod fold "load panel once, fan out experiments over the in-memory copy"
 into task #7 — it'll do more for throughput than adding worker lanes. (Also explains why the grind is
 ~2min/experiment: a big chunk is panel reload per id.)
+| 2026-06-12T22:39:33+00:00 | W12_solo_vwap_dev_fwd_60m | fwd_60m | raw | 1 | 4416876 | 0.02109 | 15.818 | 0.00317 | RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_60m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+
+## ★ SHAPE VERDICTS — post-exdiv-drift + volume-shock-overnight: BOTH NO EDGE (Lead, 2026-06-12)
+
+Two explorer-shapes smokes ran (CPU lane). Lead verdicts (explorers interpret; I declare):
+
+### shape_post_exdiv_drift (003) — NO EDGE (matches the ~30% prior + the Family-C precedent)
+7133 ex-div events / 612 payers. Post-ex N-day excess return, cross-sectionally demeaned:
+  N=1d: mean +0.00019 t=+0.79 | N=3d: -0.00010 t=-0.25 | N=5d: -0.00008 t=-0.14 (243-247 liquid events)
+Mean post-ex excess ~0 with |t|<0.8 at every horizon; yield-corr tiny (0.005->0.034); the "liquid mean"
+positives are noise on ~245 events. The dividend-capture/post-ex-drift anomaly is NOT present cross-
+sectionally for us — THIRD dividend null (Family-C features NO-edge, ex-div overnight alpha honest-negative,
+now post-ex drift). The firm-dividend-calendar is exhausted as an edge source. KILLED.
+
+### shape_volume_shock_overnight (005) — NO EDGE (overnight survivorship-dead, as predicted ~20%)
+Overnight, 785 names, gross IC 0.0189. Sparsity gate on volume_z shock:
+  full_book   part 0.20 breakeven 2.59bps surv-neutral sharpe -1.81  canary -2.37
+  shock>=2sig part 0.03 breakeven 2.52bps surv-neutral sharpe -0.30  canary -1.21
+  shock>=3sig part 0.02 breakeven 3.08bps surv-neutral sharpe -0.23  canary -0.65
+DECISIVE: survivorship-neutral sharpe is NEGATIVE at every sparsity level -> no within-symbol TIMING alpha;
+the sparsity gate did NOT rescue the survivorship-dead overnight label. METHODOLOGY NOTE (not the verdict):
+the canaries are CATASTROPHICALLY large (-0.65 to -2.37) because the shock cohort is tiny (1.7-3% participation
+= few names/ts -> the shuffle-IC is unstable on thin cross-sections); the survivorship gate, not the canary,
+carries the verdict here. CLOSES the overnight label as a shape entirely (the ONE untested lever, sparsity,
+failed). KILLED.
+
+NET: 2 more clean kills. The kill list grows; the dividend-calendar and overnight-label shape classes are
+now both closed. No false edge. (Both ran as 120-200d smokes; verdicts are directional but the survivorship/
+t-stat signals are unambiguous — full-panel confirmation only if a borderline case warranted it; neither does.)
