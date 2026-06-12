@@ -96,3 +96,16 @@ pre-registration, never replaces gates — a published result is a hypothesis he
 a fact (most published alphas are dead or were never real); (3) translate, don't
 transplant — adapt to our horizon/universe/cost reality; (4) log "checked literature,
 nothing useful" too. The point: never re-derive what's known; never trust it untested.
+
+## Research reports (Ben's directive 2026-06-12)
+Every COMPLETED experiment or experiment-batch produces a REPORT at
+experiments/reports/<date>_<agent>_<topic>.md — readable by Ben without context:
+1. **Hypothesis** (as pre-registered, with the prior),
+2. **Exploration** (what was built/queried/run; data window; method; gates applied),
+3. **Results** (the actual numbers — IC/canary/breakeven/sharpe tables, not adjectives),
+4. **Verdict + interpretation** (confirmed/refuted/artifact; what it changes),
+5. **Next steps** (follow-ups queued or explicitly declined, with reasons).
+Journals remain the raw lab notebook; reports are the polished unit of record. The
+Research Lead's synthesis links to that period's reports; the dashboard renders
+experiments/reports/ alongside the progress reports. No completed experiment without
+a report — an unreported result doesn't count toward the weekend bar.
