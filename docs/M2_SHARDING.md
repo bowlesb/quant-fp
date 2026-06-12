@@ -17,11 +17,15 @@ bars(1000)+trades(50)+quotes(50). Two things scale-break at 500 trade/quote name
    millions of ticks/min. A single Python asyncio process doing per-minute quantlib aggregation over
    all of it becomes CPU-bound; a slow minute-flush backs up the websocket receive loop → dropped
    messages → coverage loss. This is the real bottleneck (receiving is cheap; aggregating is not).
-2. **Alpaca connection limit (THE FORK).** STATE.md flags "single data websocket per account." If that
-   is a HARD Alpaca limit, we cannot shard by multiple websocket connections on one key. **First
-   design task: verify whether Algo-Trader-Plus/SIP allows >1 concurrent data websocket per account**
-   (check Alpaca docs + a careful weekend test that does NOT contend with the live ingestor — e.g. a
-   throwaway 2nd connection off-hours). The answer picks the topology:
+2. **Alpaca connection limit (THE FORK) — RESOLVED 2026-06-12 via docs (no risky live test needed).**
+   Alpaca allows **ONE concurrent market-data websocket connection per account** (Algo-Trader-Plus
+   included; a 2nd concurrent connection returns 406/403). So **topology B (multi-websocket) is BLOCKED;
+   topology A (one reader + N workers) is REQUIRED, not just preferred.** Silver lining: the paid SIP
+   tier has NO channel limit (unlimited trades/quotes/bars channels), so subscribing all ≥500 names'
+   trades+quotes on the SINGLE connection is fine — the sole bottleneck is PROCESSING throughput (→ the
+   aggregation workers), exactly what topology A shards. The earlier "careful off-hours 2nd-connection
+   test" is now UNNECESSARY (don't risk bumping the live ingestor — the docs settle it).
+   Sources: docs.alpaca.markets/docs/streaming-market-data, /us/docs/market-data-faq.
 
 ## Topology options
 **A. Reader + aggregation-workers (SAFE DEFAULT — works regardless of the connection limit).**
