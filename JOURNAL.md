@@ -1168,3 +1168,20 @@ ledger-continuity packets; execution-risk respawns Sunday night for Monday pre-o
 (nothing in its lane over the weekend — nameable reason). Lesson logged: teammate
 sessions are coupled to the team object; the ledgers+git+board pattern is the ONLY
 durable layer — keep it that way.
+
+## 2026-06-12 (evening) — Manager: gap-fade KILLED pre-promotion; open-cadence re-check ordered
+The weekend's most exciting lead (gap-fade, +2.6 net Sharpe at measured open cost,
+3-4/4 gates, escalated by explorer-shapes) was KILLED by the Lead's independent
+re-run-before-promotion: the label entered at the un-tradeable 09:30 auction print;
+a tradeable 10:00 entry flips it to −10.9bps/day (Sharpe −1.38). New gate rule adopted:
+open-anchored labels must use tradeable entry ≥09:35. NO false edge shipped — the
+pipeline's integrity proven under real temptation. Standing read unchanged: 0 promotable
+candidates; OFI single path.
+Rulings: v1.2.0 momentum DROP (not join-fix) ratified — pilot config-A baseline
+explicitly intraday-price-only; open-cadence regime-split CONDITIONALLY ratified —
+gap_from_open's −0.0718 IC must be re-measured with tradeable-entry labels first (the
+same look-ahead class could inflate it); OFI tradeless-minute NaN (16.6% mid-session)
+→ Lead decides zero-fill-vs-NaN semantics (live==backfill, no-trades distinguishable
+from capture-gap) before the pilot. QA shipped EXPECTED-tagging (immediately caught
+v1.2.0 growing: 12 flagged features incl. the OFI family) + the canonical --nan-report
+fixture (no NaN claim valid without it).
