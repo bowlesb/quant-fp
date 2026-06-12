@@ -52,6 +52,32 @@ WEEKEND QUEUE: build M2 sharded ingestor (prod-architect/m2-sharding branch, qa-
 label/feature materialization memo; signed_vol_z robust-rolling-z PR (P2 above); #20 FMP fetch (on key);
 #14 canonical-close convention; COPY-derived IMG_SRC (#11 follow-up).
 
+### M2 SHARDED INGESTOR — BUILT + DRY-RUN GREEN 2026-06-12 (commit 306eaba, awaiting qa-2 review)
+Topology A: `services/ingestor/app_ingestor/` = reader (owns the single websocket, route-only) + N
+workers (each owns a symbol shard's tick_state + quantlib aggregation + DB writes) + supervisor main.py.
+Image builds, package imports verified in-image, full test suite 40 passed.
+- **SUBSTRATE CORRECTION (running==intended caught a false memo claim):** "Redis Streams already in the
+  stack" is FALSE — no redis anywhere (grep-verified). Built on multiprocessing queues (shared-memory,
+  the Manager's approved fallback; reader+workers co-located so Redis buys nothing). Substrate isolated
+  in shard.py as a swappable seam. Flagged Manager for ratification (non-blocking; topology identical).
+- **Dynamic OFI set:** top-512-by-ADV from universe_membership at build time (no static list). Live-
+  verified: 1003 bars (1000 + QQQ/SPY/IWM market-context), 512 OFI, shards [131,137,120,124]. QQQ/SPY/IWM
+  in bars not OFI (continuity preserved).
+- **Coverage invariant LIVE day-one** (coverage.py): per-shard Prometheus gauges :9101..9104 + ≥K-silent-
+  RTH-minute alarm = the capture-regression signal qa watches at scale.
+- **Dry-run:** 102,400 trades + 102,400 quotes (512×200, no websocket — didn't bump the live conn) →
+  512/512 symbols, zero loss, full minute drains 4.35s/4 workers (>13× headroom). First run 410/512 was
+  a HARNESS bug (mp Queue.empty() racy), worker code correct.
+- **Parity:** tests/test_sharding.py — sharded == single-process per symbol at every shard count (md5
+  hash → each symbol on exactly one worker → tick_state never split). The #15 cornerstone holds sharded.
+- **TO TICK M2:** qa-2 review of 306eaba → Manager merge → Monday PRE-OPEN deploy (one ingestor restart,
+  RTH freeze) → qa-2 re-runs #15 parity at 512 (≥98%; was 99.85% sign at 50). Connection-limit resolved
+  by docs (1/account) — no risky 2nd-conn test.
+- **NB the shared-worktree branch (prod-architect/m2-sharding) is NOT isolated** — peers commit onto it
+  too (a qa commit landed on top of 306eaba). No git remote / no gh in this env, so the "PR" = my commit
+  306eaba reviewed by qa-2 via SendMessage + Manager merges, per REVIEW_POLICY's local flow. Stage by
+  explicit path only (the b856aa7 lesson) — I left peers' family_c_results.jsonl untracked.
+
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
 **STEP 0 — FIRST, immediately after BOOK FLAT, BEFORE everything else (DB restart):** raise
 `max_locks_per_transaction` 64 → 2048. ROOT CAUSE: 64×100conn = 6400 lock slots; a full-history join

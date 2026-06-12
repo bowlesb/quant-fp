@@ -116,3 +116,49 @@ if a live test is needed, account for the ingestor's reconnect and do it when a 
 costless — post-close/weekend). Then: #12 completes → build topology A on the branch → weekend dry-run
 (profile per-worker CPU + Redis burst lag + coverage invariant green) → Monday pre-open deploy → qa-2
 re-proof at the new scale ticks the M2 criterion.
+
+## BUILD COMPLETE 2026-06-12 (prod-architect, commit 306eaba) — dry-run GREEN, awaiting qa-2 review
+Topology A built as `services/ingestor/app_ingestor/` (reader.py + worker.py + shard.py +
+coverage.py + subscription.py); main.py is now the supervisor (spawns 1 reader + N workers,
+respawns a dead worker, fails-to-restart if the reader dies).
+
+**SUBSTRATE CHANGE FROM THE APPROVED DESIGN — multiprocessing, NOT Redis.** The memo + my ledger
+both stated "Redis Streams — already in the stack." VERIFIED FALSE: no redis service in
+docker-compose.yml, no redis dependency anywhere (grep-confirmed). Redis would mean a NEW Tier-1
+infra service + a new failure mode + serialization round-trips on the open burst, to decouple two
+processes that live on the SAME host (where Redis's cross-host advantage buys nothing). Chose
+multiprocessing queues (shared-memory pipes) = the Manager's pre-approved fallback ("if serialization
+can't hold the open's burst, fall back to multiprocessing without ceremony; topology survives the
+substrate swap"). The substrate is isolated in shard.py as a swappable seam — if a future dry-run
+ever wants cross-host worker scaling, swapping in Redis Streams is contained. Flagged to Manager for
+ratification (not blocking; topology is identical either way).
+
+**Dynamic OFI selection:** top-512-by-ADV from universe_membership at subscription-build time
+(self-maintains as the universe churns; no static list). Verified live: 1003 bar symbols (1000
+universe + QQQ/SPY/IWM market-context), 512 OFI, per-shard [131,137,120,124]. QQQ/SPY/IWM in bars
+not OFI (market-context preserved — won't vanish at the universe rebuild, the modeller-2 continuity
+note).
+
+**Coverage invariant LIVE from day one** (coverage.py): per-shard Prometheus gauges
+(ingestor_shard_coverage_ratio / _silent_symbols / _max_silent_streak / _dropped_alarms_total) on
+ports 9101..9104, scraped by prometheus.yml. Alarm = a subscribed name silent for ≥K consecutive RTH
+minutes (K=10 default) — the capture-regression signal, caught live not in a backfill diff.
+
+**DRY-RUN (heavy open-minute burst, no websocket — must not bump the live ingestor's connection):**
+102,400 trades + 102,400 quotes (512 names × 200 ticks) pushed reader-route → 4 real worker procs →
+live DB. RESULT: 512/512 symbols, ZERO loss, full minute's aggregation drains in **4.35s** across 4
+workers — >13× headroom under the 60s minute budget. (First dry-run "failed" at 410/512 — that was a
+HARNESS bug: mp Queue.empty() is racy right after a fast put() loop; re-run waiting on the real DB
+signal → 512/512 clean. Worker code was correct.)
+
+**Parity:** tests/test_sharding.py proves sharded aggregation == single-process aggregation per symbol
+at every shard count (the #15 cornerstone holds under sharding because every symbol routes to exactly
+one worker via md5 hash → its tick_state is never split). shard_for uses md5 not hash() (PYTHONHASHSEED
+would split a symbol's state across processes). Full suite: 40 passed.
+
+**REMAINING TO TICK M2 CRITERION:**
+1. qa-2 Tier-1 review of commit 306eaba (data semantics — aggregation parity is what's at stake).
+2. Manager merge + Monday PRE-OPEN deploy (ONE coordinated ingestor restart; RTH freeze discipline).
+3. qa-2 re-runs the #15 settled-day parity proof at 512 names → ≥98% (was 99.85% sign at 50) → DONE.
+NB the live websocket connection-limit is RESOLVED by docs (1/account) — no risky 2nd-connection test
+needed; topology A is correct under that limit by construction.
