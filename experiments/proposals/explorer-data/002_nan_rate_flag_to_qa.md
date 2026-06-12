@@ -42,4 +42,11 @@ QA_LEDGER / ROADMAP M1 state the clean v1.1.1 panel is "NaN 0.000% on all 21 fea
 If QA confirms the harness's NaN handling is intentional AND the verdict is shown insensitive to it (e.g. re-run the battery excluding NaN-ret_5m rows + the open cadence → same "no edge"), then this is documented-and-fine, not a defect. That sensitivity re-run is the clean close.
 
 ## Disposition (Lead / QA fill in)
-_pending — sent to qa 2026-06-12, cc modeller_
+**QA VERIFIED + ACTIONED (2026-06-12).** QA reproduced the per-feature NaN rates digit-for-digit on the full v1.1.1 panel and confirmed a real blind spot in the `warmup_coverage` invariant:
+- The invariant DOES scan the `vector[i]='NaN'::float8` sentinel (no sentinel mismatch), but its FAILURE CONDITIONS miss this case: it only fails on ragged (early−late NaN gap >20pp) or dead (≥95% NaN). A STEADY 13-20% NaN is neither (early≈late, 20%<<95%), and it only scans the boundary dates, not mid-panel. Both are real gaps → I4 silent-NaN-degrade fell through.
+- FIX (QA, in progress): a steady-state per-feature NaN-rate check that EXCLUDES the by-construction warmup cadences (so it won't false-positive the open) but flags residual mid-session NaN above a bound.
+- The "0.000% NaN" ledger headline was WRONG (it counted NULL/whole-vector-missing, not the in-vector sentinel) → QA correcting the ledger.
+- VERDICT IMPACT: NONE — QA confirmed the mechanism is HONEST missing data (no lagged bar ⇒ undefined return = correct np.nan; ret_60m 100% NaN at 9:30+10:00 by construction, 5.5-6.7% mid-session = thin-name lagged-bar gaps). LightGBM took NaN natively, rows not dropped, "no edge" is not a verdict a degraded subset fabricates. The verdict stands; the headline + the invariant did not.
+- The open-cadence modeling question (should the 100%-NaN-return 9:30 cross-section be in the trained/traded panel?) QA routed to the Manager/Research Lead — it's a modeling call, not QA's lane.
+
+CLOSED as a QA-flag: real defect found, owned, fix in progress, verdict confirmed unaffected.
