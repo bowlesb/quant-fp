@@ -1104,3 +1104,14 @@ prod's 6/12 backfill-aggs (relayed as DO-IT-NOW).
 Day's tally: M1 declared (a day early), 2 new invariants born + 2 inversion/regression
 fixes, 4 catch-by-verification saves, CA-feed self-healing live, ~50 role-attributed
 commits across 5 lanes under the new review policy. The close window: zero incidents.
+
+## 2026-06-12 — Manager: ★ #15 PASSES AT 50-NAME SCALE — M2 scaling investment GREEN-LIT ★
+First true full-session 50-name settled-day trade-agg proof (qa-2, 2b0f878): count
+parity 99.79% (corr 1.0000), tick-rule SIGN agreement 99.85% (the OFI-critical number),
+signed_vol 99.41%, over 36,334 overlap minutes; 100% every premarket+RTH hour; only
+the 16:00 auction hour dips (excluded from OFI by design); Modeller's >=15:50 line
+confirmed clean. The "OFI computed on a lie" risk is CLOSED at current scale.
+DECISION: 500-name sharded-ingestion build GREEN-LIT (prod implements post-weekend-
+memos; coverage invariant built in from the start; qa re-proof at each scale step;
+shard-topology plan is my one design checkpoint). ROADMAP M2 criterion annotated
+(ticks when re-proven at >=500). Standing rule: OFI <=15:59 ET.

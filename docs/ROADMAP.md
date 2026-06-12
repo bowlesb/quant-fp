@@ -68,6 +68,11 @@ but only covers ~50 names.
 - [ ] Trade/quote capture scaled 50 → **≥500 liquid equities** (shard when one process can't
       keep up), ingestor stable a full session.
 - [ ] Settled-day trade-agg parity **≥98%** at scale (QA invariant I2b green on a settled day).
+      ◐ 2026-06-12: PROVEN at current 50-name scale on the first true full-session settled day —
+      count parity 99.79% / sign agreement 99.85% / signed_vol 99.41% over 36,334 overlap minutes
+      (only the 16:00 auction hour dips, excluded from OFI by design). The INVESTMENT gate for
+      500-name sharding is MET; criterion ticks when re-proven at ≥500. Standing rule: OFI ≤15:59
+      ET (backfill trade-agg is RTH-bounded — no validation reference after the close).
 - [ ] Order-flow features (v1.2.0+) populate across the wide cross-section (NaN-rate < 5% where
       coverage exists).
 - [ ] **Research universe == live tradable universe**: backfill history for the ~150 fixable
