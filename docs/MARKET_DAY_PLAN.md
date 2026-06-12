@@ -56,6 +56,16 @@ FULL bet lifecycle is now proven on a live market day: submit (NBBO) -> fill (6 
 + validated. Bets do not linger. (Edge separate: price-only proven dead; order-flow next.)
 
 ## Plan for 2026-06-12 (open 06:30 PDT)
+- **PRIORITY #0 — ETF CONTAMINATION (overnight finding, supervised):** ~207 of 1000 universe
+  members (~21%) are ETFs/leveraged-inverse/VIX-futures funds (SOXL, TQQQ, SQQQ, UVXY, VXX,
+  UPRO...), NOT single-name stocks. They were RANKED cross-sectionally against stocks in the
+  1.59M-row feature panel -> the price-only "NO EDGE" verdict was drawn on a ~21%-contaminated
+  cross-section and is NOT trustworthy. ACTIONS (supervised, in order): (a) review the exclusion
+  set (scripts/etf_exclusion.sql); (b) exclude funds from universe_membership; (c) rebuild a CLEAN
+  equity-only panel; (d) RE-RUN the price-only cost-gated battery on clean data — does "no edge"
+  hold, or did contamination mask/distort it? This gates everything: don't trust ANY edge verdict
+  (price-only OR order-flow) computed on the contaminated cross-section. The order-flow scaling
+  list must also be clean (staged: scripts/etf_exclusion.sql -> top-200 equity-only, ETFs removed).
 - Objective: (1) ORDER-FLOW validation — 50-symbol trade/quote throughput holds a full session +
   settled-day trade-parity (backfill yesterday's aggs once settled + validate-aggs); (2) keep the
   EXECUTION lifecycle exercised — executor stays LIVE tiny paper (DRY_RUN=false) to catch

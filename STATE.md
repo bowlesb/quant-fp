@@ -12,8 +12,14 @@ Real paper orders on Alpaca (DRY_RUN=false). NO proven edge yet -> intentionally
 P&L is noise. Live exercise found+fixed: stale-close pricing (->NBBO), mode/traded_today
 re-submit loop, dup-coid guard, fills capture, lambdarank label-31. Open exec items: realized-
 P&L attribution per name, partial-basket cancel-replace, broker-side LOC EOD net.
-**EDGE (ML) — DEFINITIVE (2026-06-11): price-only cross-sectional features have NO tradeable
-edge**, proven rigorously on the deep ~600-day panel via 4 gates (net-of-cost L/S backtest +
+**EDGE (ML) — verdict NOW SUSPECT pending clean re-run.** ⚠️ OVERNIGHT FINDING (2026-06-11):
+the ~600-day panel was ~21% CONTAMINATED — 207 of 1000 universe members are ETFs/leveraged-
+inverse/VIX-futures funds (SOXL, TQQQ, SQQQ, UVXY, VXX, UPRO...), RANKED cross-sectionally
+against stocks (1.59M feature rows). The "no edge" verdict below was computed on this polluted
+cross-section. SUPERVISED OPEN (gates everything): exclude funds (scripts/etf_exclusion.sql),
+rebuild clean equity panel, RE-RUN the price-only battery -> does "no edge" hold or was it masked?
+**Prior (contaminated) verdict — price-only cross-sectional features have NO tradeable
+edge**, on the deep ~600-day panel via 4 gates (net-of-cost L/S backtest +
 shuffle canary + label de-fragmentation + survivorship neutralization):
 - 30m intraday: REAL signal (IC 0.024-0.032, clean canary at depth) but NET-NEGATIVE after costs
   (breakeven ~1.3bps < ~2bps) -> uneconomic at turnover.

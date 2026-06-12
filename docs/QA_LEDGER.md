@@ -36,6 +36,7 @@ even if reported before. Forward-looking: anticipate what breaks given where we'
 
 | sev | id | concern | status |
 |-----|----|---------|--------|
+| P0 | etf-contamination | ~207 of 1000 universe members (~21%) are ETFs/ETNs/leveraged-inverse/VIX-futures funds (SOXL, TQQQ, SQQQ, TNA, UVXY, VXX, UPRO, SPXU, TSLL...), NOT single-name equities. They reached the feature panel (1.59M feature_vector rows / 207 symbols) and were RANKED cross-sectionally against stocks. The price-only "no edge" verdict was drawn on this contaminated cross-section -> NOT trustworthy until re-run clean. Classifier + clean scaling list staged in scripts/etf_exclusion.sql. | OPEN — SUPERVISED open: exclude funds from universe, rebuild clean panel, RE-RUN price-only cost-gated battery, THEN order-flow |
 | P0 | UTC-today | today's (2026-06-10) historical panel has ~4477 UTC-calendar rows reaching training_data (insert-not-replace) | OPEN — fix = rebuild DELETE-then-insert + purge |
 | P0 | UTC-stream | feature-computer wrote UTC-calendar `stream` rows (stale pre-DST code) | OPEN — purge + add serving-path ET assertion |
 | P1 | warmup-unmonitored | per-feature warmup/coverage was UNMONITORED and the build has no warmup guard (momentum worked only because the panel starts 22 trading days after bars start — luck, not enforced) | OPEN — add NaN-by-feature-by-date probe + build-time warmup assert |

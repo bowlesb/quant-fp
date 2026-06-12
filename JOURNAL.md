@@ -570,3 +570,21 @@ why.
   the real SETTLED-day 50-symbol parity is tomorrow's full session. This de-risks the order-flow
   edge path (the micro/order-flow features will be parity-true). I2b status: PROVISIONAL PASS
   (98.2% same-day); gate on a settled-day run before trusting order-flow features in a model.
+
+## 2026-06-11 ~20:15 PDT (overnight) — MAJOR FINDING: ETF/leveraged contamination of the rankable universe
+While prepping the order-flow scaling symbol list, found the naive liquidity ranking was ETF-dominated
+(SPY/QQQ/SOXL/TQQQ/SQQQ/GLD...). Investigation: **~207 of 1000 universe_membership members (~21%) are
+ETFs / ETNs / leveraged-inverse / VIX-futures funds / commodity pools — NOT single-name equities** —
+and they reached the feature panel (1,587,588 feature_vector rows across 207 ETF symbols), RANKED
+cross-sectionally against stocks. Worst offenders carried ~8,600 rows each: SOXL/TQQQ/SQQQ (±3x),
+TNA (3x small-cap), UVXY/VXX (VIX futures), UPRO/SPXU/SPXS (±3x S&P), TSLL/TSLQ (±2x TSLA).
+Impact: the price-only "NO EDGE" verdict (the project's central edge conclusion) was computed on a
+~21%-contaminated cross-section — ranking -3x and VIX-futures instruments against AAPL distorts the
+demean, the labels, and rank-IC. **That verdict is no longer trustworthy until re-run on a clean
+equity universe.** Classifier: fund-sponsor names + ETF/ETN keyword (high-precision — keeps Abbott,
+TD Bank, Equity Residential, ADRs like ARM; high-recall — catches QQQ "Invesco...Trust", GLD
+"SPDR...", which lack the literal word ETF). Staged scripts/etf_exclusion.sql (classifier + exclusion
++ clean top-200 equity scaling list). NO universe mutation overnight — flagged P0 in QA_LEDGER, made
+PRIORITY #0 in MARKET_DAY_PLAN, qualified STATE. Supervised open: exclude funds -> rebuild clean panel
+-> RE-RUN price-only battery (does "no edge" hold?) -> then order-flow on clean liquid stocks.
+The QA agent missed this; it's the most important thing we were not seeing.
