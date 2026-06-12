@@ -2047,3 +2047,41 @@ false edge before it reached the Manager/Ben. No false edge shipped. The gap-fad
 real but un-tradeable — a documented negative, the right outcome. THE STANDING LESSON for all shapes/labels:
 an open-anchored label MUST use a TRADEABLE entry price (>=09:35/10:00), never the 09:30 open print, or it
 look-aheads the fastest part of the move. Adding to the gate checklist.
+| 2026-06-12T22:56:00+00:00 | W12_pos_minus_ret5m_30m | fwd_30m | raw | 3 | 4840765 | 0.0291 | 22.049 | 0.00318 | Position group (vwap_dev,range_pct,gap_from_open) WITHOUT any ret_* feature at 30m raw. Standalone IC 0.029 was with the position group alone — confirm it does not lean on returns. |
+| 2026-06-12T22:58:01+00:00 | W12_ret5m_plus_pos_30m | fwd_30m | raw | 4 | 4840765 | 0.0298 | 21.918 | 0.0018 | ret_5m + position group at 30m raw. Marginal: does adding position to ret_5m lift IC above either alone (ret_5m solo 0.0106; pos group 0.029)? Tests orthogonality of the two carriers. |
+
+## ★★ CORRECTED ATTRIBUTION — the 30m signal is VWAP_DEV, not ret_5m (Lead verdict, W12, 2026-06-12)
+
+The W12 position-group solos (re-queued after the OOM-poisoning) RESOLVE the ret_5m-vs-position question
+the Manager flagged ("settle before it hardens into lore"). They OVERTURN the standing "30m signal IS
+ret_5m" attribution:
+
+  W12_solo_vwap_dev_fwd_30m       IC 0.0284  t 21.3  canary 0.0015  be 1.38bps   <- carries ~the WHOLE signal
+  W12_solo_gap_from_open_fwd_30m  IC 0.0047  t  5.5  canary 0.0000  be 0.25bps   (weak, real)
+  W12_solo_range_pct_fwd_30m      IC -0.0007 t -1.0  (DEAD)
+  W12_solo_rel_ret_30m_fwd_30m    IC 0.0016  t  2.1  (~dead)
+  W12_pos_minus_ret5m_30m         IC 0.0291  t 22.0  canary 0.0032  be 1.45bps   <- pos group, NO ret_5m
+  W12_ret5m_plus_pos_30m          IC 0.0298  t 21.9  canary 0.0018  be 1.54bps   <- adding ret_5m: +0.0007
+(ret_5m solo, from C11: IC 0.0106. full carrier set: 0.0298.)
+
+THE CORRECTED FINDING: the dominant 30m cross-sectional signal is VWAP_DEV (deviation from intraday VWAP —
+a mean-reversion-to-VWAP effect), carrying IC 0.0284 (t 21) ALONE ≈ the entire 19-feature signal. ret_5m
+(solo 0.0106) is a WEAKER, largely-REDUNDANT contributor: position-minus-ret_5m (0.0291) ≈ full set, and
+adding ret_5m to the position group lifts IC only 0.0291→0.0298. range_pct and rel_ret_30m are dead at 30m.
+Corroborated independently by explorer-ml's ridge coefficients (vwap_dev the largest standardized coef) and
+the W11 position-group isolation (IC 0.029).
+
+WHAT CHANGES / WHAT DOESN'T:
+- DOESN'T: the ECONOMIC verdict. vwap_dev breakeven 1.38bps < ~2bps cost — still uneconomic, same as the
+  ret_5m story. No edge. (turnover 3.4 — vwap_dev rebalances as fast as ret_5m, so no turnover relief.)
+- DOES (load-bearing): the MECHANISM and the OFI framing. The standing ledger said "30m signal = ret_5m =
+  a crude order-book proxy, so OFI refines it." But the signal is actually VWAP-MEAN-REVERSION, not a
+  5-min return. OFI (signed trade flow) is a LESS direct mechanistic match for a vwap-deviation reversal
+  than it was for a ret_5m continuation. The OFI marginal-IC pilot baseline must therefore include
+  VWAP_DEV (not just ret_5m) — measuring OFI's lift over the TRUE carrier (vwap_dev), else we'd overstate
+  OFI by comparing to a weak proxy. UPDATING the OFI pre-registration: baseline = vwap_dev + gap + ret_5m
+  (the real intraday carriers), headline = OFI's marginal IC over THAT.
+- The "momentum dead at 30m" finding STANDS (W11 confirmed; ridge full-depth will independently re-confirm).
+LEAD NOTE: this is why the Manager's "settle it before it hardens into lore" instinct was right — the
+ret_5m framing was about to shape the entire OFI bet on a mis-attribution. vwap_dev mean-reversion is the
+real thing to refine/beat.
