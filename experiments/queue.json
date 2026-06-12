@@ -1559,6 +1559,124 @@
     "set_version": "v1.1.1"
   },
   {
+    "id": "W12_solo_vwap_dev_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vwap_dev"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_vwap_dev_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "vwap_dev"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_range_pct_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "range_pct"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_range_pct_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "range_pct"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_gap_from_open_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_gap_from_open_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_rel_ret_30m_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "rel_ret_30m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_rel_ret_30m_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "rel_ret_30m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_pos_minus_ret5m_30m",
+    "hypothesis": "Position group (vwap_dev,range_pct,gap_from_open) WITHOUT any ret_* feature at 30m raw. Standalone IC 0.029 was with the position group alone \u2014 confirm it does not lean on returns.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_ret5m_plus_pos_30m",
+    "hypothesis": "ret_5m + position group at 30m raw. Marginal: does adding position to ret_5m lift IC above either alone (ret_5m solo 0.0106; pos group 0.029)? Tests orthogonality of the two carriers.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_ret5m_plus_pos_30m_rank",
+    "hypothesis": "ret_5m + position group at 30m RANK (trading-aligned). Best-available 30m feature set under the rank loss \u2014 does the combined carrier set push breakeven toward the ~2bps cost line?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "ret_5m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
     "id": "W11_pair_mom_5d_rel_mom_10d_rel_fwd_30m",
     "hypothesis": "Momentum term-structure: mom_5d_rel+mom_10d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
     "horizon": "fwd_30m",
@@ -2626,124 +2744,6 @@
     "label": "raw",
     "features": [
       "ret_60m"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_vwap_dev_fwd_30m",
-    "hypothesis": "RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_30m",
-    "label": "raw",
-    "features": [
-      "vwap_dev"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_vwap_dev_fwd_60m",
-    "hypothesis": "RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_60m",
-    "label": "raw",
-    "features": [
-      "vwap_dev"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_range_pct_fwd_30m",
-    "hypothesis": "RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_30m",
-    "label": "raw",
-    "features": [
-      "range_pct"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_range_pct_fwd_60m",
-    "hypothesis": "RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_60m",
-    "label": "raw",
-    "features": [
-      "range_pct"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_gap_from_open_fwd_30m",
-    "hypothesis": "RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_30m",
-    "label": "raw",
-    "features": [
-      "gap_from_open"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_gap_from_open_fwd_60m",
-    "hypothesis": "RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_60m",
-    "label": "raw",
-    "features": [
-      "gap_from_open"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_rel_ret_30m_fwd_30m",
-    "hypothesis": "RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_30m",
-    "label": "raw",
-    "features": [
-      "rel_ret_30m"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_solo_rel_ret_30m_fwd_60m",
-    "hypothesis": "RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
-    "horizon": "fwd_60m",
-    "label": "raw",
-    "features": [
-      "rel_ret_30m"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_pos_minus_ret5m_30m",
-    "hypothesis": "Position group (vwap_dev,range_pct,gap_from_open) WITHOUT any ret_* feature at 30m raw. Standalone IC 0.029 was with the position group alone \u2014 confirm it does not lean on returns.",
-    "horizon": "fwd_30m",
-    "label": "raw",
-    "features": [
-      "vwap_dev",
-      "range_pct",
-      "gap_from_open"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_ret5m_plus_pos_30m",
-    "hypothesis": "ret_5m + position group at 30m raw. Marginal: does adding position to ret_5m lift IC above either alone (ret_5m solo 0.0106; pos group 0.029)? Tests orthogonality of the two carriers.",
-    "horizon": "fwd_30m",
-    "label": "raw",
-    "features": [
-      "ret_5m",
-      "vwap_dev",
-      "range_pct",
-      "gap_from_open"
-    ],
-    "set_version": "v1.1.1"
-  },
-  {
-    "id": "W12_ret5m_plus_pos_30m_rank",
-    "hypothesis": "ret_5m + position group at 30m RANK (trading-aligned). Best-available 30m feature set under the rank loss \u2014 does the combined carrier set push breakeven toward the ~2bps cost line?",
-    "horizon": "fwd_30m",
-    "label": "rank",
-    "features": [
-      "ret_5m",
-      "vwap_dev",
-      "range_pct",
-      "gap_from_open"
     ],
     "set_version": "v1.1.1"
   },
