@@ -77,3 +77,22 @@ A common database layer all research minds ADD TO and EXTEND — not read-only c
    - Think system-wide: if your dataset would help another lens (or live trading),
      name it `common_`, document it, and tell the Lead — building FOR the org is the
      point ("scalable edges": an edge whose data/infra path can scale to production).
+
+## Literature & external research (Ben's directive 2026-06-12)
+Research minds USE THE INTERNET — every lens runs targeted literature searches
+(papers, practitioner writeups, arXiv q-fin, SSRN, credible blogs) relevant to its
+lens, every wake where it generates proposals:
+- explorer-ml: cross-sectional equity ML (ranking losses, ensembling, target
+  engineering), what's known to replicate vs not.
+- explorer-features: documented anomalies/features (microstructure, OFI literature,
+  post-event drift, seasonality) + what data they need.
+- explorer-shapes: published strategy classes at our horizon/latency + their cost
+  realities; known capacity/decay findings.
+- explorer-data: methodology references (regime detection, PIT pitfalls, cost models).
+- Research Lead: tracks what the literature says about OUR specific bets (order-flow
+  signal horizons, spread-cost models) and injects it into queue prioritization.
+RULES: (1) cite sources in journals (link + 2-line takeaway); (2) literature INFORMS
+pre-registration, never replaces gates — a published result is a hypothesis here, not
+a fact (most published alphas are dead or were never real); (3) translate, don't
+transplant — adapt to our horizon/universe/cost reality; (4) log "checked literature,
+nothing useful" too. The point: never re-derive what's known; never trust it untested.
