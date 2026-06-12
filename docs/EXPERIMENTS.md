@@ -2144,3 +2144,24 @@ smoother -> slightly lower turnover) but still < ~2bps cost; net sharpe negative
 STILL NO EDGE. The linear floor confirms the verdict isn't a modeling failure — the signal is real, linear,
 vwap-reversion-shaped, and uneconomic at turnover. (rank canary 0.0071 is the within-ts-rank-label noise
 floor on 613 days, consistent with the GBM rank canary — not a leak.)
+| 2026-06-12T23:06:36+00:00 | ML003_ret5m_pos_30m | fwd_30m | raw | 4 | 4840765 | 0.0298 | 21.918 | 0.0018 | explorer-ml 003 (Lead-approved): ret_5m+pos combined — IC lift vs turnover cost; breakeven between the two legs? |
+
+## GAP-FADE re-escalation REJECTED (Lead, 2026-06-12) — cost-swept but entry-PRICE still 09:30
+
+explorer-shapes re-escalated the gap-fade with walk-forward + a cost sweep by entry minute (+2.62 net
+Sharpe @09:30 ... +2.96 @09:40, leak canary -0.72). REJECTED again — subtler instance of the SAME
+look-ahead: they swept the COST charged by minute but kept the entry PRICE fixed at the 09:30 open print
+(their own caveat #2 admits "entry PRICE is fixed at 09:30; helper has 09:30+10:00 only"). The return is
+still close_1600/open_0930 = the un-tradeable 09:30 entry.
+
+DECISIVE CHECK (liquid-50, low-vol fade, GROSS/zero-cost — isolates entry PRICE from spread):
+  09:30 entry (open_0930, NON-tradeable): +21.6 bps/day  Sharpe +1.48
+  10:00 entry (px_1000, TRADEABLE):       +5.2  bps/day  Sharpe +0.47
+76% of the gross edge is lost to the un-tradeable 09:30->10:00 window BEFORE any spread. The tradeable
++5.2bps/day gross is then < the measured 10:00 round-trip (~9.4bps) -> NET NEGATIVE. The +2.62 was 21.6bps
+un-tradeable gross minus cost; honest = 5.2bps tradeable gross minus ~9bps cost = underwater.
+DISTINCTION (now the headline gate rule): sweeping the COST by minute is NOT the same as booking the RETURN
+from a tradeable entry PRICE. You must compute the return from px_1000 (close_1600/px_1000), not just charge
+a 10:00 spread on a 09:30-entry return. Fix assigned to shapes: re-run with label=close_1600/px_1000 through
+the full gate stack; entry-minute optimum needs a helper extension (09:35/09:40 marks) to find IF any minute
+is net-positive (my check says no). NOT escalated to Manager. Third entry-price trap today.

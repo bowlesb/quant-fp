@@ -77,6 +77,14 @@ _queue_depth = Gauge(
     "Approximate reader->worker queue depth for this shard (rising => worker behind)",
     ["shard"],
 )
+# This shard's subscribed OFI-symbol count. sum() across shards = the live OFI set
+# size; a Prometheus alert on the sum dropping below the M2 floor (500) backs up the
+# build-time assert with a RUNNING-system signal (the assert only fires at startup).
+_shard_expected_symbols = Gauge(
+    "ingestor_shard_expected_symbols",
+    "Count of OFI symbols this shard is subscribed to (sum across shards = OFI set size)",
+    ["shard"],
+)
 
 
 class ShardCoverage:
@@ -95,6 +103,7 @@ class ShardCoverage:
         self._traded_this_minute: set[str] = set()
         self._seen_this_minute: set[str] = set()
         start_http_server(metrics_port)
+        _shard_expected_symbols.labels(shard=str(shard_id)).set(len(expected))
 
     def record_bar(self, symbol: str, minute_epoch: int, had_trade: bool) -> None:
         if symbol not in self.expected:

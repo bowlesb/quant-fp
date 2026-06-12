@@ -1,0 +1,107 @@
+# M2 sharded-ingestor alert rules (qa review condition #1 + Manager's restart-rate ask).
+#
+# The load-bearing design point (qa + Manager both flagged it): a wedged worker's
+# gauges FREEZE at their last value — a stale gauge looks identical to a healthy one.
+# So liveness alerts MUST key on STALENESS (time() - heartbeat) or scrape-down
+# (up == 0), never on a low gauge VALUE. "Silence is not success."
+groups:
+  - name: ingestor_liveness
+    rules:
+      # A worker process is gone: Prometheus can't scrape its metrics port. Catches a
+      # dead worker (and a SIGSTOP-frozen one — its HTTP server can't answer either).
+      - alert: IngestorWorkerScrapeDown
+        expr: up{job="ingestor-coverage"} == 0
+        for: 1m
+        labels:
+          severity: page
+          component: ingestor
+        annotations:
+          summary: "Ingestor shard worker {{ $labels.instance }} is unreachable"
+          description: >
+            A shard worker's metrics endpoint is down >1m — the worker process is dead
+            or frozen, so its shard is not aggregating. On the mp substrate a dead
+            worker forces a full ingestor restart; if this persists, the supervisor is
+            crash-looping (see IngestorCrashLooping).
+
+      # A worker is ALIVE (scrape up) but WEDGED: its heartbeat stopped advancing. Keys
+      # on staleness, NOT value, because a frozen gauge holds its last number forever.
+      - alert: IngestorWorkerHeartbeatStale
+        expr: time() - ingestor_worker_heartbeat_unixtime > 120
+        for: 0m
+        labels:
+          severity: page
+          component: ingestor
+        annotations:
+          summary: "Ingestor shard {{ $labels.shard }} heartbeat stale (wedged worker)"
+          description: >
+            Worker for shard {{ $labels.shard }} is reachable but its processing-loop
+            heartbeat is >120s old — the loop is wedged and the shard's OFI aggregation
+            has silently stopped. This is the observed-set blind spot the per-symbol
+            silence alarm cannot see.
+
+  - name: ingestor_coverage
+    rules:
+      # The OFI set dropped under the M2 floor at RUNTIME (backs up the build-time
+      # assert, which only fires at startup). Sum of per-shard subscribed counts.
+      - alert: IngestorOfiBelowFloor
+        expr: sum(ingestor_shard_expected_symbols) < 500
+        for: 5m
+        labels:
+          severity: page
+          component: ingestor
+        annotations:
+          summary: "OFI subscribed set below the M2 floor of 500"
+          description: >
+            Live OFI subscription is {{ $value }} names (< 500). The stream is
+            under-covering the M2 liquid-universe criterion — likely adv_dollar NULLs
+            shrank the top-N at the last universe rebuild.
+
+      # A subscribed liquid name has been trade-silent past the alarm threshold during
+      # RTH — the capture-regression signal. Fires off the worker's own counter.
+      - alert: IngestorSilentSubscribedSymbols
+        expr: ingestor_shard_silent_symbols > 0
+        for: 2m
+        labels:
+          severity: warning
+          component: ingestor
+        annotations:
+          summary: "Shard {{ $labels.shard }} has subscribed names gone silent"
+          description: >
+            {{ $value }} subscribed name(s) on shard {{ $labels.shard }} have been
+            trade-silent beyond the consecutive-RTH-minute threshold — a possible
+            dropped subscription, not a genuinely tradeless illiquid minute.
+
+      # Reader outpacing a worker: queue depth climbing = backpressure before drops.
+      - alert: IngestorQueueBacklog
+        expr: ingestor_shard_queue_depth > 50000
+        for: 2m
+        labels:
+          severity: warning
+          component: ingestor
+        annotations:
+          summary: "Shard {{ $labels.shard }} reader->worker queue backing up"
+          description: >
+            Queue depth {{ $value }} on shard {{ $labels.shard }} — the worker is
+            falling behind the reader. If it reaches the bound, ticks drop. Consider
+            more shards or investigate a slow worker.
+
+  - name: ingestor_stability
+    rules:
+      # Crash loop: full-restart-on-death means a flapping worker restarts the WHOLE
+      # ingestor repeatedly. A worker scrape-target that keeps reappearing (process
+      # start count climbing) within a short window must page loudly (Manager's ask).
+      # process_start_time_seconds is exported by prometheus_client per worker; a
+      # changing value = the process restarted.
+      - alert: IngestorCrashLooping
+        expr: changes(process_start_time_seconds{job="ingestor-coverage"}[15m]) > 3
+        for: 0m
+        labels:
+          severity: page
+          component: ingestor
+        annotations:
+          summary: "Ingestor crash-looping (>3 restarts in 15m)"
+          description: >
+            A shard worker has restarted >3 times in 15m. On the mp substrate each
+            worker death triggers a full ingestor restart, so a flapping worker means
+            the whole stream is bouncing — coverage is effectively down. Investigate
+            the worker crash cause before it eats the session.

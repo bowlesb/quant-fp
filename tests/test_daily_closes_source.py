@@ -16,10 +16,11 @@ binding.
 import os
 from datetime import datetime, timezone
 
-import psycopg
 import pytest
 
-from quantlib.featurestore import load_daily_closes
+psycopg = pytest.importorskip("psycopg", reason="DB-backed test needs psycopg")
+
+from quantlib.featurestore import load_daily_closes  # noqa: E402
 
 DB_KWARGS = {
     "host": os.environ.get("DB_HOST", "localhost"),

@@ -28,6 +28,13 @@ MARKET_CONTEXT_SYMBOLS = [
 # is 500; this >=500 satisfies the criterion while sharding cleanly.
 OFI_SYMBOL_COUNT = int(os.environ.get("OFI_SYMBOL_COUNT", "512"))
 
+# M2 floor: the OFI set must cover >=500 liquid names (the milestone criterion). If a
+# rebuild date has adv_dollar NULL for many names, OFI_SYMBOLS_SQL would silently
+# return fewer and the stream would drop under the floor with nothing tripping. We
+# assert this at subscription build (qa review cond #2) so a shrunk OFI set FAILS LOUD
+# at startup instead of quietly under-covering. Tunable for non-prod (e.g. a dev DB).
+OFI_MIN_COUNT = int(os.environ.get("OFI_MIN_COUNT", "500"))
+
 DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "JPM"]
 
 LATEST_DATE_SQL = "SELECT max(trade_date) FROM universe_membership"
@@ -62,6 +69,8 @@ def load_subscription(
         latest_date = row[0] if row else None
 
         if latest_date is None:
+            # Cold start (no universe built yet) — a legitimate tiny fallback, NOT a
+            # floor violation, so the OFI_MIN_COUNT assert below is skipped here.
             equities = list(DEFAULT_SYMBOLS)
             ofi_symbols = list(DEFAULT_SYMBOLS)
         else:
@@ -69,6 +78,15 @@ def load_subscription(
             equities = [r[0] for r in cur.fetchall()]
             cur.execute(OFI_SYMBOLS_SQL, (latest_date, ofi_count))
             ofi_symbols = [r[0] for r in cur.fetchall()]
+            # cond #2: a real universe must yield >=OFI_MIN_COUNT OFI names, or the
+            # stream is silently under the M2 floor. Fail loud at startup instead.
+            if len(ofi_symbols) < OFI_MIN_COUNT:
+                raise RuntimeError(
+                    f"OFI set has {len(ofi_symbols)} names < floor {OFI_MIN_COUNT} "
+                    f"(universe date {latest_date}, requested top-{ofi_count} by ADV). "
+                    f"Likely adv_dollar NULL for many names on this date — the M2 "
+                    f">=500 coverage criterion would be silently violated."
+                )
 
     bar_symbols = sorted(set(equities) | set(MARKET_CONTEXT_SYMBOLS))
 
