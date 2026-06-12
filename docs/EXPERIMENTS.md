@@ -1897,3 +1897,15 @@ PILOT-PRIOR UPDATES (translating to our horizon/universe/cost — NOT transplant
   fill-prob-adjusted net is the real gate.
 NET: the literature doesn't kill OFI but it sharpens the bet — test it at ITS native short horizon, judge
 on fill-prob-adjusted net cost, and expect the cost wall to bind. No gate relaxed; priors updated honestly.
+
+## OPS INSIGHT for task #7 (parallel runner) — panel-LOAD is the bottleneck, not CPU (Lead, 2026-06-12)
+Ran 2 explorer smokes in parallel + the grind; box load DROPPED to 8.5/32 (looked idle) — but both
+smokes were blocked in pg wait_event_type=Client for 3+ min on the load_panel SELECT (fv.ts,fv.symbol,
+fv.vector,l.value over ~6M rows). The bottleneck is CLIENT-SIDE fetch/deserialize of the multi-million-row
+panel, NOT CPU (CPU only spikes once LightGBM training starts). IMPLICATION for the resource-aware runner:
+naive parallelism makes N processes each do a slow full-panel transfer competing for DB egress — you get
+low CPU AND slow throughput. The high-leverage fix is a SHARED/CACHED loaded panel (load once into a
+memory-mapped array or a parquet snapshot in research., reuse across experiments) rather than each worker
+re-SELECTing 6M rows. Recommend prod fold "load panel once, fan out experiments over the in-memory copy"
+into task #7 — it'll do more for throughput than adding worker lanes. (Also explains why the grind is
+~2min/experiment: a big chunk is panel reload per id.)
