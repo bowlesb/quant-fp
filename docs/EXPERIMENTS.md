@@ -1591,3 +1591,69 @@ Result pending. PRE-REGISTERED prediction (~65%): dividend timing adds ~0 cross-
 30m/overnight (the effect is small, slow, and our horizon is short) — but it is the first genuinely-
 new deep data family tested, and a clean null sharpens "data-starved, not model-starved." If +Family-C
 lifts IC above canary AND improves breakeven -> Tier-1 PR for a real feature group.
+| 2026-06-12T22:04:47+00:00 | W11_solo_mom_10d_rel_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.00219 | -2.014 | -0.00118 | Single-feature mom_10d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T22:05:28+00:00 | W11_solo_mom_10d_rel_overnight | overnight | raw | 1 | 428024 | 0.00631 | 1.523 | -0.00042 | Single-feature mom_10d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T22:07:55+00:00 | W11_pair_mom_1d_mom_3d_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00177 | -1.275 | 0.00041 | Momentum term-structure: mom_1d+mom_3d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:08:35+00:00 | W11_pair_mom_1d_mom_3d_overnight | overnight | raw | 2 | 428024 | 0.0144 | 2.209 | -0.00645 | Momentum term-structure: mom_1d+mom_3d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+
+## ★ COST-BY-LIQUIDITY PRE-REGISTRATION (Modeller, 2026-06-12) — task #5, Manager top priority
+
+THE THESIS: every price signal we found is REAL but dies on the ASSUMED ~2bps one-way cost
+(ret_5m+position 30m breakeven ~1.4bps). The lever is COST, not signal. If our ACTUAL measured
+half-spread on the liquid tier is BELOW breakeven, the existing signal is already an M3 candidate
+with ZERO new data. This pre-registers expectations BEFORE the refined measurement (discipline:
+a result that contradicts a pre-registered prediction can't be rationalized away).
+
+WHAT I'VE SEEN SO FAR (raw, unconditioned): quote_agg_1m = 52 names / 3 days / mean_spread 15.86bps,
+median-of-median 9.25bps. That is the ALL-MINUTES average (includes open/close auctions + thin
+minutes where spreads blow out) — NOT yet the trading-cadence number.
+
+PRE-REGISTERED PREDICTIONS (falsifiable, before the refined cut):
+1. (conf ~70%) Conditioning on RTH 30-min-cadence timestamps (10:00-15:30 ET, excluding the first/
+   last 15 min) DROPS the median half-spread materially vs the all-minutes 4.6bps — I predict
+   trading-cadence median half-spread lands ~2-4 bps (still ABOVE the 1.4bps breakeven for the
+   median name).
+2. (conf ~60%) The most-liquid DECILE of the 50 names has median half-spread BELOW the full-50
+   median — but I predict even the top decile's half-spread is ~1-2bps, i.e. STRADDLING breakeven,
+   not comfortably below it. (These 50 are already the top-ADV liquid tier, so there isn't a much-
+   more-liquid subset hiding inside.)
+3. (conf ~65%) PRIMARY VERDICT: ret_5m+position is NOT cleanly tradeable net-of-measured-cost even
+   on the liquid tier — measured half-spread >= breakeven for most names. The honest outcome is
+   "closer than the 2bps strawman suggested, but still underwater" — which REDIRECTS the edge case
+   to OFI (refine the signal so breakeven RISES) rather than to cost alone.
+4. (conf ~80%) 3 days / 50 names is too THIN to be a verdict — this Phase-1 measurement is
+   DIRECTIONAL; the real gate needs the M2 500-name multi-week capture. I will label it as such.
+
+WHY I MIGHT BE WRONG (pre-committed): if median trading-cadence half-spread on the liquid tier
+comes in < 1.4bps, prediction 3 flips and ret_5m+position becomes a live M3 candidate on that
+subset — the highest-value possible outcome. I am NOT anchoring on "no edge"; the measurement decides.
+
+METHOD (next): half_spread_bps = median_spread_bps/2 at each name's RTH cadence ts; aggregate per
+name (median over its ts); rank names by liquidity (n_quotes / inverse spread); report the half-
+spread distribution by liquidity tier vs the 1.4bps breakeven. Then (if a sub-tier clears) re-gate
+the ret_5m+position signal restricted to that subset under net-of-MEASURED-cost.
+| 2026-06-12T22:10:30+00:00 | W11_pair_mom_3d_mom_5d_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.0019 | -1.603 | -0.001 | Momentum term-structure: mom_3d+mom_5d at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:11:03+00:00 | W11_pair_mom_3d_mom_5d_overnight | overnight | raw | 2 | 428024 | 0.01205 | 2.505 | -0.00478 | Momentum term-structure: mom_3d+mom_5d at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+
+## ★ FAMILY-C DIVIDEND-TIMING VERDICT (Modeller, 2026-06-12) — NO EDGE (full 613-day panel)
+
+family_c_dividend_timing.py on v1.1.1 (4.84M rows 30m / 428K overnight; 489/612 payers in panel;
+~3.2% of rows in the <=5d run-up window). Features: days_to_ex, days_since_ex, in_runup_window,
+is_dividend_payer — strictly PIT, lookahead-guarded.
+
+  30m       baseline IC 0.02698 be 1.42 | +family_c IC 0.02741 be 1.51 | family_c_ONLY IC -0.0002 canary 0.0026
+  overnight baseline IC 0.01420 be 3.20 | +family_c IC 0.01931 be 4.72 | family_c_ONLY IC 0.0214 canary 0.0145
+
+VERDICT (matches pre-registered ~65% null): dividend timing adds NO honest cross-sectional edge.
+- 30m: family_c_only IC ~0 (-0.0002, canary 0.0026 > |IC|); adding to price moves IC +0.0004 and
+  breakeven +0.09bps = NOISE. Dividend cycle does NOT predict 30m cross-sectional returns.
+- overnight: the family_c_only IC 0.0214 is a TRAP — its CANARY is 0.0145 (~68% of the IC reproduces
+  on SHUFFLED labels) = artifact (selection/group-structure), NOT alpha. plus_family_c overnight
+  survivorship-neutral sharpe -1.17 (negative); family_c_only neutral sharpe 0.006 (dead zero on 600
+  obs). The dividend run-up anomaly does NOT survive our gates at our horizon.
+- This is the FIRST genuinely-new deep data family tested end-to-end (live CA feed, no rebuild). A
+  clean null SHARPENS "data-starved, not model-starved": even orthogonal firm-calendar data adds 0
+  at 30m/overnight. The remaining live new-data hope is MICROSTRUCTURE (OFI), not slow firm events.
+- METHOD WIN: the canary caught it again — overnight IC 0.0214 would have looked like a find without
+  the shuffle arbiter. Standing rule reaffirmed: |IC| must clear the canary, and overnight IC is
+  untrustworthy without survivorship neutralization.
