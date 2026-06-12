@@ -300,6 +300,13 @@ Deploy gated on qa-2 re-green + Manager bless → one post-flatten targeted `mak
   in the deployed executor -> THEN drop KLAC from the manual SYMBOL_DENYLIST default. The lift ACT
   is gated on MANAGER RATIFICATION (consequential safety change; requested AFTER the guard is
   confirmed live). KLAC stays excluded throughout — two layers collapse to one data-driven layer.
+  GOTCHA (do NOT false-stall the lift): the headline `backfill_realtime_parity` will STAY RED with
+  KLAC as top driver — a PERMANENT artifact (pre-ex-date stream bars are raw as-traded vs backfill
+  retroactively split-adjusted → 10x apart BY DESIGN on those dates, incomparable forever). That
+  RED is NOT a hold reason. The gate that governs the lift (MET): backfill internally consistent
+  (jump check clean), post-ex-date stream==backfill EXACT (0% mismatch from 6/12), CA table live,
+  ex-date guard validated. (qa-2 shipping a split-aware parity fix so the metric stops false-
+  flagging.) Manager ratified the lift on the post-flatten deploy (2026-06-12).
 
 ## Standing future items (open exec work, by gating milestone)
 - **[BUILT 6/12, awaiting deploy] Automatic ex-date guard in candidate_pool (#18).** HAZARD CLASS
