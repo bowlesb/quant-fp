@@ -38,6 +38,10 @@ exec has a live basket in flight intraday); Manager go on #12. Sequence (any suc
    panel as a NEW version **v1.1.2** — do NOT rebuild v1.1.1 in place (the M1 verdict + #16 reference
    the pinned v1.1.1 panel: 5.5M rows / 785 syms / computed_at 06:43Z). Monthly-chunked + labels + QA
    re-validate. v1.1.2 becomes the research==production panel; v1.1.1 stays frozen for provenance.
+   VERIFIED 6/12: the current 1000-name universe is clean (0 ETF/fund-named, 0 missing-meta), so
+   v1.1.2 is clean-equities at full depth (NOT a re-contamination) — the extra ~215 vs v1.1.1's 785
+   are thin-history equities now backfilled. Register v1.1.2 with explicit composition metadata
+   (clean equities / full 1000-name universe / 0 funds / build+source-universe dates).
 NB: the backfill-manager CA fetch + recent-split full-history re-fetch trigger is already CODED
 (commit 5f17db9) and activates automatically at step 6's rebuild-all — its first non-market-hours
 cycle self-populates corporate_actions and re-fetches any recent-split name. The explicit
