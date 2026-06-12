@@ -310,3 +310,38 @@ HONEST REMAINING CAVEATS (must travel WITH the escalation — not blockers, but 
      price pressure) — lit says this is usually illiquid/cost-killed, yet it survives here on liquid-50
      at measured cost. That's surprising enough to warrant the Lead's independent re-run before promotion.
 Reporting to the Lead to ESCALATE per his verdict rule. Wrote the 002 report. Committed.
+
+## 2026-06-12 (cont.) — explorer-data archaeology -> 002 second arm. Two findings (one refutes their hypothesis), + multi-seed canary firms the candidate.
+
+explorer-data's gap-fade archaeology (independent, panel-wide) CONFIRMED 002 and gave two upgrades:
+(a) 10:00-entry arm (exploit ~83% IC-persistence to 60m to dodge the toxic open spread), (b) liq2/liq3
+targeting (inverted-U: fade strongest mid-liquidity, weakest mega-cap). Built shape_gap_1000entry.py for
+both + a registered liquidity-tier helper builder. RESULTS:
+
+1. ★ 10:00-ENTRY ARM DOES NOT WORK — REFUTES the persistence hypothesis (honest correction):
+   liquid-50, walk-forward OOS, low-vol fade:
+     09:30 arm: gross 3.38, net@15.3bps +2.60   (reproduces the verdict-gate result exactly — good)
+     10:00 arm: gross 0.36, net@5.4bps  +0.03   (the fade is GONE by 10:00)
+   The IC-PERSISTENCE explorer-data measured (-0.072 open -> -0.060 @60m, 83%) is the SIGNAL's rank-IC
+   decay, but the TRADEABLE open-to-close EXCESS book is FRONT-LOADED: ~all the fade is realized in the
+   first 30 min on liquid names. You CANNOT dodge the open spread by entering at 10:00 — the edge IS the
+   opening move. So the candidate must trade at the open and EAT the ~12.6bps open half-spread — and it
+   STILL clears (+2.60 net). My ~55%-prior that 10:00 would beat 09:30 was WRONG; logged. (Caveat: the
+   10:00 arm might revive on liq2/liq3 where the fade is bigger — gated on the tier builder.)
+
+2. ★ MULTI-SEED CANARY firms the candidate (caught + fixed a single-seed-canary noise issue):
+   My first 10:00-arm run showed a 09:30 canary of +1.29 — vs the verdict-gate's -0.72 on the SAME data.
+   That discrepancy = single-shuffle NOISE on 517 dates, not a leak. Replaced the single-seed canary with
+   a 20-SEED null: mean 0.36 / std 0.69 / MAX 1.62. The real 09:30 gross 3.38 is ~4.3 std ABOVE the null
+   mean and well above the max -> the candidate is real AND the canary is now characterized, not a lucky
+   draw. IMPORTANT lesson for ALL my canaries: a single shuffle on ~500 dates has a ~±0.7 Sharpe null
+   band; one draw can read +1.3. Multi-seed is mandatory at this sample size. (Flagging to the Lead — my
+   earlier -0.72 verdict-gate canary was a lucky-LOW draw; the multi-seed null is the honest statement,
+   and the candidate clears it comfortably.)
+
+DELIVERED: experiments/builders/common_liquidity_tier.sql — registered helper, per-symbol median
+dollar-volume ntile-4 (matches explorer-data's def). The inline dollar-volume scan TIMED OUT (exit 143,
+full bars_1m scan) -> materialize-once is the right call; Lead to run it. liq2/liq3 cut gated on it.
+NET: 002 candidate UNCHANGED and FIRMER (must trade at open, +2.60 net, 4.3-sigma over a proper null).
+The 10:00 dodge doesn't exist on liquid names. Reporting to explorer-data (their hypothesis, my refutation)
+and the Lead.
