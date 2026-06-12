@@ -909,3 +909,20 @@ Full-panel run launched (the firm read); 120d is directional only. If the full p
 is a discard (logged, not shipped) and the case for NEW DATA (OFI/news/ex-div) as the only path
 strengthens. NOTE: the within-snapshot beta is a cheap proxy; a true rolling-regression beta on bar
 history could differ — but a proxy showing zero is weak evidence FOR investing in the expensive version.
+| 2026-06-12T19:29:13+00:00 | C11_solo_ret_30m | fwd_30m | raw | 1 | 4840765 | -0.00073 | -0.947 | 1e-05 | Single-feature interrogation: ret_30m ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+
+### EXPERIMENTER GUARD — Manager ruling: OPEN on evidence + prod pause-authority (2026-06-12)
+
+The ≥15:30 guard is OPEN (EXP_HEAVY_AFTER_PT=00:00). Manager ruling (provenance-checked):
+- The "start the queue NOW / batch-precaution is without evidence" relay did NOT come from the Manager
+  (dual-manager mislabel again). The Manager's only directive kept the ≥15:30 guard. I surfaced the
+  contradiction instead of silently obeying the louder one — correct per the provenance rule
+  (un-board-reflected contradictory directives come back to the Manager).
+- ON THE MERITS the open guard WINS on EVIDENCE: 25+ min of grind ran clean alongside live collection +
+  the #16 train + prod's KLAC re-fetch (217k bars); DB unbothered. Remaining batch items are mostly
+  restarts/image-builds (not DB-contention-sensitive); #12 backfill is separately rate-gated.
+- STANDING CONDITION: prod-architect-2 has PAUSE AUTHORITY over the grind for the batch duration — if
+  they report ANY contention, I re-close the guard (EXP_HEAVY_AFTER_PT=15:30 + restart, seconds) with
+  NO round-trip to the Manager. I told prod they hold that authority.
+LESSON (operating): the quiet-window guard was precaution; it's now empirically tested as unnecessary
+under current load. Keep the guard CODE (cheap insurance for a real future reason) but default OPEN.
