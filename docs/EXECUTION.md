@@ -292,6 +292,14 @@ Deploy gated on qa-2 re-green + Manager bless → one post-flatten targeted `mak
   boundary in the mixed-basis daily series, so KLAC's SCORE stays corrupt until prod's #17 series
   re-fetch on a consistent basis. Removal stays gated on QA parity (stream==backfill across the
   SERIES), not on the 09:30 spot looking right.
+  REMOVAL CONDITION MET (2026-06-12, prod-architect-2): #17 KLAC re-fetch DONE + verified (max
+  day-jump 10x->1.19x, consistent Adjustment.ALL series); QA `no_extreme_backfill_jump` re-ran
+  GREEN (0 unexplained >3x jumps across 785 names; KLAC's 6/01 mixed-basis step gone); #18
+  corporate_actions LIVE. Data-side gate satisfied. LIFT PLAN (safe ordering, no un-excluded
+  window): post-flatten deploy #18 guard + #19 -> confirm the ex-date guard returns ['KLAC'] LIVE
+  in the deployed executor -> THEN drop KLAC from the manual SYMBOL_DENYLIST default. The lift ACT
+  is gated on MANAGER RATIFICATION (consequential safety change; requested AFTER the guard is
+  confirmed live). KLAC stays excluded throughout — two layers collapse to one data-driven layer.
 
 ## Standing future items (open exec work, by gating milestone)
 - **[BUILT 6/12, awaiting deploy] Automatic ex-date guard in candidate_pool (#18).** HAZARD CLASS
