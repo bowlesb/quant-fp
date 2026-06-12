@@ -1816,3 +1816,42 @@ read-only -> they deliver builder SQL, I EXPLAIN+run+register. NEXT: synthesis a
 | 2026-06-12T22:27:43+00:00 | W11_int_mom_x_vol_fwd_30m | fwd_30m | raw | 7 | 4840765 | -0.00453 | -2.728 | 0.0007 | Interaction probe: mom_x_vol (7 feats) at fwd_30m. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |
 | 2026-06-12T22:29:36+00:00 | W11_int_mom_x_vol_fwd_60m | fwd_60m | raw | 7 | 4416876 | -0.00559 | -2.686 | 0.00169 | Interaction probe: mom_x_vol (7 feats) at fwd_60m. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |
 | 2026-06-12T22:30:13+00:00 | W11_int_mom_x_vol_overnight | overnight | raw | 7 | 428024 | 0.02329 | 2.749 | -0.00192 | Interaction probe: mom_x_vol (7 feats) at overnight. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |
+
+## ═══ SYNTHESIS — Pipeline kickoff cycle (Research Lead, 2026-06-12 ~15:30 PT Fri) ═══
+
+First synthesis of the 5-mind pipeline (between the 14:00 and 22:00 PT boundaries). For the Manager's 8h report.
+
+PROPOSED (15 across 4 lenses, all validated + dispositioned by the Lead):
+- features (5): volume-surprise, highlow-vol, splits [runnable]; sector, quotes [blocked: sector-map=task#8, M2-scale].
+- ml (4): pos-carrier-economics [ENQUEUED], ridge, turnover-smoothed-target, multihorizon-composite [runnable].
+- shapes (6): daily-session-price helper [building], conditional-participation, post-exdiv-drift, volume-shock [runnable]; gap, ORB [behind helper].
+- data (1+): liquid-tier 60m-reversal [APPROVED, rigorous OOS]; +2 load-bearing journal observations (NaN-rate -> task#9; ret_5m reversal-in-illiquid).
+
+RUN (this cycle):
+- My task #5 cost-by-liquidity: DONE (verdict below). OFI curiosity read: DONE (gates nothing).
+- Family-C dividend timing: DONE — NO edge.
+- ml_ridge: RAN (smoke) but CANARY BROKEN (-0.017, should be ~0) -> HELD, sent explorer-ml the diagnosis; does NOT count until fixed + full-panel.
+- Scripts DELIVERED awaiting staggered runs (DB-contention managed): family_e_volume, family_d_highlow_vol, family_f_splits, shape_conditional_participation, shape_post_exdiv_drift, shape_volume_shock.
+- W12 position-group probes + ML003 economics: queued at front, run after the current W11 pass.
+
+LEARNED / KILLED (Lead verdicts this cycle):
+- ★ Cost lever CANNOT rescue the price signal (task #5): signal lives in the ILLIQUID broad cross-section
+  (full IC 0.031); liquid-tier signal too weak (breakeven 0.82 << ~3bps measured cost). -> the edge case
+  is definitively OFI (lift breakeven 1-2bps), not cheaper execution.
+- KILLED: Family-C dividend timing (NO edge, artifact overnight). KILLED earlier: price-panel no-edge,
+  Shape 7 horizon-ensemble, ex-div overnight alpha.
+- data-lens corroboration: ret_5m is a univariate REVERSAL concentrated in illiquid names (29/30 months
+  negative) — explains the texture the 0.027 GBM headline hid.
+
+PROMISING LEADS (ranked, with the honest caveat NONE is proven):
+1. OFI marginal-IC-over-ret_5m (battery pre-registered; gated on >=10 sessions; curiosity read showed a
+   faint -0.05 reversal = right sign, gates nothing). The whole thesis rests here.
+2. Position-group as a LOWER-turnover carrier (ML003 + W12 testing now — does pos clear breakeven where ret_5m can't?).
+3. Volume-surprise family (widest cross-section, zero collection, fully orthogonal — explorer-features building).
+4. Turnover-smoothed / multihorizon targets (attack the binding turnover constraint directly).
+5. Liquid-tier 60m-reversal (data lens, ~25% prior, rigorous OOS — likely a documented honest no, but cheap).
+
+QUEUED NEXT: the 11 W12 pos probes + 3 ML003 configs (front of queue); staggered family/shape script runs;
+sector family fires when task#8 lands. GLOBAL experiment count: 143 + the new proposals (tracking multiple-testing).
+BIGGEST RISK TO THE MONDAY BAR: compute contention — 7 scripts each load the 6M-row panel; with no parallel
+runner (task#7) yet, I'm running them SERIALLY as smokes-first. If a lens stalls on compute I escalate.
