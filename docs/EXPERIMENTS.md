@@ -2114,3 +2114,33 @@ churning cost for no edge — mild priority to halt).
 SECOND TIME the tradeable-entry rule killed an apparent open-anchored edge today (gap-fade + this). Strong
 validation that the rule belongs in the permanent checklist. The Manager's "apply your own rule to your own
 recommendation" was exactly right — I'd cited the look-ahead IC as the reason to keep it.
+| 2026-06-12T23:02:43+00:00 | ML003_ret5m_only_30m | fwd_30m | raw | 1 | 4840765 | 0.01056 | 8.146 | 0.00111 | explorer-ml 003 (Lead-approved): ret_5m-only breakeven/turnover baseline for the pos-vs-ret5m economic comparison. |
+| 2026-06-12T23:04:31+00:00 | ML003_pos_only_30m | fwd_30m | raw | 3 | 4840765 | 0.0291 | 22.049 | 0.00318 | explorer-ml 003 (Lead-approved): pos-only — is the position group a LOWER-turnover, HIGHER-breakeven carrier than ret_5m? Headline = pos-only breakeven vs ret_5m-only; does pos clear 1.4bps? |
+
+## ★ RIDGE BASELINE VERDICT (Lead, full-depth, 2026-06-12) — signal is LINEAR; 3 findings hardened model-independently
+
+explorer-ml's ridge baseline (numpy closed-form, fold-local scale+impute, byte-identical battery gates),
+full 613-day panel, 19 price-only features:
+  ridge/raw  a1000  IC 0.0318  t 20.1  canary 0.0010  breakeven 1.66bps  turn 3.17  surv-out sharpe -1.78
+  ridge/rank a1000  IC 0.0345  t 19.6  canary 0.0071  breakeven 1.55bps  turn 3.20  surv-out sharpe -2.04
+  raw top coefs(std): vwap_dev -0.00019 (LARGEST), vol_30m, vol_60m, mom_10d_rel -0.00011 (tiny)...
+  rank top coefs(std): vwap_dev -0.0153 (LARGEST), rel_ret_30m -0.0086, vol_60m, vol_30m, ret_30m,
+                       gap_from_open, ret_5m -0.0040 (~26% of vwap_dev), ret_15m...
+
+THREE FINDINGS HARDENED (the linear baseline did its job — it was the missing P3 floor):
+1. THE 30m SIGNAL IS LINEAR. Ridge IC (raw 0.0318 / rank 0.0345) MATCHES — slightly EXCEEDS — the GBM
+   (raw ~0.027-0.032 / rank ~0.0235). The GBM's nonlinearity/interactions buy ~NOTHING on this panel.
+   => future ML effort goes to FEATURES + COST, not fancier models; the cheap, interpretable, low-latency
+   linear model is a production-viable default. (Clean P3-gap closure.)
+2. vwap_dev CONFIRMED as the carrier MODEL-INDEPENDENTLY. Largest |coef| in both raw and rank; NEGATIVE
+   (= mean-reversion: high VWAP-deviation -> lower forward return). ret_5m coef is ~26% of vwap_dev's.
+   This independently confirms the W12 attribution (the signal is vwap-mean-reversion, not ret_5m) via a
+   completely different model class. The two model families AGREE -> trustworthy.
+3. MOMENTUM IS DEAD, MODEL-INDEPENDENTLY. The largest momentum coef (mom_10d_rel -0.00011 raw) is tiny;
+   in rank NO momentum feature is in the top 8. Momentum |coef| << 50% of vwap_dev -> "momentum is dead at
+   30m" is NOT a GBM gain-attribution artifact (explorer-ml's load-bearing question, now answered NO).
+ECONOMICS UNCHANGED: ridge breakeven 1.55-1.66bps is marginally BETTER than GBM ~1.4 (linear preds slightly
+smoother -> slightly lower turnover) but still < ~2bps cost; net sharpe negative, survivorship-out negative.
+STILL NO EDGE. The linear floor confirms the verdict isn't a modeling failure — the signal is real, linear,
+vwap-reversion-shaped, and uneconomic at turnover. (rank canary 0.0071 is the within-ts-rank-label noise
+floor on 613 days, consistent with the GBM rank canary — not a leak.)
