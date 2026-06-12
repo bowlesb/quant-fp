@@ -785,3 +785,27 @@ applies) so the real trigger-gated pilot (~6/26) has ZERO pipeline risk. I will 
 LABELED "PIPELINE-VALIDATION — NOT A READ" and record any IC as plumbing-status only; the ~2.5-day
 sample is far too thin for ANY belief. Pilot discipline (≥10 full-session 50-name days from the
 confirmed-capture clock + the ≥15:50 exclusion + at-scale parity prerequisite) stands unchanged.
+
+## FAMILY A — EX-DIV/CA PIT-LOOKUP SPEC (Modeller → prod #18, 2026-06-12, Manager-prioritized)
+
+Manager approved Family A and routed me to spec prod the PIT lookup (like #20). The #18 fetcher already
+parses cash_dividends + splits and the corporate_actions table populates tonight; this spec makes the
+consumer side PIT-correct BY CONSTRUCTION. Primary value = LABEL HYGIENE (neutralize the mechanical
+ex-div overnight drop — same honesty class as survivorship demean), secondarily a conditioning feature.
+
+REQUIREMENTS (what I need exposed; prod owns the table from #18):
+- A PIT lookup keyed (symbol, ex_date) — the actions table from #18, or a view over it. Columns I
+  consume: symbol, ex_date (date), action_type ('cash_dividend'|'split'|...), cash_amount (per-share $,
+  null for splits), split_ratio (null for dividends). announcement_date if Alpaca provides it (lets me
+  build days_to_ex_div anticipation features; nice-to-have, not blocking).
+- PIT DISCIPLINE: at a feature-compute cadence ts, only actions with announcement_date <= ts (or
+  ex_date <= ts for realized flags) are visible. ex_date is a calendar fact so no live/backfill skew —
+  the only honesty rule is "don't see a dividend before it's announced/ex." Join at feature-compute
+  time (same pattern as sector_map), NOT baked into feature_vectors.
+FEATURES IT POWERS: is_ex_div_today (binary at ts), days_to_next_ex_div, days_since_ex_div,
+trailing_div_yield (sum trailing-12m cash_amount / price). LABEL-HYGIENE USE (the priority): an
+ex_div_adjustment to the OVERNIGHT label so the mechanical close→next-open drop on ex-date is removed
+before demeaning — tests overnight momentum free of the dividend artifact.
+COVERAGE/PARITY: dividends are sparse (most names most days = no action) so "coverage" = did we fetch
+the full 2.5yr of actions for the panel universe; QA check = action counts per month are non-zero and
+stable (a month with 0 dividends = a fetch gap). API-historical so backfillable immediately tonight.
