@@ -132,6 +132,23 @@ consistent on ONE basis (no 9.95× step at 6/01), `no_extreme_backfill_jump` sto
 KLAC, and parity overlap for KLAC closes. That green is the GATE for exec pulling the KLAC
 denylist — do NOT signal it until verified.
 
+## Reviews performed (mapped-reviewer gate outcomes — policy docs/REVIEW_POLICY.md)
+
+- **2026-06-12 — #19 exec symmetric-reconcile fix (b856aa7), reviewer=qa.** APPROVE w/ 2
+  must-fix conditions before deploy. The fix genuinely closes my exec-recon-one-directional
+  finding (sees partial/unfilled/rejected/orphaned + writes terminal status/filled_qty back).
+  Conditions: (1) `basket_neutral` is a NAME-COUNT check, not notional — add per-side filled
+  NOTIONAL (filled_qty×price) so dollar-skew is visible (a 1-sh $5 long vs 100-sh $300 short
+  passes count-neutral); my fill_reconciliation invariant needs this for realized-neutrality.
+  (2) fill_ts double-count: a partial ending `done_for_day`/`expired` has neither filled_at
+  nor canceled_at → falls to mutating `updated_at` → 2 fills_log rows/order = double-counted
+  P&L. Partials are routine here (4/6 fills on 6/11 were partial). Fix: deterministic fill_ts
+  or key the upsert on alpaca_order_id alone (cumulative). Agreed (3): per-cycle `ok` stays
+  unexpected+rejected only (no flap); the HARD incomplete-fill/lopsided gate lives in MY
+  per-day invariant, evaluated post-flatten when all orders are terminal. Deploy gated on my
+  re-confirm of the updated diff + prod-architect-2 + Manager. SEPARATE from the KLAC denylist
+  parity gate (that waits on tonight's re-fetch).
+
 ## Data provenance facts (encode so we don't re-derive them)
 
 - **Intraday bars/features (v1.1.x panel)** come from BACKFILL fetched in month windows →
