@@ -734,3 +734,19 @@ Manager decisions:
    (failure at 52 redirects M2 cheaply). QA owns proof, Prod owns data path.
 3. ROADMAP: M1 criteria 1 & 4 ticked GREEN with evidence; current-focus updated.
 M1 remaining: #2 panel (grinding, ~2.5h) -> #3 battery verdict. On track for 6/13.
+
+## 2026-06-12 (pre-open 5) — Manager: QA drills land — KLAC 10x bug + close-hour OFI gate
+QA (f868896) drilled both follow-ups:
+#14 bar parity: (1) KLAC stream close EXACTLY 10x backfill on ALL 833 overlap bars
+(feed scaling bug, not a split) — escalated URGENT to Prod incl. "is the in-flight
+v1.1.1 rebuild reading these poisoned bars?" (fix/exclude/confirm before go-signal);
+(2) ~87% of mismatches = ~15-20 symbols with consistent <1% every-bar offsets =
+canonical-close methodology question (Prod decides). Gate stays RED at 1% (residual
+1.02% post-KLAC) — catching real issues, not too tight.
+#15 settled-day trade-agg proof @52 names: CORE RTH TRUSTWORTHY — n_trades within-2%
+98.05%, corr 0.9997, tick-rule sign agreement 99.82% => OFI thesis survives first hard
+test. TWO M2 gates found BEFORE sharding spend: (a) close-hour collapse (16:00 within-2%
+= 14% vs 93% at 15:00 — closing cross/late prints) -> Modeller specs closing-minute
+exclusion for OFI features (their lane), Prod implements in shared featurestore, QA
+verifies it binds; (b) 12,802 stream-only minutes coverage mismatch -> Prod explains.
+#14/#15 stay in_progress (fix-handoff / standing scale-tracking proof).
