@@ -208,6 +208,47 @@ denylist — do NOT signal it until verified.
 
 ## Reviews performed (mapped-reviewer gate outcomes — policy docs/REVIEW_POLICY.md)
 
+- **2026-06-13 — M2 sharded ingestion 50→512 (prod commit 306eaba, topology A), reviewer=qa.**
+  **APPROVE for the weekend dry-run; 3 conditions before the Monday deploy, none blocking the
+  dry-run. The REAL gate is the settled-day #15 re-proof at 512 (my own), NOT this code review.**
+  Reviewed adversarially against my 3 mapped gates:
+  - **GATE 2 (parity survives 512) — PASS BY CONSTRUCTION, the strongest part.** The aggregation
+    is the SAME quantlib `aggregate_trades`/`aggregate_quotes`; the buffer/`flush_through`/
+    `flush_minute`/`ON CONFLICT DO NOTHING` logic is BYTE-IDENTICAL to the single-process path
+    (verified via `git show 306eaba^:services/ingestor/main.py`). Sharding only changes process
+    topology; `shard_for`=md5(symbol)%n (NOT hash(), determinism-safe) gives each symbol exactly
+    ONE worker, so per-symbol `tick_state` is never split → the 99.85% tick-rule sign proof
+    TRANSFERS. tests/test_sharding.py proves routing parity at every shard count (3 passed, I ran
+    them). **NEW failure mode sharding introduces that the 50-name proof can't see: cross-process
+    queue ordering — single reader producer + FIFO per-shard queue preserves a symbol's trade/
+    quote/bar order, so it SHOULD hold, but only the settled-day #15 re-proof at 512 confirms it.**
+    Standing pre-existing residual (NOT a regression, already inside the 99.85%): a tick arriving
+    AFTER its minute's bar re-buffers and the re-flushed minute is dropped by ON CONFLICT — same
+    in single-process; my proof was measured against it.
+  - **GATE 1 (coverage invariant present) — PRESENT & good, with ONE real gap (condition #1).**
+    coverage.py ships per-shard Prometheus gauges + a consecutive-silent-RTH-minute alarm — the
+    capture-regression signal I asked for, day one. GAP: it detects a subscribed name going
+    trade-silent, but is BLIND to a WHOLE-NAME bar dropout / a wedged worker — a worker that stops
+    calling record_bar emits nothing, so its gauge goes STALE (looks identical to healthy in
+    Prometheus), and a dropped symbol's streak FREEZES instead of incrementing (record_bar early-
+    returns on absence). Classic "silence is not success." CONDITION #1: add a per-shard liveness/
+    gauge-freshness alert (and an absolute "all N expected names produced a bar this minute" check)
+    so a wedged worker / dropped subscription ALARMS instead of flatlining silently.
+  - **GATE 3 (subscription semantics) — CLEAN.** OFI set = top-512 by ADV from `universe_membership
+    WHERE in_universe` → inherits the equities-only fix; ETFs can't enter the trade/quote tier.
+    QQQ/SPY/IWM are bars-ONLY market-context, explicitly out of OFI (so my Monday bars-level probe
+    should see EXACTLY those 3 ETFs in stream bars and no SOXL/TQQQ class). CONDITION #2: `OFI_SYMBOLS_SQL`
+    filters `adv_dollar IS NOT NULL` with no `len(ofi)>=500` assert — if ADV is NULL for many names
+    on a rebuild date the OFI set silently shrinks under the M2 floor. Add a build-time assert.
+  - **CONDITION #3 (test completeness, non-blocking):** test_sharding_parity passes each symbol's
+    ticks as ONE list — proves ROUTING parity, not the per-minute buffer/flush interleave (where a
+    real divergence would live). Covered by transitivity (flush code byte-identical) but the test
+    doesn't assert it; add a minute-boundary-interleaved parity case.
+  Verdict: code is sound; conditions are hardening, not corrections. **My settled-day #15 re-proof at
+  512 ticks the M2 criterion — that's the gate, code review is necessary-not-sufficient.** PROCESS
+  NOTE: my ledger commit landed on the prod-architect/m2-sharding branch (shared-tree checkout);
+  flagged to Manager to land on master at merge — did NOT rewrite the shared branch myself.
+
 - **2026-06-12 — #19 DEPLOYED & VERIFIED LIVE + after-review of hotfix 899c72c (qa).** #19 is live;
   reconciliation_log now carries the rich detail my notional-neutrality condition required — today's
   16:00 ET rows read `intended 3L/3S, filled 3L/1S, unfilled=[AMPX,FLY], net_notional=+$353.17,
