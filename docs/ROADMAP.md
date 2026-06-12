@@ -37,7 +37,8 @@ leveraged funds; the price-only "no edge" verdict is therefore suspect.
 - [ ] Universe = single-name equities ONLY — **0 ETF/leveraged/fund members** (automated
       invariant `universe_is_equities_only` green in the QA suite & CI).
 - [ ] Clean equity panel rebuilt over the full ~600-day history, PIT-correct — **~715
-      equities/date** as set_version **v1.1.1** (labels recomputed too, DELETE-then-insert).
+      equities/date** (~715-742 range, ~742 avg) as set_version **v1.1.1** (labels
+      recomputed too, DELETE-then-insert).
       (CORRECTED 2026-06-12: an earlier "~885 with ~160 un-crowded equities" reading came
       from a stale-image rebuild that ran pre-fix code; contamination was purely ADDITIVE
       ETFs — old ~933/date ≈ ~210 funds + ~723 equities. Note: v1.1.0 feature rows stay
@@ -57,6 +58,10 @@ but only covers ~50 names.
 - [ ] Settled-day trade-agg parity **≥98%** at scale (QA invariant I2b green on a settled day).
 - [ ] Order-flow features (v1.2.0+) populate across the wide cross-section (NaN-rate < 5% where
       coverage exists).
+- [ ] **Research universe == live tradable universe**: full historical backfill for the live
+      clean ~1000-name universe (today ~285 live names have ZERO history — edge would be
+      validated on a cross-section we don't trade). (Added 2026-06-12, prod-architect's catch;
+      scope = task #12.)
 
 ### M3 — First HONEST edge candidate (target 2026-07-15)
 **Exit criteria (a candidate must pass ALL, on clean data):**

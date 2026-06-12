@@ -696,3 +696,22 @@ have no set_version -> v1.1.0's original labels overwritten -> v1.1.0 must NEVER
 re-batteried; Modeller adding fail-loud battery guard refusing v1.1.0. Label recompute
 confirmed DELETE-then-insert per horizon (passes Modeller's computed_at gate).
 Experimenter stopped during rebuild (halts BUG-B poisoning); restart = part of #8.
+
+## 2026-06-12 (pre-open 3) — Manager: M1 #1 GREEN; research!=live universe gap surfaced
+Prod-architect: task #1 DONE-VERIFIED (614 dates, 455,881 members, 0 ETF-like via the
+authoritative checker; 573k->456k rows). #2 grinding (12.3M dirty labels deleted,
+v1.1.1 features building monthly-chunked). #6(a)(b) GREEN — live 6/12 membership was
+contaminated AND maybe_build_universe skips-if-exists; deleted + rebuilt clean (1000
+equities, 0 funds) on the FIXED scheduler image. #8 fixed (6eb5084), experimenter
+stopped pending go-signal. Avg clean universe ~742/date (ROADMAP: ~715-742).
+Manager decisions on Prod's coverage questions:
+1. ⭐ RESEARCH PANEL != LIVE UNIVERSE (~285 live names with ZERO history — edge would
+   be validated on a cross-section we don't trade) -> task #12 scope memo (Prod),
+   execution gated on M1 critical path; "research universe == live universe" added as
+   M2 exit criterion. The single most strategic catch since the contamination itself.
+2. is_etf_like tautology risk -> QA told: invariant must use an INDEPENDENT signal
+   (denylist snapshot/issuer metadata), else label necessary-not-sufficient.
+3. UTC-vs-ET maybe_build_universe bug -> task #13 (Prod fixes, QA adds calendar
+   invariant + near-midnight-UTC test).
+4. Delisted stays #9 post-M1. 09:30 first-cadence check covered by Exec/Risk.
+QA pinged for first report (only silent role; #3 in_progress).
