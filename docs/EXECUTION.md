@@ -217,6 +217,33 @@ First live test of everything built last night, at the 09:30 ET open:
   (only 2 of 6 legs positioned so far — the open partial-basket item; rest rest until fill/EOD).
 - Lifecycle now in MANAGE; EOD flatten will TERMINATE ~15:48 ET (verify post-close).
 
+### 2026-06-12 — P1 #19: symmetric reconcile + spread-scaled cross + terminal status (WHY)
+Triggered by QA probe `exec-recon-one-directional`: 6/12 basket intended 3L/3S, filled 2L/1S
+(KEEL/FLY/AMPX never filled), yet reconcile reported ok:true all session — it was structurally
+one-directional (only flagged UNEXPECTED broker positions). Three fixes:
+1. **Spread-scaled marketable cross.** Root cause of the unfilled legs: a fixed $0.01 cross is
+   non-marketable when the quote ticks on a wide-spread name between snapshot and submit (FLY's
+   sell rested inside the bid). Fix: buffer = max(1¢, CROSS_SPREAD_FRAC×spread). ALTERNATIVES
+   considered: (a) a bps-of-price term too — REJECTED, it over-crosses tight liquid names (10bps
+   of $200 = $0.20 on a 2¢-spread stock); (b) cancel-replace loop — deferred (bigger change; the
+   scaled cross is the cheap high-value fix now). Verified live: W/FLY get a proportional buffer,
+   AAPL stays at 1¢.
+2. **Terminal status writeback** (`sync_orders_and_fills` replaces `capture_fills`): one pass over
+   today's orders writes current status + cumulative `filled_qty` to orders_log (was stuck at
+   'submitted' → ledger showed all-time filled=0) and records fills incl. PARTIALS (a partial that
+   later cancels was previously lost) using a STABLE terminal `fill_ts` so the upsert hits one row
+   (no double-count). This is what makes reconcile able to see fill completeness.
+3. **Symmetric reconcile**: compares intent vs broker BOTH ways. ok=false on unexpected positions
+   OR rejected legs (real desync). partial/unfilled/orphaned-open + L/S basket-neutrality recorded
+   in detail (not ok-breaking, so the EOD flatten's transient close orders don't flap ok) → feeds
+   QA's per-day fill_reconciliation invariant (submitted == filled+accounted).
+PROCESS NOTE: this Tier-1 diff was mechanically ABSORBED onto master inside prod's commit b856aa7
+(a `git add -A` swept my uncommitted edits) BEFORE the new REVIEW_POLICY PR/review flow could run.
+Code is on master but NOT deployed (running executor is the old image) → nothing un-reviewed is
+live. Holding the deploy until the mapped reviewer (prod-architect for schema + QA for the
+reconcile-invariant contract) signs off; escalated to Manager to regularize. Mission stakes: M4's
+paper track record is meaningless if the basket we measure isn't the basket we decided.
+
 ## Active live-basket exclusions (remove when the condition clears — don't let these rot)
 - **KLAC — excluded since 2026-06-12 (Manager pre-open directive).** Reason: KLAC's LIVE STREAM
   bars are persistently exactly 10× the true price (feed scaling bug, QA finding). The v1.1.x
