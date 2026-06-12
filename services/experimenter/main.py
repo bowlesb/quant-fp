@@ -29,6 +29,17 @@ LOG_MD = os.environ.get("EXP_LOG_MD", "/app/docs/EXPERIMENTS.md")
 IDLE_SECONDS = int(os.environ.get("EXP_IDLE_SECONDS", "1800"))
 NOMICRO_FEATURES = 13          # first 13 of 18 are the non-micro set (stable prefix)
 
+# Transient DB failures (lock exhaustion / out-of-shared-memory / serialization /
+# connection drops) all surface as psycopg.OperationalError — including the
+# out-of-shared-memory lock-OOM that permanently poisoned 4 W11 ids when the runner
+# persisted them as ERRORED. These must NEVER be persisted (done_ids() never
+# retries a persisted id); we retry in-cycle with backoff, then skip without
+# recording so the next cycle picks the id up again. Deterministic errors
+# (ValueError / KeyError / a real programming/data psycopg error) ARE persisted so
+# they don't retry forever.
+TRANSIENT_DB_RETRIES = int(os.environ.get("EXP_TRANSIENT_DB_RETRIES", "3"))
+TRANSIENT_DB_BACKOFF_S = float(os.environ.get("EXP_TRANSIENT_DB_BACKOFF_S", "5"))
+
 # Each experiment loads the full multi-million-row panel — heavy DB reads. Defer them past
 # the live session + the post-close rebuild/batch window (prod owns 13:00-15:00 PT) so the
 # always-on engine grinds overnight without contending for the DB. Set the gate OPEN
@@ -124,6 +135,86 @@ def log_result(record: dict) -> None:
                 f"{res.get('canary_ic','')} | {r['hypothesis']} |\n")
 
 
+def load_panel_with_retry(
+    horizon: str, sv: str
+) -> tuple[list[str], object, object, object, object]:
+    """Load the panel, retrying transient DB failures (lock-OOM / connection drops)
+    with backoff. Re-raises the transient error if every attempt fails so the caller
+    skips WITHOUT persisting; lets deterministic errors propagate immediately."""
+    last_exc: psycopg.OperationalError | None = None
+    for attempt in range(1, TRANSIENT_DB_RETRIES + 1):
+        try:
+            with psycopg.connect(**DB_KWARGS) as conn:
+                return load_panel(conn, horizon, sv)
+        except psycopg.OperationalError as exc:
+            last_exc = exc
+            logger.warning(
+                "transient DB error loading panel (attempt %d/%d, set=%s, horizon=%s): %s",
+                attempt, TRANSIENT_DB_RETRIES, sv, horizon, exc,
+            )
+            if attempt < TRANSIENT_DB_RETRIES:
+                time.sleep(TRANSIENT_DB_BACKOFF_S * attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
+def run_one_experiment(exp: dict) -> dict | None:
+    """Run a single experiment. Returns the result dict to persist, or None to SKIP
+    WITHOUT persisting (transient condition — retry next cycle). A deterministic
+    error is returned as an {"error": ...} result so it persists and isn't retried
+    forever."""
+    horizon = exp.get("horizon", "fwd_30m")
+    sv = exp.get("set_version", SET_VERSION)
+    sel = exp.get("features")
+    try:
+        names, ts, symbols, X, y = load_panel_with_retry(horizon, sv)
+    except psycopg.OperationalError:
+        # Transient even after retries — do NOT persist; the next cycle retries.
+        logger.warning(
+            "skipping %s: transient DB error persisted across %d retries — not "
+            "recording; will retry next cycle",
+            exp["id"], TRANSIENT_DB_RETRIES,
+        )
+        return None
+    except psycopg.Error as exc:
+        # Non-operational DB error (e.g. a malformed query) is deterministic — persist
+        # it so a real bug surfaces in the log and isn't retried forever.
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+    # A too-small panel is almost always TRANSIENT — the experimenter loaded while a
+    # panel rebuild was mid-flight. Persisting it would poison the id permanently
+    # (done_ids() never retries), so SKIP without recording and retry next cycle.
+    if len(y) < 1000:
+        logger.warning(
+            "skipping %s: panel too small (n_rows=%d, set=%s, horizon=%s) — not "
+            "persisting; will retry when the panel grows",
+            exp["id"], len(y), sv, horizon,
+        )
+        return None
+
+    try:
+        # named feature subsets, by NAME so they work for any set version:
+        #   nomicro = drop microstructure; nocalendar = drop micro + calendar
+        feature_idx = resolve_feature_idx(sel, names)
+        # overnight = ~1 rebalance/day -> periods_per_year ~252 (cadence_min=390)
+        exp_cadence = 390 if horizon == "overnight" else CADENCE_MIN
+        vol_scaler = X[:, names.index("vol_30m")] if "vol_30m" in names else None
+        result = run_experiment(
+            X, y, ts, symbols=symbols, vol_scaler=vol_scaler, label=exp.get("label", "raw"),
+            feature_idx=feature_idx, horizon_minutes=HORIZON_MIN.get(horizon, 30),
+            cadence_min=exp_cadence,
+        )
+        imp = result.get("gain_importance")
+        if imp:
+            used = [names[i] for i in feature_idx] if feature_idx else names
+            top = sorted(zip(used, imp), key=lambda kv: -kv[1])[:5]
+            result["top_features"] = [f"{n}:{v}" for n, v in top]
+        return result
+    except (ValueError, KeyError) as exc:
+        # Deterministic experiment error — persist so it doesn't retry forever.
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def run_queue() -> int:
     with open(QUEUE) as f:
         experiments = json.load(f)
@@ -137,37 +228,9 @@ def run_queue() -> int:
         sel = exp.get("features")
         logger.info("running experiment %s (%s, set=%s, %s, %s)", exp["id"], horizon, sv,
                     exp.get("label"), sel)
-        try:
-            with psycopg.connect(**DB_KWARGS) as conn:
-                names, ts, symbols, X, y = load_panel(conn, horizon, sv)
-            # A too-small panel is almost always TRANSIENT — the experimenter loaded while a
-            # panel rebuild was mid-flight. Persisting it would poison the id permanently
-            # (done_ids() never retries), so SKIP without recording and retry next cycle.
-            if len(y) < 1000:
-                logger.warning(
-                    "skipping %s: panel too small (n_rows=%d, set=%s, horizon=%s) — not "
-                    "persisting; will retry when the panel grows",
-                    exp["id"], len(y), sv, horizon,
-                )
-                continue
-            # named feature subsets, by NAME so they work for any set version:
-            #   nomicro = drop microstructure; nocalendar = drop micro + calendar
-            feature_idx = resolve_feature_idx(sel, names)
-            # overnight = ~1 rebalance/day -> periods_per_year ~252 (cadence_min=390)
-            exp_cadence = 390 if horizon == "overnight" else CADENCE_MIN
-            vol_scaler = X[:, names.index("vol_30m")] if "vol_30m" in names else None
-            result = run_experiment(
-                X, y, ts, symbols=symbols, vol_scaler=vol_scaler, label=exp.get("label", "raw"),
-                feature_idx=feature_idx, horizon_minutes=HORIZON_MIN.get(horizon, 30),
-                cadence_min=exp_cadence,
-            )
-            imp = result.get("gain_importance")
-            if imp:
-                used = [names[i] for i in feature_idx] if feature_idx else names
-                top = sorted(zip(used, imp), key=lambda kv: -kv[1])[:5]
-                result["top_features"] = [f"{n}:{v}" for n, v in top]
-        except (psycopg.Error, ValueError, KeyError) as exc:
-            result = {"error": f"{type(exc).__name__}: {exc}"}
+        result = run_one_experiment(exp)
+        if result is None:
+            continue  # transient skip — not persisted, retried next cycle
         record = {
             "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "id": exp["id"], "horizon": horizon, "label": exp.get("label", "raw"),
