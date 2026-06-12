@@ -294,6 +294,15 @@ Deploy gated on qa-2 re-green + Manager bless → one post-flatten targeted `mak
   sequenced: guard proven live ✓ → verify ratification board-reflection + re-confirm → drop. Not
   urgent (double-excluded, market closed).
 
+### 2026-06-12 post-close — KLAC manual denylist LIFTED ✅ (single data-driven layer)
+After prod's step-0 DB restart (max_locks 64→2048, verified) the executor reconnected cleanly
+(loop's `except psycopg.Error` auto-reconnect — no crash), and I deployed the lift (commit 8edfe07)
+on a targeted rebuild. VERIFIED LIVE: startup `denylist=[]` (manual empty), `ex_date_excluded`
+returns `['KLAC']` (the data-driven guard is now the SOLE layer and works), book flat, and
+`assert_image_fresh executor` = **fresh, baked dbab3fc (clean stamp, RUNNING==intended by the tool,
+not just grep)**. Two-layer KLAC defense → one clean data-driven layer, no un-excluded window. The
+manual `SYMBOL_DENYLIST` stays empty/env-extensible for the next pre-guard emergency.
+
 ## Active live-basket exclusions (remove when the condition clears — don't let these rot)
 - **KLAC — excluded since 2026-06-12 (Manager pre-open directive).** Reason: KLAC's LIVE STREAM
   bars are persistently exactly 10× the true price (feed scaling bug, QA finding). The v1.1.x
