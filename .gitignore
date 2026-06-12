@@ -15,3 +15,4 @@ experiments/shape_open_gap_results.jsonl
 
 # Experiment output log — regenerable, must not gate image builds (#11 freshness)
 experiments/results.jsonl
+experiments/shape_ensemble_results.jsonl
