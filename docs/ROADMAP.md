@@ -178,7 +178,10 @@ The fork question is CLOSED: full-depth re-gate shows ret_5m+position does NOT s
 liquid tier (liquid-50 IC 0.009, breakeven 0.82bps vs ~3bps measured median cost; only 11 names
 <1.4bps — signal and cheap names are DISJOINT; random-50 control 0.017 confirms partly
 liquidity-specific). OFI's job, precisely: lift breakeven ~1-2bps to unlock the 19-29-name
-liquid tier. Tempering: literature says OFI's predictive content is <3min → pilot MUST test
+liquid tier. (ATTRIBUTION CORRECTED 2026-06-12 eve: the 30m signal is VWAP_DEV — intraday
+VWAP-mean-reversion, IC 0.028 solo ≈ the whole set — not ret_5m (0.011, redundant); economic
+verdict unchanged; the OFI pilot baseline = the TRUE carriers vwap_dev+gap+ret_5m so OFI's
+marginal isn't overstated against a weak proxy.) Tempering: literature says OFI's predictive content is <3min → pilot MUST test
 native 5m/15m horizons; prior honestly 35%. Diversification if OFI nulls = explorer families
 (volume/vol-structure/shapes — note shapes/002 low-vol fade showing early liquid-tier promise)
 + sector/news axes (sector map landing via #8). Weekend: 5-mind pipeline grinding toward the
