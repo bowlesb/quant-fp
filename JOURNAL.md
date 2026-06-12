@@ -787,3 +787,13 @@ Consequences: #15 "at-scale" NOT yet met (first candidate full 50-name settled d
 (~6/26); M2 sharding design must include a live COVERAGE invariant (streamed==subscribed,
 alarmed) so partial capture can't masquerade as full. Backfill trade-agg is RTH-bounded
 => post-close OFI has no validation reference (reinforces the close hard-stop).
+
+## 2026-06-12 (pre-open 9) — Manager: coverage mismatch CLOSED; no-ingestor-restart constraint today
+Prod verified: 10->50 stream transition at 15:51 ET 6/11 == the 7dfb438 deploy restart
+(startup log 19:51:04Z). One-off deploy event; coverage item closed. Ingestor up 9h+,
+no restart today => 6/12 is the first candidate full 50-name settled day for #15.
+OPERATING CONSTRAINT adopted: NO ingestor restart during today's RTH (protects QA's
+candidate day). Post-close batch: #11 ingestor-touching work + the ONE restart needed
+to pick up clean bar-subscription membership (currently still the contaminated 1000-name
+list from its 6/11 startup — harmless: ETF bars stored, unused by trading/universe).
+M2 sharding design gains the live COVERAGE invariant (streamed==subscribed, alarmed).
