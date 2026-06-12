@@ -3,7 +3,10 @@
 # Build-time provenance (task #11): stamp the current git SHA into every image so
 # running==intended is verifiable by content. Appends -dirty if the working tree is unclean
 # (an image built from uncommitted code must NEVER read as authoritative).
-GIT_SHA := $(shell git rev-parse --short HEAD)$(shell git diff --quiet 2>/dev/null || echo -dirty)
+# -dirty if the worktree has EITHER unstaged OR staged uncommitted changes — a baked SHA must never
+# read "clean" when the repo isn't at that exact commit (staged-only drift fooled the old unstaged-only
+# check; exposed by the EXPERIMENTS.md staged-in-shared-index incident 2026-06-12).
+GIT_SHA := $(shell git rev-parse --short HEAD)$(shell git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || echo -dirty)
 
 # Run the shared-library tests (parity + aggregation) in a clean container.
 test:
