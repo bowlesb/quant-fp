@@ -98,6 +98,67 @@ but only covers ~50 names.
 
 ---
 
+## Process milestones (org-maturity ladder — Ben's directive 2026-06-12)
+
+Quantifiable milestones (M-series above) measure WHAT the system achieves. These P-series
+milestones measure HOW the org works — the behaviors that make the M-series results
+trustworthy. The Manager reports position on BOTH ladders whenever Ben asks. Status values:
+ACHIEVED (demonstrated, now must be maintained) / PARTIAL / NOT STARTED. An ACHIEVED process
+milestone can REGRESS — the Manager re-checks these, not just the M-series, every wake.
+
+### P1 — Evidence-first culture: claims are verified, not asserted ✅ ACHIEVED (maintain)
+- [x] Every "done" is backed by a check that was actually RUN this cycle (e.g. universe
+      rebuild verified 0-funds-by-query; #13 verified by container grep; exec's "flat"
+      always from a fresh broker snapshot).
+- [x] Self-corrections happen BEFORE wrong numbers are consumed downstream (displacement
+      finding retracted pre-battery; QA re-attributed KLAC direction; scope corrected
+      ~285→0 zero-history names).
+- [x] Pre-registration: hypotheses written down blind, before results (battery predictions
+      ~70% no-edge — held; breadth tripwire bound exactly as pre-registered).
+- Maintenance bar: any claim that reaches Ben or a verdict traces to a run check.
+
+### P2 — Flaws are caught by the SYSTEM, not by luck 🟡 PARTIAL
+- [x] Automated invariants catch a real issue within their first day (10× KLAC corruption
+      found by the parity suite, 2026-06-12).
+- [x] Detection→root-cause→structural-fix loop completes without Ben intervening (KLAC:
+      drill → reversal → CA-API ground truth → adjustment-consistency fix + new invariant).
+- [ ] SELF-HEALING live: CA-feed auto-re-fetch wired and proven on the NEXT real corporate
+      action (coded 5f17db9; activates at tonight's rebuild; proven only when a future
+      split is handled with zero human attention).
+- [ ] QA's unprovoked creative probing is a sustained habit (≥1 novel probe per wake,
+      logged even when clean) — re-instated 2026-06-12 after drift; needs a week of streak.
+
+### P3 — Modeller as an independent research engine 🟡 PARTIAL
+- [x] Ships honest negatives under pressure — twice declared "no edge" on work the org
+      wanted to succeed, gates intact; survivorship/canary discipline never bent.
+- [x] Independent method development: 4-gate battery harness built as ONE deterministic
+      command; sensitivity methodology self-designed.
+- [ ] Always-running exploration: experiment queue non-empty ≥95% of days; 2-4 curiosity
+      long-shots/day logged (restarted 2026-06-12 after going cold; needs a sustained streak).
+- [ ] Full new-feature loop completed END-TO-END at least once: invent idea → drive data
+      collection (with Prod) → parity-verify (with QA) → test on real panel → keep/discard.
+      (OFI is mid-loop: features built, data accruing, pilot pre-registered ~6/26.)
+- [ ] A modeller-initiated feature idea reaches production scoring (not just the panel).
+
+### P4 — Operational steadiness (quantifiable, daily) 🟡 PARTIAL
+- [x] One full RTH session: collection uninterrupted, zero unplanned restarts, live trading
+      lifecycle clean (2026-06-12 is the first candidate; settled-data verification tonight).
+- [ ] 5 consecutive such days (counter resets on any unplanned restart/gap/red invariant
+      that isn't known+owned).
+- [ ] 20 consecutive days (aligns with M4's paper-track requirement).
+- Daily definition of "smooth": bars landing every minute all session; trade/quote capture
+      complete vs subscription; reconcile ok; EOD flatten confirmed; QA suite green-on-active.
+
+### P5 — Org continuity survives infrastructure failure ✅ ACHIEVED (maintain)
+- [x] Session death → ledger-based respawn with no lost state, no repeated work (3 role
+      respawns on 2026-06-12: prod-architect→-2 with written handoff; modeller-2 + qa-2
+      from EXPERIMENTS.md / QA_LEDGER.md).
+- [x] Every decision journaled + committed same-cycle; the board (tasks) is the
+      authoritative record of rulings, robust to message mislabeling.
+- Maintenance bar: any new role/process must write its durable state to a ledger from day 1.
+
+---
+
 ## Current focus (the Manager updates this line every wake)
 **M1 DECLARED DONE 2026-06-12 (a day early) — driving toward M2 (order-flow at scale, 6/20).**
 Tonight's post-close batch (prod owns, ONE ingestor restart): #17 KLAC re-fetch, #11 structural
