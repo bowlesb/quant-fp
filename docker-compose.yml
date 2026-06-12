@@ -79,7 +79,7 @@ services:
     environment:
       FEATURE_SET_VERSION: "v1.0.0"
       FEATURE_CADENCE_MIN: "30"
-      EXP_HEAVY_AFTER_PT: "15:30"
+      EXP_HEAVY_AFTER_PT: "00:00"
     volumes:
       - ./experiments:/app/experiments
       - ./docs:/app/docs
