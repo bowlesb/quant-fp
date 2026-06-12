@@ -1814,3 +1814,5 @@ families are the diversification against an OFI null.
 SHARED-DB: research.catalog live; common_spreads_at_cadence registered (mine, first entry). Explorers are
 read-only -> they deliver builder SQL, I EXPLAIN+run+register. NEXT: synthesis at the period boundary.
 | 2026-06-12T22:27:43+00:00 | W11_int_mom_x_vol_fwd_30m | fwd_30m | raw | 7 | 4840765 | -0.00453 | -2.728 | 0.0007 | Interaction probe: mom_x_vol (7 feats) at fwd_30m. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |
+| 2026-06-12T22:29:36+00:00 | W11_int_mom_x_vol_fwd_60m | fwd_60m | raw | 7 | 4416876 | -0.00559 | -2.686 | 0.00169 | Interaction probe: mom_x_vol (7 feats) at fwd_60m. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |
+| 2026-06-12T22:30:13+00:00 | W11_int_mom_x_vol_overnight | overnight | raw | 7 | 428024 | 0.02329 | 2.749 | -0.00192 | Interaction probe: mom_x_vol (7 feats) at overnight. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |
