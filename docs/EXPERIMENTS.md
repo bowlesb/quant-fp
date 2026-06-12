@@ -1302,3 +1302,31 @@ miss, keep the hard fill-prob curve for the widest spread buckets. Exec pings me
 actual short fill-rate + per-leg spread-vs-filled data. I consume it then (accumulating sessions; n=4
 today is noise). This is a real M3-gate tightener: the net-of-cost backtest must charge for short legs
 that don't fill (uncompensated net-long exposure = missed-hedge risk), not assume symmetric fills.
+
+### OPS INCIDENT — experimenter silently DOWN ~10min after DB restart (2026-06-12, caught + fixed)
+
+The never-idle grind went SILENTLY DOWN for ~10 min: experimenter Exited (137 = SIGKILL) during prod's
+timescaledb restart and did NOT auto-recover. ROOT CAUSE: I'd `docker compose stop`'ed it to pause for
+the restart; `stop` marks the container intentionally-stopped, so when the DB restart's kill hit it,
+`restart: unless-stopped` did NOT bring it back (unless-stopped honors an explicit stop). The "grind
+resumed on its own" read earlier was STALE log tail — it had actually been killed. CAUGHT when a shape
+re-fire returned "service not running"; brought it back with `docker compose up -d experimenter`
+(resumed C11_loo_mom_10d_rel idempotently from the queue — no work lost, guard open 00:00).
+LESSON: to PAUSE for a restart, prefer re-closing the GUARD (EXP_HEAVY_AFTER_PT) over `docker compose
+stop` — the guard pauses NEW heavy queries while keeping the container alive + auto-recovering. `stop`
+breaks unless-stopped recovery and needs an explicit `up -d` afterward (easy to forget = silent
+idle). If `stop` is necessary, the resume step (`up -d`) is MANDATORY and must be verified, not assumed.
+Flagging to prod (their restart killed it; the stop+kill interaction defeated auto-recovery).
+
+### BREADTH MEASUREMENT — corrected framing (prod, 2026-06-12): #12 DEEPENS, not widens
+
+Prod corrected my breadth question: #12 does NOT widen the universe (count stays 1000). It DEEPENS
+history for the 222 thin names (backfill to 2023-12-01) so the v1.1.2 REBUILD can include ~1000 names
+vs v1.1.1's 785 (the ~215 extra were thin-history, now deep). So the Manager's breadth question is a
+v1.1.2 question (post-#12 + post-rebuild): "do the ~215 newly-deep names improve cross-sectional power?"
+Prod's prior (which I share): NEUTRAL-to-slightly-NEGATIVE — they're noisier thin-history names, so more
+breadth ≠ automatic power boost; the rank-IC could even degrade if the new names are low-quality. MEASURE
+it on v1.1.2: re-run the battery on v1.1.2 (785→~1000 names) vs v1.1.1 (785) and compare IC/breakeven/
+canary. If IC holds or improves -> breadth helps, keep 1000; if it degrades -> the thin names are noise,
+consider a quality floor. This is a v1.1.2 task (gated on #12 backfill + rebuild), NOT now. Universe
+ticker COUNT is unchanged at 1000 — the lever is the panel's per-date breadth, not the universe cap.
