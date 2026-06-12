@@ -215,3 +215,15 @@ Built the measured cost curve the cost-gate battery only ASSUMED (cost_bps_onewa
   market orders. Pairs with the open "broker-side LOC EOD net" item.
 - **[open] Partial-basket cancel-replace** — re-price unfilled legs (whole-share, no opposing
   same-symbol coexist) vs the 30s loop; cap re-prices then escalate near close.
+- **[post-M1, pairs with LOC/cls EOD rework] Exit-leg cost capture → validate entry≈exit
+  symmetry.** The Modeller's cost gate (long_short_backtest) is per-rebalance ONE-WAY: it charges
+  cost_bps_oneway × Σ|Δweight|, so a full hold is already two one-way charges (entry 0→1/k, exit
+  1/k→0). v1 correctly consumes the ENTRY-leg one-way slippage and applies it symmetrically. But
+  that assumes exit cost ≈ entry cost — and our EOD-flatten exits are broker-generated MARKET-style
+  fills with NO price control, vs marketable-limit entries, so exits may be systematically worse.
+  Measuring exit cost is NOT a cheap view change: flatten fills aren't in orders_log and have no
+  stored arrival mid, and the bar-close proxy is unusable on thin names (established finding). It
+  requires capturing the NBBO mid per symbol AT FLATTEN time — do this when reworking EOD
+  termination to LOC/`cls` (capture the auction/quote reference there). If exits prove materially
+  worse, the Modeller moves to an asymmetric cost model (different bps on weight-decrease vs
+  -increase). Not blocking M1; Modeller flagged it explicitly as a later validation.
