@@ -1750,3 +1750,30 @@ PRE-REGISTERED PREDICTIONS (falsifiable):
 Battery script to build when data lands: experiments/ofi_marginal_battery.py (mirror battery.py
 gates; report IC(A), IC(B), IC(C), the B-A delta, canary on each, net-of-cost at the measured
 liquid-tier cost from research.common_spread_at_cadence, survivorship demean).
+| 2026-06-12T22:20:32+00:00 | W11_pair_mom_3d_rel_mom_5d_rel_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00372 | -2.73 | -1e-05 | Momentum term-structure: mom_3d_rel+mom_5d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+| 2026-06-12T22:21:05+00:00 | W11_pair_mom_3d_rel_mom_5d_rel_overnight | overnight | raw | 2 | 428024 | 0.00587 | 1.357 | -0.0035 | Momentum term-structure: mom_3d_rel+mom_5d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
+
+## WAKE SUMMARY (Modeller, 2026-06-12 evening, quant-team-2) — what this wake settled
+
+Tasks closed/advanced: #5 cost-by-liquidity (DONE, verdict above), #2 standing exploration (ongoing).
+1. QUEUE: refilled W12 (17, ret_5m-vs-position + cost-gate) + W12b (12, lambdarank/carrier sweep);
+   reordered the 11 W12 position/carrier probes to the FRONT (Manager: settle ret_5m-vs-position
+   before it hardens). ~88 pending, grind healthy. Queue philosophy ratified: motivated, not padded.
+2. OPS BUG -> task #6 (prod): experimenter persists transient OOM/lock errors as done -> 4 position-
+   group solos poisoned. Re-queued under W12 ids. Fix folds into the #7 parallel-runner build.
+3. Family-C dividend timing (NEW data, live CA feed): NO EDGE (dead 30m, artifact overnight). First
+   new deep data family tested e2e -> clean null -> data-starved-not-model-starved sharpened.
+4. ★ Task #5 VERDICT: cost lever CANNOT rescue the price signal — signal (full-panel IC 0.031) and
+   tradeable-cost names (liquid tier) are DISJOINT; liquid-50 breakeven 0.82bps << ~3bps measured
+   cost. DEFINITIVELY redirects to OFI. random50 control confirms part liquidity-specific.
+5. OFI: curiosity read (faint -0.05 reversal, 3d, gates nothing) + marginal-IC-over-ret_5m battery
+   PRE-REGISTERED (PRIMARY "OFI beats proxy" ~45%, deliberately not optimistic).
+6. SHARED CATALOG: research.common_spread_at_cadence (first catalog entry) — half-spread@cadence view.
+
+WHERE THE EDGE HUNT STANDS (the honest fork): the whole thesis now rests on ONE coin-flip — does
+OFI's marginal IC over ret_5m clear the canary AND lift breakeven ~1-2bps (the bar task #5 set). If
+OFI nulls, we have NO identified edge path on current data and need a new data axis (sector_map on
+Ben's FMP key is next-in-line). Pending Manager rulings: who builds ofi_marginal_battery.py on the
+>=10-session trigger (proposed: me); pre-build sector_map now as the OFI-null hedge?
+NEXT WAKE: interpret the W12 position-group solos (do vwap_dev/range_pct/gap carry standalone signal,
+or is it ret_5m? the W11 GROUP IC 0.029 says the position features matter — settle it).
