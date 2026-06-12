@@ -45,14 +45,14 @@ EOD_FLATTEN_MIN = int(os.environ.get("EOD_FLATTEN_MIN", "12"))   # flatten this 
 STALENESS_MAX_MIN = int(os.environ.get("STALENESS_MAX_MIN", "35"))
 MIN_SCORE_SEP = float(os.environ.get("MIN_SCORE_SEP", "0.0005"))
 LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "30"))
-# Symbols barred from the live basket because their LIVE feed is known-bad — the model
-# scores them off corrupt stream bars so their rank is artifact, not signal. KLAC (2026-06-12):
-# stream bars persistently 10x the true price (feed scaling bug); the research panel is
-# backfill-sourced and verified unaffected, but model-server computes live features from stream.
-# REMOVAL CONDITION: out only when prod-architect confirms the KLAC ingestion fix is live AND
-# QA's parity check shows KLAC stream==backfill. Env-extensible for the Nx-sibling sweep.
+# Manual EMERGENCY symbol denylist — bar a name from the live basket when its feed/score is
+# known-bad and not yet covered by an automated guard. Now EMPTY by default: KLAC (the 2026-06-12
+# 10:1-split mixed-basis case) is LIFTED — its removal condition is met (#17 re-fetch verified,
+# QA no_extreme_backfill_jump GREEN, #18 CA table live) and it's now excluded by the DATA-DRIVEN
+# ex-date guard below, not a hardcoded patch. Stays env-extensible (`SYMBOL_DENYLIST=FOO,BAR`) for
+# the next emergency before an automated guard exists. (Manager-ratified lift, board-reflected #17.)
 SYMBOL_DENYLIST = {
-    sym.strip().upper() for sym in os.environ.get("SYMBOL_DENYLIST", "KLAC").split(",") if sym.strip()
+    sym.strip().upper() for sym in os.environ.get("SYMBOL_DENYLIST", "").split(",") if sym.strip()
 }
 # Data-driven successor to the manual denylist (task #18): exclude any name with a split ex-date
 # inside the feature-lookback window, since its multi-bar features straddle the adjustment boundary
