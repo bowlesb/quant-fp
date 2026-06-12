@@ -91,3 +91,36 @@ relative) - sector_map not confirmed landed; will pick up when it does. Shape 7 
 ensemble) - already tested -> DISCARDED (30m signal has zero overnight IC).
 
 Next: wrote proposals 000-005, messaged the Lead, handed off label-computation needs.
+
+## 2026-06-12 (cont.) — Lead dispositions in. Delivered helper-000 SQL + 001/003/005 scripts.
+
+Lead dispositioned all 6 proposals (in the files). Build order he set: 001 (priority 1), 003 (2),
+005 (3) runnable NOW; 002+004 behind helper-000; helper-000 becomes a REGISTERED catalog table
+(research.common_daily_session_price) since explorers are DB-read-only — I deliver the SQL, he runs it.
+
+DELIVERED (committed c97df44, ruff-clean + black + py_compile-OK):
+- experiments/builders/common_daily_session_price.sql — catalog builder copying the
+  common_spreads_at_cadence INSERT pattern. Materialized snapshot (NOT a live view — the whole point
+  is to avoid the per-experiment 693-chunk bars_1m scan). ET/DST via ::time-in-ET; early-close
+  16:00-absent -> NULL (honest, not stale-filled). Lead to EXPLAIN + run quiet + register.
+- experiments/shape_conditional_participation.py (001) — the Lead handed me a SHARP tension I baked
+  into the pre-registration AND the design: task #5 found the signal is ~0 on the liquid-50 tier
+  (IC -0.0035 vs +0.023 full) and explorer-data found ret_5m is a REVERSAL concentrated in ILLIQUID
+  names. So the cheap-tier gate may remove the SIGNAL, not just the cost. My script therefore
+  SEPARATES the gates: sweeps the conviction gate on BOTH full_panel (signal lives) and liquid50
+  (cheap), 6 conviction fracs x 2 modes (L/S + long-only) x 2 tiers, reporting the
+  participation-vs-net-Sharpe FRONTIER with shuffle-canary + survivorship-neutral on every cell. The
+  CONVICTION-gate axis is the genuinely new knowledge regardless of how the tier tension resolves.
+- experiments/shape_post_exdiv_drift.py (003) — event-anchored, in-memory sparse label (no panel
+  rebuild), cohort-demeaned forward N-day from ex_date close. Added a PLACEBO-DATE canary (anchor the
+  same window on a random trading day) so the effect must be ex-date-SPECIFIC. Reports liquid-tier
+  event count (the high-yield tail is the wide-spread tail — honest). Must beat canary AND Family-C
+  NO-edge precedent.
+- experiments/shape_volume_shock_overnight.py (005) — vol_z_30 shock gate on the EXISTING overnight
+  label (cheapest test). Honest ~20% prior; survivorship-demean is the make-or-break gate; a clean
+  death CLOSES the overnight label as a shape.
+
+NOTE for the Lead when he runs them: 001/005 import the cost_liquidity_tier.py / battery.py helpers
+(collect_oos, load_panel, per_symbol_demean, shuffle_within_groups) — same harness, run from /app via
+the experimenter container. 003 is standalone (only needs corporate_actions + bars_1m, read-only).
+NEXT (when helper-000 lands): build 002 (gap fade/follow) + 004 (ORB) together on the shared open-anchored machinery.
