@@ -46,10 +46,12 @@ DB_KWARGS = {
 
 
 def load_session_prices(conn: psycopg.Connection) -> dict[tuple[str, date], dict[str, float]]:
-    """{(symbol, session_date): {open, open_10, high_30, low_30, close}} from backfill bars.
+    """{(symbol, session_date): {open, open_10, close}} from backfill bars.
 
-    open = 09:30, open_10 = 10:00, close = 15:59; high_30/low_30 over [09:30,10:00] (Shape 2's
-    opening range). Lock limit is 2048 so the full-window scan runs in one statement."""
+    open = 09:30, open_10 = 10:00 close, close = 15:59 close. ONLY these 3 minutes are scanned
+    (IN-list on the time predicate). Pulling the full RTH window to compute an opening-range
+    high/low was ~250M rows and too heavy at panel scale under concurrent load — Shape 2's
+    morning-move uses open_10/open as the first-30-min proxy instead of a full range."""
     out: dict[tuple[str, date], dict[str, float]] = defaultdict(dict)
     with conn.cursor() as cur:
         cur.execute("SET max_parallel_workers_per_gather = 0")
@@ -59,29 +61,25 @@ def load_session_prices(conn: psycopg.Connection) -> dict[tuple[str, date], dict
               SELECT symbol,
                      (ts AT TIME ZONE 'America/New_York')::date AS d,
                      (ts AT TIME ZONE 'America/New_York')::time AS t,
-                     open, high, low, close
+                     open, close
               FROM bars_1m
               WHERE source = 'backfill'
                 AND ts >= '2024-01-01'::timestamptz AND ts < '2026-06-15'::timestamptz
-                AND (ts AT TIME ZONE 'America/New_York')::time BETWEEN '09:30' AND '16:00'
+                AND (ts AT TIME ZONE 'America/New_York')::time IN ('09:30', '10:00', '15:59')
             )
             SELECT symbol, d,
               max(open)  FILTER (WHERE t = '09:30') AS open_930,
               max(close) FILTER (WHERE t = '10:00') AS close_1000,
-              max(close) FILTER (WHERE t = '15:59') AS close_1559,
-              max(high)  FILTER (WHERE t BETWEEN '09:30' AND '10:00') AS high_30,
-              min(low)   FILTER (WHERE t BETWEEN '09:30' AND '10:00') AS low_30
+              max(close) FILTER (WHERE t = '15:59') AS close_1559
             FROM b GROUP BY symbol, d
             """
         )
-        for symbol, d, open_930, close_1000, close_1559, high_30, low_30 in cur.fetchall():
+        for symbol, d, open_930, close_1000, close_1559 in cur.fetchall():
             if open_930 and close_1559:
                 out[(symbol, d)] = {
                     "open": float(open_930),
                     "open_10": float(close_1000) if close_1000 else float("nan"),
                     "close": float(close_1559),
-                    "high_30": float(high_30) if high_30 else float("nan"),
-                    "low_30": float(low_30) if low_30 else float("nan"),
                 }
     return out
 
@@ -125,23 +123,24 @@ def main() -> None:
     # lookahead and no leakage from attaching a same-day afternoon row to a morning-anchored move.
     anchor_et = {"open_to_close": 9 * 60 + 30, "ten_to_close": 10 * 60}
 
+    # Precompute (minute-of-day ET, ET date) per panel row ONCE — astimezone per row is slow at
+    # 4.8M rows; doing it once avoids redoing it for every label.
+    et_local = [t.astimezone(ET) for t in ts]
+    row_minute = [loc.hour * 60 + loc.minute for loc in et_local]
+    row_date = [loc.date() for loc in et_local]
+
     records: list[dict[str, object]] = []
     for label_name, label_map in labels.items():
         anchor_minutes = anchor_et[label_name]
-        keep = []
-        for i, (sym, timestamp) in enumerate(zip(symbols, ts)):
-            local = timestamp.astimezone(ET)
-            if local.hour * 60 + local.minute != anchor_minutes:
-                continue
-            if (sym, local.date()) in label_map:
-                keep.append(i)
+        keep = [i for i in range(len(ts))
+                if row_minute[i] == anchor_minutes and (symbols[i], row_date[i]) in label_map]
         if len(keep) < 1000:
             print(f"{label_name}: only {len(keep)} joined rows — skipping", flush=True)
             continue
         Xs = X[np.ix_(keep, feature_idx)]
         ks_ts = [ts[i] for i in keep]
         ks_sym = [symbols[i] for i in keep]
-        y = np.array([label_map[(symbols[i], ts[i].astimezone(ET).date())] for i in keep], dtype=float)
+        y = np.array([label_map[(symbols[i], row_date[i])] for i in keep], dtype=float)
         vol_scaler = X[keep][:, vol_col]
         print(f"\n=== {label_name} | {len(y)} rows | {len(set(ks_ts))} ts ===", flush=True)
         for lab in ["raw", "rank"]:

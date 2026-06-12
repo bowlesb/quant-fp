@@ -1231,3 +1231,23 @@ PRIORITY ORDER for the design memo: label-versioning column FIRST (unblocks the 
 new-label shape), then incremental label materialization, then the feature side. The ex-div correctness
 PR is the immediate forcing function — it NEEDS label-versioning to persist the corrected labels without
 overwriting the frozen canonical ones.
+| 2026-06-12T20:00:17+00:00 | C11_loo_mom_10d | fwd_30m | raw | 7 | 4840765 | -0.00191 | -1.252 | 0.00059 | Leave-one-out: momentum minus mom_10d. Marginal contribution of mom_10d — does dropping it move IC? |
+| 2026-06-12T20:02:04+00:00 | C11_loo_mom_1d_rel | fwd_30m | raw | 7 | 4840765 | -0.00156 | -1.064 | 0.00018 | Leave-one-out: momentum minus mom_1d_rel. Marginal contribution of mom_1d_rel — does dropping it move IC? |
+| 2026-06-12T20:04:34+00:00 | C11_loo_mom_3d_rel | fwd_30m | raw | 7 | 4840765 | -5e-05 | -0.032 | 0.00113 | Leave-one-out: momentum minus mom_3d_rel. Marginal contribution of mom_3d_rel — does dropping it move IC? |
+
+### SHAPE 1+2 — DEFERRED during post-close batch (nameable reason, 2026-06-12)
+
+Built the open-gap/opening-range prototype (experiments/shape_open_gap.py) but its bars_1m session-price
+scan is heavy: the `(ts AT TIME ZONE 'ET')::time IN (...)` predicate is non-indexable so it scans all
+693 chunks even for 3 minutes/day, and with FILTER+GROUP BY it ran 5+ min. While running, prod's
+POST-CLOSE BATCH went active (INSERT INTO bars_1m backfill + universe string_aggs) — my heavy read was
+contending with the batch writes. CANCELLED my query + killed the shape process: yielded to the batch
+(prod owns the window). DEFER the bar-heavy shape work until the batch completes — a genuine nameable
+reason, not habit. (The experimenter GRIND reads feature_vectors+labels, a different physical path than
+the bars_1m INSERTs, ~10s/experiment — it keeps running per the Manager's evidence ruling; prod still
+holds grind-pause authority if even that contends.) RESUME the shape prototype post-batch.
+EFFICIENCY NOTE for the resume: the 3-minute IN-list query is still heavy at panel scale because the
+time predicate is non-indexable. Better path = precompute a small (symbol, date) -> {open,10:00,close}
+DAILY-PRICE helper table once (this is exactly the kind of derived artifact task #22's composable layer
+should make cheap), rather than re-scanning bars_1m for every shape experiment. For now: run post-batch
+when the DB is quiet; longer-term: a daily-OHLC materialized view.
