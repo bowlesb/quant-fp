@@ -39,6 +39,14 @@ DB_KWARGS = {
 
 HORIZON_MINUTES = {"fwd_30m": 30, "fwd_60m": 60}
 
+# Labels have no version column and were OVERWRITTEN in place by the clean v1.1.1 recompute (demeaned
+# over the clean ~715-equity universe). Training a pre-clean feature version (v1.0.0/v1.1.0) against the
+# current labels = dirty-features ⨝ clean-labels chimera — and this trainer SAVES to /models, i.e. it
+# would silently corrupt the live production model. Refuse it in CODE (Manager-mandated: the v1.0.0
+# rows are NOT purged, so this guard is the load-bearing control). Purge happens only after the clean
+# v1.1.1 model replaces the live one. Train the clean model with FEATURE_SET_VERSION=v1.1.1.
+FORBIDDEN_VERSIONS = {"v1.0.0", "v1.1.0"}
+
 LGB_PARAMS = dict(
     objective="regression", learning_rate=0.05, num_leaves=31,
     min_data_in_leaf=50, bagging_fraction=0.8, bagging_freq=1,
@@ -91,6 +99,13 @@ def evaluate(ts, X, y, label_for_fit):
 def main() -> None:
     global HORIZON
     HORIZON = sys.argv[1] if len(sys.argv) > 1 else "fwd_30m"
+    if SET_VERSION in FORBIDDEN_VERSIONS:
+        sys.exit(
+            f"REFUSING to train on FEATURE_SET_VERSION={SET_VERSION}: the labels table was overwritten "
+            "by the clean v1.1.1 recompute, so training a pre-clean feature version against the current "
+            "labels = dirty-features ⨝ clean-labels chimera, and this trainer SAVES to /models (would "
+            "corrupt the live model). Set FEATURE_SET_VERSION=v1.1.1 to train the clean model."
+        )
     names, ts, symbols, X, y = load_panel(HORIZON)
     print(f"panel: {len(y)} rows, {X.shape[1]} features, {len(set(ts))} timestamps, "
           f"set={SET_VERSION}, horizon={HORIZON}")
