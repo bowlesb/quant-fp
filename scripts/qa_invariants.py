@@ -18,7 +18,7 @@ Invariants (map to docs/QA_LEDGER.md):
   universe_sessions_valid    — I1/calendar: no weekend member trade_dates; latest member date
                                doesn't lead the latest ingested ET session (UTC-vs-ET bug).
   calendar_et_correct        — I1: stored minute_of_day/day_of_week equal true ET wall-clock and
-                               are RTH; gates the ACTIVE set, reports legacy sets. UTC-leak catch.
+                               are RTH (ACTIVE set only). UTC-calendar-leak catch.
   bars_integrity             — OHLC + minute-grid sanity (extended-hours bars reported, not failed).
   backfill_realtime_parity   — I2: stream vs backfill bars agree on overlap (replay-equiv).
   trade_agg_parity           — I2b: trade-agg stream vs backfill within tolerance on overlap.
@@ -27,9 +27,10 @@ Invariants (map to docs/QA_LEDGER.md):
   no_inf_no_degenerate       — I5: no Inf in vectors; predictions not score-degenerate;
                                per-ts label cross-section demeaned (avg per-ts median ~0).
 
-Set scoping: calendar/warmup/pit gate the ACTIVE feature set (env QA_ACTIVE_SET, else the
-highest set_version present). Older sets are reported informationally; target one with
-QA_ACTIVE_SET=v1.1.0 to reproduce its historical FAIL (the suite's own regression fixture).
+Set scoping: calendar/warmup/pit/no_inf scan ONLY the ACTIVE feature set (env QA_ACTIVE_SET,
+else the highest set_version present) — so the DEFAULT run is green-on-active and cheap, and the
+legacy frozen-dirty fixtures are OPT-IN red: QA_ACTIVE_SET=v1.0.0 reproduces its UTC/dead-feature
+FAILs, QA_ACTIVE_SET=v1.1.0 reproduces its PIT-leak FAIL (the suite's own regression fixtures).
 
 Run (from repo root):
     python3 scripts/qa_invariants.py             # all invariants, exit 1 on any FAIL
@@ -335,22 +336,22 @@ def check_calendar_et_correct() -> Result:
         f"(extract(isodow from {et}) - 1)"  # isodow Mon=1..Sun=7 -> Mon=0..Sun=6
     )
     rth = f"({et}::time >= '09:30' AND {et}::time < '16:00')"
-    # ONE grouped scan over feature_vectors (the table is large; avoid per-group rescans).
+    active = active_set_version()
+    # Scan ONLY the active set: legacy frozen-dirty fixtures are opt-in red via QA_ACTIVE_SET
+    # (e.g. QA_ACTIVE_SET=v1.0.0 reproduces the UTC-leakage FAIL), not standing red — and it
+    # keeps the default run cheap (one set, not the whole table).
     groups = sql(
-        "SELECT set_version, source, "
+        "SELECT source, "
         f"  count(*) FILTER (WHERE vector[{min_idx}] <> {expected_min} "
         f"                     OR vector[{dow_idx}] <> {expected_dow}) AS cal_bad, "
         f"  count(*) FILTER (WHERE NOT {rth}) AS non_rth, "
         "  count(*) AS total "
-        "FROM feature_vectors GROUP BY 1,2 ORDER BY 1,2"
+        f"FROM feature_vectors WHERE set_version='{active}' GROUP BY 1 ORDER BY 1"
     )
-    active = active_set_version()
     details: list[str] = []
     active_bad = 0
-    legacy_bad = 0
-    for set_version, source, cal_bad, non_rth, total in groups:
-        bad = int(cal_bad) + int(non_rth)
-        scope = "ACTIVE" if set_version == active else "legacy"
+    for source, cal_bad, non_rth, total in groups:
+        active_bad += int(cal_bad) + int(non_rth)
         flags = []
         if int(cal_bad):
             flags.append("UTC leakage")
@@ -358,17 +359,7 @@ def check_calendar_et_correct() -> Result:
             flags.append("non-RTH ts")
         flag = ("  <-- " + ", ".join(flags)) if flags else ""
         details.append(
-            f"[{scope}] {set_version:8s} {source:11s} cal_bad={int(cal_bad)} "
-            f"non_rth={int(non_rth)} / {int(total)}{flag}"
-        )
-        if set_version == active:
-            active_bad += bad
-        else:
-            legacy_bad += bad
-    if legacy_bad:
-        details.append(
-            f"(legacy sets carry {legacy_bad} UTC/non-RTH rows — frozen-dirty fixtures, "
-            f"purge to clear; not gated)"
+            f"{source:11s} cal_bad={int(cal_bad)} non_rth={int(non_rth)} / {int(total)}{flag}"
         )
     if active_bad:
         return Result(
@@ -575,55 +566,45 @@ def check_pit_universe_membership() -> Result:
 
 
 def check_warmup_coverage() -> Result:
-    """I4: no feature silently NaN-degraded; ragged-warmup detector (early vs late NaN-rate)."""
+    """I4: no feature silently NaN-degraded; ragged-warmup detector (early vs late NaN-rate).
+
+    Scoped to the ACTIVE set only (legacy frozen-dirty fixtures are opt-in via QA_ACTIVE_SET,
+    e.g. QA_ACTIVE_SET=v1.0.0 reproduces its 5 dead micro features).
+    """
+    active = active_set_version()
     rows = sql(
         "WITH bounds AS ("
-        "  SELECT set_version, min(ts::date) mn, max(ts::date) mx "
-        "  FROM feature_vectors WHERE source='historical' GROUP BY set_version"
+        "  SELECT min(ts::date) mn, max(ts::date) mx "
+        f"  FROM feature_vectors WHERE source='historical' AND set_version='{active}'"
         "), d AS ("
         # Only unnest boundary dates (first/last 6 sessions), not the whole panel.
-        "  SELECT f.set_version, f.ts::date AS dt, f.vector FROM feature_vectors f "
-        "  JOIN bounds b USING (set_version) "
-        "  WHERE f.source='historical' AND (f.ts::date <= b.mn + 5 OR f.ts::date >= b.mx - 5)"
+        "  SELECT f.ts::date AS dt, f.vector FROM feature_vectors f, bounds b "
+        f"  WHERE f.source='historical' AND f.set_version='{active}' "
+        "    AND (f.ts::date <= b.mn + 5 OR f.ts::date >= b.mx - 5)"
         "), exploded AS ("
-        "  SELECT d.set_version, u.idx, (u.val='NaN'::float8)::int AS isnan, "
+        "  SELECT u.idx, (u.val='NaN'::float8)::int AS isnan, "
         "         (d.dt <= b.mn + 5) AS early, (d.dt >= b.mx - 5) AS late "
-        "  FROM d JOIN bounds b USING (set_version), "
-        "       LATERAL unnest(d.vector) WITH ORDINALITY AS u(val, idx)"
+        "  FROM d, bounds b, LATERAL unnest(d.vector) WITH ORDINALITY AS u(val, idx)"
         ") "
-        "SELECT e.set_version, e.idx, fs.names[e.idx] AS feature, "
+        "SELECT e.idx, fs.names[e.idx] AS feature, "
         "       round(100.0*avg(isnan) FILTER (WHERE early),1) AS early_nan, "
         "       round(100.0*avg(isnan) FILTER (WHERE late),1)  AS late_nan, "
         "       round(100.0*avg(isnan),1) AS all_nan "
-        "FROM exploded e JOIN feature_sets fs ON fs.version=e.set_version "
-        "GROUP BY e.set_version, e.idx, fs.names[e.idx] ORDER BY e.set_version, e.idx"
+        f"FROM exploded e JOIN feature_sets fs ON fs.version='{active}' "
+        "GROUP BY e.idx, fs.names[e.idx] ORDER BY e.idx"
     )
-    active = active_set_version()
     ragged: list[str] = []
     dead: list[str] = []
-    legacy: list[str] = []
-    for set_version, idx, feature, early, late, all_nan in rows:
+    for idx, feature, early, late, all_nan in rows:
         early_f, late_f, all_f = float(early), float(late), float(all_nan)
         is_ragged = early_f - late_f > WARMUP_EARLY_LATE_GAP_PCT
         is_dead = all_f >= DEAD_FEATURE_NAN_PCT
         if not (is_ragged or is_dead):
             continue
         kind = "ragged warmup" if is_ragged else f"{all_f}% NaN (dead)"
-        line = (
-            f"{set_version} [{idx}] {feature}: early={early_f}% late={late_f}% — {kind}"
-        )
-        if set_version != active:
-            legacy.append(line)
-        elif is_ragged:
-            ragged.append(line)
-        else:
-            dead.append(line)
+        line = f"[{idx}] {feature}: early={early_f}% late={late_f}% — {kind}"
+        (ragged if is_ragged else dead).append(line)
     details = ragged + dead
-    if legacy:
-        details.append(
-            f"(legacy sets, not gated: {len(legacy)} ragged/dead feature(s))"
-        )
-        details.extend(legacy[:10])
     if ragged or dead:
         return Result(
             "warmup_coverage",
@@ -640,20 +621,28 @@ def check_warmup_coverage() -> Result:
 
 
 def check_no_inf_no_degenerate() -> Result:
-    """I5: no Inf in vectors; predictions not score-degenerate; per-ts labels demeaned."""
+    """I5: no Inf in vectors; predictions not score-degenerate; per-ts labels demeaned.
+
+    The Inf scan is scoped to the ACTIVE set (legacy opt-in via QA_ACTIVE_SET).
+    """
+    active = active_set_version()
     details: list[str] = []
     failures: list[str] = []
 
     # Per-row array membership (= ANY) instead of unnest (which would explode 6.9M x 25 rows).
     inf_count = int(
         scalar(
-            "SELECT count(*) FROM feature_vectors "
-            "WHERE 'Infinity'::float8 = ANY(vector) OR '-Infinity'::float8 = ANY(vector)"
+            f"SELECT count(*) FROM feature_vectors WHERE set_version='{active}' AND "
+            "('Infinity'::float8 = ANY(vector) OR '-Infinity'::float8 = ANY(vector))"
         )
     )
-    details.append(f"feature rows containing Inf/-Inf: {inf_count}")
+    details.append(
+        f"ACTIVE set {active}: feature rows containing Inf/-Inf: {inf_count}"
+    )
     if inf_count:
-        failures.append(f"{inf_count} feature rows contain Inf/-Inf elements")
+        failures.append(
+            f"{inf_count} feature rows in {active} contain Inf/-Inf elements"
+        )
 
     pred_rows = sql("SELECT count(*) FROM predictions")
     if pred_rows and int(pred_rows[0][0]) > 0:
