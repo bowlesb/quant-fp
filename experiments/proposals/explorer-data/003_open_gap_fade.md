@@ -18,8 +18,12 @@ Mechanism: overnight gaps MEAN-REVERT in the first 30 min (gapped-up fade, gappe
 
 **Confidence: ~40%** (higher than 001's 25%). The signal is far stronger (t -18.5) and the turnover far lower — the two things that killed every prior signal. The big unknown is the OPENING-MINUTE execution cost: trading at 9:30 pays the widest spread of the day, the analog of the 16:00 close-minute toxicity QA flagged for OFI. That cost, not the signal, is what could still make it a "no."
 
+## Liquidity structure (landed post-submission — INVERTED-U, changes which tier to trade)
+gap-fade IC at the open by liquidity tier (fwd_30m): liq1 -0.063 (t-8.8), **liq2 -0.095 (t-22.6)**, **liq3 -0.089 (t-20.2)**, liq4 (mega) -0.038 (t-7.2). Persistence to 60m: -0.060 (t-16.0), ~83% retained (more durable than the ret_5m reversal's 58%).
+- The signal peaks in the MID-liquidity tiers (liq2/liq3), NOT the most-liquid mega-caps (efficiently priced overnight → less to fade). **Target liq2/liq3 for the net-of-cost test; use liq4 as the low-cost control.** This inverts the usual "trade only the most liquid" — the signal/cost tradeoff peaks in the middle.
+
 ## Metric
-- within-ts rank-IC of −gap_from_open vs fwd_30m AND fwd_60m, open cadence only, liquid tier, NW t.
+- within-ts rank-IC of −gap_from_open vs fwd_30m AND fwd_60m, open cadence only, **per liquidity tier (liq2/liq3 primary, liq4 control)**, NW t.
 - Net-of-cost L/S sharpe + breakeven one-way bps at the realized ~1/day turnover.
 - **Cost MUST be measured at the OPEN minute specifically** (quote_agg_1m spread at/just after 9:30), not a mid-session average — the open is the cost-toxic minute, mirroring the 16:00 exclusion logic. If opening-minute measured cost isn't available at scale yet, state the flat-cost assumption AND the opening-spread sensitivity explicitly.
 

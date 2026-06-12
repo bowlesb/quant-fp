@@ -235,3 +235,31 @@ CAVEATS to gate (running / pre-registered in proposal 003):
 - Liquid-tier + 60m-persistence + monthly-stability: running now.
 - Survivorship: gap-fade is a TIMING signal (today's gap), should survive per-symbol demean — gate it.
 
+### OBS7 refined (liquidity + persistence landed) — the gap-fade is an INVERTED-U in liquidity, and MORE persistent than the ret_5m reversal.
+
+gap-fade IC at the open by liquidity tier (May-ADV ntile-4, fwd_30m):
+| tier | IC | t |
+|---|---:|---:|
+| liq1 (illiquid) | -0.063 | -8.8 |
+| liq2 | **-0.095** | **-22.6** |  ← strongest |
+| liq3 | -0.089 | -20.2 |
+| liq4 (most liquid) | -0.038 | -7.2 |  ← weakest of the liquid tiers |
+
+Persistence: gap-fade vs fwd_60m (all) = -0.0599 (t -16.0) vs -0.0717 at 30m ⇒ retains ~83% out to 60m
+(vs 58% for the ret_5m reversal). A SLOW, durable intraday mean-reversion — the gap fades over the whole
+first hour, not just the first 5 min.
+
+THE TRADABILITY NUANCE (inverted-U): the gap-fade is STRONGEST in the MID-liquidity tiers (liq2/liq3,
+t -20 to -23) and WEAKEST in the most-liquid mega-caps (liq4, -0.038). Mega-caps gap-fade least — they're
+the most efficiently priced overnight, less to revert. So the prize is NOT the top liquidity decile (lowest
+cost, weakest signal); it's the LIQUID-BUT-NOT-MEGA tier (liq2/liq3) where signal is ~-0.09 AND cost is
+still moderate. A net-of-cost test must target THAT tier, not the absolute most-liquid names. This is the
+opposite of the usual "trade only the very most liquid" instinct — here the signal/cost tradeoff peaks in
+the middle. Proposal 003 updated to gate liq2/liq3 specifically, with liq4 as the low-cost control.
+
+OPEN QUESTION for the net-of-cost gate (the make-or-break): the gap-fade requires trading AT/just-after
+9:30 ET — the widest-spread minute. If liq2/liq3's opening half-spread is, say, 5-15bps, even a -0.09 IC
+gap-fade may not clear it. The signal is huge; whether the OPENING SPECIFICALLY is tradeable is the whole
+question — exactly the OPEN-minute analog of QA's 16:00 close-minute toxicity finding. Net-of-MEASURED-
+opening-cost is the gate that decides this, and it's the one input proposal 003 depends on.
+
