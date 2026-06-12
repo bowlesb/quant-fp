@@ -103,6 +103,29 @@ KLAC 6/01 (artifact, 13 real events silent → flips green after the #17 re-fetc
 verified trustworthy on every axis except the two flagged backfill issues (momentum-only /
 parity-overlap, both being fixed).
 
+**FULL-SUITE evidence (2026-06-13, FIRST run without lock-OOM after the max_locks 64→2048 bump):**
+10 PASS / 3 FAIL. The two parity invariants are GREEN at FULL-PANEL scale for the first time:
+`backfill_realtime_parity` **99.32% within 0.2%** on 1,020,258 overlap bars (the split-aware 0.97%
+residual fix holds at scale), `trade_agg_parity` PASS, `pit_universe_membership` + `calendar_et_correct`
+PASS on the active set. The 3 FAILs:
+- **fill_reconciliation** — KNOWN 6/12 true-positive (3L/1S, 52% net exposure), resolves Monday.
+- **warmup_coverage — NEW, P1-for-M3 (NOT a live-trading incident).** The active set auto-selected to
+  **v1.2.0** (the OFI/order-flow research set, 1,516 rows / **50 names** / source='historical' ONLY —
+  confirmed NOT live-served; model-server consumes the trained set's version with source='live', which
+  is still v1.0.0). v1.2.0 has **6 genuinely-DEAD features: the daily-momentum family mom_3d/5d/10d +
+  _rel variants (idx 15-21), 100% NaN in BOTH early AND late window** (so not warmup — a real compute
+  failure). Almost certainly the 50-name OFI panel build didn't join the daily-bar history those
+  multi-day momentum features need. Impact: if an OFI model is trained on v1.2.0, these 6 silently
+  contribute nothing (the I4 silent-NaN-degrade failure mode the invariant exists to catch). Routes to
+  MODELLER (feature defs) / prod (panel build): either drop the momentum family from v1.2.0's
+  registration or fix the daily-bar join. Live trading unaffected.
+- **no_extreme_backfill_jump — NEW: STI 2025-10-13 5.6→21.55 (3.85×), 1 unexplained.** Diagnosed: STI
+  has a reverse_splits 50:1 but on 2025-05-12 (5mo EARLIER, not this date), so the check correctly did
+  NOT auto-exempt it. Daily closes 5.51(10/10)→16.20(10/13)→23.10(10/14) with bar-count stepping
+  147→764/day = sustained new level + rising activity → most likely a REAL microcap move (post-reverse-
+  split $5 name running on volume), NOT a mixed-basis artifact (which spikes-and-reverts). prod's call
+  (owns backfill + the manual allowlist): manual-allowlist if confirmed real, re-fetch if artifact.
+
 ## Open concerns — severity-ranked (update status each wake)
 
 | sev | id | concern | status |
@@ -248,6 +271,16 @@ denylist — do NOT signal it until verified.
   512 ticks the M2 criterion — that's the gate, code review is necessary-not-sufficient.** PROCESS
   NOTE: my ledger commit landed on the prod-architect/m2-sharding branch (shared-tree checkout);
   flagged to Manager to land on master at merge — did NOT rewrite the shared branch myself.
+  - **MANAGER RULINGS (2026-06-13, binding):** cond #1 (per-shard liveness/freshness alert) and cond #2
+    (OFI≥500 assert) are **DEPLOY-BLOCKING on prod for Monday** (Manager told prod). cond #3 non-blocking.
+    **My #15 re-proof at 512 runs TUESDAY** on the settled 6/15 data (prod fetches 6/15 backfill-aggs
+    post-close Monday → I re-prove Tuesday; in the Manager's deploy coordination matrix). Ledger commits
+    on the sharding branch: LEAVE them (merge carries them). OFI-marginal-IC-over-ret_5m early read: modeller
+    running it before Monday, labeled not-a-verdict (3d=noise), real pilot at ~10 full-session days; gates
+    nothing. My canonical-close basis warning is now an explicit input to prod's #14 ONE-close-convention
+    decision. **STANDING OBLIGATION: Tuesday — re-prove trade_agg_parity ≥98% at 512 on settled 6/15 (the
+    M2 exit criterion tick); Monday ~09:35 ET — bars-level clean-subscription probe (expect exactly QQQ/SPY/
+    IWM in stream bars, no SOXL/TQQQ class).**
 
 - **2026-06-12 — #19 DEPLOYED & VERIFIED LIVE + after-review of hotfix 899c72c (qa).** #19 is live;
   reconciliation_log now carries the rich detail my notional-neutrality condition required — today's
