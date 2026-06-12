@@ -17,9 +17,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Services that COPY shared quantlib into their image (so a quantlib commit makes them stale).
-USES_QUANTLIB=" ingestor feature-computer model-server executor scheduler backfiller backfill-manager experimenter "
+USES_QUANTLIB=" ingestor feature-computer model-server executor scheduler backfiller backfill-manager experimenter trainer "
 
-ALL_SERVICES=(ingestor feature-computer model-server executor scheduler backfiller backfill-manager experimenter dashboard)
+ALL_SERVICES=(ingestor feature-computer model-server executor scheduler backfiller backfill-manager experimenter trainer dashboard)
 services=("$@"); [ ${#services[@]} -eq 0 ] && services=("${ALL_SERVICES[@]}")
 
 fail=0
