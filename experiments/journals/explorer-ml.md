@@ -154,3 +154,89 @@ Both lint clean (ruff+black), compile OK. Smoke validation pending — the exper
 runs one heavy job at a time, so I'm serializing: 002 smoke first (5 GBM configs x 2 walk-forwards
 on ~1M rows = slow), then 004. Will commit each once its smoke proves the harness end-to-end +
 canary clean, then hand the full-depth runs to the Lead to enqueue.
+
+### 002 SMOKE RESULT (120d) — mechanism VALIDATED, harness clean
+tag                IC      t      canary    breakeven  turn   surv_sh
+raw_baseline_k1    0.0151  4.46   -0.00923  0.98       2.761  -4.92
+smoothed_k2_hl1    0.0135  3.76   -0.00923  0.80       2.461  -4.68
+smoothed_k3_hl1    0.0118  3.24   -0.00923  0.66       2.337  -4.82
+smoothed_k3_hl2    0.0123  3.36   -0.00923  0.95       2.188  -4.21
+smoothed_k5_hl2    0.0127  3.41   -0.00923  1.25       2.021  -2.52
+
+READS: (1) canary IDENTICAL (-0.0092) across configs — correct, it shuffles raw y (features-only
+arbiter), so smoothing the TARGET can't move it. Matches the GBM raw canary on the same window =>
+harness clean. (2) k1 reproduces GBM raw EXACTLY (IC 0.0151) — the baseline is faithful. (3) The
+MECHANISM works: smoothing LOWERS turnover monotonically (2.76->2.02) and IMPROVES survivorship
+sharpe (-4.9->-2.5); IC falls gently (0.0151->0.0127, all t>3.2, all above canary). (4) Breakeven
+is directional-positive at the most-smoothed end (k5_hl2 1.25 > baseline 0.98) — turnover fell
+faster than gross — BUT 120d is too short/noisy for the economic verdict. Full depth (600d) decides
+whether any config clears the ~1.4bps line. The IC<->turnover FRONTIER is exactly as proposed.
+Committed (b73f794). 004 smoke launched next (unbuffered + results-file monitor to dodge the
+stdout-buffering trap that hid 002's streaming output).
+
+OPS NOTE: piping `docker compose exec` stdout to a file buffers until process exit, so a
+line-grep monitor never fires mid-run. FIX for 004: run with `python -u` AND monitor the
+in-container RESULTS FILE row-count (completion = N records) rather than stdout lines.
+
+---
+
+## 2026-06-12 — Wake 1 cont: Lead flagged ridge canary; DIAGNOSED = NOISE not bug + lit search
+
+Lead HELD the 001 verdict: ridge smoke canary -0.0168 (raw) vs his expected ~0. He gave 3
+diagnostic hypotheses. I ruled out ALL THREE with a focused diagnostic (/tmp, container, removed
+after):
+
+DIAGNOSTIC (120d, 3 seeds + alpha re-tune + fixed alpha):
+  raw  seed=13 canary -0.01684 | seed=99 -0.00584 | seed=7 -0.00328 | pred_spread 6.7e-05
+  rank seed=13 canary -0.00686 | seed=99 -0.00554 | seed=7 +0.00272 | pred_spread 3.2e-03
+  RE-TUNED alpha on shuffled target -> SAME canary. FIXED alpha=10 -> SAME canary.
+300d window (raw): seed=13 +0.00842 | seed=99 +0.00503 | seed=7 +0.01332  <- SIGN FLIPPED vs 120d
+
+VERDICT: it's NOISE, not a structural bug. Evidence, point by point vs the Lead's hypotheses:
+- H1 (canary scored vs wrong realized vector): RULED OUT. collect_oos_ridge returns realized=y
+  (raw return) and per_timestamp_ic(canary_preds, canary_real=y, ...). Re-tune/fixed-alpha don't
+  move it; the wiring is correct.
+- H2 (degenerate/constant shuffle): RULED OUT. canary pred_spread within ts is NON-zero
+  (raw 6.7e-05, rank 3.2e-03) — predictions vary, the shuffle isn't constant/sign-flipped.
+- H3 (alpha coupling — canary inherits the real-tuned alpha): RULED OUT. Re-tuning alpha ON the
+  shuffled target gives the SAME canary; fixed alpha=10 gives the SAME canary. Alpha is not it.
+THE TELL: the canary SWINGS sign and magnitude with the seed (-0.0168/-0.0058/-0.0033 at 120d)
+and FLIPS SIGN between window sizes (-ve at 120d, +ve at 300d). A structural leak would be stable
+in sign+magnitude. This is sampling noise whose scale is set by #test-timestamps.
+
+ROOT CAUSE: the canary estimator = mean over test-ts of per-ts Spearman IC, over only 5 folds.
+On a 120-300d smoke the effective #independent timestamps is small (intraday rows are highly
+autocorrelated within a day), so the noise floor is ~+/-0.01 — for BOTH ridge AND GBM (I'd
+already calibrated: GBM 120d canaries -0.0027..-0.0127; my 004 GBM canary -0.0017). The seed=13
+raw -0.0168 is the unlucky tail. IMPORTANT GENERAL FINDING: the canary noise floor (~0.01) is
+COMPARABLE to the real IC (~0.02) at smoke depth, so IC/canary separation is marginal on a smoke
+for EVERY model — the full ~600d panel is what makes the canary a trustworthy arbiter. This isn't
+a ridge problem; it's a smoke-depth property the whole team should treat as a standing caveat.
+
+ACTION: no code change needed (the harness is correct). Run 001 at FULL DEPTH; only then read
+IC/canary. Reported the diagnosis to the Lead.
+
+### LITERATURE (new binding protocol — my lens: cross-sectional equity ML + what replicates)
+1. Gu, Kelly, Xiu (2020) "Empirical Asset Pricing via Machine Learning", RFS 33:2223. THE
+   reference. Trees/NNs beat linear, BUT the gain is MODEST and traced to NONLINEAR INTERACTIONS;
+   all methods agree on the same dominant signals (momentum, liquidity, volatility). At MONTHLY
+   horizon. TAKEAWAY for 001: literature SUPPORTS "linear captures most of it" — my smoke ridge
+   recovered ~76% of GBM rank IC at INTRADAY horizon, consistent. The remaining GBM lift is the
+   interaction term GKX describe. TRANSLATION CAVEAT: GKX is monthly; intraday S/N + turnover are
+   very different — published linear-vs-tree gap doesn't transfer 1:1, it's a hypothesis to test.
+   https://academic.oup.com/rfs/article/33/5/2223/5758276
+2. Transaction-cost-aware ML / signal smoothing (2024-26 arxiv: FR-LUX 2510.02986; band-turnover
+   regularization; + Garleanu-Pedersen "Dynamic Trading with Predictable Returns and Transaction
+   Costs", NBER w15205). STRONG support for 002: a documented result — "without smoothing net
+   Sharpe -1.24 despite gross 2.27; a 21-day MA cuts turnover 82% and turns it profitable; gross
+   Sharpe declines (signal decay) but turnover reduction more than compensates." This IS my 002
+   mechanism (smooth the target -> lower turnover -> economic even as gross IC falls), and my smoke
+   already showed the monotone turnover drop (2.76->2.02). Garleanu-Pedersen theory: weight
+   SLOW-decaying predictors more relative to fast-alpha-decay ones. TRANSLATION: their smoothing
+   is over DAYS (21d MA); ours is intraday cadence steps (K=2-5 over ~30-150 min) — same logic,
+   our horizon means a much shorter smoothing window suffices. https://www.nber.org/system/files/working_papers/w15205/w15205.pdf
+3. (empty/low-yield) "de-noising shrinkage noisy financial targets" — mostly covariance-matrix
+   shrinkage (Ledoit-Wolf), not target-side. Logged as low-yield for the target-engineering angle;
+   the ridge L2 IS the shrinkage answer on the FEATURE side (001). Not pursuing a separate probe.
+LITERATURE INFORMS, never replaces gates: GKX's published linear-vs-tree result and the smoothing
+Sharpe numbers are HYPOTHESES here, decided by our canary + net-of-cost gates at full depth.
