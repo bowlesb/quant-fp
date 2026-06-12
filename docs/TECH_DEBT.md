@@ -73,6 +73,30 @@ Image builds, package imports verified in-image, full test suite 40 passed.
 - **TO TICK M2:** qa-2 review of 306eaba → Manager merge → Monday PRE-OPEN deploy (one ingestor restart,
   RTH freeze) → qa-2 re-runs #15 parity at 512 (≥98%; was 99.85% sign at 50). Connection-limit resolved
   by docs (1/account) — no risky 2nd-conn test.
+
+### M2 HARDENING 2026-06-12 (commit c224175) — worker-death/wedge resilience; mp-substrate HAZARD logged
+Manager mandated two dry-run acceptance tests; building them surfaced a REAL bug.
+- **★ mp.Queue CORRUPTION ON CONSUMER DEATH (architectural hazard — remember this):** killing a worker
+  mid-`get()` leaves the process holding the queue's internal read lock, PERMANENTLY wedging that queue
+  for any replacement consumer. Verified live: a respawned worker drained 0 msgs, silently losing its
+  15-symbol shard while showing "alive". This is the exact OFI-poisoning failure mode (restart silently
+  loses a shard). My original supervisor respawned a worker onto its existing queue → walked straight
+  into it. FIX: ANY child death → supervisor sets stop, main() exits non-zero → restart:unless-stopped
+  rebuilds the WHOLE topology with FRESH queues. You CANNOT surgically respawn one worker onto a wedged
+  mp queue. The ~1-min gap is backfill-recoverable (source='backfill') + visible in gauges; a wedged
+  shard is not. THIS IS THE PRICE OF THE MP SUBSTRATE — a consumer-group substrate (Redis Streams) would
+  make single-worker respawn safe; that's the swappable-seam payoff if multi-host ever lands.
+- **Observed-set liveness (req #2):** per-symbol silence alarm is BLIND to a wedged worker (record_bar
+  stops firing). Added per-worker HEARTBEAT gauge (bumped every loop incl. idle) → stale/scrape-down =
+  wedged/dead, alarmed independent of record_bar. + per-shard queue-depth gauge (backpressure). Verified:
+  heartbeat advances live (+3s idle), gone when process dies/freezes.
+- **Graceful flush on SIGTERM:** workers flush buffered minutes before exit → planned deploy loses
+  nothing; only a crash leaves a (recoverable) gap.
+- Tests: test_worker_restart_resumes_with_correct_tick_state (post-restart == cold-start, no spurious
+  carried state; sign self-heals in one trade). Sharding+aggregate suite 9 passed. Live ingestor
+  build-only throughout. NOTE: dry-run one-shot containers leak if they time out (SIGSTOPPED children +
+  wedged queues) — `docker ps -a --filter name=quant-ingestor-run -q | xargs docker rm -f` to clean;
+  they don't touch the live ingestor.
 - **NB the shared-worktree branch (prod-architect/m2-sharding) is NOT isolated** — peers commit onto it
   too (a qa commit landed on top of 306eaba). No git remote / no gh in this env, so the "PR" = my commit
   306eaba reviewed by qa-2 via SendMessage + Manager merges, per REVIEW_POLICY's local flow. Stage by
