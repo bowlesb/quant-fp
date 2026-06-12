@@ -2628,5 +2628,199 @@
       "ret_60m"
     ],
     "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_vwap_dev_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vwap_dev"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_vwap_dev_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "vwap_dev"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_range_pct_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "range_pct"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_range_pct_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_range_pct (OOM-locks error permanently skipped). Standalone within-ts IC of range_pct at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "range_pct"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_gap_from_open_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_gap_from_open_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_gap_from_open (OOM-locks error permanently skipped). Standalone within-ts IC of gap_from_open at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_rel_ret_30m_fwd_30m",
+    "hypothesis": "RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "rel_ret_30m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_solo_rel_ret_30m_fwd_60m",
+    "hypothesis": "RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_60m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "rel_ret_30m"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_pos_minus_ret5m_30m",
+    "hypothesis": "Position group (vwap_dev,range_pct,gap_from_open) WITHOUT any ret_* feature at 30m raw. Standalone IC 0.029 was with the position group alone \u2014 confirm it does not lean on returns.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_ret5m_plus_pos_30m",
+    "hypothesis": "ret_5m + position group at 30m raw. Marginal: does adding position to ret_5m lift IC above either alone (ret_5m solo 0.0106; pos group 0.029)? Tests orthogonality of the two carriers.",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_ret5m_plus_pos_30m_rank",
+    "hypothesis": "ret_5m + position group at 30m RANK (trading-aligned). Best-available 30m feature set under the rank loss \u2014 does the combined carrier set push breakeven toward the ~2bps cost line?",
+    "horizon": "fwd_30m",
+    "label": "rank",
+    "features": [
+      "ret_5m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_ret5m_pos_fwd_60m",
+    "hypothesis": "ret_5m + position group at fwd_60m raw. Longer horizon = lower turnover. Does the strongest carrier set clear breakeven (toward ~2bps) where 30m could not, purely via reduced turnover?",
+    "horizon": "fwd_60m",
+    "label": "raw",
+    "features": [
+      "ret_5m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_ret5m_pos_fwd_60m_rank",
+    "hypothesis": "ret_5m + position group at fwd_60m RANK. Turnover-vs-signal: rank loss + 60m horizon on the carrier set \u2014 the most economically-favorable price config we can build.",
+    "horizon": "fwd_60m",
+    "label": "rank",
+    "features": [
+      "ret_5m",
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_pos_vol_overnight_raw",
+    "hypothesis": "Position group + vol group at overnight raw. W11 showed vol@overnight IC 0.0227 (t2.9) and pos@overnight 0.011 \u2014 do they combine? (Note: overnight wins must pass survivorship demean.)",
+    "horizon": "overnight",
+    "label": "raw",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "W12_pos_vol_overnight_rank",
+    "hypothesis": "Position + vol group at overnight rank. Same combination under trading-aligned loss. Flag for survivorship neutralization if breakeven clears cost.",
+    "horizon": "overnight",
+    "label": "rank",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open",
+      "vol_30m",
+      "vol_60m",
+      "vol_z_30"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W12_allprice_lambdarank_60m",
+    "hypothesis": "LONG-SHOT: full nocalendar set, lambdarank, fwd_60m. Trading-aligned loss at lower turnover on the whole price panel \u2014 does loss alignment + horizon rescue net P&L?",
+    "horizon": "fwd_60m",
+    "label": "lambdarank",
+    "features": "nocalendar",
+    "set_version": "v1.1.1"
+  },
+  {
+    "id": "LONGSHOT_W12_volscaled_pos_30m",
+    "hypothesis": "LONG-SHOT: position group, vol_scaled label, 30m. Does vol-normalizing the target sharpen the position-group signal (rank alpha not volatility)?",
+    "horizon": "fwd_30m",
+    "label": "vol_scaled",
+    "features": [
+      "vwap_dev",
+      "range_pct",
+      "gap_from_open"
+    ],
+    "set_version": "v1.1.1"
   }
 ]

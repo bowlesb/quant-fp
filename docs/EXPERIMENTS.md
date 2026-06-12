@@ -1515,3 +1515,79 @@ Sequencing settled: v1.1.2 AFTER the M2 build (my input — OFI is higher-value;
 grind/shapes run on it fine). When v1.1.2 rebuilds: bake in ex-div-corrected overnight labels (new
 label-version, needs #22) + the 11 split-discontinuity names corrected from re-fetched bars. Expected
 breadth result: neutral-to-slightly-negative (the ~200 newly-deep names are noisier thin-history names).
+| 2026-06-12T21:27:21+00:00 | W11_grp_ret_fwd_60m_rank | fwd_60m | rank | 4 | 4416876 | 0.01183 | 6.511 | 0.00199 | Feature-group isolation: ret group (4 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:27:53+00:00 | W11_grp_ret_overnight_raw | overnight | raw | 4 | 428024 | 0.01107 | 1.927 | -0.00276 | Feature-group isolation: ret group (4 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:28:26+00:00 | W11_grp_ret_overnight_rank | overnight | rank | 4 | 428024 | 0.01398 | 2.179 | -8e-05 | Feature-group isolation: ret group (4 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:30:28+00:00 | W11_grp_vol_fwd_30m_raw | fwd_30m | raw | 3 | 4840765 | -0.00262 | -2.358 | 0.00032 | Feature-group isolation: vol group (3 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:32:31+00:00 | W11_grp_vol_fwd_30m_rank | fwd_30m | rank | 3 | 4840765 | -0.00093 | -0.943 | 6e-05 | Feature-group isolation: vol group (3 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:34:10+00:00 | W11_grp_vol_fwd_60m_raw | fwd_60m | raw | 3 | 4416876 | -0.0026 | -1.477 | -0.0005 | Feature-group isolation: vol group (3 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:36:05+00:00 | W11_grp_vol_fwd_60m_rank | fwd_60m | rank | 3 | 4416876 | -0.00088 | -0.584 | 0.00056 | Feature-group isolation: vol group (3 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:36:36+00:00 | W11_grp_vol_overnight_raw | overnight | raw | 3 | 428024 | 0.02265 | 2.907 | -0.00461 | Feature-group isolation: vol group (3 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:37:07+00:00 | W11_grp_vol_overnight_rank | overnight | rank | 3 | 428024 | 0.02194 | 2.568 | -0.00506 | Feature-group isolation: vol group (3 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:38:54+00:00 | W11_grp_pos_fwd_30m_raw | fwd_30m | raw | 3 | 4840765 | 0.0291 | 22.049 | 0.00318 | Feature-group isolation: pos group (3 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:40:56+00:00 | W11_grp_pos_fwd_30m_rank | fwd_30m | rank | 3 | 4840765 | 0.02897 | 23.821 | 0.00052 | Feature-group isolation: pos group (3 feats) at fwd_30m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:42:37+00:00 | W11_grp_pos_fwd_60m_raw | fwd_60m | raw | 3 | 4416876 | 0.02207 | 15.089 | 0.00375 | Feature-group isolation: pos group (3 feats) at fwd_60m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:44:31+00:00 | W11_grp_pos_fwd_60m_rank | fwd_60m | rank | 3 | 4416876 | 0.02148 | 16.235 | 0.00278 | Feature-group isolation: pos group (3 feats) at fwd_60m rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:45:02+00:00 | W11_grp_pos_overnight_raw | overnight | raw | 3 | 428024 | 0.01052 | 1.571 | -0.00366 | Feature-group isolation: pos group (3 feats) at overnight raw. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:45:33+00:00 | W11_grp_pos_overnight_rank | overnight | rank | 3 | 428024 | 0.02111 | 3.085 | 0.00238 | Feature-group isolation: pos group (3 feats) at overnight rank. Which feature FAMILY carries within-ts signal at each horizon? |
+| 2026-06-12T21:47:24+00:00 | W11_solo_mom_1d_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.00083 | -0.582 | -0.00038 | Single-feature mom_1d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:47:57+00:00 | W11_solo_mom_1d_overnight | overnight | raw | 1 | 428024 | 0.01011 | 2.102 | -0.00061 | Single-feature mom_1d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:49:48+00:00 | W11_solo_mom_3d_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.0015 | -1.439 | 0.00017 | Single-feature mom_3d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:50:21+00:00 | W11_solo_mom_3d_overnight | overnight | raw | 1 | 428024 | 0.00905 | 1.801 | -0.00316 | Single-feature mom_3d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:52:13+00:00 | W11_solo_mom_5d_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.00064 | -0.606 | 5e-05 | Single-feature mom_5d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:52:45+00:00 | W11_solo_mom_5d_overnight | overnight | raw | 1 | 428024 | 0.01372 | 2.563 | -0.00155 | Single-feature mom_5d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:54:38+00:00 | W11_solo_mom_10d_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.0002 | -0.194 | -0.0002 | Single-feature mom_10d ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:55:10+00:00 | W11_solo_mom_10d_overnight | overnight | raw | 1 | 428024 | 0.01109 | 2.17 | -0.00142 | Single-feature mom_10d ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:57:02+00:00 | W11_solo_mom_1d_rel_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.00195 | -1.231 | 3e-05 | Single-feature mom_1d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:57:35+00:00 | W11_solo_mom_1d_rel_overnight | overnight | raw | 1 | 428024 | 0.0065 | 1.81 | -0.00108 | Single-feature mom_1d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T21:59:28+00:00 | W11_solo_mom_3d_rel_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.0026 | -2.598 | 0.00026 | Single-feature mom_3d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T22:00:01+00:00 | W11_solo_mom_3d_rel_overnight | overnight | raw | 1 | 428024 | 0.00581 | 1.449 | -0.00173 | Single-feature mom_3d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T22:02:01+00:00 | W11_solo_mom_5d_rel_fwd_60m | fwd_60m | raw | 1 | 4416876 | -0.00275 | -2.519 | 0.00028 | Single-feature mom_5d_rel ALONE at fwd_60m raw. Does this feature's standalone IC strengthen at longer horizon? |
+| 2026-06-12T22:02:45+00:00 | W11_solo_mom_5d_rel_overnight | overnight | raw | 1 | 428024 | 0.00854 | 1.95 | -0.00111 | Single-feature mom_5d_rel ALONE at overnight raw. Does this feature's standalone IC strengthen at longer horizon? |
+
+## W12 WAVE + Family-C dividend-timing (Modeller, 2026-06-12 evening) — queue refill + new data family
+
+Wake: respawned modeller on quant-team-2. Read ledger; M2 current. W11 grind alive (78->93 pending
+after refill). Two actions this wake:
+
+### (1) OPS BUG found: 4 position-group SOLO ids PERMANENTLY POISONED (OOM-locks)
+C11_solo_vwap_dev / _range_pct / _gap_from_open / _rel_ret_30m all errored:
+  "OutOfMemory: out of shared memory / HINT: increase max_locks_per_transaction"
+This is transient TimescaleDB lock exhaustion (feature_vectors 614 chunks + labels ~600 chunks
+joined in ONE txn ~ >2048 locks under rebuild-concurrency; max_locks_per_transaction=2048). But
+done_ids() records ERRORED results too, so these ids never retry = the standalone IC of the
+POSITION-GROUP members is MISSING. This matters: the W11 pos GROUP (vwap_dev,range_pct,gap_from_open)
+carries IC 0.029 at 30m raw = AS STRONG as the full set, yet our standing finding credits the whole
+30m signal to ret_5m (solo IC 0.0106). We never isolated whether the position features are an
+independent carrier. RE-QUEUED under fresh W12_solo_* ids (poisoned ids sidestepped). Ops follow-up
+for prod/qa: experimenter should NOT persist transient DB errors as done — retry OOM/lock/connection
+errors instead of poisoning the id (the runner already skips panel-too-small without recording; the
+same treatment should cover psycopg OperationalError/OOM).
+
+### (2) W12 wave queued (17 exp) — resolve ret_5m-vs-position + attack the cost gate
+The price panel is largely mapped (30m signal = ret_5m; momentum dead at 30m). W12 targets the few
+GENUINELY-open questions, not redundant re-slicing:
+- W12_solo_{vwap_dev,range_pct,gap_from_open,rel_ret_30m} x {30m,60m}: recover the poisoned solos;
+  isolate the position carriers.
+- W12_pos_minus_ret5m_30m / W12_ret5m_plus_pos_30m(_rank): is position orthogonal to ret_5m? does
+  combining lift IC toward the ~2bps breakeven line?
+- W12_ret5m_pos_fwd_60m(_rank): same carrier set at LOWER turnover (60m) — attacks the economic gate
+  (every price signal dies on turnover, breakeven ~1.4bps < ~2bps cost).
+- W12_pos_vol_overnight_{raw,rank}: W11 vol@overnight surprised (IC 0.0227 t2.9) — combine with pos;
+  FLAG for survivorship demean if breakeven clears.
+- 2 long-shots (lambdarank@60m full price; vol_scaled pos@30m).
+NOTE: the experimenter runner hardcodes run_experiment() args (label/feature_idx/horizon/cadence) and
+does NOT forward cost_bps_oneway — so a "lower-cost liquid-quartile" probe is NOT queueable; it needs
+a runner change (Tier-1) or a standalone script. Recorded for later.
+
+### (3) Family-C: dividend-timing features (NEW deep data family) — built, smoke running
+experiments/family_c_dividend_timing.py (Tier-2 prototype, mirrors family_b). Joins the LIVE
+corporate_actions feed (7,133 cash_dividends / 612 symbols / 2023-2026) to the v1.1.1 panel — NO
+rebuild. Tests the dividend run-up / ex-date anomaly (a calendar-of-the-firm effect, orthogonal to
+the exhausted intraday price features). Features (strictly PIT, lookahead-guarded: upcoming ex-date
+only counted if within 35 cal days = always-already-declared): days_to_ex, days_since_ex,
+in_runup_window(<=5d), is_dividend_payer. Full battery gates (IC+canary+net-of-cost+survivorship).
+Result pending. PRE-REGISTERED prediction (~65%): dividend timing adds ~0 cross-sectional IC at
+30m/overnight (the effect is small, slow, and our horizon is short) — but it is the first genuinely-
+new deep data family tested, and a clean null sharpens "data-starved, not model-starved." If +Family-C
+lifts IC above canary AND improves breakeven -> Tier-1 PR for a real feature group.
