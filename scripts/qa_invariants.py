@@ -21,7 +21,9 @@ Invariants (map to docs/QA_LEDGER.md):
                                are RTH (ACTIVE set only). UTC-calendar-leak catch.
   bars_integrity             — OHLC + minute-grid sanity (extended-hours bars reported, not failed).
   no_extreme_backfill_jump   — task #17: no >3× unexplained backfill daily-close day-over-day jump
-                               (mixed split-adjustment artifacts; allowlist exempts real splits).
+                               (split-adjustment artifacts). SELF-GATES against the #18
+                               corporate_actions table (real splits auto-exempt, ±1d); manual
+                               allowlist is the fallback for non-split events (IPOs/restructurings).
   backfill_realtime_parity   — I2: stream vs backfill bars agree on overlap (replay-equiv).
   trade_agg_parity           — I2b: trade-agg stream vs backfill within tolerance on overlap.
   pit_universe_membership    — I3: ACTIVE-set feature rows exist ONLY for that date's members.
@@ -100,19 +102,31 @@ SESSION_FORWARD_SLACK_DAYS = (
 EXTREME_JUMP_RATIO = 3.0  # backfill daily-close day-over-day ratio beyond this -> flag
 DENYLIST_PATH = REPO / "tests" / "fixtures" / "known_funds.txt"
 CORP_ACTIONS_PATH = REPO / "tests" / "fixtures" / "known_corporate_actions.txt"
-LIVE_COVERAGE_BASELINE_PATH = REPO / "tests" / "fixtures" / "live_feature_coverage_baseline.json"
+LIVE_COVERAGE_BASELINE_PATH = (
+    REPO / "tests" / "fixtures" / "live_feature_coverage_baseline.json"
+)
 
 # live_feature_coverage: per-family valued% must not DROP below its derived expectation, nor
 # regress vs the trailing baseline. Floors are DERIVED (not hardcoded): price/vol expects ~the
 # fraction of universe names with adequate intraday history; trade/quote expects ~the captured-
 # name fraction; calendar must be exact. A DROP vs trailing baseline beyond tolerance fails loud.
-LIVE_PRICEVOL_IDX = list(range(1, 12))  # ret_*/vol_*/vwap_dev/range_pct/gap_from_open/rel_ret_30m
+LIVE_PRICEVOL_IDX = list(
+    range(1, 12)
+)  # ret_*/vol_*/vwap_dev/range_pct/gap_from_open/rel_ret_30m
 LIVE_CALENDAR_IDX = [12, 13]  # minute_of_day, day_of_week
 LIVE_TRADEQUOTE_IDX = [14, 15, 16, 17, 18]  # trade/quote microstructure family
-LIVE_WARMUP_MIN_BARS = 60  # bars needed today to warm the longest price-feature lookback (60m)
-LIVE_COVERAGE_DROP_TOL_PCT = 5.0  # family valued% may fall at most this vs trailing baseline
-LIVE_PRICEVOL_FLOOR_SLACK_PCT = 5.0  # price/vol valued% may trail its warmup-adequacy ceiling by this
-LIVE_SYMBOL_DROP_TOL = 25  # live symbol-count may fall at most this vs trailing baseline median
+LIVE_WARMUP_MIN_BARS = (
+    60  # bars needed today to warm the longest price-feature lookback (60m)
+)
+LIVE_COVERAGE_DROP_TOL_PCT = (
+    5.0  # family valued% may fall at most this vs trailing baseline
+)
+LIVE_PRICEVOL_FLOOR_SLACK_PCT = (
+    5.0  # price/vol valued% may trail its warmup-adequacy ceiling by this
+)
+LIVE_SYMBOL_DROP_TOL = (
+    25  # live symbol-count may fall at most this vs trailing baseline median
+)
 
 # Independent leverage/inverse/structure tokens, maintained HERE and deliberately NOT identical
 # to quantlib.universe's regex, so this gate can flag a fund the builder's classifier misses
@@ -243,18 +257,36 @@ def _load_corporate_actions() -> tuple[set[str], set[tuple[str, str]]]:
     return symbol_wide, dated
 
 
+def _split_ex_dates() -> set[tuple[str, str]]:
+    """(symbol, date) for split-like corporate actions (forward/reverse/stock splits), each
+    expanded to ex_date ±1 day to absorb ex-date vs first-adjusted-bar timing. Reads the live
+    #18 corporate_actions table so the jump check SELF-GATES against real splits; returns empty
+    if the table is absent (then only the manual allowlist applies). Cash dividends are excluded
+    — they don't move price >3×."""
+    if scalar("SELECT to_regclass('public.corporate_actions')") in ("", "NULL"):
+        return set()
+    rows = sql(
+        "SELECT symbol, to_char(d,'YYYY-MM-DD') FROM corporate_actions ca, "
+        "LATERAL (VALUES (ca.ex_date-1),(ca.ex_date),(ca.ex_date+1)) AS x(d) "
+        "WHERE ca.action_type IN ('forward_splits','reverse_splits','stock_dividends')"
+    )
+    return {(sym, d) for sym, d in rows}
+
+
 def check_no_extreme_backfill_jump() -> Result:
     """Price integrity (task #17): no >3× UNEXPLAINED day-over-day jump in a backfill daily close.
 
     A split landing mid-backfill leaves pre-split months on the old adjustment basis, deflating
     prices (the KLAC 10× class). This reaches the PANEL (momentum/return features), not just the
-    parity overlap, so it must be caught at the bars level. Real splits/reverse-splits are exempted
-    via the curated corporate-action allowlist (we have no corporate-action feed yet).
+    parity overlap, so it must be caught at the bars level. A flagged jump is exempted if it
+    matches a real split in the #18 corporate_actions table (self-gating, ex_date ±1d) OR the
+    curated manual allowlist (for non-split events — IPOs, restructurings — not in that table).
 
-    HEAVY: aggregates bars_1m (~253M rows) to daily RTH last-close. Part of the post-rebuild
-    battery, not the light wake run. Scope to recent history with env QA_JUMP_SINCE=YYYY-MM-DD.
+    HEAVY: aggregates bars_1m (~253M rows) to daily RTH last-close. Part of the post-rebuild /
+    nightly --full run, not the --fast wake. Scope to recent history with env QA_JUMP_SINCE.
     """
     symbol_wide, dated = _load_corporate_actions()
+    split_dates = _split_ex_dates()
     since = os.environ.get("QA_JUMP_SINCE")
     et = "(ts AT TIME ZONE 'America/New_York')"
     since_clause = f"AND ts >= '{since}'" if since else ""
@@ -272,12 +304,19 @@ def check_no_extreme_backfill_jump() -> Result:
         f"WHERE prev > 0 AND (close/prev > {EXTREME_JUMP_RATIO} OR close/prev < {1.0/EXTREME_JUMP_RATIO}) "
         "ORDER BY symbol, dt"
     )
-    flagged = [
-        (sym, dt, prev, close, ratio)
-        for sym, dt, prev, close, ratio in rows
-        if sym not in symbol_wide and (sym, dt) not in dated
-    ]
-    exempted = len(rows) - len(flagged)
+    flagged = []
+    auto_exempt = 0  # matched a real split in the corporate_actions table
+    manual_exempt = (
+        0  # matched the curated allowlist (non-split events not in the table)
+    )
+    for sym, dt, prev, close, ratio in rows:
+        if (sym, dt) in split_dates:
+            auto_exempt += 1
+        elif sym in symbol_wide or (sym, dt) in dated:
+            manual_exempt += 1
+        else:
+            flagged.append((sym, dt, prev, close, ratio))
+    exempt_note = f"{auto_exempt} via corporate_actions (#18), {manual_exempt} via manual allowlist"
     if flagged:
         details = [
             f"{sym:8s} {dt}: {prev} -> {close} ({ratio}×)"
@@ -285,9 +324,7 @@ def check_no_extreme_backfill_jump() -> Result:
         ]
         if len(flagged) > 40:
             details.append(f"... and {len(flagged) - 40} more")
-        details.append(
-            f"({exempted} jump(s) exempted by the corporate-action allowlist)"
-        )
+        details.append(f"({exempt_note})")
         return Result(
             "no_extreme_backfill_jump",
             "FAIL",
@@ -299,7 +336,7 @@ def check_no_extreme_backfill_jump() -> Result:
         "no_extreme_backfill_jump",
         "PASS",
         f"no unexplained >{EXTREME_JUMP_RATIO}× backfill daily-close jumps "
-        f"({exempted} known corporate action(s) exempted)",
+        f"({auto_exempt + manual_exempt} known corporate action(s) exempted: {exempt_note})",
     )
 
 
@@ -865,14 +902,17 @@ def check_live_feature_coverage() -> Result:
       - symbol cnt -> the universe deficit must be explained by warmup, not silent; and must not
                       drop > tol vs the trailing-baseline median (a silent live-path coverage loss).
     Also fails on any family valued% DROP vs the trailing baseline beyond tolerance. SKIPs cleanly
-    before the open (no live rows yet today). Roll the baseline forward with --update-baseline."""
+    before the open (no live rows yet today). Roll the baseline forward with --update-baseline.
+    """
     today = scalar("SELECT (now() AT TIME ZONE 'America/New_York')::date")
     live_set = scalar(
         "SELECT set_version FROM feature_vectors WHERE source='live' "
         "GROUP BY set_version ORDER BY set_version DESC LIMIT 1"
     )
     if not live_set:
-        return Result("live_feature_coverage", "SKIP", "no source='live' feature_vectors yet")
+        return Result(
+            "live_feature_coverage", "SKIP", "no source='live' feature_vectors yet"
+        )
     dims = sql(
         "SELECT count(*), count(DISTINCT symbol), count(DISTINCT ts) FROM feature_vectors "
         f"WHERE source='live' AND set_version='{live_set}' "
@@ -882,7 +922,8 @@ def check_live_feature_coverage() -> Result:
     n_rows, n_syms, n_cadences = (int(x) for x in dims[0])
     if n_rows == 0:
         return Result(
-            "live_feature_coverage", "SKIP",
+            "live_feature_coverage",
+            "SKIP",
             f"no live rows for {today} yet (pre-open / model-server idle)",
         )
     rows = sql(
@@ -925,7 +966,9 @@ def check_live_feature_coverage() -> Result:
             "(now() AT TIME ZONE 'America/New_York')::date"
         )
     )
-    pricevol_ceiling = round(100.0 * warm_enough / universe_total, 1) if universe_total else 0.0
+    pricevol_ceiling = (
+        round(100.0 * warm_enough / universe_total, 1) if universe_total else 0.0
+    )
     tradequote_expected = round(100.0 * captured / n_syms, 1) if n_syms else 0.0
 
     details = [
@@ -938,7 +981,9 @@ def check_live_feature_coverage() -> Result:
     failures: list[str] = []
 
     if calendar < 100.0:
-        failures.append(f"calendar features valued {calendar}% < 100% — deterministic family is NaN-leaking")
+        failures.append(
+            f"calendar features valued {calendar}% < 100% — deterministic family is NaN-leaking"
+        )
     if pricevol < pricevol_ceiling - LIVE_PRICEVOL_FLOOR_SLACK_PCT:
         failures.append(
             f"price/vol valued {pricevol}% trails warmup ceiling {pricevol_ceiling}% by "
@@ -964,11 +1009,17 @@ def check_live_feature_coverage() -> Result:
     if baseline:
         prior = [r for r in baseline if r["date"] != today]
         if prior:
+
             def _med(key: str) -> float:
                 vals = sorted(float(r[key]) for r in prior)  # type: ignore[arg-type]
                 mid = len(vals) // 2
                 return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
-            for fam, val in (("pricevol", pricevol), ("calendar", calendar), ("tradequote", tradequote)):
+
+            for fam, val in (
+                ("pricevol", pricevol),
+                ("calendar", calendar),
+                ("tradequote", tradequote),
+            ):
                 base = _med(fam)
                 if val < base - LIVE_COVERAGE_DROP_TOL_PCT:
                     failures.append(
@@ -982,12 +1033,15 @@ def check_live_feature_coverage() -> Result:
                     f"{round(base_syms)} — live-path symbol coverage regression"
                 )
     else:
-        details.append("no trailing baseline yet — run with --update-baseline to record the first row")
+        details.append(
+            "no trailing baseline yet — run with --update-baseline to record the first row"
+        )
 
     if failures:
         return Result("live_feature_coverage", "FAIL", "; ".join(failures), details)
     return Result(
-        "live_feature_coverage", "PASS",
+        "live_feature_coverage",
+        "PASS",
         f"live {live_set} coverage healthy for {today} (price/vol {pricevol}%, calendar {calendar}%, trade/quote {tradequote}%)",
         details,
     )
