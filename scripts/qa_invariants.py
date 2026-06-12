@@ -1333,6 +1333,65 @@ def select_tier(tier: str) -> list[str]:
     return list(INVARIANTS)
 
 
+# The v1.2.0 OFI research set is WORK-IN-PROGRESS (task #9): its momentum family is 100% NaN
+# (daily-bar join not wired) and its order-flow family is sparse mid-session (trade-agg coverage
+# on the 50 captured names). These two families are the ONLY known-owned warmup reds. Membership
+# by name-prefix so the fingerprint adapts as the modeller fixes families — but a NaN appearing in
+# any STABLE feature (price/vol/calendar/vwap) or in any non-v1.2.0 set is NOT covered and surfaces.
+_V120_WIP_FAMILIES = ("mom_", "ofi_", "signed_vol_z")
+
+
+def _flagged_feature_names(result: Result) -> set[str]:
+    """Pull the feature names out of a warmup_coverage FAIL's detail lines ('[idx] name: ...')."""
+    return {
+        line.split("]", 1)[1].split(":", 1)[0].strip()
+        for line in result.details
+        if "]" in line and ":" in line.split("]", 1)[1]
+    }
+
+
+def _is_v120_ofi_wip(result: Result) -> bool:
+    """Fingerprint the known-owned v1.2.0 OFI-WIP warmup FAIL (Manager ruling 2026-06-13: tag it
+    EXPECTED so a NEW red is never camouflaged). Matches ONLY if it's the v1.2.0 set AND EVERY
+    flagged feature is in the WIP momentum/order-flow families. A flagged STABLE feature (ret_*,
+    vol_*, calendar, vwap_dev, ...), or any other set, breaks the match and surfaces as [FAIL].
+    """
+    if result.name != "warmup_coverage" or result.status != "FAIL":
+        return False
+    if "v1.2.0" not in result.message:
+        return False
+    flagged = _flagged_feature_names(result)
+    if not flagged:
+        return False
+    return all(
+        any(name.startswith(fam) for fam in _V120_WIP_FAMILIES) for name in flagged
+    )
+
+
+# (predicate, owner, reference, why) — a FAIL matching the predicate is rendered EXPECTED/OWNED
+# and excluded from the gate's exit code, but STILL printed in full so it's never hidden. The
+# predicate must be a TIGHT fingerprint of the specific accepted failure, not "this invariant
+# is allowed to fail" — anything outside the fingerprint stays an unexpected red.
+KNOWN_ISSUES: list[tuple[Callable[[Result], bool], str, str, str]] = [
+    (
+        _is_v120_ofi_wip,
+        "modeller+prod",
+        "task #9",
+        "v1.2.0 OFI set is WIP/not model-ready: momentum family 100% NaN (daily-bar join) + "
+        "order-flow family sparse mid-session. Both are known-owned; not live-served, no "
+        "trading impact. A NaN in any STABLE feature here would NOT match this and surface.",
+    ),
+]
+
+
+def classify_known(result: Result) -> tuple[str, str, str] | None:
+    """Return (owner, ref, why) if this FAIL is a registered known-owned issue, else None."""
+    for predicate, owner, ref, why in KNOWN_ISSUES:
+        if predicate(result):
+            return owner, ref, why
+    return None
+
+
 def run(selected: list[str]) -> int:
     results: list[Result] = []
     for name in selected:
@@ -1345,20 +1404,36 @@ def run(selected: list[str]) -> int:
     print("\n" + "=" * 78)
     print("QA INVARIANT SUITE")
     print("=" * 78)
+    n_expected = 0
+    n_unexpected_fail = 0
     for result in results:
-        glyph = {"PASS": "✓", "FAIL": "✗", "SKIP": "○"}[result.status]
-        print(f"\n[{result.status}] {glyph} {result.name}")
-        print(f"      {result.message}")
+        known = classify_known(result) if result.status == "FAIL" else None
+        if known is not None:
+            n_expected += 1
+            owner, ref, why = known
+            print(f"\n[FAIL·EXPECTED] ✗ {result.name}  (OWNED: {owner}, {ref})")
+            print(f"      {result.message}")
+            print(f"      → EXPECTED/OWNED: {why}")
+        else:
+            if result.status == "FAIL":
+                n_unexpected_fail += 1
+            glyph = {"PASS": "✓", "FAIL": "✗", "SKIP": "○"}[result.status]
+            print(f"\n[{result.status}] {glyph} {result.name}")
+            print(f"      {result.message}")
         for line in result.details:
             print(f"        {line}")
 
-    n_fail = sum(1 for r in results if r.status == "FAIL")
     n_skip = sum(1 for r in results if r.status == "SKIP")
     n_pass = sum(1 for r in results if r.status == "PASS")
     print("\n" + "-" * 78)
-    print(f"SUMMARY: {n_pass} PASS, {n_fail} FAIL, {n_skip} SKIP")
+    summary = f"SUMMARY: {n_pass} PASS, {n_unexpected_fail} FAIL, {n_skip} SKIP"
+    if n_expected:
+        summary += f", {n_expected} FAIL·EXPECTED (owned, not gating)"
+    print(summary)
     print("-" * 78)
-    return 1 if n_fail else 0
+    # Gate trips ONLY on unexpected fails — a known-owned red stays visible but green-lights CI,
+    # while anything new (incl. a CHANGE to a known issue that breaks its fingerprint) trips it.
+    return 1 if n_unexpected_fail else 0
 
 
 def main() -> int:
