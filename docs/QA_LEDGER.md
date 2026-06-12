@@ -43,8 +43,15 @@ answer to the lesson that defines this role:** vigilance no longer depends on an
 noticing — a violation fails CI with a clear message.
 
 - **`scripts/qa_invariants.py`** — CI-able runner. `python3 scripts/qa_invariants.py`
-  (exit 1 on any FAIL), `--list`, `--only a,b`. DB access via the documented
+  (exit 1 on any UNEXPECTED FAIL — known-owned FAILs render `[FAIL·EXPECTED]` and don't gate;
+  see KNOWN_ISSUES), `--list`, `--only a,b`. DB access via the documented
   `docker compose exec psql`; override with env `QA_PSQL` for in-network/CI runs.
+- **`--nan-report [set_version]`** — **CANONICAL per-feature in-vector NaN report (Manager
+  fixture 2026-06-13).** THE authoritative NaN number; every "panel is clean" claim MUST cite it.
+  Exists because the same failure class bit us twice (rebuild-time "0.000% NaN" counted NULL/
+  whole-vector-missing, not `vector[i]='NaN'::float8`). Current: v1.1.1 worst 20.06% (ret_60m,
+  honest open/thin-name), v1.2.0 100% (momentum dead), v1.0.0 99.9% (dead micro). NEVER claim a
+  set's NaN figure without running this.
 - **`tests/test_invariants.py`** — the same checks as pytest (one source of truth); SKIPs when
   the DB is unreachable so the clean `make test` container stays green.
 - **`tests/test_session_date.py`** — near-midnight-UTC ET-session-date regression (task #13).
