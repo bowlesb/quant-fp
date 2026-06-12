@@ -197,3 +197,41 @@ test is proposal 001 (liquid × 60m-hold × measured-cost × OOS), now with a re
 (restrict/upweight low-dispersion days) as a second arm. 3 formalized items for the Monday bar:
 001 (reversal-60m), 002 (NaN flag→QA), and this regime/outlier characterization feeding 001's regime arm.
 
+---
+
+## 2026-06-12 — Wake 1, batch 3. The open-cadence question turned up the BIGGEST signal in the panel.
+
+Followed my own OBS1 thread: is the all-NaN-return 9:30 open cross-section silently BIASING the panel?
+Tested gap_from_open (feat 10, the one feature that's 0% NaN AND meaningful at the open = the overnight gap).
+
+### OBSERVATION 7 (the headline) — OPEN GAP-FADE: gap_from_open is the single strongest signal in the panel, but ONLY at the 9:30 open.
+
+within-ts rank-IC of gap_from_open vs fwd_30m, full panel, by cadence group:
+  - **9:30 OPEN (mod=570): IC -0.0717, t -18.5** over 613 days.
+  - every OTHER cadence pooled: IC +0.0004, t 0.2 = PURE NOISE.
+
+Interpretation: the overnight gap MEAN-REVERTS hard in the first 30 min — names that gapped up most fade,
+names that gapped down most bounce. Classic opening-gap-fade. t -18.5 DWARFS ret_5m's t -10; this is the
+strongest single-feature signal I've found. It's open-only because gap_from_open is only meaningful at the
+open — by mid-session it's a stale distance-from-open stat with zero predictive content (hence IC~0 elsewhere).
+
+WHY THIS REFRAMES OBS1: I flagged the 9:30 open cross-section as "feature-DEGRADED" (all return features NaN,
+ranked on a smaller subset). The truth is the OPPOSITE — the open cadence carries the BEST signal in the
+panel, via gap_from_open. Excluding the open (as my reversal analysis did) throws away the strongest signal.
+My OBS1 framing was incomplete; the open isn't degraded, it's DIFFERENT — a distinct gap-fade regime.
+
+WHY IT MATTERS FOR THE EDGE HUNT — this is the lowest-turnover signal possible:
+- ONCE PER DAY (one open per day) → turnover ~1 rebalance/day, the floor. The cost wall that killed every
+  30m signal (turnover ~3.1, breakeven ~1.4bps) is FAR easier to clear at turnover ~1.
+- It's IN the modeller's battery panel (they include the open cadence) but BLENDED into one LightGBM model
+  alongside ret_5m (NaN at the open!) and the momentum family. A DEDICATED open-only gap-fade L/S has never
+  been isolated. This is a distinct STRATEGY SHAPE, not just a feature.
+
+CAVEATS to gate (running / pre-registered in proposal 003):
+- Is it tradeable at the open? The open is the WIDEST-spread minute of the day (price discovery). A gap-fade
+  that needs to trade AT 9:30 pays the opening spread — which may eat the edge. The honest test is net-of-
+  measured-cost at the open specifically (the close-minute exclusion analog: the OPEN minute may be as
+  cost-toxic as the 16:00 close).
+- Liquid-tier + 60m-persistence + monthly-stability: running now.
+- Survivorship: gap-fade is a TIMING signal (today's gap), should survive per-symbol demean — gate it.
+
