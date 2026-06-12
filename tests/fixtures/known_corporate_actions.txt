@@ -11,5 +11,20 @@
 # Format: SYMBOL            (exempts that symbol's jumps), or
 #         SYMBOL<TAB>DATE   (exempts only the jump on that ET session date — preferred).
 #
-# (none confirmed yet — the 11 names from the 2026-06-12 sweep are pending prod verification
-#  under task #17; KLAC is a confirmed ARTIFACT and is intentionally NOT listed.)
+# 2026-06-12 sweep: prod verified all 10 non-KLAC names against Alpaca live (match to the cent)
+# -> CONFIRMED REAL events (IPOs, reverse/forward splits, restructurings). Encoded surgically by
+# (symbol, ET date) so ONLY the verified jump is exempt — a future artifact on the same name
+# still flags. KLAC is the lone ARTIFACT and is intentionally NOT listed (re-fetch queued #17).
+ABVX	2025-07-23
+ASTC	2026-05-27
+BMNR	2025-06-30
+FIG	2025-07-31
+INHD	2023-12-15
+INHD	2025-08-25
+INHD	2026-06-08
+QXO	2023-12-04
+QXO	2024-07-30
+RXT	2026-02-18
+STI	2026-06-04
+STRC	2025-07-30
+WOLF	2025-09-29
