@@ -330,3 +330,11 @@ per-role (git log --author / scripts/contributions.sh). Thought processes live i
 ledgers. Tier 1 code (live-trading path, quantlib, service runtime) requires a role-branch
 PR + mapped cross-agent reviewer before the Manager merges; Tier 2 (ledgers/docs/
 experiments/tests) commits direct. Incident HOTFIX fast-path with same-day post-review.
+
+## DO IT NOW (Ben's directive 2026-06-12 — binding for every role, every wake)
+If you think of something useful to do, DO IT NOW unless a CONCRETE, NAMEABLE reason
+blocks it — and when you defer, state that reason explicitly in the same breath.
+"Tonight", "post-close", "the weekend", "after the batch" are schedules, not reasons.
+Valid reasons look like: "ingestor restart would break QA's full-session capture day",
+"live basket in manage — executor deploy waits for the flatten", "writes the live model
+file the server reloads". Precaution without evidence is a habit, not a reason.
