@@ -126,3 +126,74 @@ and my archaeology surfaces:
 DEAD-END NOTE (logged so it's not re-tread): the illiquid-tier "stronger reversal" is NOT exploitable —
 it's where spreads are 3-10bps and ret_5m is up to 60% NaN. Any reversal strategy must live on the liquid tier.
 
+CORRECTION (next sub-wake): the illiquid concentration was a RECENT-WINDOW artifact — full-panel the reversal
+is UNIFORM across liquidity (q4 liquid -0.020, t-9.8). So the dead-end note above is WRONG as stated: the
+liquid tier carries the reversal just as strongly. The real constraint is cost, not signal location. (Kept
+the strike-through for honesty re: my own correction trail.)
+
+---
+
+## 2026-06-12 — Wake 1, batch 2. Lead's 3 highest-value stares: regime, outliers, breadth.
+
+All on the full v1.1.1 panel, ret_5m within-ts rank-IC vs fwd_30m, non-NaN, excl-open.
+
+### OBSERVATION 4 — TIME-OF-DAY: reversal present at EVERY cadence, slightly stronger in the afternoon. Not a fragile time-of-day artifact.
+
+| cadence ET | mod | mean_ic | t |
+|---|---|---:|---:|
+| 10:00 | 600 | -0.0254 | -3.8 |
+| 10:30 | 630 | -0.0164 | -2.7 |
+| 11:00 | 660 | -0.0089 | -1.4 |  ← midday lull, weakest |
+| 11:30 | 690 | -0.0248 | -4.6 |
+| 12:00 | 720 | -0.0154 | -2.7 |
+| 12:30 | 750 | -0.0261 | -4.6 |
+| 13:00 | 780 | -0.0216 | -3.9 |
+| 13:30 | 810 | -0.0216 | -4.0 |
+| 14:00 | 840 | -0.0174 | -2.9 |
+| 14:30 | 870 | -0.0313 | -5.2 |  ← strongest |
+| 15:00 | 900 | -0.0184 | -3.2 |
+
+Every cadence negative; t -1.4 to -5.2. Strongest 14:30 / 12:30 / 11:30 / 10:00; weakest 11:00 midday.
+No single cadence carries the effect — it's pervasive intraday. Robustness GOOD for a strategy (don't have
+to time a specific minute). (Note: the 9:30 open cadence is excluded — ret_5m is 100% NaN there, OBS1.)
+
+### OBSERVATION 5 — OUTLIER DAYS are recognizable MACRO-VOL EVENTS, but no single day dominates the average.
+
+Top-20 most-negative daily IC (each is a full-day mean over ~11 cadences): -0.18 to -0.11 vs the -0.020
+panel mean. The dates are a who's-who of realized-vol events:
+- **2024-08-05** (-0.160) — the yen-carry-unwind / VIX-spike-to-65 crash day.
+- **2025-03-11/12/13 + 2025-04-07/08/09/17** (-0.12 to -0.14) — the tariff-shock cluster (7 of the top-20).
+- 2025-11-18 (-0.184, the single worst), 2026-06-10 (-0.140, recent), 2026-01-28, 2026-02-13, 2026-04-21.
+On these days the cross-section violently mean-reverts (panic over-reaction → snapback). But 613 days, and
+the top-20 are ~3% of days → the reversal is NOT a few-event artifact; it's a pervasive baseline + an
+event-day amplification. The shuffle canary in the battery will arbitrate whether the event-day spikes are
+real or in-sample selection.
+
+### OBSERVATION 6 (the SURPRISE — overturns the naive read) — reversal is STRONGEST in LOW-dispersion (CALM) regimes, WEAKEST in high-dispersion. Monotone.
+
+Bucketed days into quintiles by daily cross-sectional label dispersion (stddev of fwd_30m that day = realized-vol proxy):
+
+| disp quintile | mean_day_ic | avg_disp | n_days |
+|---|---:|---:|---:|
+| 1 (calmest)  | **-0.0275** | 0.00397 | 123 |
+| 2 | -0.0228 | 0.00449 | 123 |
+| 3 | -0.0231 | 0.00500 | 123 |
+| 4 | -0.0160 | 0.00557 | 122 |
+| 5 (most volatile) | **-0.0150** | 0.00680 | 122 |
+
+This LOOKS to contradict OBS5 (extreme days = strongest), but reconciles cleanly: a HANDFUL of extreme
+high-vol days have enormous reversal (event snapback), but the high-dispersion quintile AS A WHOLE is
+WEAKER on average — because high-vol days are a MIX of panic-snapback days (strong reversal) AND
+trend/momentum-continuation days (reversal breaks down or flips). The MEAN reversal is most RELIABLE in
+CALM, low-dispersion conditions. ACTIONABLE: a reversal strategy should size UP in calm regimes and DOWN
+(or filter out) high-dispersion days — the opposite of "trade the vol events." The event days are
+high-MEAN but high-VARIANCE; the calm days are the steady edge. → folds into proposal 001 as a regime filter.
+
+### Synthesis of wake-1 (for the Lead)
+ret_5m reversal is the most structurally robust price signal in the panel: stable across 30 months,
+uniform across liquidity, pervasive across the session, persists to 60m, and — the new texture — most
+RELIABLE in calm regimes. It is NOT yet shown tradeable (cost wall, task #5). The single highest-value
+test is proposal 001 (liquid × 60m-hold × measured-cost × OOS), now with a regime-filter variant
+(restrict/upweight low-dispersion days) as a second arm. 3 formalized items for the Monday bar:
+001 (reversal-60m), 002 (NaN flag→QA), and this regime/outlier characterization feeding 001's regime arm.
+

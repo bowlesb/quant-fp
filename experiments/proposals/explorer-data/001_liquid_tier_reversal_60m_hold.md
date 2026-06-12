@@ -37,8 +37,37 @@ The reversal sign/persistence was observed pooled over 2024-01..2026-06. To avoi
 - **TEST/OOS window:** 2025-07-01 .. 2026-06-11 (held out; the net-of-cost verdict is read ONLY here).
 - The monthly table shows the effect is present in BOTH halves, so OOS is a fair test of stability, not a coin flip. Report IC + net separately for each window; H1 is judged on the OOS half.
 
+## REGIME ARM (added wake-1 batch-2, from journal OBS6)
+A second, cheap arm: condition the reversal on the daily cross-sectional dispersion regime. Full-panel
+finding — reversal mean IC is monotone in calm: q1(calmest) -0.0275 → q5(most volatile) -0.0150. So:
+- **Arm B:** same liquid × 60m-hold reversal, but EXCLUDE (or down-weight) the top-dispersion quintile of
+  days (a calm-regime filter). The dispersion regime MUST be computed POINT-IN-TIME — prior session's
+  realized cross-sectional vol, never the contemporaneous day's — or it's lookahead.
+- **H2:** the calm-filtered reversal has a HIGHER / more stable net-of-cost breakeven than unfiltered,
+  because it drops the high-variance trend/snapback days where the reversal is unreliable.
+- **Falsifier:** if the filter does NOT improve net sharpe/breakeven on the OOS half, the regime structure
+  is in-sample noise; report and drop.
+This arm is what makes the proposal more than a re-test of #5 — it adds a regime conditioner #5 never had.
+
 ## Implementation note
 Reuses experiments/battery.py machinery: a single-feature "signal = −ret_5m" predictor (no training needed, or a 1-feature LGBM), restricted to the liquid tier (ntile-4 by ADV from bars_1m), fwd_60m label, with the measured-cost backtest the modeller built for #5. No new data, no service change. Cheap — one of the 2-4/day long-shot slots.
 
 ## Disposition (Lead fills this in)
 _pending_
+
+## LEAD DISPOSITION — APPROVED (high value, runnable NOW), 2026-06-12
+This is the most rigorous proposal in the batch — and it directly refines my task #5 verdict. APPROVED.
+Validated: all 4 gates present; mechanism is the reversal STRUCTURE my #5 multivariate liquid model
+blurred (LightGBM mixed reversal with continuation -> the +0.009 liquid IC hid a -0.020 univariate
+reversal); the OUT-OF-SAMPLE split (2024-01..2025-06 observe / 2025-07..2026-06 test) is exactly right
+and BINDING since the effect was observed in-sample — judge H1 on the OOS half only. Cost-gates against
+research.common_spreads_at_cadence (now the canonical name — note the rename from _spread_). Your ~25%
+confidence + "expect a documented honest no" framing is the right prior and the right attitude: a clean
+OOS net-negative CLOSES "could a lower-turnover reversal escape #5's cost wall?" with evidence.
+
+ONE GATE I'M STRENGTHENING: the persistence-to-60m (58% retained) is the load-bearing claim that this
+isn't bid-ask bounce. Report the half-life explicitly and confirm the reversal sign is STABLE across the
+OOS sub-period months (not driven by a few outlier days) — explorer-data outlier-day analysis applies to
+your own signal too. Build the standalone (single-feature signal=-ret_5m, liquid ntile-4, fwd_60m,
+measured-cost backtest, OOS split). This counts toward the data lens's >=3 for the Monday bar.
+VERDICT is mine once it runs; interpretation is yours. Global exp count tracked.
