@@ -16,6 +16,19 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 | P3 | experimenter writes host files as root | permission paper-cuts | add user:uid to the service |
 
 ## Scheduled core-rebuilds (maintenance windows)
+### LIVE EXECUTION STATUS (2026-06-12, started ~12:1x PT per Ben's DO-IT-NOW — no-restart items run during RTH)
+- [x] **Step 1-2 #18 DONE LIVE:** corporate_actions table + corporate_actions_pit view created in live DB;
+  first CA fetch populated 7205 actions (7133 cash_dividends + 42 forward + 19 reverse splits + 11
+  stock_dividends, ~3yr). Dividends verified present. KLAC 10:1 split captured. FINDING: Alpaca has NO
+  announcement/declaration date (process_date is POST-ex) → view announcement_date=NULL (anticipation
+  features need a real declaration feed / #21). Backfiller tool image rebuilt to get the CA code.
+- [x] **Step 3 #17 KLAC bars DONE LIVE + VERIFIED:** 217,732 bars re-fetched (one Adjustment.ALL pass,
+  2023-12-01→now). Max day-over-day jump now 1.19×/0.86× (was ~10×) — discontinuity gone. QA re-verify
+  requested (gates denylist removal). Momentum-cell recompute: PENDING Modeller's (A) in-place-v1.1.1 vs
+  (B) let-v1.1.2-carry-it call (recommended B — don't mutate the pinned verdict panel).
+- [ ] Remaining (still gated on close): rebuild-batch (ingestor restart) + executor deploy (exec).
+- [ ] In progress per DO-IT-NOW: #10 OFI panel, #12 backfill (rate-cap check vs live executor NBBO).
+
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
 Prereqs before starting: market closed (≥16:00 ET); Manager go on #12; **THE GUN = exec's
 broker-CONFIRMED-flat signal** after the ~15:48 ET EOD-flatten (exec reports 0 positions / 0 open
