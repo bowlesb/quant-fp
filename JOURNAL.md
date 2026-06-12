@@ -1185,3 +1185,15 @@ same look-ahead class could inflate it); OFI tradeless-minute NaN (16.6% mid-ses
 from capture-gap) before the pilot. QA shipped EXPECTED-tagging (immediately caught
 v1.2.0 growing: 12 flagged features incl. the OFI family) + the canonical --nan-report
 fixture (no NaN claim valid without it).
+
+## 2026-06-12 (evening 2) — Manager: open-cadence EXCLUDED (2nd tradeable-entry kill); OFI zero-fill ratified
+The open-cadence re-check FLIPPED the recommendation: gap_from_open's open-signal
+collapses under tradeable entry (IC -0.0222 t-2.9 -> -0.0061 t-0.8) — the live system
+has been ranking/trading the 09:30 cadence on a non-tradeable phantom. RATIFIED: exclude
+min_of_day=570 from train+serve. Research effective now; LIVE 09:30-skip staged for
+Monday's deploy window with exec sign-off (respawn packet item). OFI NaN semantics
+ratified: zero-fill tradeless minutes (true zero), NaN only for absent minutes (capture
+gaps); shared featurestore path; lands WITH the 512 populate. Day's epistemic
+scoreboard: 2 false-signal kills, 2 lore corrections, 0 promotable candidates, every
+kill now a permanent rule. Exec Sunday-night respawn packet must include: 09:30-skip
+sign-off, fill-prob data delivery, Monday deploy matrix role.
