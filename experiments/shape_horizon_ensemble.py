@@ -39,7 +39,9 @@ RESULTS = os.environ.get("ENSEMBLE_RESULTS", "/app/experiments/shape_ensemble_re
 FORBIDDEN = {"v1.0.0", "v1.1.0"}
 PRICE_ONLY_DROP = {"minute_of_day", "day_of_week"}
 ET = ZoneInfo("America/New_York")
-ANCHOR_MIN = 15 * 60 + 30                         # 15:30 ET = the overnight-label anchor cadence
+ANCHOR_MIN = 15 * 60                              # 15:00 ET = the LAST intraday 30m cadence (the
+#                                                   overnight label anchors at 15:30, which has no
+#                                                   30m feature row — gate the hold on the 15:00 signal)
 
 DB_KWARGS = {
     "host": os.environ["DB_HOST"], "port": int(os.environ.get("DB_PORT", "5432")),
@@ -70,27 +72,31 @@ def main() -> None:
 
     # --- Ensemble: 30m-TRAINED model, evaluated against the OVERNIGHT label on the 15:30 rows. ---
     # Map overnight (symbol, ts) -> overnight label, then attach to the 30m model's OOS prediction
-    # at the matching 15:30 row. Train on the 30m target; eval target is the overnight return.
-    overnight_label = {(sym_o[i], ts_o[i]): y_on[i] for i in range(len(y_on))}
+    # The 30m intraday cadence ends at 15:00 ET (no 15:30 row); the overnight label is anchored at
+    # 15:30 ET. So join the LAST intraday prediction (15:00) to the overnight label by (symbol, DATE),
+    # and group IC by the overnight ANCHOR ts (one cross-section/day). This IS the ensemble: the last
+    # intraday signal gates the overnight hold. Key overnight label + its anchor ts by (symbol, date).
+    overnight_label = {(sym_o[i], ts_o[i].astimezone(ET).date()): y_on[i] for i in range(len(y_on))}
+    overnight_ts = {(sym_o[i], ts_o[i].astimezone(ET).date()): ts_o[i] for i in range(len(y_on))}
     Xs = X_30[:, feature_idx]
     preds, _, pred_ts, pred_sym = collect_oos(
         Xs, y_30, y_30, ts_30, sym_30, "raw", X_30[:, vol_col], horizon_minutes=30
     )
-    # keep only OOS predictions on the 15:30 ET cadence that have an overnight label
+    # keep OOS predictions on the LAST intraday cadence (15:00 ET) that have an overnight label
     ens_pred, ens_real, ens_ts, ens_sym = [], [], [], []
     for prediction, timestamp, symbol in zip(preds, pred_ts, pred_sym):
         local = timestamp.astimezone(ET)
         if local.hour * 60 + local.minute != ANCHOR_MIN:
             continue
-        key = (symbol, timestamp)
+        key = (symbol, local.date())
         if key in overnight_label:
             ens_pred.append(prediction)
             ens_real.append(overnight_label[key])
-            ens_ts.append(timestamp)
+            ens_ts.append(overnight_ts[key])             # group IC by the overnight anchor ts
             ens_sym.append(symbol)
 
     if len(ens_pred) < 1000:
-        sys.exit(f"too few ensemble rows joined: {len(ens_pred)} (need the 15:30 cadence + overnight label)")
+        sys.exit(f"too few ensemble rows joined: {len(ens_pred)} (need the {ANCHOR_MIN//60}:{ANCHOR_MIN%60:02d} ET cadence + overnight label)")
 
     ic = per_timestamp_ic(ens_pred, ens_real, ens_ts)
     shuffled_real = shuffle_within_groups(ens_real, ens_ts, 13)
