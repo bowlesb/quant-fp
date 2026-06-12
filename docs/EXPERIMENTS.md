@@ -186,3 +186,50 @@ PATH TO EDGE is BETTER DATA, not more price-feature modeling: universe-wide ORDE
 microstructure (the Architect's sharded trade/quote ingestion — we only stream 10 symbols), and
 delisted-name backfill to test overnight survivorship-free. The EXECUTION infra is proven (place/
 manage/terminate bets live-paper), so when real edge appears we can trade it. No false edge shipped.
+
+## PRE-REGISTRATION (Modeller, 2026-06-11) — clean-panel battery, hypotheses BEFORE the data
+
+M1 task #4. The ~600-day panel the verdict above was computed on was ~21% contaminated
+(207/1000 members were ETFs / leveraged-inverse / VIX-futures funds, ranked cross-sectionally
+against single stocks). prod-architect is rebuilding the clean equities-only panel (~790 names).
+Per pre-registration discipline I commit these falsifiable predictions NOW, so a clean result
+cannot be rationalized after the fact. The re-run is ONE command: `experiments/battery.py`
+(net-of-cost L/S + shuffle canary + de-fragmented overnight labels + per-symbol survivorship
+neutralization, deterministic).
+
+PRIMARY PREDICTION (confidence ~70%): **"price-only has no tradeable edge" HOLDS on clean data.**
+The fund contamination did NOT mask a real edge. 30m = real signal but net-negative after costs;
+overnight = survivorship, not timing.
+
+Per-gate, falsifiable:
+1. **30m intraday IC** — two competing effects. Leveraged/inverse ETFs are the highest-|return|
+   names each cross-section and mechanically momentum/reversal-predictable (H1a: they INFLATE IC,
+   so clean IC FALLS toward the noise floor) vs. their leverage/decay returns are orthogonal noise
+   that dilutes within-ts rank correlation (H1b: clean IC RISES). I lean H1a (~60/40). Either way:
+   **PREDICTION — 30m stays NET-NEGATIVE after costs (breakeven < ~2bps).** The "real but uneconomic
+   at 30m turnover" verdict holds.
+2. **Trading cost / turnover** — ETFs are the tightest-spread, cheapest names in the basket.
+   Removing them makes the basket trade only single names => effective cost RISES, breakeven bar
+   gets HARDER. **PREDICTION — the 30m net-of-cost picture gets slightly WORSE, reinforcing
+   "uneconomic."** (This is the asymmetry that makes a clean 30m edge unlikely.)
+3. **Overnight survivorship** — leveraged/inverse funds carry the STRONGEST persistent per-symbol
+   overnight drift (vol-decay: structurally negative for UVXY/VXX/SQQQ, positive for TQQQ/UPRO in
+   an up-market). They were a large chunk of the "rank ex-post survivors" artifact. **PREDICTION —
+   on clean equities the RAW overnight sharpe DROPS and the gap between raw and per-symbol-demeaned
+   (survivorship-out) sharpe NARROWS; timing alpha stays ~0.** The survivorship diagnosis was right
+   and was not itself a fund artifact.
+4. **Overnight ranking canary** — the elevated lambdarank canary (0.0077) partly reflects the
+   persistent cross-sectional selection structure of always-extreme funds. **PREDICTION — removing
+   funds LOWERS the overnight ranking-canary (cleaner).** TRIPWIRE: if the canary STAYS elevated on
+   clean equities, the selection/leakage artifact is intrinsic to the features (not the funds) —
+   that reframes the lambdarank result as fake regardless of panel, and must be chased down.
+5. **NW t / cross-section size** — clean panel has ~790 names/ts vs ~1000; per-ts IC is slightly
+   noisier. Expect t-stats to move modestly; not decisive.
+
+THE RESULT THAT WOULD CHANGE EVERYTHING (~30% tail I am NOT dismissing): removing fund NOISE lifts
+clean-equity 30m IC enough that a LOWER-TURNOVER variant (60m horizon, or top/bottom-decile-only
+with hysteresis to cut the 2.2/period turnover) clears breakeven net-of-cost. So the clean battery
+must ALSO probe lower-turnover intraday variants, not merely reproduce the 30m/overnight grid — a
+real edge here would most plausibly show up as "modest IC + low turnover," not "high IC." If that
+appears, it does NOT get called edge until it passes the full M3 gate (NW t>3, clean canary,
+positive net-of-cost, survives survivorship neutralization, multiple-testing deflated).

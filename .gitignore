@@ -6,3 +6,4 @@ __pycache__/
 *.log
 models/
 .team_review_marker
+experiments/battery_results.jsonl
