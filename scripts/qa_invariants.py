@@ -274,6 +274,19 @@ def _split_ex_dates() -> set[tuple[str, str]]:
     return {(sym, d) for sym, d in rows}
 
 
+def _split_cutoffs() -> dict[str, str]:
+    """{symbol: latest split ex_date 'YYYY-MM-DD'} from the #18 corporate_actions table. Used by
+    the parity check to exclude a split name's RAW-stream-vs-ADJUSTED-backfill PRE-ex overlap,
+    which is incomparable by design (see check_backfill_realtime_parity). Empty if table absent."""
+    if scalar("SELECT to_regclass('public.corporate_actions')") in ("", "NULL"):
+        return {}
+    rows = sql(
+        "SELECT symbol, to_char(max(ex_date),'YYYY-MM-DD') FROM corporate_actions "
+        "WHERE action_type IN ('forward_splits','reverse_splits') GROUP BY symbol"
+    )
+    return {sym: dt for sym, dt in rows}
+
+
 def check_no_extreme_backfill_jump() -> Result:
     """Price integrity (task #17): no >3× UNEXPLAINED day-over-day jump in a backfill daily close.
 
@@ -596,17 +609,46 @@ def check_bars_integrity() -> Result:
 
 
 def check_backfill_realtime_parity() -> Result:
-    """I2: stream and backfill bars must agree on (symbol, ts) overlap (replay-equivalence)."""
+    """I2: stream and backfill bars must agree on (symbol, ts) overlap (replay-equivalence).
+
+    SPLIT-AWARE EXCLUSION — and note the semantics are the OPPOSITE of the jump check's, so do
+    NOT "fix" one to match the other (that reintroduces an inversion):
+      - This check compares RAW stream close vs RETROACTIVELY split-ADJUSTED backfill close. On a
+        name's PRE-ex-date overlap, those two are incomparable BY DESIGN — after a split, backfill
+        retro-adjusts the old days while the stream recorded the actual as-traded price (KLAC: 833
+        pre-ex bars at exactly 10×). That is NOT a replay-equivalence failure, so excluding the
+        (symbol, on/before last split ex_date) overlap is CORRECT — it removes a known non-bug.
+      - The JUMP check tests backfill's INTERNAL consistency, where a jump AT a split ex_date means
+        the Adjustment.ALL fetch FAILED — there, a split is the BUG and must NOT be exempted.
+    ACCEPTED RESIDUAL RISK: a REAL pre-ex corruption on a split name (e.g. genuine tick loss in
+    those same days) would now hide from parity. What covers it: (a) `no_extreme_backfill_jump`
+    catches an internal-consistency break on that name regardless of parity; (b) the POST-ex
+    overlap for the same name is still fully parity-checked (KLAC 6/12-on = 0% mismatch). The
+    excluded window is narrow (only on/before the last split, only for split names)."""
+    split_cutoffs = _split_cutoffs()  # {symbol: latest split ex_date 'YYYY-MM-DD'}
+    # VALUES list of (symbol, cutoff_date) so SQL can exclude stream bars on/before a split ex_date.
+    if split_cutoffs:
+        values = ",".join(f"('{sym}','{dt}'::date)" for sym, dt in split_cutoffs.items())
+        excl_cte = f", splitcut(symbol, cutoff) AS (VALUES {values}) "
+        excl_pred = (
+            "AND NOT EXISTS (SELECT 1 FROM splitcut sc WHERE sc.symbol=s.symbol "
+            "AND (s.ts AT TIME ZONE 'America/New_York')::date <= sc.cutoff) "
+        )
+    else:
+        excl_cte = ""
+        excl_pred = ""
     # Drive the join from the (small) stream side and prune the 253M-row backfill partition to
     # the stream's ts range so Timescale can exclude chunks. Overlap + mismatch in ONE pass.
     row = sql(
         "WITH s AS (SELECT symbol, ts, close FROM bars_1m WHERE source='stream'), "
         "bnds AS (SELECT min(ts) AS mn, max(ts) AS mx FROM s) "
+        f"{excl_cte}"
         "SELECT count(*) AS overlap, "
         "  count(*) FILTER (WHERE b.close <> 0 "
         f"     AND abs(s.close - b.close)/abs(b.close) > {PARITY_REL_TOL}) AS mismatch "
         "FROM s JOIN bars_1m b ON b.symbol=s.symbol AND b.ts=s.ts AND b.source='backfill' "
-        "WHERE b.ts >= (SELECT mn FROM bnds) AND b.ts <= (SELECT mx FROM bnds)"
+        "WHERE b.ts >= (SELECT mn FROM bnds) AND b.ts <= (SELECT mx FROM bnds) "
+        f"{excl_pred}"
     )[0]
     overlap, mismatch = int(row[0]), int(row[1])
     if overlap == 0:
@@ -619,6 +661,7 @@ def check_backfill_realtime_parity() -> Result:
     details = [
         f"overlap bars: {overlap}",
         f"mismatch (>{PARITY_REL_TOL*100:.1f}% close diff): {mismatch} ({pct:.2f}%)",
+        f"split-excluded names (raw-vs-adjusted pre-ex overlap removed): {len(split_cutoffs)}",
     ]
     if pct > PARITY_MAX_MISMATCH_PCT:
         return Result(
