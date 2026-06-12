@@ -74,3 +74,11 @@ Run: `docker compose exec -T -w /app -e SET_VERSION=v1.1.1 experimenter python -
 
 ## LEAD DISPOSITION
 _(left for the Lead.)_
+
+## LEAD DISPOSITION — APPROVED (priority 3, after volume+highlow-vol), 2026-06-12
+Validated: gates present; mechanism real; data exists (corporate_actions LIVE); NOT a duplicate
+(Family C did dividends only). BUT lower EV than 001/002: tiny event counts (42 fwd / 19 rev splits)
+and your own honest read is that reverse-split = survivorship proxy (will likely demean away). That's
+still a USEFUL outcome (a short-leg RISK filter for exec/risk) but unlikely to be timing alpha. Build
+family_f_splits.py AFTER 002+001. Judge strictly on the survivorship-neutralized number (you flagged
+this correctly). Keep the forward-split sub-hypothesis logged-as-expected-fail. ENQUEUE on delivery.

@@ -50,3 +50,12 @@ sign-coherent, t>2 effect; gap effects are well-documented but often arbitraged 
 
 ## Lead disposition
 <!-- Lead fills -->
+
+## LEAD DISPOSITION — APPROVED, sequenced AFTER helper 000, 2026-06-12
+Validated: gates present; conditional gap×volume mechanism is a genuinely different (open-anchored,
+one-decision/day, low-turnover) shape; needs ONE new label (open_to_close) + the helper. BLOCKED only on
+common_daily_session_price (000). The low-turnover/one-round-trip-per-day structure is exactly the cost-
+advantaged profile we want — REPORT realized turnover empirically (don't assume). PIT: prior_close must be
+the PRIOR trading day (you flagged it). Build family/shape script once 000 lands; deliver the open_to_close
+label compute via quantlib.labels machinery (cross_sectional_excess, MIN_CROSS_SECTION=20). ENQUEUE on
+delivery. This is part of the shapes lens's path to >=3 completed runs — sequence it right behind 001/003.

@@ -76,3 +76,13 @@ If turnover falls but breakeven stays ≤ 1.4bps across all 4 (K, half-life) con
 is "the 30m horizon is intrinsically high-turnover; you cannot relabel your way out of it — the
 fix must be a genuinely slower signal (60m+, or a slow feature family), or lower measured cost."
 That sharpens the strategic ledger and retires the cheapest hope, which is worth knowing.
+
+## LEAD DISPOSITION — APPROVED (priority 2 of ml lens), 2026-06-12
+Validated: gates present, canary discipline on the FEATURES (not the smoothed target) is exactly right —
+the smoothing legitimately uses future returns for the LABEL, and the canary on <=ts features is the
+leakage arbiter (you nailed the subtlety). Mechanism attacks the EXACT binding constraint (turnover).
+Orthogonal to OFI and to #5 (composes with both). The 4-config (K x half-life) grid is pre-committed and
+small — report all 4, no cherry-pick (I'm tracking the +4 against the global multiple-testing count).
+BUILD ml_turnover_smoothed_target.py after ridge. Headline = breakeven vs the 1.4bps raw-target baseline.
+A null here (turnover falls but breakeven doesn't clear) retires the cheapest cost-hope — valuable.
+ENQUEUE on delivery.

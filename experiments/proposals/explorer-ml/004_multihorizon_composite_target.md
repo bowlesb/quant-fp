@@ -75,3 +75,12 @@ nothing the pure horizons don't already offer — the horizons are economically 
 and the "fixed 30m is off-resonance" hypothesis is FALSE (the resonance problem is cost, not
 horizon choice). That cleanly retires multi-horizon target-blending as a lever and re-focuses
 on OFI (refine the signal) + measured cost (#5). Honest null, ledger-sharpening.
+
+## LEAD DISPOSITION — APPROVED (priority 3 of ml lens), 2026-06-12
+Validated: gates present; dual-cadence evaluation + inner-join-no-impute is clean; distinct mechanism
+from 002 (co-train on two validated horizons vs smooth one horizon's forward path). Lower priority than
+001/002 only because it's more moving parts and partly overlaps 002's turnover goal — but the "is 30m
+off-resonance with our cost structure" question is genuinely separate and worth one clean test. BUILD
+ml_multihorizon_composite.py after ridge + smoothed-target. Report BOTH cadences (your spec). A null
+(composite 60m-cadence breakeven <= both baselines) retires horizon-blending — ledger-sharpening.
+ENQUEUE on delivery. (+ this adds to the global count; 001+002+004 = the ml lens's >=3 for the Monday bar.)

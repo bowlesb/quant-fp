@@ -1559,6 +1559,17 @@
     "set_version": "v1.1.1"
   },
   {
+    "id": "W11_pair_mom_5d_rel_mom_10d_rel_fwd_30m",
+    "hypothesis": "Momentum term-structure: mom_5d_rel+mom_10d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": [
+      "mom_5d_rel",
+      "mom_10d_rel"
+    ],
+    "set_version": "v1.1.1"
+  },
+  {
     "id": "W12_solo_vwap_dev_fwd_30m",
     "hypothesis": "RECOVER poisoned C11_solo_vwap_dev (OOM-locks error permanently skipped). Standalone within-ts IC of vwap_dev at fwd_30m \u2014 the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution.",
     "horizon": "fwd_30m",
@@ -1677,15 +1688,28 @@
     "set_version": "v1.1.1"
   },
   {
-    "id": "W11_pair_mom_5d_rel_mom_10d_rel_fwd_30m",
-    "hypothesis": "Momentum term-structure: mom_5d_rel+mom_10d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal?",
+    "id": "ML003_ret5m_only_30m",
     "horizon": "fwd_30m",
     "label": "raw",
-    "features": [
-      "mom_5d_rel",
-      "mom_10d_rel"
-    ],
-    "set_version": "v1.1.1"
+    "features": "keep:ret_5m",
+    "set_version": "v1.1.1",
+    "hypothesis": "explorer-ml 003 (Lead-approved): ret_5m-only breakeven/turnover baseline for the pos-vs-ret5m economic comparison."
+  },
+  {
+    "id": "ML003_pos_only_30m",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "keep:vwap_dev,range_pct,gap_from_open",
+    "set_version": "v1.1.1",
+    "hypothesis": "explorer-ml 003 (Lead-approved): pos-only \u2014 is the position group a LOWER-turnover, HIGHER-breakeven carrier than ret_5m? Headline = pos-only breakeven vs ret_5m-only; does pos clear 1.4bps?"
+  },
+  {
+    "id": "ML003_ret5m_pos_30m",
+    "horizon": "fwd_30m",
+    "label": "raw",
+    "features": "keep:ret_5m,vwap_dev,range_pct,gap_from_open",
+    "set_version": "v1.1.1",
+    "hypothesis": "explorer-ml 003 (Lead-approved): ret_5m+pos combined \u2014 IC lift vs turnover cost; breakeven between the two legs?"
   },
   {
     "id": "W11_pair_mom_5d_rel_mom_10d_rel_overnight",

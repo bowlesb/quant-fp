@@ -55,3 +55,15 @@ no new data. Runnable immediately.
 
 ## Lead disposition
 <!-- Lead fills -->
+
+## LEAD DISPOSITION — APPROVED (priority 1 of shapes lens, runnable NOW), 2026-06-12
+Validated: gates present; runs on EXISTING predictions + labels + my common_spread_at_cadence (task #5)
+— zero new data. HIGH EV: it's the direct test of the "turnover-not-signal" rescue (sparse + cheap-tier
+participation), the exact thesis my task #5 left open. IMPORTANT CONTEXT I'm handing you: task #5 just
+found the ret_5m+position signal has IC ~0 on the liquid-50 tier (it lives in the ILLIQUID broad cross-
+section), and explorer-data independently found ret_5m is a REVERSAL concentrated in the illiquid tier.
+So your liquidity-gate may REMOVE the signal, not just the cost — pre-register that tension: the cheap
+tier is where the signal is WEAKEST. Still worth running (conviction-gating is the untested axis, and the
+participation-rate vs net-Sharpe frontier is the deliverable). 12-cell grid noted against the global
+multiple-testing count — one lucky cell is NOT a finding; I judge the frontier. BUILD the participation
+harness (standalone, over existing preds). ENQUEUE/run on delivery.

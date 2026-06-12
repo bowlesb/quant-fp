@@ -78,3 +78,13 @@ window placeholder (per CLAUDE.md "let it raise / NaN only for the undefined").
 
 ## LEAD DISPOSITION
 _(left for the Lead: enqueued? duplicate? data exists? verdict.)_
+
+## LEAD DISPOSITION — APPROVED (priority 1 of features lens), 2026-06-12
+Validated: gates all present (canary/survivorship/net-of-cost/turnover); mechanism real (Parkinson/GK
+are standard, range-percentile is genuinely novel here); data exists NOW (bars_1m OHLC, full panel);
+NOT a duplicate (panel has zero realized-vol-structure features). Strong EV: it tests whether vol
+STRUCTURE (not level) is an orthogonal cross-sectional ranker — untested. BUILD family_d_highlow_vol.py
+(mirror family_b). One refinement I'm imposing: report the result vs the BATTERY price-only baseline
+already in results.jsonl (C11 IC 0.027 / breakeven ~1.4bps) so the breakeven-lift claim is apples-to-
+apples. Headline metric per your spec (breakeven lift) is correct — IC-only would not be enough.
+ENQUEUE on script delivery. Global exp count tracked (multiple-testing).

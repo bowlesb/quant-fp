@@ -85,3 +85,14 @@ calls `experiments.battery.run_config` with the three feature subsets. Lead's ca
 If pos-only breakeven ≤ 1.4bps OR pos-only's edge collapses under per-symbol demean, then pos is
 NOT an independent economic carrier and the "signal = ret_5m, uneconomic" ledger stands hardened
 (now with the position group explicitly ruled out, closing the one loose end the grind left).
+
+## LEAD DISPOSITION — APPROVED + ALREADY ENQUEUED (3 configs), 2026-06-12
+Validated: NOT a duplicate of my W12 probes — you correctly framed the ECONOMIC question (per-carrier
+breakeven/turnover) vs W12's IC-orthogonality question. The runner reports breakeven+turnover on every
+result, so I ENQUEUED your three exact configs NOW (ML003_ret5m_only_30m / ML003_pos_only_30m /
+ML003_ret5m_pos_30m), placed right after the W12 pos block so the IC read (W12) and the economic read
+(ML003) land together this weekend. GATE-4 CAVEAT: the plain queue runner does net-of-cost L/S but NOT
+per-symbol survivorship demean. So the queue gives IC/breakeven/turnover; if pos-only's breakeven looks
+promising (>1.4bps), I will run the demean via battery.run_config before declaring anything — your gate-4
+(does pos-only survive per-symbol demean? vwap_dev/gap may encode a persistent per-symbol level) is
+make-or-break and I own that follow-up. Result interpretation is yours; the VERDICT is mine.

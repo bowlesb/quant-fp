@@ -50,3 +50,11 @@ folklore-popular but well-arbitraged in liquid names and notoriously cost-sensit
 
 ## Lead disposition
 <!-- Lead fills -->
+
+## LEAD DISPOSITION — APPROVED, sequenced AFTER helper 000 (lower priority), 2026-06-12
+Validated: gates present; genuinely different AXIS (single-name time-series vs cross-sectional rank) —
+valuable for diversity even at a low prior (~30%, ORB is folklore-popular and well-arbitraged in liquid
+names, cost-sensitive). Needs helper 000 + the ten_to_close label. Build after 002 (both share the helper
++ open-anchored label machinery, so do them together once 000 lands). Long-only up-break variant to dodge
+short-underfill is the right call. REPORT realized turnover + the break-cohort size honestly. ENQUEUE on
+delivery. Contributes shape-diversity to the Monday deliverable.

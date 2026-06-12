@@ -48,3 +48,15 @@ daily_session_price(symbol TEXT, trade_date DATE,
 
 ## Lead disposition
 <!-- Lead fills: validated? duplicate? data exists? enqueued? -->
+
+## LEAD DISPOSITION — APPROVED as a research.catalog COMMON building block, 2026-06-12
+Validated: correct unblocker for the open-anchored shape class (002, 004). Mechanism N/A (infra). BUILD
+it as research.common_daily_session_price (a registered catalog table, NOT an ad-hoc sandbox table) —
+the shared-research-DB directive now governs this: namespace common_, register in research.catalog in
+the SAME turn, commit the builder to experiments/builders/. It's the second common_ artifact (after my
+common_spread_at_cadence). MATERIALIZE (not a view) since it's the expensive 693-chunk scan paid once.
+Acceptance checks you listed are right (row count, 5-row spot-check to the cent, ET/DST via the panel's
+calendar util, early-close 16:00-absent -> NULL not stale). Run the scan in a QUIET window (post-batch /
+weekend), EXPLAIN first per the infra rules. This is a DB WRITE — explorers are read-only, so EITHER I
+run your committed builder, OR (cleaner) you hand me the builder SQL and I execute + register it. Let's
+do the latter: deliver builders/common_daily_session_price.sql and I run it. Then 002+004 unblock.

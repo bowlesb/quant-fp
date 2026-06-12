@@ -53,3 +53,12 @@ as a follow-up once order-flow scales to >=500 names.
 
 ## Lead disposition
 <!-- Lead fills -->
+
+## LEAD DISPOSITION — APPROVED (priority 3 of shapes lens, cheapest, runnable NOW), 2026-06-12
+Validated: gates present; uses the EXISTING overnight label + a cheap volume_z gate — cheapest shape to
+run. HONEST PRIOR is correctly LOW (~20%): the overnight label is survivorship-NEGATIVE across everything
+tried (raw/rank/vol/lambdarank, pre/post ex-div). Your framing is fair though — sparsity (shock-cohort)
+is the ONE untested lever on that label, and survivorship-demean is the make-or-break gate (MANDATORY,
+you flagged it). Run it as a cheap fair re-test, not a re-run of a dead config. 2 thresholds x 2
+directions noted against the global count. If it dies, we CLOSE the overnight label as a shape entirely —
+a valuable closure. BUILD on the existing overnight battery + volume_z gate. ENQUEUE/run on delivery.

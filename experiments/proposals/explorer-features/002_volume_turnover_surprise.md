@@ -78,3 +78,12 @@ full breadth, it both stands alone AND de-risks the OFI thesis.
 
 ## LEAD DISPOSITION
 _(left for the Lead.)_
+
+## LEAD DISPOSITION — APPROVED (priority 1, tied — build FIRST), 2026-06-12
+Validated: gates present; mechanism canonical (volume->vol->return lead-lag); data exists NOW (bar
+volume+vwap, FULL ~715-name breadth); NOT a duplicate (the single most glaring panel hole — no volume
+feature exists). This is the highest-prior features proposal: wide cross-section, zero collection,
+fully orthogonal by construction, and a clean complement to the narrow OFI bet (de-risks it). BUILD
+family_e_volume.py FIRST. Same imposed refinement: compare to the C11 battery baseline. The
+same-time-of-day volume baseline (removing the U-shape) is exactly right — guards against it being a
+calendar feature in disguise. ENQUEUE on delivery.

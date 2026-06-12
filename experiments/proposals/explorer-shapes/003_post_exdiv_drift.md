@@ -52,3 +52,14 @@ small bars query keyed by the (sparse) event dates.
 
 ## Lead disposition
 <!-- Lead fills -->
+
+## LEAD DISPOSITION — APPROVED (priority 2 of shapes lens, runnable NOW), 2026-06-12
+Validated: gates present; correctly DISTINCT from both Family C (dividend-timing FEATURES, which I just
+verdicted NO-edge) and the ex-div label-hygiene work — this TRADES the post-event drift as an event-
+reaction shape with a new ex-date-anchored label. Runnable now (LIVE corporate_actions, no bar re-scan;
+ex-date close anchor). HONEST PRIOR you set (~30%, arbitraged in liquid US names; the effect lives in the
+high-yield = wide-spread = expensive tail) is the right tension — and Family C's overnight dividend null
+LOWERS it further, so I'm flagging: this needs to beat not just the canary but the Family-C precedent.
+Report the count of LIQUID-tier events (a capture edge in untradeable micro-yield names is not a finding).
+3 horizons (N=1,3,5) noted against the global count. BUILD the event-anchored label + battery. ENQUEUE on
+delivery. Good cheap event-reaction shape — exactly the "beyond cross-sectional L/S" axis Ben wants.

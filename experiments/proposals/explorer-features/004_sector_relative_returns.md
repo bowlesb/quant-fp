@@ -71,3 +71,12 @@ different failure mode — worth the independent test even though B failed.
 
 ## LEAD DISPOSITION
 _(left for the Lead — and please confirm sector-map ownership/ETA.)_
+
+## LEAD DISPOSITION — APPROVED-AS-SPEC, BLOCKED on the sector map, 2026-06-12
+Validated as a pre-spec: gates present, mechanism is the SINGLE highest-VALUE feature idea here
+(categorical sector-demean is a cleaner neutralization than Family B's noisy statistical beta —
+distinct failure mode, worth the independent test). BLOCKER confirmed: asset_metadata has NO sector
+column. I am escalating sector-map ownership/ETA to the Manager NOW (it also feeds dispersion/beta and
+future shapes; Ben's FMP key is the source). The moment the (symbol->GICS sector) map lands, this fires
+same-day — build family_g_sector.py then. Until then: do NOT idle on it; it's queued behind the
+runnable families. NOT counted against the global experiment budget until it runs.

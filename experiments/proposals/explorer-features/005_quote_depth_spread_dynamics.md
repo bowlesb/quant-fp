@@ -75,3 +75,13 @@ testing both isolates which side of the book carries the short-horizon signal at
 
 ## LEAD DISPOSITION
 _(left for the Lead.)_
+
+## LEAD DISPOSITION — APPROVED-AS-SPEC, BLOCKED on M2 scale + accrual, 2026-06-12
+Validated as pre-spec: gates present, mechanism strong, and it correctly attacks the cost wall from
+the EX-ANTE side (the model down-weights expensive names) — the complement to my task #5 ex-post cost
+measurement. Distinct from OFI (quote/resting-liquidity side vs trade side). BLOCKER confirmed: quote_agg
+is 50 names / 3 days (noise). Fires when: quote_agg scaled >=500 (Monday) + >=10 days accrued + at-scale
+QUOTE parity proven (separate from the trade-agg OFI proof — flag to QA that quote parity is unproven).
+The >=15:50 ET close exclusion you inherited is correct and binding. Build family_h_quotes.py when data
+accrues. Your prior ("cost conditioner, not standalone alpha") matches the advisor's — test it as exactly
+that. NOT counted against budget until it runs.

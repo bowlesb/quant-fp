@@ -78,3 +78,14 @@ If ridge IC < 0.020 AND breakeven ≤ 1.4bps AND coefs just re-confirm ret_5m do
 momentum near-zero, the finding is "GBM is fine, momentum really is dead, linear buys nothing"
 — a clean, valuable NULL that hardens the OFI/cost thesis. Honest either way; this is a
 floor-setting experiment whose null is as useful as its hit.
+
+## LEAD DISPOSITION — APPROVED (priority 1 of ml lens, build FIRST), 2026-06-12
+Validated: gates byte-identical to the battery (good); data exists; NOT a duplicate (zero linear results
+exist — a real P3 gap). LOAD-BEARING for honesty: every "momentum is dead / signal is ret_5m" finding is
+a GBM gain-attribution claim; a ridge with additive coefficients is the independent check that it's not a
+model artifact. Three outcomes all valuable (ridge matches=signal is linear, GBM nonlinearity buys
+nothing; ridge beats net-of-cost=smoother preds=lower turnover=the cost lever; ridge differs on
+momentum=overturns a standing finding). DEPENDENCY: confirm scikit-learn in the experimenter image — if
+absent, use the numpy closed-form ridge ((XtX+aI)^-1 Xty), NO new dep, so this never blocks on packaging.
+Fold-local scaler + median-impute (you specified this — critical for a clean canary). BUILD
+ml_ridge_baseline.py FIRST. ENQUEUE/run on delivery.
