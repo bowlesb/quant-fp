@@ -1749,7 +1749,7 @@ PRE-REGISTERED PREDICTIONS (falsifiable):
 
 Battery script to build when data lands: experiments/ofi_marginal_battery.py (mirror battery.py
 gates; report IC(A), IC(B), IC(C), the B-A delta, canary on each, net-of-cost at the measured
-liquid-tier cost from research.common_spread_at_cadence, survivorship demean).
+liquid-tier cost from research.common_spreads_at_cadence, survivorship demean).
 | 2026-06-12T22:20:32+00:00 | W11_pair_mom_3d_rel_mom_5d_rel_fwd_30m | fwd_30m | raw | 2 | 4840765 | -0.00372 | -2.73 | -1e-05 | Momentum term-structure: mom_3d_rel+mom_5d_rel at fwd_30m. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
 | 2026-06-12T22:21:05+00:00 | W11_pair_mom_3d_rel_mom_5d_rel_overnight | overnight | raw | 2 | 428024 | 0.00587 | 1.357 | -0.0035 | Momentum term-structure: mom_3d_rel+mom_5d_rel at overnight. Does combining adjacent lookbacks (short vs long momentum spread) add signal? |
 
@@ -1768,7 +1768,7 @@ Tasks closed/advanced: #5 cost-by-liquidity (DONE, verdict above), #2 standing e
    cost. DEFINITIVELY redirects to OFI. random50 control confirms part liquidity-specific.
 5. OFI: curiosity read (faint -0.05 reversal, 3d, gates nothing) + marginal-IC-over-ret_5m battery
    PRE-REGISTERED (PRIMARY "OFI beats proxy" ~45%, deliberately not optimistic).
-6. SHARED CATALOG: research.common_spread_at_cadence (first catalog entry) — half-spread@cadence view.
+6. SHARED CATALOG: research.common_spreads_at_cadence (first catalog entry) — half-spread@cadence view.
 
 WHERE THE EDGE HUNT STANDS (the honest fork): the whole thesis now rests on ONE coin-flip — does
 OFI's marginal IC over ret_5m clear the canary AND lift breakeven ~1-2bps (the bar task #5 set). If
@@ -1811,5 +1811,6 @@ price (NO — task #5); + the standing price-panel nulls. PROMISING-LEADS so far
 state is the whole thesis rests on OFI's marginal IC over ret_5m (data not yet deep enough). The explorer
 families are the diversification against an OFI null.
 
-SHARED-DB: research.catalog live; common_spread_at_cadence registered (mine, first entry). Explorers are
+SHARED-DB: research.catalog live; common_spreads_at_cadence registered (mine, first entry). Explorers are
 read-only -> they deliver builder SQL, I EXPLAIN+run+register. NEXT: synthesis at the period boundary.
+| 2026-06-12T22:27:43+00:00 | W11_int_mom_x_vol_fwd_30m | fwd_30m | raw | 7 | 4840765 | -0.00453 | -2.728 | 0.0007 | Interaction probe: mom_x_vol (7 feats) at fwd_30m. GBM can split on the cross-term — does conditioning sharpen IC vs either group alone? |

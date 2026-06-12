@@ -1,4 +1,4 @@
--- research.common_spread_at_cadence — measured half-spread at trading-cadence timestamps.
+-- research.common_spreads_at_cadence — measured half-spread at trading-cadence timestamps.
 --
 -- Owner: modeller. A shared `common_` building block: per (symbol, ts) half-spread in bps at the
 -- RTH 30-min cadence marks, from the live quote_agg_1m feed. Feeds cost-by-liquidity gating
@@ -13,7 +13,7 @@
 --
 -- Refresh policy: live view (no materialization) — always reflects current quote_agg_1m.
 
-CREATE OR REPLACE VIEW research.common_spread_at_cadence AS
+CREATE OR REPLACE VIEW research.common_spreads_at_cadence AS
 SELECT
     symbol,
     ts,
@@ -31,13 +31,13 @@ WHERE median_spread_bps IS NOT NULL
 INSERT INTO research.catalog
     (table_name, owner_agent, purpose, builder_script, source_tables, pit_notes, refresh_policy, status)
 VALUES (
-    'common_spread_at_cadence',
+    'common_spreads_at_cadence',
     'modeller',
     'Per-(symbol,ts) half-spread (bps) at RTH 30-min cadence marks — measured one-way trading '
         'cost for cost-by-liquidity gating, OFI cost modeling, and execution fill-prob calibration. '
         'Key Phase-1 finding (task #5): 11/50 liquid equities clear the 1.4bps breakeven; the '
         'ret_5m+position signal is ABSENT on the liquid-50 tier (IC -0.0035 vs +0.023 full panel).',
-    'experiments/builders/common_spread_at_cadence.sql',
+    'experiments/builders/common_spreads_at_cadence.sql',
     ARRAY['public.quote_agg_1m'],
     'half_spread_bps = median_spread_bps/2 of each minute''s own quote aggregate; RTH 10:00-15:30 ET '
         'cadence marks only (excludes auction spread blow-ups). No lookahead — per-minute, self-contained.',
