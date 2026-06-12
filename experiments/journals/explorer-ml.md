@@ -126,3 +126,31 @@ NOTE on smoke economics: like the GBM, ridge is net-negative / breakeven <1.4bps
 QA: ruff clean, black formatted, py_compile OK. mypy's only gripe is the psycopg stub (host-only,
 hits every experiment script identically — not a real error). Committed; handed to Lead to enqueue
 full-depth. NEXT: build 002 (turnover-smoothed target).
+
+---
+
+## 2026-06-12 — Wake 1 cont: 002 + 004 BUILT (smoke pending container)
+
+### 002 built: experiments/ml_turnover_smoothed_target.py
+Target = per-symbol FORWARD EWMA of the raw fwd_30m label over the next K IN-DAY cadence rows
+(window truncated at the day boundary so an intraday target never averages across an overnight
+gap). label="raw" path => transform_label is identity, so collect_oos trains the GBM on my
+pre-smoothed array while the realized series stays raw y — reuses the battery GBM fold loop +
+all 4 gates byte-for-byte. Canary shuffles RAW y (features-only leakage arbiter; the smoothed
+target legitimately uses future returns, but the FEATURES must stay clean). Grid (k,hl) =
+(2,1),(3,1),(3,2),(5,2) + a k=1 baseline that is provably == raw (weights=[1.0]). HEADLINE =
+does any smoothed config lift breakeven above the raw ~1.4bps by cutting turnover faster than
+gross falls.
+
+### 004 built: experiments/ml_multihorizon_composite.py
+Loads BOTH fwd_30m + fwd_60m panels, inner-joins on (symbol, ts) (drops rows missing either
+horizon — never fabricates a label), target = within_ts_zscore(y30) + within_ts_zscore(y60)
+(scale-fair blend). Trains GBM on the composite; grades IC vs BOTH raw horizons and runs the L/S
+at BOTH 30m and 60m cadences; per-symbol-demean at each. Purges with the LONGER horizon (60m).
+Reference runs pure_30m + pure_60m on the SAME joined panel for a fair comparison. Canary shuffles
+raw y30. HEADLINE = composite breakeven at 60m cadence vs 30m-native ~1.4bps AND vs pure_60m.
+
+Both lint clean (ruff+black), compile OK. Smoke validation pending — the experimenter container
+runs one heavy job at a time, so I'm serializing: 002 smoke first (5 GBM configs x 2 walk-forwards
+on ~1M rows = slow), then 004. Will commit each once its smoke proves the harness end-to-end +
+canary clean, then hand the full-depth runs to the Lead to enqueue.
