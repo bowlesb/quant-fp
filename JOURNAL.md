@@ -750,3 +750,13 @@ test. TWO M2 gates found BEFORE sharding spend: (a) close-hour collapse (16:00 w
 exclusion for OFI features (their lane), Prod implements in shared featurestore, QA
 verifies it binds; (b) 12,802 stream-only minutes coverage mismatch -> Prod explains.
 #14/#15 stay in_progress (fix-handoff / standing scale-tracking proof).
+
+## 2026-06-12 (pre-open 6) — Manager: KLAC verdict — panel CLEAN (verified); live basket exclusion ordered
+Prod verified Option (c): v1.1.1 NOT poisoned — all 1,540,340 rows source='historical'
+(backfill bars; FEATURE_BAR_SOURCE=backfill for features AND labels); KLAC backfill
+closes correct (~224), the 10x lives only in stream bars. Go-signal unblocked.
+LIVE-path residual risk (model-server computes live features from STREAM bars): uniform
+10x cancels in ratio features, but any non-uniform bar => garbage score in the ranking.
+Manager directive to Exec/Risk: EXCLUDE KLAC from today's live basket (cost ~0 at 3L/3S),
+removal condition = Prod's ingestion fix live + QA parity shows KLAC stream==backfill;
+logged in EXECUTION.md; siblings from the Nx sweep get same treatment.
