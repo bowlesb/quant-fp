@@ -217,8 +217,28 @@ Built the measured cost curve the cost-gate battery only ASSUMED (cost_bps_onewa
   ratio 10.0000; no other symbol with ≥30 overlap bars deviates >10%; sub-1% canonical-close
   offsets deliberately don't qualify — they don't corrupt scores). => denylist is COMPLETE for the
   open; no additions needed.
+  ROOT CAUSE (Alpaca Corporate Actions API, ground truth): NOT a feed bug — KLAC has a REAL 10:1
+  forward split with ex_date = 2026-06-12. The "10×" was the split landing mid-backfill (pre-
+  announcement months fetched raw, post-announcement adjusted) → stream and backfill were each
+  internally right but the backfill SERIES is mixed-basis. EXEC NUANCE — do NOT pull the denylist
+  on a superficial self-resolve: the live SPOT price realigns at the open (stream → post-split
+  ~243), but the model's multi-bar features (mom_1d, gap_from_open, vwap_dev…) span the split
+  boundary in the mixed-basis daily series, so KLAC's SCORE stays corrupt until prod's #17 series
+  re-fetch on a consistent basis. Removal stays gated on QA parity (stream==backfill across the
+  SERIES), not on the 09:30 spot looking right.
 
 ## Standing future items (open exec work, by gating milestone)
+- **[gated on prod CA feed #18] Automatic "ex-date today → exclude from basket" guard in
+  candidate_pool.** HAZARD CLASS (generalized from KLAC 6/12): any name with a corporate-action
+  ex-date TODAY (forward/reverse split, large special dividend, spinoff) can present MIXED-BASIS
+  features at the open — the live spot price is on the new basis while multi-bar lookback features
+  span the adjustment boundary on the old basis → a garbage cross-sectional score that can pull
+  the name into the basket on artifact. Today this is handled by the MANUAL `SYMBOL_DENYLIST`,
+  which only works if a human spots the ex-date pre-open — not scalable/safe. Fix: once prod wires
+  the Alpaca Corporate Actions feed (#18) into the DB, add a candidate_pool filter that excludes
+  any symbol with an ex_date within the feature lookback window (≈ longest multi-bar feature
+  horizon, not just same-day) until its series is verified consistent. Until #18 lands, the manual
+  denylist + watching the CA calendar is the mitigation. Worth doing right after #18; not blocking M1.
 - **[M4/M5 — mandatory before real money] Settled-day reconciliation vs broker statements.**
   Paper has no statements to reconcile against, so this can't be exercised now — but the muscle
   (fills + realized P&L + borrow fees vs the broker's official daily statement, T+1 settled) is
