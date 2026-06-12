@@ -38,9 +38,12 @@ leveraged funds; the price-only "no edge" verdict is therefore suspect.
       invariant `universe_is_equities_only` green in the QA suite & CI). ✅ 2026-06-12:
       614 dates / 455,881 members / 0 violations; invariant FAILED on dirty fixture, PASSES
       0/1000 clean; independent `universe_no_known_funds` (5,284-name frozen denylist) also green.
-- [ ] Clean equity panel rebuilt over the full ~600-day history, PIT-correct — **~715
+- [x] Clean equity panel rebuilt over the full ~600-day history, PIT-correct — **~715
       equities/date** (~715-742 range, ~742 avg) as set_version **v1.1.1** (labels
-      recomputed too, DELETE-then-insert).
+      recomputed too, DELETE-then-insert). ✅ 2026-06-12: 5,525,040 rows / 613 dates /
+      785 symbols / 2024-01-02→2026-06-11; NaN 0.000% on all 21 features; labels fwd_30m
+      4.84M + fwd_60m 4.42M (613d) + overnight 428K (600d, ~2% month-boundary gaps);
+      computed_at acceptance gate passed.
       (CORRECTED 2026-06-12: an earlier "~885 with ~160 un-crowded equities" reading came
       from a stale-image rebuild that ran pre-fix code; contamination was purely ADDITIVE
       ETFs — old ~933/date ≈ ~210 funds + ~723 equities. Note: v1.1.0 feature rows stay
@@ -91,12 +94,12 @@ but only covers ~50 names.
 ---
 
 ## Current focus (the Manager updates this line every wake)
-**Driving toward M1 — criteria 1 & 4 GREEN (2026-06-12); 2 in flight; 3 armed.** Clean universe
-rebuilt+verified (0 funds, ~715-742 equities/date); QA suite automated (9/10 green; bar-parity
-1.14% deliberately RED under drill, task #14). NOW: v1.1.1 panel+label rebuild grinding (ETA
-~2-2.5h) → Modeller's one-command battery re-run fires on landing. Then: bar-parity drill (#14),
-settled-day trade-agg parity at current 52 names (#15, gates M2 sharding investment), stale-image
-structural fix (#11). M2 proceeds in parallel as throughput allows.
+**Driving toward M1 — criteria 1, 2 & 4 GREEN (2026-06-12); the milestone hinges on #3 (battery
+verdict), RUNNING NOW.** Clean v1.1.1 panel landed (5.5M rows / 613 dates / 0.000% NaN); Modeller's
+4-gate battery is re-validating the price-only verdict on it. Parallel: #13 UTC/ET scheduler fix,
+KLAC root-cause (read-only until post-close ingestor batch), #11 staging. Post-battery: #12
+backfill (pre-approved, DB-heavy), #14 full-depth parity drill, #15 first full-50-name settled-day
+proof (6/12 session, protected by no-RTH-restart constraint).
 
 ---
 

@@ -817,3 +817,14 @@ candidate day). Post-close batch: #11 ingestor-touching work + the ONE restart n
 to pick up clean bar-subscription membership (currently still the contaminated 1000-name
 list from its 6/11 startup — harmless: ETF bars stored, unused by trading/universe).
 M2 sharding design gains the live COVERAGE invariant (streamed==subscribed, alarmed).
+
+## 2026-06-12 — Manager: M1 criterion #2 GREEN — clean panel LANDED; battery running
+Prod task #2 DONE-VERIFIED: v1.1.1 = 5,525,040 rows / 613 dates / 785 symbols /
+2024-01-02->2026-06-11, breadth ~742/date, NaN 0.000% on all 21 features. Labels:
+fwd_30m 4.84M + fwd_60m 4.42M (613d) + overnight 428K (600d; ~2% month-boundary gaps,
+patch offered to Modeller). computed_at gate PASSED. Two rebuild bugs fixed en route
+(612-chunk lock OOM; docker-run stdin theft). Modeller GO'd directly by Prod — battery
+(#4) now running on the clean panel. M1: #1/#2/#4(criteria) GREEN; hinges on the verdict.
+Prod queue approved as sequenced: #13 now (scheduler-only), KLAC root-cause read-only
+(fix deferred to post-close ingestor batch), #11 staging, #12 held until battery
+completes (DB contention). Constraint intact: no ingestor restart during RTH.
