@@ -174,6 +174,9 @@ services:
       - ./STATE.md:/docs/STATE.md:ro
       - ./JOURNAL.md:/docs/JOURNAL.md:ro
       - ./ARCHITECTURE.md:/docs/ARCHITECTURE.md:ro
+      # 8-hour progress reports rendered by the /progress page. Dir mount (not a
+      # rebuild) so a new report .md is served immediately — content, not code.
+      - ./docs/progress:/docs/progress:ro
     depends_on:
       timescaledb:
         condition: service_healthy

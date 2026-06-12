@@ -5,7 +5,9 @@ STATE.md / JOURNAL.md) and live system health queried directly from TimescaleDB.
 Read-only: no secrets, no controls. Ben checks it in a browser; Claude reads
 /status.json or the DB directly in-session.
 """
+import html
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,14 @@ from fastapi.responses import HTMLResponse, JSONResponse
 app = FastAPI(title="Quant Dashboard")
 
 DOCS_DIR = Path("/docs")
+# 8-hour progress reports, one markdown file per period (market/evening/overnight).
+# Mounted read-only; the page renders whatever .md files appear here, no rebuild
+# needed when the Manager drops a new report.
+PROGRESS_DIR = DOCS_DIR / "progress"
+
+# Roadmap/severity tags the Manager uses in reports, e.g. [M2] or [P3]. Highlighted
+# visually so a skim surfaces which milestone each line ladders up to.
+TAG_PATTERN = re.compile(r"\[((?:M|P)\d[\w/]*)\]")
 
 DB_KWARGS = {
     "host": os.environ["DB_HOST"],
@@ -108,9 +118,93 @@ def render_doc(name: str) -> str:
     )
 
 
+def highlight_tags(rendered_html: str) -> str:
+    """Wrap roadmap/severity tags like [M2] / [P3] in a styled chip so they stand
+    out in a skim. Runs on already-escaped rendered HTML, so it only ever inserts
+    our own span markup around the literal bracketed tag text."""
+    return TAG_PATTERN.sub(r'<span class="tag">[\1]</span>', rendered_html)
+
+
+def list_progress_reports() -> list[str]:
+    """Report filenames (e.g. 2026-06-12_market.md), newest-first. The date_period
+    naming sorts chronologically as a string, so reverse-sort is newest-first; ties
+    within a day fall back to file mtime so a same-day re-drop still orders right."""
+    if not PROGRESS_DIR.exists():
+        return []
+    files = [p for p in PROGRESS_DIR.glob("*.md") if p.is_file()]
+    files.sort(key=lambda p: (p.stem, p.stat().st_mtime), reverse=True)
+    return [p.name for p in files]
+
+
+def render_progress_report(name: str) -> str:
+    """Render one progress report's markdown with roadmap tags highlighted. `name`
+    is validated against the directory listing by the caller, so no path traversal."""
+    path = PROGRESS_DIR / name
+    rendered = markdown.markdown(
+        path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"]
+    )
+    return highlight_tags(rendered)
+
+
 @app.get("/status.json")
 def status_json() -> JSONResponse:
     return JSONResponse(collect_metrics())
+
+
+PROGRESS_STYLE = """
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background:#0f1115; color:#d7dce2; }
+  header { background:#171a21; padding:16px 24px; border-bottom:1px solid #262b35; }
+  h1 { font-size:18px; margin:0; }
+  header a { color:#58a6ff; text-decoration:none; font-size:13px; }
+  .layout { display:grid; grid-template-columns:240px 1fr; gap:0; min-height:calc(100vh - 58px); }
+  .sidebar { background:#13161c; border-right:1px solid #262b35; padding:16px; }
+  .sidebar a { display:block; color:#d7dce2; text-decoration:none; padding:8px 10px;
+               border-radius:6px; font-size:13px; margin-bottom:2px; }
+  .sidebar a:hover { background:#1d212a; }
+  .sidebar a.active { background:#1f6feb33; color:#58a6ff; font-weight:600; }
+  .content { padding:24px 32px; max-width:900px; }
+  .doc { font-size:14px; line-height:1.55; }
+  .doc h1 { font-size:20px; border-bottom:1px solid #262b35; padding-bottom:8px; }
+  .doc h2 { font-size:16px; border-bottom:1px solid #262b35; padding-bottom:4px; margin-top:24px; }
+  .doc code { background:#0f1115; padding:1px 4px; border-radius:3px; }
+  .doc pre { background:#0f1115; padding:12px; border-radius:6px; overflow:auto; }
+  .doc table { border-collapse:collapse; font-size:13px; }
+  .doc th,.doc td { text-align:left; padding:6px 8px; border-bottom:1px solid #262b35; }
+  .tag { background:#1f6feb33; color:#58a6ff; padding:0 5px; border-radius:4px;
+         font-size:0.85em; font-weight:600; font-variant-numeric:tabular-nums; }
+  .muted { color:#8b949e; font-size:12px; }
+</style>
+"""
+
+
+@app.get("/progress", response_class=HTMLResponse)
+def progress(report: str | None = None) -> str:
+    reports = list_progress_reports()
+    if not reports:
+        body = "<div class='content'><p class='muted'>No progress reports yet.</p></div>"
+        return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Progress — Quant</title>{PROGRESS_STYLE}</head><body>
+<header><h1>Progress Reports &nbsp; <a href="/">&larr; dashboard</a></h1></header>
+{body}</body></html>"""
+
+    selected = report if report in reports else reports[0]
+    links = "".join(
+        f'<a class="{"active" if name == selected else ""}" '
+        f'href="/progress?report={html.escape(name, quote=True)}">'
+        f'{html.escape(name.removesuffix(".md"))}</a>'
+        for name in reports
+    )
+    doc_html = render_progress_report(selected)
+
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Progress — {html.escape(selected)}</title>{PROGRESS_STYLE}</head><body>
+<header><h1>Progress Reports &nbsp; <a href="/">&larr; dashboard</a></h1>
+<div class="muted">8-hour cadence: market / evening / overnight &middot; newest first</div></header>
+<div class="layout">
+  <nav class="sidebar">{links}</nav>
+  <div class="content doc">{doc_html}</div>
+</div></body></html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -171,7 +265,8 @@ def dashboard() -> str:
   .muted {{ color:#8b949e; font-size:12px; }}
 </style></head>
 <body>
-<header><h1>Quant Trading System &nbsp; {db_badge}</h1>
+<header><h1>Quant Trading System &nbsp; {db_badge} &nbsp;
+<a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
   <div class="grid" style="margin-bottom:24px;">
