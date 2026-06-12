@@ -1382,3 +1382,25 @@ construction off the panel, not at capture. FORWARD v2 (post-pilot, gated on OFI
 landing): "is OFI sector-conditional?" would want sector coverage in the stream — a deliberate expansion,
 NOT the first 500. EXCLUDE QQQ/SPY (ETFs). The current 50 OF equities are all in the top-500 (auto
 continuity). Count: shard-even (480/500/512 all ~0 liquidity difference at that ADV).
+| 2026-06-12T20:56:23+00:00 | W11_grp_mom_fwd_30m_raw | fwd_30m | raw | 8 | 4840765 | -0.00084 | -0.549 | 0.00052 | Feature-group isolation: mom group (8 feats) at fwd_30m raw. Which feature FAMILY carries within-ts signal at each horizon? |
+
+### ★ SHAPE 7 (HORIZON ENSEMBLE) VERDICT — DISCARD: 30m signal carries NO overnight info (2026-06-12)
+
+Fixed the join (15:00 ET last intraday cadence -> overnight label by date) and ran. Result (n=344,160):
+  ENSEMBLE 30m-signal -> OVERNIGHT eval: IC -0.00186, NW t -0.30, canary -0.00109, breakeven 0.61bps,
+  SURV-OUT sharpe -0.67.
+VERDICT = DISCARD. The 30m-trained cross-sectional signal has IC ≈ 0 against the OVERNIGHT return
+(-0.0019, BELOW its own canary -0.0011, t insignificant). So gating the overnight book on the last
+intraday (15:00) signal does NOT help — the 30m signal predicts the next 30m (IC ~0.027) but has ZERO
+predictive power overnight. INFORMATIVE NEGATIVE: the intraday and overnight horizons are genuinely
+ORTHOGONAL prediction problems, not two views of one signal — you can't borrow the (real-but-uneconomic)
+30m signal to rescue the (survivorship-only) overnight book. Rules out the cheapest cross-horizon
+composition. (Reference 30m-on-30m IC reproduced at 0.02698, confirming the model trains correctly; the
+zero is real, not a pipeline artifact.)
+
+WEEKEND SHAPES STATUS: Shape 7 (ensemble) = DISCARD (done). Shapes 1+2 (open-gap, opening-range) =
+DEFERRED pending prod's bars_1m batch (heavy bar-scan; resume on "bars done" ping). So far 2 of the 3
+picked shapes' cheap composition (Shape 7) reads as no-edge — consistent with the broader pattern: the
+price panel and its compositions are exhausted; new DATA (OFI/news/ex-div/sector) is the path. Open-gap
+(Shape 1) is the one with a genuinely NEW label (open-to-close) that might behave differently — it's the
+most interesting remaining cheap shape; run it first when bars are quiet.
