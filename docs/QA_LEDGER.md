@@ -98,6 +98,7 @@ parity-overlap, both being fixed).
 | P1 | preds-degenerate | predictions ~80% within 1bp of 0 → basket was tie-break noise | MITIGATED — executor degeneracy guard added; preds still non-tradeable |
 | P1 | pit-leak | now AUTOMATED (`pit_universe_membership`): the leak is far bigger than the earlier ~14 estimate — **117,047 (symbol,date) feature rows in v1.1.0 are not in-universe members for that date, across 217 symbols of which 209 (96%) are the ETFs.** The panel was built over a current symbol set across all history, not strict PIT membership. Resolves when the clean v1.1.1 panel + history land (tasks #2/#12). | OPEN — gated on active set; will go green when v1.1.1 history is PIT-correct |
 | P2 | view-fanout | training_data 2× horizon fan-out | LOW — trainer filters horizon; harden the view |
+| P2 | suite-too-slow | **The invariant suite no longer completes as a single gate** — full `qa_invariants.py` exceeds 500s on the 5.5M-row v1.1.1 panel (bars_integrity ~50s + no_inf ~23s + calendar ~32s + jump ~77s + the 4 unmeasured heavy scans parity/trade_agg/pit/warmup). A fail-loud suite that's too slow to run defeats its own purpose (the role's core thesis). Per-invariant `--only` works fine; the all-in-one run times out. | OPEN-LOW — split the heavy panel-scans behind a `--fast`/`--full` flag (composition+calendar+values fast-tier for every-wake/CI; parity+pit+warmup full-tier nightly), or push the scans into indexed SQL. Track for M2 when the panel only grows. |
 
 ## Unprovoked creative probes (Ben's directive — log every probe + result, even clean)
 
