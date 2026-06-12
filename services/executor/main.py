@@ -329,22 +329,57 @@ def write_pnl(conn: psycopg.Connection, today: object, state: dict, positions: l
             (today, state["start_equity"], state["equity"], round(unrealized, 2), len(positions)))
 
 
-def reconcile(conn: psycopg.Connection, positions: list, today: object) -> None:
-    """Broker-truth probe with a MEANINGFUL ok: flag UNEXPECTED broker positions (a symbol
-    we didn't submit today) — the dangerous desync. After an EOD flatten the broker is empty
-    so ok stays true; a stray/unintended position trips ok=false."""
+def reconcile(conn: psycopg.Connection, positions: list, orders: list, today: object) -> None:
+    """SYMMETRIC broker-truth probe. The old version only flagged UNEXPECTED broker positions, so
+    it was structurally blind to the other half — submitted-but-unfilled / partial / orphaned-open
+    orders — and reported ok:true all 6/12 while the basket filled 2L/1S of an intended 3L/3S. Now
+    we compare our INTENT (orders_log, terminal-aware via sync) against broker reality both ways:
+      - unexpected: a broker position in a name we didn't submit today (dangerous desync -> ok=false);
+      - rejected: a leg the broker refused (lopsided basket by failure -> ok=false);
+      - partial / unfilled: submitted legs that didn't (fully) fill -> recorded + logged (a
+        fill-quality issue, addressed by the spread-scaled cross; not ok-breaking on its own);
+      - orphaned_open: an OPEN broker order whose coid isn't ours (e.g. a stale prior-day order
+        reserving BP) -> warned + recorded (not ok-breaking, so the EOD flatten's own transient
+        close orders don't flap ok);
+      - basket neutrality: intended vs realized L/S counts, so lopsidedness is visible.
+    The rich detail lets QA's per-day fill_reconciliation invariant assert submitted == filled+accounted."""
     broker = {p.symbol: round(float(p.qty), 4) for p in positions}
     with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT symbol FROM orders_log WHERE intended_at::date=%s "
-                    "AND status='submitted' AND mode=%s", (today, MODE))
-        expected_syms = {row[0] for row in cur.fetchall()}
-        unexpected = sorted(s for s in broker if s not in expected_syms)
-        ok = len(unexpected) == 0
+        cur.execute("SELECT client_order_id, symbol, side, qty, status, COALESCE(filled_qty, 0) "
+                    "FROM orders_log WHERE intended_at::date=%s AND mode=%s AND alpaca_order_id IS NOT NULL",
+                    (today, MODE))
+        rows = cur.fetchall()
+    submitted = [{"coid": coid, "symbol": symbol, "side": side, "qty": float(qty),
+                  "status": status, "filled": float(filled)}
+                 for coid, symbol, side, qty, status, filled in rows]
+    our_coids = {leg["coid"] for leg in submitted}
+    expected_syms = {leg["symbol"] for leg in submitted}
+    unexpected = sorted(symbol for symbol in broker if symbol not in expected_syms)
+    partial = sorted(leg["symbol"] for leg in submitted if 0 < leg["filled"] < leg["qty"])
+    unfilled = sorted(leg["symbol"] for leg in submitted if leg["filled"] == 0)
+    rejected = sorted(leg["symbol"] for leg in submitted if leg["status"] == "rejected")
+    orphaned = sorted(order.symbol for order in orders
+                      if order.status.value not in TERMINAL_ORDER_STATES and order.client_order_id not in our_coids)
+    intended_long = sum(1 for leg in submitted if leg["side"] == "buy")
+    intended_short = sum(1 for leg in submitted if leg["side"] == "sell")
+    filled_long = sum(1 for leg in submitted if leg["side"] == "buy" and leg["filled"] > 0)
+    filled_short = sum(1 for leg in submitted if leg["side"] == "sell" and leg["filled"] > 0)
+    basket_neutral = filled_long == filled_short
+    ok = not unexpected and not rejected
+    detail = {"mode": "dry_run" if DRY_RUN else MODE, "broker": broker, "unexpected": unexpected,
+              "n_submitted": len(submitted), "intended_long": intended_long, "intended_short": intended_short,
+              "filled_long": filled_long, "filled_short": filled_short, "basket_neutral": basket_neutral,
+              "partial": partial, "unfilled": unfilled, "rejected": rejected, "orphaned_open": orphaned}
+    with conn.cursor() as cur:
         cur.execute("INSERT INTO reconciliation_log (ts, ok, detail) VALUES (now(), %s, %s)",
-                    (ok, json.dumps({"mode": "dry_run" if DRY_RUN else MODE,
-                                     "broker": broker, "unexpected": unexpected})))
+                    (ok, json.dumps(detail)))
     if not ok:
-        logger.warning("reconcile DRIFT: unexpected broker positions %s", unexpected)
+        logger.warning("reconcile DRIFT: unexpected=%s rejected=%s", unexpected, rejected)
+    if orphaned:
+        logger.warning("reconcile: ORPHANED open orders (not our intent): %s", orphaned)
+    if submitted and (partial or unfilled or not basket_neutral):
+        logger.info("reconcile: intended %dL/%dS, filled %dL/%dS | partial=%s unfilled=%s",
+                    intended_long, intended_short, filled_long, filled_short, partial, unfilled)
 
 
 def main() -> None:
@@ -364,6 +399,9 @@ def main() -> None:
                 today = now.astimezone(_NY).date()
                 state = ensure_session_state(conn, today)
                 positions = trading.get_all_positions()       # broker truth, fetched once
+                orders = ([] if DRY_RUN else trading.get_orders(GetOrdersRequest(
+                    status=QueryOrderStatus.ALL,
+                    after=datetime.combine(today, dtime.min, tzinfo=_NY), limit=500)))
                 kill_breach = state["equity"] < state["start_equity"] - MAX_DAILY_LOSS
                 in_eod = clock.is_open and (clock.next_close - now).total_seconds() / 60 <= EOD_FLATTEN_MIN
                 stranded = (not clock.is_open) and bool(positions)   # missed-window / overnight catch-up
@@ -384,8 +422,8 @@ def main() -> None:
                         ts = cur.fetchone()[0]
                     if ts and (now - ts).total_seconds() / 60 <= STALENESS_MAX_MIN:
                         submit_basket(conn, ts, today)        # one basket/day
-                reconcile(conn, positions, today)
-                capture_fills(conn, today)
+                sync_orders_and_fills(conn, orders)
+                reconcile(conn, positions, orders, today)
                 write_pnl(conn, today, state, positions)
         except (psycopg.Error, ValueError, KeyError, APIError) as exc:
             logger.error("cycle error: %s", exc)
