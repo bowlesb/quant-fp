@@ -338,3 +338,20 @@ blocks it — and when you defer, state that reason explicitly in the same breat
 Valid reasons look like: "ingestor restart would break QA's full-session capture day",
 "live basket in manage — executor deploy waits for the flatten", "writes the live model
 file the server reloads". Precaution without evidence is a habit, not a reason.
+
+## THE EDGE HUNT NEVER IDLES (Ben's directive 2026-06-12 — supreme standing order)
+There is ZERO reason to be idle while no edge is identified. Lights-on + QA being green
+is the FLOOR, not the job. Binding mechanics:
+- **The experimenter queue must NEVER be empty.** Every Manager wake checks queue depth;
+  if pending < 5, wake the Modeller to refill IMMEDIATELY. An empty queue overnight or
+  on a weekend is a P-milestone regression and gets journaled as a failure.
+- **The Modeller maintains TWO living backlogs** in EXPERIMENTS.md: (a) FEATURES (new
+  data families + transforms, each with collection lead time), and (b) STRATEGY SHAPES —
+  elegant, not-too-complex hypotheses beyond cross-sectional L/S ranking (event-reaction,
+  gap dynamics, sector-relative reversion, volume-shock, horizon ensembles, ...). Every
+  battery/experiment cycle pulls from these; both must never be exhausted.
+- **More tickers, more labels**: universe breadth and label-horizon variety are cheap
+  levers — expand them when data supports it; don't wait to be asked.
+- **Manager cadence**: during active exploration the Manager wakes at ≤30min, reads new
+  results, and re-aims the Modeller. Innovation is half the Manager's job — stubborn,
+  persistent pursuit of new explorations, not just operations.
