@@ -41,17 +41,30 @@ In-sample exploratory split (full universe and liquid-50):
 Walk-forward OOS on the liquid-50, net of the Lead's MEASURED open half-spread (09:30=12.6 / 09:33=7.5 /
 09:35=6.7 / 09:40=6.0 bps half; close exit 2.7bps half):
 
-| regime | OOS dates | gross OOS Sharpe | net @09:30 (RT 15.3bps) | net @09:35 (9.4) | net @09:40 (8.7) | leak canary |
-|---|---|---|---|---|---|---|
-| **low_vol FADE** | 517 | **+3.40** | **+2.62** | **+2.92** | **+2.96** | **−0.72** |
-| high_vol FOLLOW | 522 | −0.95 | −1.45 | −1.25 | −1.23 | — |
+| regime | OOS dates | gross OOS Sharpe | net @09:30 (RT 15.3bps) | net @09:35 (9.4) | net @09:40 (8.7) |
+|---|---|---|---|---|---|
+| **low_vol FADE** | 517 | **+3.40** | **+2.62** | **+2.92** | **+2.96** |
+| high_vol FOLLOW | 522 | −0.95 | −1.45 | −1.25 | −1.23 |
+
+**Leakage canary (20-seed null, corrected — see update below):** shuffling the open_to_close excess
+within each date and re-running the full walk-forward pipeline 20× gives a null Sharpe distribution of
+**mean 0.36 / std 0.69 / max 1.62**. The real low_vol gross Sharpe **+3.40 sits ~4.3 std above the null
+mean and well above its max** → no leak. (A single-seed canary on 517 dates is noisy — individual draws
+ranged −0.72 to +1.29 — so the multi-seed null is the honest statement; the candidate clears it
+comfortably.)
+
+**Second arm — 10:00-entry (does the open-spread dodge exist?): NO.** Entering at 10:00 instead of the
+09:30 open (to pay ~2.7bps cadence spread instead of 12.6bps open) collapses the gross OOS Sharpe to 0.36
+(net +0.03). The tradeable open→close excess is FRONT-LOADED — the fade is realized in the first 30 min,
+so the IC-persistence to 60m does not transfer to the book. The candidate MUST trade at the open and eat
+the open spread — and still clears at +2.62. There is no cheaper-entry escape hatch on the liquid-50.
 
 ## 4. Verdict + interpretation
 **CONFIRMED as an M3 candidate.** The conditional low-volume gap-fade on liquid US equities:
 - carries real within-date structure (the aggregate gap IC of −0.027 was TWO opposite effects cancelling
   — light-volume fade vs heavy-volume follow — which is why it never surfaced as a plain signal);
-- survives a clean shuffle canary both in-sample (−0.39/−0.76) and in the walk-forward OOS pipeline
-  (−0.72) — it is NOT a leak;
+- survives a clean shuffle canary — the walk-forward OOS gross Sharpe +3.40 is ~4.3 std above a 20-seed
+  null (mean 0.36 / max 1.62) — it is NOT a leak;
 - survives survivorship neutralization (per-symbol demean barely moved it) and walk-forward OOS (direction
   learned per-fold, not assumed) — it is TIMING alpha, not survivor selection;
 - is **positive net of the MEASURED open-minute spread** (+2.6 to +3.0 Sharpe) on the tradeable liquid
@@ -68,10 +81,15 @@ the liquid-50 at measured cost is surprising and warrants the Lead's independent
 - **ESCALATED** to the Research Lead for promotion review per his verdict rule (positive net at measured
   open cost after walk-forward → legitimate M3 candidate). Verdict is his.
 - **Caveats that must travel with the candidate** (real, not blockers): (1) the open-spread cost is
-  measured on ~3 days of `quote_agg_1m` — needs more settled sessions to firm; (2) the entry-price DECAY
-  is unmodeled — the cost-sweep varies cost by entry minute but the entry PRICE is fixed at the 09:30
-  open (helper has 09:30 + 10:00 only), so the +2.96 @09:40 is optimistic-on-price and the +2.62 @09:30
-  is the CONSERVATIVE honest number (and still positive); (3) paper-stage.
-- **Follow-up queued**: a helper extension (intra-09:30–10:00 marks) to model the entry-minute
-  price-decay vs spread-tightening tradeoff — the true entry-minute optimum. Declined for now (needs the
-  helper extension; the conservative 09:30 number already clears the gate).
+  measured on ~3 days of `quote_agg_1m` — needs more settled sessions to firm; (2) paper-stage. The
+  entry-price-decay caveat is now largely RESOLVED by the 10:00-entry arm (above): entering later doesn't
+  help — the fade is front-loaded — so the conservative +2.62 at the 09:30 open (full spread, full fade)
+  is the operative number, not an optimistic one.
+- **Follow-up — liq2/liq3 inverted-U cut** (explorer-data archaeology: the fade is strongest at
+  mid-liquidity and weakest at mega-cap, so the liquid-50 may be the WEAKEST tier and the candidate could
+  be STRONGER on liq2/liq3). Blocked on `research.common_liquidity_tier` (builder delivered:
+  `experiments/builders/common_liquidity_tier.sql`; the inline dollar-volume scan timed out, so it must be
+  materialized once). `experiments/shape_gap_1000entry.py` auto-runs the liq2/liq3 cut the moment the tier
+  table lands.
+- **Verdict** is the Research Lead's; an independent re-run (ideally with the multi-seed canary) is
+  warranted before promotion given how surprising a liquid-name survival is against the literature.
