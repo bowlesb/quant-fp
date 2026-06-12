@@ -1096,3 +1096,62 @@ FORMAL COMMITMENT (Manager): if the ex-div correction CHANGES the overnight surv
 B gets ONE RE-LOOK on the ex-div-corrected labels before its discard is FINAL. (Family B's overnight
 survivorship -1.61 was measured on ex-div-CONTAMINATED labels; removing the artifact could in principle
 change it. The corrected battery answers this — pending qa-2's verify before interpretation.)
+| 2026-06-12T19:50:31+00:00 | C11_overnight_raw_nocal | overnight | raw | 19 | 428024 | 0.0142 | 1.661 | -0.00557 | Clean overnight raw nocalendar. Re-anchor overnight on clean panel (battery showed survivorship; this is the IC-level read). |
+| 2026-06-12T19:51:15+00:00 | C11_overnight_mom_rel | overnight | raw | 4 | 428024 | 0.00869 | 1.532 | -0.00106 | Overnight, relative-momentum only. Overnight gap continuation/reversal is where cross-sectional momentum is most plausible. |
+
+## ★ STRATEGY_SHAPES — living backlog beyond cross-sectional L/S ranking (Modeller, 2026-06-12)
+
+Ben supreme standing order: the edge hunt never idles — more strategies, more features, more tickers,
+ELEGANT not-too-complex. Manager's catch: EVERYTHING we've tested is ONE shape — cross-sectional L/S
+ranking at 30m/overnight. This is the living backlog of OTHER shapes. Each = hypothesis + required
+label/data + cheapness (★=trivial/existing data … ★★★★=needs new collection). Grounded in the ACTUAL
+data state: news table EMPTY (0 rows, blocks news shapes until #21); CA feed LIVE (corporate_actions_pit);
+labels.py builds any fwd_Nm + overnight cheaply; bars_1m queries MUST month-chunk (693-chunk lock limit).
+
+SHAPE 1 — OPEN-GAP DYNAMICS (fade vs follow). ★ CHEAP, data EXISTS.
+  Hypothesis: the overnight gap (open vs prior close) either continues (momentum) or reverts (fade),
+  conditionally. We already have gap_from_open as a feature but have NEVER used it as the STRATEGY AXIS
+  with a gap-anchored label. Label: open-to-close return (fwd from the 09:30 open to 16:00 close) — NEW
+  but cheap (forward_return_series machinery, anchored at the open bar). Condition the fade/follow on
+  gap size, overnight volume, prior-day range. Elegant, classic, testable on existing bars.
+
+SHAPE 2 — FIRST-30-MIN RANGE BREAKOUT. ★ CHEAP, data EXISTS.
+  Hypothesis: names that break their 09:30-10:00 high/low continue in the breakout direction intraday
+  (opening-range breakout, a well-known intraday shape). Label: 10:00->close (or 10:00->fwd_120m) return.
+  Features: position vs the first-30-min range, first-30-min volume vs ADV. NEW label (fwd from 10:00),
+  cheap. Single-name TIME-SERIES signal, not cross-sectional — a genuinely different shape.
+
+SHAPE 3 — POST-CORPORATE-ACTION DRIFT/REVERSAL. ★★ CHEAP-ish, CA data LIVE NOW.
+  Hypothesis: names post-ex-dividend (or post-split) exhibit drift or reversal in the following days
+  (dividend-capture unwind, post-split retail flow). Label: fwd 1-5 day return anchored on ex_date.
+  Data: corporate_actions_pit (LIVE). Event-anchored window label = NEW. Distinct from the ex-div LABEL
+  HYGIENE work — this TRADES the post-event drift rather than cleaning it out. Cheap, uses live data.
+
+SHAPE 4 — VOLUME / TRADE-INTENSITY SHOCK REACTION. ★★ data exists (bars) but needs OFI for the good version.
+  Hypothesis: a volume/range shock (today's volume >> trailing avg) predicts next-day reversal or
+  continuation. Label: overnight or fwd_120m. Features: volume_z, range_z (cheap from bars). The richer
+  version wants trade-intensity/OFI (M2-gated). The bar-only version is CHEAP and testable now.
+
+SHAPE 5 — SECTOR-RELATIVE MEAN REVERSION. ★★ needs sector_map (#20, landing).
+  Hypothesis: a name that has diverged from its SECTOR (not the whole universe) mean-reverts. This is
+  cross-sectional but SECTOR-NEUTRALIZED — a different axis than universe-relative. Label: existing
+  fwd_30m/overnight but demeaned WITHIN sector. Data: sector_map (#20, post-batch). Cheap once sector lands.
+
+SHAPE 6 — EVENT-REACTION (post-news drift/reversal). ★★★★ BLOCKED — news table EMPTY.
+  Hypothesis: post-headline drift or overreaction-reversal. Label: event-anchored fwd window. Data: needs
+  the news table populated (#21 scoping tomorrow). Logged as the highest-potential-but-blocked shape;
+  revisit when news lands.
+
+SHAPE 7 — HORIZON ENSEMBLE (30m signal GATES overnight holds). ★★ cheap, composition of existing.
+  Hypothesis: use the 30m cross-sectional signal not to TRADE intraday (uneconomic) but to GATE which
+  names to hold overnight — i.e. the 30m rank as a FILTER on the overnight book. Elegant: combines two
+  things we have without new data. Label: overnight, conditioned on the 30m prediction. Cheap.
+
+### THIS WEEKEND — picked + spec'd (the 2-3 most promising, into the queue):
+1. SHAPE 1 (open-gap dynamics) — needs the open-to-close label. SPEC: fwd label anchored at the 09:30
+   RTH open bar to the 16:00 close, cross-sectionally demeaned (reuse cross_sectional_excess). Cheapest
+   high-value new shape.
+2. SHAPE 2 (opening-range breakout) — needs the 10:00->close label + first-30-min-range features.
+3. SHAPE 7 (horizon ensemble) — no new label; compose existing 30m + overnight. Pure harness work.
+These 3 need NEW LABELS (open-to-close, 10:00-anchored) — spec'd below for the label builder.
+| 2026-06-12T19:51:58+00:00 | C11_overnight_rank_nocal | overnight | rank | 19 | 428024 | 0.01891 | 2.121 | 0.00012 | Overnight rank label nocalendar. Trading-aligned overnight ranking on clean data. |
