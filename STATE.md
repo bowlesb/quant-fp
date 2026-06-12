@@ -27,6 +27,11 @@ neutralization) => NO EDGE. Full numbers + pre-registration scorecard in docs/EX
 - overnight: apparent win (lambdarank sharpe_net +1.66, breakeven 9.65bps) COLLAPSES under per-symbol
   demean to sharpe -0.35 -> SURVIVORSHIP, ~0 timing alpha. (Fund-removal LOWERED the overnight canary
   0.0077->0.0020, confirming funds were part of it; the survivorship gate kills the residual.)
+CAVEAT (verdict robust to it): a backfill split-adjustment discontinuity affects MOMENTUM features for
+11/785 names (~0.03% of momentum cells; KLAC the one true artifact; intraday features + all labels
+unaffected). Sensitivity pass EXCLUDING all 11 => headline numbers materially identical (30m IC ~0.027/
+breakeven ~1.4bps; every overnight neutralized sharpe stays negative) — all 8 still NO edge. Verdict
+STANDS. (Fix = tasks #17/#18, post-close; details in docs/EXPERIMENTS.md sensitivity entry.)
 PATH TO EDGE = BETTER DATA, not more price-feature modeling: universe-wide ORDER-FLOW (v1.2.0 OFI;
 gated on M2 50->500-name scaling + the trigger-gated 50-name pilot ~6/26) + delisted-name backfill
 (test overnight survivorship-free at the source, not via the conservative demean proxy). The price-only

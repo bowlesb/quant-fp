@@ -7,3 +7,4 @@ __pycache__/
 models/
 .team_review_marker
 experiments/battery_results.jsonl
+experiments/battery_excl11.jsonl

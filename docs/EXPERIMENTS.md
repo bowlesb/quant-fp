@@ -484,3 +484,33 @@ CONCLUSION (unchanged, now TRUSTWORTHY not contaminated): price-only cross-secti
 tradeable edge under the 4-gate battery. PATH TO EDGE remains BETTER DATA — universe-wide ORDER-FLOW
 (v1.2.0 OFI, gated on M2 scaling + the 50-name pilot) and delisted-name backfill (to test overnight
 survivorship-free at the source rather than via the conservative demean proxy). No false edge shipped.
+
+### SENSITIVITY / CAVEAT — backfill split-adjustment discontinuity (11 names), verdict STABLE (2026-06-12)
+
+prod-architect found a backfill split-adjustment discontinuity (chasing the KLAC 10× anomaly): 11/785
+names (KLAC, INHD, QXO, ABVX, ASTC, BMNR, FIG, RXT, STI, STRC, WOLF) have backfill day-over-day jumps
+>3×. KLAC is the confirmed ARTIFACT (10×-deflated backfill; Alpaca ground-truth ~2429); the other 10 are
+mostly REAL moves / reverse-splits. BLAST RADIUS: MOMENTUM features only (mom_1d..mom_10d_rel — the only
+ones spanning multi-day daily_closes across a step), ≤11 names on isolated dates (~0.03% of momentum
+cells). The 13 intraday features are within-session self-consistent; fwd_30m/fwd_60m labels are
+within-session; overnight labels come from the separate one-shot SPLIT-adjusted daily fetch — all
+unaffected. Tasks #17 (re-fetch) / #18 (CA feed) handle the fix post-close.
+
+SENSITIVITY PASS: re-ran the full battery EXCLUDING all 11 (conservative — over-excludes, since only
+KLAC is a true artifact). Dropped 26,698 / 2,341 rows (30m / overnight). HEADLINE NUMBERS vs the full run:
+
+  config                full-panel              excl-11                 moved?
+  30m raw      IC 0.0270 bkeven 1.42bps   IC 0.0266 bkeven 1.41bps   no (rounding)
+  30m rank     IC 0.0318 bkeven 1.44bps   IC 0.0322 bkeven 1.43bps   no
+  30m vol      IC 0.0268 bkeven 1.37bps   IC 0.0269 bkeven 1.39bps   no
+  30m lrank    IC 0.0010 bkeven 0.58bps   IC 0.0012 bkeven 0.64bps   no
+  overnight raw   SURV-OUT sharpe -1.79      SURV-OUT sharpe -1.85      no (still neg)
+  overnight rank  SURV-OUT sharpe -1.20      SURV-OUT sharpe -1.12      no
+  overnight vol   SURV-OUT sharpe -1.68      SURV-OUT sharpe -1.80      no
+  overnight lrank SURV-OUT sharpe -0.35      SURV-OUT sharpe -0.47      no (still neg = survivorship)
+
+RESULT: ALL 8 configs => NO edge in BOTH runs. 30m IC ~0.027 / breakeven ~1.4bps and every overnight
+survivorship-neutralized sharpe stays NEGATIVE — the discontinuity does not move the verdict. As
+predicted (0.03% of momentum cells, intraday + labels untouched): "shown stable," not just "reasoned
+stable." VERDICT STANDS with this documented caveat; the price-only "no tradeable edge" conclusion is
+robust to the 11 flagged names. (Sensitivity output: experiments/battery_excl11.jsonl, gitignored.)
