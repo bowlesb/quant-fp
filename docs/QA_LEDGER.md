@@ -252,6 +252,34 @@ denylist — do NOT signal it until verified.
 
 ## Reviews performed (mapped-reviewer gate outcomes — policy docs/REVIEW_POLICY.md)
 
+- **2026-06-13 — M2 worker-lifecycle hardening (prod commit c224175, rides 306eaba), reviewer=qa.**
+  **APPROVE — and it CLOSES my review condition #1 (the wedged-worker-blindness I flagged on 306eaba).**
+  prod's restart test FOUND A REAL BUG: killing a worker mid-`mp.Queue.get()` wedges the queue (dead
+  process holds the read lock), a respawn drains 0 → silent OFI-shard loss. FIX = full-restart-on-death
+  (supervisor exits non-zero → fresh queues) instead of single-worker respawn. Vetted prod's 2 in-lane
+  questions with EVIDENCE:
+  (1) **Recovery semantics — CONFIRMED SOUND, with a nuance prod's claim understated.** The feature
+  read is `SELECT DISTINCT ON (ts) ... ORDER BY ts, (source='backfill') DESC` (featurestore.py
+  load_flow/load_micro) → one row/minute, PREFERS backfill, no double-count. Verified from data: in a
+  6/12 sample hour all 3,000 minute-keys carry BOTH stream+backfill, 0 stream-only — so a stream gap is
+  healed by the backfill row at the same (symbol,ts). **NUANCE: this is PANEL-complete but not same-day
+  LIVE-complete** — backfill trade-aggs run post-hoc, so a crash gap is NaN in source='live' OFI until
+  the next backfill. Negligible: ~1-min gap, and the live model already tolerates 16.6% mid-session OFI
+  NaN (tradeless-minute baseline), so one boot-gap is well inside tolerance. Recovery story holds.
+  (2) **Parity under restart — CONFIRMED within #15 tolerance.** test_worker_restart_resumes_with_correct_
+  tick_state proves a respawned fresh-TickState worker is byte-identical to a cold start at the boundary;
+  the only divergence is the first-trade sign ambiguity (no last_price → last_sign=1 bias), which is the
+  SAME cold-start condition at every daily session boot — and my #15 99.85% sign proof was measured on
+  data INCLUDING session boots, so the boot-boundary ambiguity is already inside the proven tolerance. A
+  crash adds one rare boot-equivalent boundary, self-heals in one trade. NOT a parity regression. Ran the
+  sharding suite myself: 4/4 pass.
+  Also CLOSES condition #1: per-worker heartbeat gauge (bumped every loop incl. idle) + per-shard
+  queue-depth gauge = observed-set liveness, alarms a wedged worker independent of record_bar (exactly
+  the stale-gauge blind spot I raised). SIGTERM graceful flush means Monday's planned restart loses
+  nothing. Net: 306eaba + c224175 together = APPROVE; conditions #1 (liveness) now MET in-PR, #2
+  (OFI≥500 assert) still pending, #3 (interleave test) non-blocking. Settled-day #15 re-proof at 512
+  remains the criterion gate (Tuesday).
+
 - **2026-06-13 — M2 sharded ingestion 50→512 (prod commit 306eaba, topology A), reviewer=qa.**
   **APPROVE for the weekend dry-run; 3 conditions before the Monday deploy, none blocking the
   dry-run. The REAL gate is the settled-day #15 re-proof at 512 (my own), NOT this code review.**
