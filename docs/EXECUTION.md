@@ -303,6 +303,21 @@ returns `['KLAC']` (the data-driven guard is now the SOLE layer and works), book
 not just grep)**. Two-layer KLAC defense → one clean data-driven layer, no un-excluded window. The
 manual `SYMBOL_DENYLIST` stays empty/env-extensible for the next pre-guard emergency.
 
+### 2026-06-12 — why the shorts didn't fill + spread-scaled-cross prognosis (Monday test)
+Root-caused today's unfilled shorts against their submit-time NBBO (orders_log nbbo_bid/ask):
+- FLY: bid 37.27 / ask 37.69 → spread 0.42 (**112 bps**). Old 1¢ sell limit = 37.26 (just 1¢ under
+  bid) → stranded the moment the bid jittered down (constant on a 112bps microcap). New spread-
+  scaled limit = bid − 0.5×spread = 37.06 (**21¢ under bid**) → robustly marketable.
+- AMPX: bid 17.00 / ask 17.14 → spread 0.14 (**82 bps**). Old 16.99; new 16.93 (7¢ under bid).
+PROGNOSIS: `CROSS_SPREAD_FRAC=0.5` looks ADEQUATE — half-spread crossing keeps the sell well inside
+the book against normal bid jitter; both would very likely have filled. DECISION: do NOT tune the
+fraction now — the spread-scaled cross is UNTESTED live (today's basket was the old 1¢ executor);
+Monday's open is its first real test. Tune only on the live result. TENSION to carry to the cost
+program: filling these shorts is NOT free — crossing a 112bps spread costs ~56bps one-way. So the
+qa fill-gate (net-exposure <40% = fill both legs) and the net-of-cost goal pull against each other
+on wide-spread microcaps; the measured nbbo slippage will quantify the real cost of the fix. Flag
+to modeller-2 once Monday's fills + slippage are in.
+
 ## Active live-basket exclusions (remove when the condition clears — don't let these rot)
 - **KLAC — excluded since 2026-06-12 (Manager pre-open directive).** Reason: KLAC's LIVE STREAM
   bars are persistently exactly 10× the true price (feed scaling bug, QA finding). The v1.1.x
