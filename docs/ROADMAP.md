@@ -75,11 +75,15 @@ but only covers ~50 names.
       ET (backfill trade-agg is RTH-bounded — no validation reference after the close).
 - [ ] Order-flow features (v1.2.0+) populate across the wide cross-section (NaN-rate < 5% where
       coverage exists).
-- [ ] **Research universe == live tradable universe**: backfill history for the ~150 fixable
+- [x] **Research universe == live tradable universe**: backfill history for the ~150 fixable
       partial-history live-universe names (CORRECTED 2026-06-12: 750/1000 full, 250 partial,
       0 zero-history; PIT membership already self-corrects, so this is breadth insurance, not
       a validity bug; ~100 are post-2024 listings with nothing to fetch). Cheap: ~1GB /
       <90min via existing backfiller (scope memo docs/BACKFILL_SCOPE.md, task #12).
+      ✅ 2026-06-12: 43.6M bars upserted for 222 thin names; universe depth 988/1000 ≥120d
+      (residual 12 are genuinely-young listings — all available history fetched). Achieved at
+      the BAR level; the v1.1.2 full-universe panel (785→988 names) ticks the panel level
+      whenever sequenced (v1.1.1 stays frozen as the M1 verdict panel).
 
 ### M3 — First HONEST edge candidate (target 2026-07-15)
 **Exit criteria (a candidate must pass ALL, on clean data):**

@@ -1131,3 +1131,18 @@ Consequences ratified:
 3. Shape 7 DISCARD (intraday/overnight orthogonal: 30m signal IC -0.0019 vs overnight).
 Pattern now explicit: price panel + compositions EXHAUSTED; all edge hope = new data
 (OFI ~6/26, news scoping 6/13, ex-div hygiene, sector option).
+
+## 2026-06-12 (night) — Manager: #12 DONE — research==production at bar level; night complete
+Prod final: 43,617,345 bars upserted (222 thin names, 2023-12-01->now, 68min via the
+gated runner). Universe depth 988/1000 >=120d (was 778); residual 12 = genuinely-young
+listings (all available history fetched). M2 research==live criterion TICKED at bar
+level; v1.1.2 full-universe panel (785->988 names) ticks the panel level when sequenced.
+NOTHING IN FLIGHT except the experiment grind (~80/201) + qa's --full board write-out.
+Weekend queue: M2 sharded-ingestor BUILD (critical path) -> dry-run -> Monday deploy;
+#22 design memo; #21 news scoping; signed_vol_z PR; ex-div labels.py PR; #20 (on Ben's
+FMP key); #14 canonical-close; COPY-derived IMG_SRC. Monday opens with: bars-level
+subscription probe (~09:35 ET) + spread-scaled cross's first fill test.
+Day P-series read (Ben's process ladder): P1 evidence-first held under pressure all
+day — 5 catch-by-verification saves, 3 self-corrections pre-consumption, every gate
+evidence-closed; review policy survived its first incident (absorption) and first
+full Tier-1 cycle (#19) on day one.
