@@ -930,3 +930,18 @@ reconcile/fill_reconciliation contract -> both approvals logged in ledgers -> Ma
 bless -> deploy rides the one post-flatten executor rebuild with the #18 guard.
 ROOT CAUSE patched in REVIEW_POLICY.md: shared-worktree staging discipline — never
 add -A/commit -a; explicit paths only; absorbed-WIP remedy documented.
+
+## 2026-06-12 — Manager: #19 review record (PR-equivalent consolidation)
+Post-hoc review of the absorbed #19 Tier-1 executor work, per the b856aa7 ruling:
+- prod-architect (schema/runtime): APPROVE — verified complete hunk (no NameError on
+  rebuild), filled_qty self-migrates via EXEC_DDL at startup, schema files independent.
+- qa (reconcile/fill contract): APPROVE with 2 must-fix conditions, BOTH FIXED in
+  8ba6c89: (1) realized NOTIONAL neutrality (count-only was a hole), (2) deterministic
+  fill_ts via immutable submitted_at fallback (killed a real partial-fill P&L
+  double-count; 4/6 fills on 6/11 were partials).
+- Gate split ratified: per-cycle ok = dangerously-desynced-now only; hard
+  incomplete-fill/lopsided gate = QA's per-day fill_reconciliation invariant.
+- Manager bless: issued contingent on qa re-green of the fix diff; deploy = ONE
+  targeted executor rebuild post-flatten (with #18 ex-date guard); prod's rebuild-batch
+  EXCLUDES the executor. No retroactive PR — this record + role ledgers are the
+  PR-equivalent; Tier-1 PR flow binds on new work from 2026-06-13.
