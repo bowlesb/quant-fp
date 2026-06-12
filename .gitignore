@@ -12,3 +12,6 @@ experiments/family_b_results.jsonl
 experiments/family_b_smoke.jsonl
 experiments/exdiv_corrected_results.jsonl
 experiments/shape_open_gap_results.jsonl
+
+# Experiment output log — regenerable, must not gate image builds (#11 freshness)
+experiments/results.jsonl
