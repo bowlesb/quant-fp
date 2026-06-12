@@ -355,3 +355,13 @@ is the FLOOR, not the job. Binding mechanics:
 - **Manager cadence**: during active exploration the Manager wakes at ≤30min, reads new
   results, and re-aims the Modeller. Innovation is half the Manager's job — stubborn,
   persistent pursuit of new explorations, not just operations.
+
+## 8-hour progress cadence (Ben's directive 2026-06-12)
+The 24h day divides into three periods (PT): MARKET 06:00-14:00 / EVENING 14:00-22:00 /
+OVERNIGHT 22:00-06:00. At each boundary the Manager writes docs/progress/<date>_<period>.md:
+commits (scripts/period_commits.sh), explorations & learnings, infrastructure progress,
+process notes — EVERY item tagged to the roadmap ([M2], [P3], ...) so each contribution
+visibly ladders to the long-term goal. Period character shapes content (market hours =
+live debugging/execution; evening = batches/deploys/settled proofs; overnight = grind/
+backfills/research synthesis). The Manager's wake chain MUST hit every boundary. Reports
+are surfaced on the DASHBOARD (Progress page renders docs/progress/, newest first).
