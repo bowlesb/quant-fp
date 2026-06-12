@@ -55,6 +55,23 @@ def test_live_feature_coverage_is_registered() -> None:
     assert "live_feature_coverage" in qa.INVARIANTS
 
 
+def test_fill_reconciliation_is_registered() -> None:
+    # The live-basket execution gate must exist by this exact name (exec-recon-one-directional).
+    assert "fill_reconciliation" in qa.INVARIANTS
+    assert "fill_reconciliation" in qa.FAST_INVARIANTS
+
+
+def test_terminal_order_states_match_executor() -> None:
+    # qa.TERMINAL_ORDER_STATES is a hand-kept mirror of services/executor/main.py's set; if the
+    # executor's terminal set drifts, fill_reconciliation would mis-judge "stuck" orders. Guard it.
+    executor_main = (
+        qa.REPO / "services" / "executor" / "main.py"
+    ).read_text()
+    assert 'TERMINAL_ORDER_STATES = {"filled", "canceled", "expired", "rejected", "done_for_day", "replaced"}' in executor_main, (
+        "executor's TERMINAL_ORDER_STATES changed — update qa.TERMINAL_ORDER_STATES to match"
+    )
+
+
 def test_family_valued_pct_averages_only_present_indices() -> None:
     # DB-free: family valued% is the mean over the indices that exist in today's vector.
     valued = {1: 90.0, 2: 80.0, 12: 100.0, 13: 100.0}

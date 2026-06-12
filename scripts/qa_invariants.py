@@ -30,6 +30,10 @@ Invariants (map to docs/QA_LEDGER.md):
   warmup_coverage            — I4: ACTIVE set has no silently NaN-degraded / dead feature.
   no_inf_no_degenerate       — I5: no Inf in vectors; predictions not score-degenerate;
                                per-ts label cross-section demeaned (avg per-ts median ~0).
+  fill_reconciliation        — the live basket EXECUTED as intended (post-flatten, terminal-aware
+                               orders_log): no stuck order, realized L/S net exposure within tol, fill
+                               rate above floor. The hard gate the per-cycle reconcile `ok` skips
+                               (exec-recon-one-directional). FAST tier.
   live_feature_coverage      — same-day LIVE serving-path coverage (Ben's 2026-06-12 ask): for
                                TODAY's source='live' rows, each feature FAMILY is valued at its
                                DERIVED expectation (price/vol ~warmup-adequate fraction; trade/
@@ -98,6 +102,18 @@ LABEL_MEDIAN_TOL = 0.001  # |per-ts median of cross-sectional excess| must be < 
 SESSION_FORWARD_SLACK_DAYS = (
     4  # member trade_date may lead the latest bar by at most this
 )
+
+# fill_reconciliation: the live basket must EXECUTE as intended, asserted post-flatten when every
+# submitted order is terminal. The hard gate that the per-cycle reconcile `ok` deliberately does NOT
+# enforce (it stays unexpected+rejected-only to avoid flap; see services/executor #19-Q3).
+# Mirrors services/executor/main.py TERMINAL_ORDER_STATES (kept in sync — Alpaca's terminal set).
+TERMINAL_ORDER_STATES = {"filled", "canceled", "expired", "rejected", "done_for_day", "replaced"}
+# Skew is RELATIVE to gross, not absolute dollars — at tiny paper sizes a fully one-sided basket is
+# only a few hundred $ absolute but still ~100% net exposure. |net|/gross is the size-independent
+# lopsidedness measure (0 = perfectly neutral, 1 = fully one-sided). A market-neutral intent should
+# realize near 0; 0.40 means 40% of gross is unhedged directional exposure.
+FILL_RECON_NET_EXPOSURE_TOL = 0.40  # |long-short|/(long+short) filled notional beyond this -> FAIL
+FILL_RECON_MIN_FILL_RATE_PCT = 60.0  # < this share of submitted legs filling -> FAIL (basket gutted)
 
 EXTREME_JUMP_RATIO = 3.0  # backfill daily-close day-over-day ratio beyond this -> flag
 DENYLIST_PATH = REPO / "tests" / "fixtures" / "known_funds.txt"
@@ -1099,6 +1115,80 @@ def check_live_feature_coverage() -> Result:
     )
 
 
+def check_fill_reconciliation() -> Result:
+    """The live basket EXECUTED as intended (the hard gate the per-cycle reconcile `ok` does NOT
+    enforce — see services/executor #19-Q3: per-cycle ok stays unexpected+rejected-only to avoid
+    flap; THIS is where lopsided-fill / incomplete-fill fails loud). Born from the
+    exec-recon-one-directional finding: on 2026-06-12 the book filled 3L/1S of an intended 3L/3S
+    and the OLD reconcile reported ok:true all session.
+
+    Scoped to the latest trading day that has submitted orders, asserted against the now-terminal-
+    aware orders_log (#19 writes status + filled_qty back). Reads fills_log for realized price →
+    per-side filled NOTIONAL. FAILS on: (a) any submitted order still NON-terminal (post-flatten it
+    must be filled/canceled/expired/rejected — a stuck 'submitted' = a lost/hung order); (b) realized
+    long-vs-short filled notional skew > tol (the lopsided-basket gate — a market-neutral intent that
+    executed one-sided); (c) fill rate < floor (basket gutted by non-marketable limits). SKIPs if no
+    orders today (non-trading day / pre-open)."""
+    day = scalar(
+        "SELECT max((intended_at AT TIME ZONE 'America/New_York')::date) FROM orders_log "
+        "WHERE alpaca_order_id IS NOT NULL"
+    )
+    if not day:
+        return Result("fill_reconciliation", "SKIP", "no submitted orders yet (nothing to reconcile)")
+    rows = sql(
+        "SELECT o.symbol, o.side, o.qty, o.status, COALESCE(o.filled_qty,0), "
+        "       COALESCE(f.price, 0) "
+        "FROM orders_log o "
+        "LEFT JOIN LATERAL (SELECT price FROM fills_log f WHERE f.alpaca_order_id=o.alpaca_order_id "
+        "                   ORDER BY fill_ts DESC LIMIT 1) f ON true "
+        "WHERE o.alpaca_order_id IS NOT NULL "
+        f"  AND (o.intended_at AT TIME ZONE 'America/New_York')::date = '{day}'"
+    )
+    n = len(rows)
+    non_terminal = [r[0] for r in rows if r[3] not in TERMINAL_ORDER_STATES]
+    filled = [r for r in rows if float(r[4]) > 0]
+    fill_rate = 100.0 * len(filled) / n if n else 0.0
+    long_notional = round(sum(float(r[4]) * float(r[5]) for r in filled if r[1] == "buy"), 2)
+    short_notional = round(sum(float(r[4]) * float(r[5]) for r in filled if r[1] == "sell"), 2)
+    net_notional = round(long_notional - short_notional, 2)
+    gross_notional = round(long_notional + short_notional, 2)
+    net_exposure = abs(net_notional) / gross_notional if gross_notional else 0.0
+    n_long = sum(1 for r in filled if r[1] == "buy")
+    n_short = sum(1 for r in filled if r[1] == "sell")
+    details = [
+        f"day {day}: {n} submitted orders, {len(filled)} filled ({fill_rate:.0f}%)",
+        f"realized {n_long}L / {n_short}S; long ${long_notional} / short ${short_notional} / "
+        f"net ${net_notional} / gross ${gross_notional} / net-exposure {net_exposure:.0%}",
+    ]
+    if non_terminal:
+        details.append(f"NON-TERMINAL (stuck): {sorted(non_terminal)}")
+    failures: list[str] = []
+    if non_terminal:
+        failures.append(
+            f"{len(non_terminal)} submitted order(s) still non-terminal on a settled day "
+            f"{sorted(non_terminal)} — lost/hung order, orders_log status not synced"
+        )
+    if net_exposure > FILL_RECON_NET_EXPOSURE_TOL:
+        failures.append(
+            f"realized net exposure {net_exposure:.0%} (net ${net_notional} / gross ${gross_notional}) "
+            f"> {FILL_RECON_NET_EXPOSURE_TOL:.0%} — intended market-neutral, executed {n_long}L/{n_short}S "
+            f"one-sided (the exec-recon-one-directional failure mode)"
+        )
+    if n and fill_rate < FILL_RECON_MIN_FILL_RATE_PCT:
+        failures.append(
+            f"fill rate {fill_rate:.0f}% < {FILL_RECON_MIN_FILL_RATE_PCT:.0f}% — basket gutted "
+            f"(non-marketable limits / unfilled legs)"
+        )
+    if failures:
+        return Result("fill_reconciliation", "FAIL", "; ".join(failures), details)
+    return Result(
+        "fill_reconciliation",
+        "PASS",
+        f"day {day}: basket executed as intended ({n_long}L/{n_short}S, net ${net_notional}, fill {fill_rate:.0f}%)",
+        details,
+    )
+
+
 def update_coverage_baseline() -> None:
     """Append TODAY's live-coverage row to the trailing baseline (idempotent per date)."""
     today = scalar("SELECT (now() AT TIME ZONE 'America/New_York')::date")
@@ -1153,6 +1243,7 @@ INVARIANTS: dict[str, Callable[[], Result]] = {
     "warmup_coverage": check_warmup_coverage,
     "no_inf_no_degenerate": check_no_inf_no_degenerate,
     "live_feature_coverage": check_live_feature_coverage,
+    "fill_reconciliation": check_fill_reconciliation,
 }
 
 # FAST-tier invariants: sub-second-to-~few-second composition / calendar / same-day checks that
@@ -1164,6 +1255,7 @@ FAST_INVARIANTS: set[str] = {
     "universe_no_known_funds",
     "universe_sessions_valid",
     "live_feature_coverage",
+    "fill_reconciliation",
 }
 
 
