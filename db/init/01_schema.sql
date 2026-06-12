@@ -223,7 +223,8 @@ SELECT o.intended_at::date AS day, o.symbol, o.side, f.qty, f.price AS fill_pric
                    ELSE COALESCE(o.nbbo_mid, bar.close::numeric) - f.price END)
              / NULLIF(COALESCE(o.nbbo_mid, bar.close::numeric), 0) * 10000, 2) AS slippage_bps,
        round((CASE WHEN o.side = 'buy' THEN f.price - COALESCE(o.nbbo_mid, bar.close::numeric)
-                   ELSE COALESCE(o.nbbo_mid, bar.close::numeric) - f.price END) * f.qty, 2) AS slippage_usd
+                   ELSE COALESCE(o.nbbo_mid, bar.close::numeric) - f.price END) * f.qty, 2) AS slippage_usd,
+       o.submitted_at AS submit_ts          -- PIT key so the cost model can join ADV$/price per name
 FROM orders_log o
 JOIN fills_log f ON f.alpaca_order_id = o.alpaca_order_id
 LEFT JOIN LATERAL (SELECT close FROM bars_1m b
