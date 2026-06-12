@@ -34,6 +34,7 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime, timezone
 
+import numpy as np
 import psycopg
 
 from quantlib.backtest import mean_ic, newey_west_tstat, per_timestamp_ic
@@ -199,6 +200,42 @@ def gap_long_short(
     }
 
 
+def shuffle_excess_within_date(
+    excess: list[float], group: list[datetime], seed: int
+) -> list[float]:
+    """Canary: permute the open_to_close excess WITHIN each date, breaking the gap<->return link
+    while preserving the per-date return distribution. A real gap effect must collapse here.
+    """
+    rng = np.random.default_rng(seed)
+    by_date: dict[datetime, list[int]] = defaultdict(list)
+    for i, ts in enumerate(group):
+        by_date[ts].append(i)
+    shuffled = list(excess)
+    for idxs in by_date.values():
+        values = [excess[i] for i in idxs]
+        rng.shuffle(values)
+        for i, value in zip(idxs, values):
+            shuffled[i] = value
+    return shuffled
+
+
+def per_symbol_demean_signal(signal: list[float], symbol: list[str]) -> list[float]:
+    """Survivorship neutralization: subtract each symbol's own mean gap so the signal is the
+    TIMING of a name's gaps, not which names persistently gap (a survivor-selection artifact).
+    """
+    sums: dict[str, float] = defaultdict(float)
+    counts: dict[str, int] = defaultdict(int)
+    for value, sym in zip(signal, symbol):
+        if not math.isnan(value):
+            sums[sym] += value
+            counts[sym] += 1
+    means = {sym: sums[sym] / counts[sym] for sym in sums if counts[sym] > 0}
+    return [
+        (value - means[sym]) if (sym in means and not math.isnan(value)) else math.nan
+        for value, sym in zip(signal, symbol)
+    ]
+
+
 def main() -> None:
     records: list[dict[str, object]] = []
     with psycopg.connect(**DB_KWARGS) as conn:
@@ -240,9 +277,30 @@ def main() -> None:
         r_ic = per_timestamp_ic(r_gap, r_excess, r_ts)
         follow = gap_long_short(r_gap, r_excess, r_ts, r_sym, +1.0, cost_bps_oneway=2.0)
         fade = gap_long_short(r_gap, r_excess, r_ts, r_sym, -1.0, cost_bps_oneway=2.0)
+
+        # GATE 1 — shuffle canary: permute the excess within each date; the IC + the strong-direction
+        # Sharpe must collapse to ~0 if the effect is real (not a leak).
+        c_excess = shuffle_excess_within_date(r_excess, r_ts, SEED)
+        c_ic = per_timestamp_ic(r_gap, c_excess, r_ts)
+        c_follow = gap_long_short(
+            r_gap, c_excess, r_ts, r_sym, +1.0, cost_bps_oneway=2.0
+        )
+        c_fade = gap_long_short(r_gap, c_excess, r_ts, r_sym, -1.0, cost_bps_oneway=2.0)
+
+        # GATE 2 — survivorship neutralization: demean the gap signal per symbol (timing, not
+        # which names persistently gap). The surviving Sharpe is the honest one.
+        n_gap = per_symbol_demean_signal(r_gap, r_sym)
+        n_follow = gap_long_short(
+            n_gap, r_excess, r_ts, r_sym, +1.0, cost_bps_oneway=2.0
+        )
+        n_fade = gap_long_short(n_gap, r_excess, r_ts, r_sym, -1.0, cost_bps_oneway=2.0)
+
         print(
             f"  regime={regime_name:<9} n={len(idx)} IC={mean_ic(r_ic):+.5f} "
-            f"follow_sharpe@2bps={follow.get('sharpe_net')} fade_sharpe@2bps={fade.get('sharpe_net')}",
+            f"follow@2bps={follow.get('sharpe_net')} fade@2bps={fade.get('sharpe_net')} "
+            f"| CANARY ic={mean_ic(c_ic):+.5f} follow={c_follow.get('sharpe_net')} "
+            f"fade={c_fade.get('sharpe_net')} "
+            f"| SURV-NEUTRAL follow={n_follow.get('sharpe_net')} fade={n_fade.get('sharpe_net')}",
             flush=True,
         )
         cost_sweep = {
@@ -260,6 +318,11 @@ def main() -> None:
                 "gap_nw_t": round(newey_west_tstat(r_ic, 1), 3),
                 "follow_sharpe_2bps": follow.get("sharpe_net"),
                 "fade_sharpe_2bps": fade.get("sharpe_net"),
+                "canary_ic": round(mean_ic(c_ic), 5),
+                "canary_follow_sharpe": c_follow.get("sharpe_net"),
+                "canary_fade_sharpe": c_fade.get("sharpe_net"),
+                "surv_neutral_follow_sharpe": n_follow.get("sharpe_net"),
+                "surv_neutral_fade_sharpe": n_fade.get("sharpe_net"),
                 "cost_sweep": cost_sweep,
             }
         )

@@ -155,3 +155,33 @@ point of the helper). Both ruff+black clean, py_compile-OK. SMOKE-RAN both:
 NET: 002 is the first conditional shape with sign-coherent structure that SURVIVES a first look — but
 unverified. 004 dies cleanly. Both committed with results jsonl. Reporting to the Lead with the gate
 gap on 002 explicit (verdicts his).
+
+## 2026-06-12 (cont.) — 002 GATED: low-vol fade SURVIVES canary + survivorship. Strongest candidate.
+
+Proactively wired the shuffle-canary + per-symbol survivorship demean into shape_gap_fade_follow.py
+(don't wait for the Lead to gate the candidate — gate it myself, hand him a gated result). Re-ran:
+
+  regime    | real fade@2bps | CANARY fade | SURV-NEUTRAL fade   (the make-or-break columns)
+  low_vol   | +4.12          | -0.76       | +3.82   <- SURVIVES BOTH GATES
+  high_vol  | follow +1.24   | follow -1.49| follow +0.92  <- follow side also survives both
+  all       | -0.08          | -2.79       | -0.11   (aggregate is noise — the regimes cancel)
+
+  canary IC per regime: low_vol -0.001, high_vol +0.002, all +0.0003 — ALL collapse to ~0 (the gap
+  effect is NOT a leak). Survivorship demean barely moves the surviving Sharpes (low-vol fade
+  4.12->3.82) — so it's TIMING alpha (when a name gaps), NOT survivor-name selection.
+
+This is the strongest candidate the shapes lens has produced: a low-turnover (1 round-trip/day),
+CONDITIONAL (fade light-volume gaps / follow heavy-volume gaps) shape that passes canary + survivorship.
+It is exactly the cost-advantaged class I ranked #1-style (low-turnover + conditional).
+
+REMAINING HONEST CAVEATS (handed to the Lead — these are why it's a candidate, not a verdict):
+ 1. IN-SAMPLE sort, not walk-forward OOS. The Lead's harness should re-run with walk-forward folds —
+    a stable effect across folds is the real test (in-sample 3.8 Sharpe could shrink OOS).
+ 2. FLAT 2bps cost. The gap round-trip executes at the OPEN, where spreads are WIDEST — the real cost
+    is harsher than the 30m-cadence common_spreads_at_cadence marks (which exclude the auction). The
+    +3.8 Sharpe has headroom but the open-spread haircut is the true economic test.
+ 3. The universe here is all-1213-backfill-symbols, NOT the liquid tier — and the low-vol-gap names
+    skew ILLIQUID (light volume = wide spread). So the fade may live exactly where it's expensive to
+    trade — the same tension the Lead flagged on 001. The liquid-tier-only re-run is the honest cut.
+NEXT: offered the Lead either I add walk-forward+liquid-tier+open-cost myself, or he takes it into his
+harness. Committed the gated script + results.
