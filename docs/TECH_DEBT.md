@@ -59,6 +59,11 @@ blocked full-history query COMPLETES (e.g. the feature_vectors⨝labels full joi
 rest of the batch; modeller resumes grind; exec proceeds. IaC follow-up: add `command: postgres -c
 max_locks_per_transaction=2048` to the timescaledb compose service via a reviewed Tier-1 PR tomorrow
 (ALTER SYSTEM already persists it in postgresql.auto.conf in the data volume).
+**DONE + VERIFIED (2026-06-12 ~15:52 ET):** restarted timescaledb; SHOW max_locks_per_transaction=2048,
+timescaledb 2.27.2 loaded, all services up, experimenter reconnected + queue RESUMED (C11 grind running
+post-restart — never-idle holds). EVIDENCE (before→after): a full feature_vectors⨝labels join (20,265,791
+rows / 785 syms / 1227 chunks locked) — this class was BLOCKED at 64 (out-of-shared-memory / max_locks) —
+now COMPLETES in **10.02s**. IaC compose `command:` follow-up = Tier-1 PR tomorrow.
 
 Prereqs before starting: market closed (≥16:00 ET); Manager go on #12; **THE GUN = exec's
 broker-CONFIRMED-flat signal** after the ~15:48 ET EOD-flatten (exec reports 0 positions / 0 open
