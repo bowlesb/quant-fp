@@ -6,22 +6,25 @@
 -- Run (edit :day to the settled day under test):
 --   docker compose exec -T timescaledb psql -U quant -d quant -f - < scripts/trade_agg_parity_settled.sql
 --
--- FINDINGS (settled day 2026-06-11, 50 symbols, 6,058 overlap minutes):
---   GREEN (the core RTH aggregation is trustworthy):
---     * n_trades within 2%: 98.05% (corr 0.9997) — clears the 98% gate.
---     * tick-rule SIGN agreement: 99.82%; imbalance within 0.05: 99.75% — the HARDEST threat
---       (sign depends on order + last-price state, sensitive to out-of-order live delivery) is solid.
---     * signed_volume within 2% of volume: 99.34%.
---   CAVEATS to clear before scaling (real, found at 52 names):
---     * CLOSE-HOUR COLLAPSE: 16:00 ET hour n_trades-within-2% = 14% (15:00 hr = 93%). Closing-
---       cross / late-and-out-of-sequence prints diverge live-vs-REST -> OFI features at/after the
---       close are NOT trustworthy. Minute-boundary state init (I2b threat #4) is the suspect.
---     * COVERAGE MISMATCH: backfill 34,784 min vs stream 18,860 min; 28,726 backfill-only
---       (stream is RTH-concentrated, ~363 vs ~682 min/symbol) and 12,802 stream-only minutes.
---       The minute-set mismatch must be understood before trusting at scale.
---   VERDICT: core RTH count+sign parity passes at 52 names; gate OFI on (a) excluding the
---   closing minutes until close-hour parity is fixed and (b) explaining the coverage mismatch.
---   Owner of the at-scale DATA PATH: prod-architect; QA re-runs this as scale grows.
+-- FINDINGS (settled day 2026-06-11):
+--   *** THE HEADLINE NUMBER IS NOT AN AT-SCALE PROOF. *** The per-minute coverage drill (sections
+--   below) shows the live STREAM captured only ~10 of 50 names for the WHOLE day until ~15:51 ET,
+--   when the subscription scaled 10->50; backfill had all 50 throughout. So the 6,058 "overlap"
+--   minutes and the 98.05% within-2% / 99.82% sign agreement are essentially a 10-NAME proof plus
+--   a ~10-minute 50-name window (15:51-16:00). A true 50-name full-session proof needs a day with
+--   all 50 streamed start-to-finish (earliest 2026-06-12).
+--   GOOD news where the stream DID capture a name:
+--     * per-minute parity excellent — 15:30 / 15:45 / 15:55 ET all 100% count + sign (the overnight
+--       label anchor + last intraday cadence are CLEAN; the overnight verdict is not tainted).
+--     * tick-rule SIGN agreement 99.82% — the HARDEST threat (sign depends on order+last-price
+--       state, sensitive to out-of-order live delivery) holds on the captured names.
+--   RESIDUAL THREATS:
+--     * 16:00-ET CLOSING-PRINT minute = 14% within-2% (closing-auction divergence) -> exclude
+--       >=16:00; the Modeller's conservative >=15:50 OFI line is safe (15:50-15:59 ~100%).
+--     * backfill trade-agg is RTH-bounded (no post-16:00 ET) -> post-close OFI has NO backfill to
+--       validate against at all.
+--   VERDICT: encouraging on the 10 streamed names, but NOT proven at 50. Re-run on the first full
+--   50-name settled session. Owner of the 10->50 live-coverage gap + at-scale data path: prod-architect.
 
 \timing off
 \set day '2026-06-11'
@@ -62,3 +65,17 @@ SELECT round(100.0*count(*) FILTER (WHERE b_tot<>0 AND abs(s_sv-b_sv)/abs(b_tot)
 SELECT extract(hour from (ts AT TIME ZONE 'America/New_York')) AS et_hr, count(*) AS min,
        round(100.0*count(*) FILTER (WHERE b_nt<>0 AND abs(s_nt-b_nt)/abs(b_nt::float)<=0.02)/count(*),1) AS nt_within2
 FROM j GROUP BY 1 ORDER BY 1;
+
+\echo '== 5. SYMBOL COVERAGE per source by ET hour (THE at-scale check: is the stream really 50?) =='
+SELECT extract(hour from (ts AT TIME ZONE 'America/New_York')) AS et_hr,
+       count(DISTINCT symbol) FILTER (WHERE source='stream')   AS stream_syms,
+       count(DISTINCT symbol) FILTER (WHERE source='backfill') AS backfill_syms
+FROM trade_agg_1m WHERE ts::date=:'day' GROUP BY 1 ORDER BY 1;
+
+\echo '== 6. per-minute parity, closing hour 15:00-16:00 ET (overnight anchor 15:30; MOC line) =='
+SELECT to_char((ts AT TIME ZONE 'America/New_York')::time,'HH24:MI') AS et_min, count(*) AS syms,
+       round(100.0*count(*) FILTER (WHERE b_nt<>0 AND abs(s_nt-b_nt)/abs(b_nt::float)<=0.02)/count(*),1) AS nt_within2,
+       round(100.0*count(*) FILTER (WHERE s_imb IS NOT NULL AND b_imb IS NOT NULL AND sign(s_imb)=sign(b_imb))/NULLIF(count(*) FILTER (WHERE s_imb IS NOT NULL AND b_imb IS NOT NULL),0),1) AS sign_agree
+FROM j WHERE (ts AT TIME ZONE 'America/New_York')::time >= '15:00'
+        AND (ts AT TIME ZONE 'America/New_York')::time < '16:00'
+GROUP BY 1 ORDER BY 1;
