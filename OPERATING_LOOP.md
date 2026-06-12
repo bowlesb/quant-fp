@@ -365,3 +365,12 @@ visibly ladders to the long-term goal. Period character shapes content (market h
 live debugging/execution; evening = batches/deploys/settled proofs; overnight = grind/
 backfills/research synthesis). The Manager's wake chain MUST hit every boundary. Reports
 are surfaced on the DASHBOARD (Progress page renders docs/progress/, newest first).
+
+## Exploration pipeline (Ben's directive 2026-06-12 — see docs/EXPLORATION_PIPELINE.md)
+Weekends + overnight: FIVE research minds run in parallel — modeller (Research Lead,
+single writer of queue/EXPERIMENTS, verdict authority) + explorer-features/-ml/-shapes/
+-data, each with its own lens, pre-registered proposals, and append-only journal under
+experiments/journals/. The Manager wakes the five at period boundaries and on grind
+results; any lens blocked on data/compute escalates immediately. WEEKEND BAR (Ben):
+come back Monday with a DIVERSE set of COMPLETED experiments and a ranked promising-
+leads list — every lens ≥3 completed runs, plus the kill list with reasons.
