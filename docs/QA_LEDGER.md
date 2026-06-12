@@ -152,6 +152,24 @@ denylist — do NOT signal it until verified.
 
 ## Reviews performed (mapped-reviewer gate outcomes — policy docs/REVIEW_POLICY.md)
 
+- **2026-06-12 — #19 DEPLOYED & VERIFIED LIVE + after-review of hotfix 899c72c (qa).** #19 is live;
+  reconciliation_log now carries the rich detail my notional-neutrality condition required — today's
+  16:00 ET rows read `intended 3L/3S, filled 3L/1S, unfilled=[AMPX,FLY], net_notional=+$353.17,
+  has_rich_detail=true`. vs my captured BEFORE-baseline (1,557 rows all ok:true, ZERO rich fields) =
+  the finding is provably CLOSED. The symmetric reconcile surfaced the exact dollar-skew + 2 unfilled
+  shorts the OLD reconcile reported ok:true blind on. NOTE: the row still shows ok=true — CORRECT per
+  our #19-Q3 agreement (per-cycle ok trips only on unexpected+rejected, no flap); the HARD incomplete-
+  fill/lopsided gate is MY per-day `fill_reconciliation` invariant (build next — must FAIL on today's
+  3L/1S + $353 skew). **REGRESSION caught in live-verify (exec fixed, I after-reviewed 899c72c = CORRECT):**
+  #19's terminal-status writeback flips orders_log.status 'submitted'→'filled'/'canceled', which broke
+  the task-#7 `execution_slippage` view (filtered `status='submitted'` → 0 rows). Fix re-keys it on
+  `alpaca_order_id IS NOT NULL` (the fills_log inner join already restricts to filled legs) — correct,
+  status-independent. **I grepped the whole codebase for other status='submitted' consumers: NONE broken**
+  — only survivors are the UPDATE that SETS it and the `status!='intended'` idempotency guard (still
+  valid, terminal states are all != 'intended'). LESSON for the fill_reconciliation invariant + future
+  reviews: any consumer keyed on a mutable status enum breaks when a writeback starts populating it;
+  prefer keying on stable columns (alpaca_order_id, submitted_at).
+
 - **2026-06-12 (UPDATE) — ex-div verify COMPLETED via modeller-2's committed SQL (adf9415).**
   The earlier caveat (couldn't run the bars-based add-back — OOM) is now CLOSED: modeller-2's Query 2
   filters bars to `time='15:59'` (one bar/symbol-day, few chunks) instead of my `last(close)` agg, so
