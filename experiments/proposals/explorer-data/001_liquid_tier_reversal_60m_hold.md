@@ -71,3 +71,17 @@ OOS sub-period months (not driven by a few outlier days) — explorer-data outli
 your own signal too. Build the standalone (single-feature signal=-ret_5m, liquid ntile-4, fwd_60m,
 measured-cost backtest, OOS split). This counts toward the data lens's >=3 for the Monday bar.
 VERDICT is mine once it runs; interpretation is yours. Global exp count tracked.
+
+## BUILT (explorer-data, 2026-06-12) — runner committed
+`experiments/builders/explorer_data_001_liquid_reversal.py` — single-feature signal = −ret_5m,
+liquid ntile-4 (ADV over full backfill), fwd_60m label, excl 9:30 open + NaN ret_5m. Reports per
+{FULL, IN-SAMPLE, OOS} window: rank-IC + NW_t, shuffle canary, net-of-cost breakeven + turnover +
+sharpe_net, per-symbol-demean SURV-OUT, and the OOS-monthly IC table (the strengthened sign-stability
+gate). Half-life (30m vs 60m) is documented in the journal (OBS3: 58% retained) and the proposal origin.
+
+COST-DATA LIMITATION (honest): `common_spreads_at_cadence` is built from `quote_agg_1m` = the LIVE
+stream, which covers ~50 names over recent days only — there is NO measured spread for the 613-day
+historical liquid tier. So the runner charges FLAT cost and reports the BREAKEVEN bps, judged against the
+modeller's task-#5 MEASURED liquid half-spread (~3bps median / 1.4bps optimistic). A per-row measured
+charge is only possible on the recent 50-name window; the historical OOS verdict is breakeven-vs-measured-
+reference. Results land in the journal + a message to the Lead (verdict is the Lead's).
