@@ -297,6 +297,74 @@ Catalog-first query revealed proposal 003 (open gap-fade) == explorer-shapes' sh
 common_daily_session_price catalog entry names "gap fade/follow #002"). Flagged to the Lead to arbitrate;
 I lean: let shapes own the SHAPE, I feed the DATA ARCHAEOLOGY (inverted-U liquidity, 83% persistence,
 regime conditioning, the 9:30-cost blocker). Avoids two lenses building the same backtest.
+RULING (Lead, 2026-06-12): option (a) — explorer-shapes OWNS the shape; I feed archaeology + keep it as a
+data-lens REPORT. Lead MEASURED the open-cost blocker I flagged: open-minute HALF-spread = 12.6bps @09:30,
+6.7bps @09:35, 6.0bps @09:40 (2-4× the 10:00 cost). So gap-fade IC -0.09 must clear ~6-12bps half-spread —
+the blocker is real and large. Lead registering open-minute spreads as a common_ table for shapes' gate.
+
+---
+
+## 2026-06-12 — Wake 1, batch 5. LITERATURE (new binding protocol: methodology lens, cite + translate).
+
+Three targeted searches for the data/methodology lens. Literature INFORMS, never replaces gates.
+
+### LIT-1 — Nagel 2012, "Evaporating Liquidity" (RFS 25(7):2005-2039). THE mechanism for my reversal.
+Link: https://academic.oup.com/rfs/article/25/7/2005/1602153 (NBER w17653; SSRN 1988706).
+TAKEAWAY: short-horizon reversal returns = a PROXY FOR THE RETURNS TO LIQUIDITY PROVISION. The expected
+return to the reversal strategy is strongly time-varying and HIGHLY PREDICTABLE BY VIX — it rises enormously
+with VIX in turmoil (intermediaries withdraw liquidity → compensation for providing it spikes). Even
+industry-portfolio reversal (no unconditional return) pays well when VIX is high.
+RELEVANCE TO MY FINDING — a SHARP, TESTABLE TENSION I must resolve:
+- Nagel: reversal STRATEGY RETURN ↑ with VIX (strongest in turmoil).
+- My OBS6: reversal mean rank-IC is STRONGEST in CALM (low-dispersion) regimes, monotone DOWN as dispersion ↑.
+- These are NOT necessarily contradictory — they measure DIFFERENT quantities. Nagel's $ return = (ordering
+  quality) × (spread/compensation captured). In turmoil the COMPENSATION (spread) is huge, so $ return is high
+  EVEN IF the rank-IC (ordering quality) is noisier (my OBS6: high-vol days mix snapback with trend, hurting IC).
+  My OBS5 independently showed the BIGGEST single-day reversal IC lands on macro-vol events (2024-08-05 carry
+  unwind, 2025 tariff cluster) — i.e. the IC TAIL is turmoil-driven (Nagel-consistent) even though the MEAN IC
+  is calm-driven. The reconciliation: turmoil = high-mean, high-VARIANCE reversal; calm = steady moderate reversal.
+- TESTABLE REFINEMENT (Nagel predicts this, my proposal 001 should add it): condition the reversal on VIX and
+  measure the STRATEGY RETURN (not IC). Nagel predicts the NET-OF-COST reversal return is concentrated in
+  high-VIX periods — which is ALSO where spreads (my cost wall) are widest. So the real question 001 must answer
+  is whether the high-VIX reversal return clears the high-VIX spread — Nagel says the compensation exists
+  PRECISELY because the spread is wide (it IS the liquidity-provision payment). This reframes "is the reversal
+  tradeable" as "can we provide liquidity at our latency/cost, or do market makers capture it all." A retail-
+  latency cross-sectional reversal likely CANNOT capture the maker's spread — which predicts 001 = net-negative
+  (consistent with my ~25% prior), but for a PRINCIPLED reason, not just "turnover too high."
+- ACTION: add a VIX/regime split to the 001 verdict (use common_regime_labels disp_tier as the VIX proxy —
+  conveniently already built); report reversal return AND breakeven per regime tier. Cite Nagel in proposal 001.
+
+### LIT-2 — Square-root market-impact / Almgren cost models (methodology for cost-gating beyond flat bps).
+Links: Almgren et al. 2005 "Direct Estimation of Equity Market Impact"
+(https://www.researchgate.net/publication/228754794); square-root law G ~ σ·(Q/V)^0.5 (Torre 1997, Loeb 1983);
+Almgren-Chriss (https://en.wikipedia.org/wiki/Almgren%E2%80%93Chriss_model).
+TAKEAWAY: realistic one-way cost = HALF-SPREAD + MARKET IMPACT, where impact ~ σ·(order_size/ADV)^δ
+(δ≈0.5 square-root, Almgren found ≈0.6). Flat-bps (our current battery) captures only the half-spread and
+ASSUMES zero impact — fine for tiny size, but our L/S basket trades ~89 names/leg and a real book has size.
+TRANSLATE TO OUR REALITY: our cost-gating (common_spreads_at_cadence half-spread + flat) is a LOWER BOUND on
+true cost — it omits impact. For the liquid tier at small initial size (~$5-10K/name, Ben's start) impact is
+negligible (order « ADV), so half-spread dominates and flat is OK for the M3 gate. BUT as size scales toward
+$100K the square-root impact term grows; a future cost model should be half_spread + k·σ·(notional/ADV$)^0.5.
+This MATTERS MOST for the illiquid tier (low ADV → impact bites fast) — reinforcing my "trade the liquid tier
+only" conclusion from a second, independent (impact-cost) angle, not just spread. NOT a gate change now (size is
+tiny); logged as the cost-model upgrade path when size scales. Complements modeller's measured-spread table.
+
+### LIT-3 — Regime detection methodology (HMM vs threshold) — validates my common_regime_labels design.
+Links: Cube/QuantifiedStrategies HMM regime writeups; arXiv 2104.03667 (realized-cov regime detection).
+TAKEAWAY: HMMs give probabilistic, persistence-aware states (a single bad day doesn't flip a calm belief) and
+often beat naive threshold rules by using full distributional info — BUT they're estimation-heavy, Gaussian
+emissions miss fat tails, state interpretation is fragile, and they OVERFIT without strict walk-forward. Many
+practitioners PREFER transparent VIX/realized-vol THRESHOLD classification for interpretability + PIT-robustness.
+TRANSLATE: this VALIDATES my common_regime_labels choice — a transparent trailing-percentile threshold on
+realized cross-sectional dispersion (PIT, rank-based, no latent state to overfit). For ~613 days an HMM would
+be over-parameterized; the threshold is the robust, interpretable, PIT-honest call. The one HMM virtue worth
+borrowing — PERSISTENCE (don't flip the regime on one day) — my trailing-120 percentile already provides
+(the tier moves slowly because the window is long). So no HMM needed now; if regime conditioning proves
+load-bearing in a verdict, revisit a 2-3 state Gaussian-mixture HMM with walk-forward as a robustness check.
+
+LITERATURE NET: Nagel is the big one — it may EXPLAIN my reversal as liquidity-provision compensation, predicts
+it's VIX-conditional (testable via the regime table), and predicts it's likely NOT retail-capturable net of the
+maker's spread (a principled reason for the 001 prior). Folding a VIX/regime split into 001 is the concrete next step.
 
 OPEN QUESTION for the net-of-cost gate (the make-or-break): the gap-fade requires trading AT/just-after
 9:30 ET — the widest-spread minute. If liq2/liq3's opening half-spread is, say, 5-15bps, even a -0.09 IC
