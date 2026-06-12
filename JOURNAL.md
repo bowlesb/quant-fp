@@ -1085,3 +1085,22 @@ to independently eyeball the exclusion list. In flight: #12 backfill long tail; 
 deploying executor (#19 + ex-date guard + ratified KLAC lift). QA unleashed on post-
 restart suite + live_feature_coverage baseline + #15 settled proof + unprovoked probe.
 Board: tasks #3, #12 completed.
+
+## 2026-06-12 — Manager: POST-CLOSE BATCH COMPLETE — the close window executed clean
+Prod final: max_locks 64->2048 (20.3M-row join now 10s); #18 CA feed live (7205
+actions); #17 KLAC fixed+green; #10 OFI panel live; #11 blocking freshness gate live;
+rebuild-batch = 7 services, ONE ingestor restart, all baked-fresh, subscription swap
+verified clean at subscribe level (1000 equities, 0 ETFs; bars-level confirmation =
+Monday ~09:35 ET probe). #12 grinding (222 thin names from 2023-12-01, ~30-90min).
+ANOTHER catch-by-verification: docker compose run does NOT inherit host env — first
+#12 launch silently ran the 10-symbol default; run_tool now forwards a runtime-env
+allowlist; relaunch verified at 222 symbols. (Harmless first run: idempotent upsert.)
+Exec lane: #18+#19 live-verified, KLAC lift done (single data-driven guard), slippage-
+view regression caught in live-verify + fixed + after-reviewed. fill_reconciliation
+invariant live and correctly RED on today's 3L/1S (true positive; flips green when
+the spread-scaled cross fills shorts Monday).
+QA lane: baselines rolled; full suite running at new lock headroom; #15 awaits only
+prod's 6/12 backfill-aggs (relayed as DO-IT-NOW).
+Day's tally: M1 declared (a day early), 2 new invariants born + 2 inversion/regression
+fixes, 4 catch-by-verification saves, CA-feed self-healing live, ~50 role-attributed
+commits across 5 lanes under the new review policy. The close window: zero incidents.
