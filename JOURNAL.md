@@ -1009,3 +1009,16 @@ don't warn). Vigilance saved us 4x; structure must replace vigilance.
 Experiment engine grinding since 12:15 PT (gate opened, compose 3d38e1f, retro-review
 flagged to prod per policy). Family B (dispersion/beta) prototyping started — zero
 data dependency. Family A waits only on #18 CA rows (real blocker, not habit).
+
+## 2026-06-12 — Manager: ex-div label-hygiene defect found (Family A) — handling ruled
+Modeller-2 (827f478): overnight labels carry a MECHANICAL −51.6bps on ex-div nights
+(3,291 cells; baseline +4.7bps), ~85% explained by dividend yield; yield-back restores
+baseline. Same class as survivorship — non-alpha the overnight model could mislearn.
+Manager rulings: (1) v1.1.1 stored labels are FROZEN (the M1 verdict's labels; no
+version column — overwrite would repeat the v1.1.0 destruction). Corrected battery
+re-run computes the fix IN-EXPERIMENT (no persistence). Persistent corrected labels
+require label-versioning (prod schema) first. (2) Production labels.py fix = the FIRST
+Tier-1 PR under the new review flow, qa-2 adversarial reviewer. (3) qa-2 assigned
+independent verification of the diagnostic (PIT ex-date alignment, residual 15%,
+multi-class double-count) before corrected results are interpreted.
+Anticipation features off the table (Alpaca CA feed lacks declaration dates) — #21-class.
