@@ -36,9 +36,13 @@ leveraged funds; the price-only "no edge" verdict is therefore suspect.
 **Exit criteria (quantifiable):**
 - [ ] Universe = single-name equities ONLY — **0 ETF/leveraged/fund members** (automated
       invariant `universe_is_equities_only` green in the QA suite & CI).
-- [ ] Clean equity panel rebuilt over the full ~600-day history, PIT-correct — ~885-900
-      equities/date (rebuild found removing funds UN-CROWDS ~160 equities/date the 1000-cap
-      had displaced; labels recomputed too, not just features).
+- [ ] Clean equity panel rebuilt over the full ~600-day history, PIT-correct — **~715
+      equities/date** as set_version **v1.1.1** (labels recomputed too, DELETE-then-insert).
+      (CORRECTED 2026-06-12: an earlier "~885 with ~160 un-crowded equities" reading came
+      from a stale-image rebuild that ran pre-fix code; contamination was purely ADDITIVE
+      ETFs — old ~933/date ≈ ~210 funds + ~723 equities. Note: v1.1.0 feature rows stay
+      frozen but their original labels are overwritten — v1.1.0 must NEVER be re-batteried;
+      its canonical results live in experiments/results.jsonl.)
 - [ ] Price-only cost-gated battery **RE-RUN on the clean panel**; verdict re-validated and
       documented (trustworthy, not contaminated) in STATE/EXPERIMENTS.
 - [ ] All QA invariants are **automated checks** (calendar/DST, parity, PIT, warmup, no-Inf,

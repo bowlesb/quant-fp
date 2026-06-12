@@ -651,3 +651,20 @@ OFI pilot trigger-gated (52 syms x 2 days = noise; needs ~10 days + v1.2.0 panel
 which had 0 ROWS, never computed -> task #10, Prod).
 Manager: task #6 split — Prod owns upstream (membership pre-open, model-server fires
 09:30), Exec owns executor-side (stale->fresh transition + first live nbbo slippage rows).
+
+## 2026-06-12 (pre-open 2) — Manager: CORRECTION cycle — displacement finding RETRACTED
+Prod-architect retracted the "~885 with +160 un-crowded equities" finding: it was read
+from a STALE-IMAGE rebuild that ran pre-is_etf_like code and RE-CONTAMINATED the universe.
+TRUE clean universe = ~715 equities/date (0 funds; lone flag = UiPath/iPath checker
+false-positive). Contamination was purely ADDITIVE (~933 ≈ 210 funds + 723 equities).
+ROADMAP corrected (2nd move — record kept of why). Modeller told to VOID the +160-names
+hypotheses and re-register blind: breadth tripwire flips (cross-section SHRINKS -> t
+mechanically harder), cost-optimism arg void.
+Stale-image bug class hit 3 services in 24h (experimenter, backfiller mid-rebuild,
+scheduler — which would have re-contaminated the LIVE universe at next pre-open).
+-> task #11 (Prod, architect hat): structural fix + QA-detectable invariant, before M2.
+Decisions: clean panel = NEW set_version v1.1.1 (provenance in results.jsonl); labels
+have no set_version -> v1.1.0's original labels overwritten -> v1.1.0 must NEVER be
+re-batteried; Modeller adding fail-loud battery guard refusing v1.1.0. Label recompute
+confirmed DELETE-then-insert per horizon (passes Modeller's computed_at gate).
+Experimenter stopped during rebuild (halts BUG-B poisoning); restart = part of #8.
