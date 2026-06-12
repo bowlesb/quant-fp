@@ -40,10 +40,17 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
   vs hard-fail.
 - [x] **KLAC denylist condition MET:** QA no_extreme_backfill_jump GREEN + #17 verified + #18 CA live.
   Signaled exec to lift post-deploy (KLAC stays excluded via the data-driven ex-date guard); Manager ratifies.
-- [ ] **#12 backfill — at the close (CONCRETE reason):** 222 thin names = sustained paginated data-API
-  load that contends with the live executor NBBO during RTH. Run AT CLOSE via the gate:
-  `BACKFILL_SYMBOLS=<thin list> BACKFILL_START=2023-12-01 scripts/run_tool.sh backfiller backfill-bars`.
-- [ ] Remaining (still gated on close): rebuild-batch (ingestor restart) + executor deploy (exec, lifts KLAC denylist).
+- [x] **#12 backfill — DONE + verified.** 43.6M bars for the 222 thin names (2023-12-01→now). Universe
+  depth now 988/1000 ≥120d (was 778) — 210 deepened; residual 12 thin/7 very-thin are genuinely-young
+  (no earlier history exists). research==production at the BAR level; v1.1.2 rebuild can draw ~988 names.
+- [x] **rebuild-batch DONE + verified** (single ingestor restart, 7 services baked-dbab3fc fresh,
+  subscription swap clean: 1000 equities / 0 ETFs). Executor deploy DONE (exec lane: #18 guard + #19 +
+  KLAC denylist LIFTED, ratified).
+### BATCH COMPLETE 2026-06-12 — every post-close item executed + verified. M1 declared; #15 M2 I2b gate
+MET; M2 500-name sharding designed+approved+verified (docs/M2_SHARDING.md, topology A, weekend build).
+WEEKEND QUEUE: build M2 sharded ingestor (prod-architect/m2-sharding branch, qa-2 PR); #22 composable
+label/feature materialization memo; signed_vol_z robust-rolling-z PR (P2 above); #20 FMP fetch (on key);
+#14 canonical-close convention; COPY-derived IMG_SRC (#11 follow-up).
 
 ### POST-CLOSE 6/12 RUNBOOK (~13:00 PT / 16:00 ET) — turnkey; ONE ingestor restart total
 **STEP 0 — FIRST, immediately after BOOK FLAT, BEFORE everything else (DB restart):** raise
