@@ -28,3 +28,8 @@ RXT	2026-02-18
 STI	2026-06-04
 STRC	2025-07-30
 WOLF	2025-09-29
+# KLAC's REAL 10:1 split, ex-date 2026-06-12 (announced ~6/4) -> exempt the legit ex-date
+# transition (~2429 -> ~243) so it isn't flagged as an artifact post-close. NOTE: KLAC's
+# 2026-06-01 mid-series STEP is a SEPARATE backfill mixed-adjustment ARTIFACT and stays FLAGGED
+# until prod's #17 re-fetch rebases KLAC's whole history.
+KLAC	2026-06-12

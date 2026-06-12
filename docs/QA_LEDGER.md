@@ -72,6 +72,17 @@ UTC-calendar leakage is confined to v1.0.0 (32,220 rows); v1.1.0 and v1.1.1 are 
 land. `backfill_realtime_parity` read borderline 1.14% mismatch (just over the 1% gate) — see
 below.
 
+**POST-REBUILD full-suite evidence (2026-06-12, v1.1.1 COMPLETE: 5,525,040 rows / 613 dates /
+785 symbols / 0.000% NaN, all 3 label sets recomputed):** 9 PASS / 2 FAIL. The clean panel
+passes EVERY integrity axis — calendar ET-correct (0 bad / 5.5M), PIT-correct, no ragged/dead
+feature, no Inf, and the **label-demean sub-check re-activated and PASSES** (fwd_30m/60m
+avg|per-ts median|=0.000000, overnight 0.000076 — the avg-based threshold clears the lone
+0.011 single-ts outlier). The 2 FAILs are BOTH real & owned: `no_extreme_backfill_jump` flags
+KLAC 6/01 (artifact, 13 real events silent → flips green after the #17 re-fetch) and
+`backfill_realtime_parity` 1.14% (#14). i.e. the panel the edge verdict was computed on is now
+verified trustworthy on every axis except the two flagged backfill issues (momentum-only /
+parity-overlap, both being fixed).
+
 ## Open concerns — severity-ranked (update status each wake)
 
 | sev | id | concern | status |
