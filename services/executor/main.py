@@ -152,7 +152,7 @@ EXEC_DDL = [
        LEFT JOIN LATERAL (SELECT close FROM bars_1m b
                           WHERE b.symbol = o.symbol AND b.ts < date_trunc('minute', o.submitted_at)
                           ORDER BY b.ts DESC LIMIT 1) bar ON true
-       WHERE o.status = 'submitted'""",
+       WHERE o.alpaca_order_id IS NOT NULL""",
     # Daily roll-up: oneway_cost_bps_* is the real number to feed long_short_backtest(cost_bps_oneway=).
     """CREATE OR REPLACE VIEW execution_slippage_daily AS
        SELECT day, count(*) AS n_legs,
