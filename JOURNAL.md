@@ -871,3 +871,14 @@ M2 (order-flow at scale, 6/20) is now CURRENT. Tonight post-close: prod's batch
 review+swap (held entirely post-close — /models hot-reload risk), #12 backfill, QA #15
 first full-50 settled-day proof. prod-architect-2 (joined 07:45, origin unknown) stood
 down to read-only; original prod owns the lane.
+
+## 2026-06-12 — Manager: prod lane handoff RATIFIED — prod-architect-2 owns
+The two prod sessions deconflicted cooperatively (opposite my initial ruling — accepted:
+context already handed over in writing, -2 actively driving #11/#18, flip-flop costs
+more). Single owner = prod-architect-2; original = standby context-holder (its M1 work
+— rebuild, displacement self-correction, KLAC chain — was the milestone's backbone).
+Ratification conditions sent to -2: (1) stale-context corrections (M1 DECLARED, #12
+guard satisfied; #13 verified live, no rebuild), (2) post-close constraints (ONE
+ingestor restart; QA parity before denylist pull; #16 ordering with modeller),
+(3) answer who spawned it + any Ben directive verbatim. Modeller rerouted to -2 for
+#16 coordination.
