@@ -881,3 +881,31 @@ NOTE on the beta proxy: a true beta needs a trailing time series; this within-sn
 beta is a cheap PROXY computable from the panel alone. If the proxy shows promise, the production
 version would use rolling per-name regression on the bar history (a real featurestore computation) —
 but the proxy is the cheap weekend read on whether the idea has ANY legs before investing in that.
+| 2026-06-12T19:27:14+00:00 | C11_solo_ret_15m | fwd_30m | raw | 1 | 4840765 | 0.00428 | 4.476 | 0.00069 | Single-feature interrogation: ret_15m ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+
+### FAMILY B SMOKE RESULT (120-day, 2026-06-12) — no meaningful lift; full run pending
+
+experiments/family_b_smoke.jsonl (gitignored). 120-day sample, 3 variants × 2 horizons:
+
+  variant               horizon    nf      IC     canary  breakeven  surv_sharpe
+  baseline_price_only   fwd_30m    19  +0.01510  -0.00923   0.98bps    -4.92
+  plus_family_b         fwd_30m    23  +0.01602  -0.00989   0.93bps    -4.03
+  family_b_only         fwd_30m     4  +0.00257  -0.00087   0.01bps    -7.32
+  baseline_price_only   overnight  19  -0.00179  +0.00230   3.94bps    -0.43
+  plus_family_b         overnight  23  -0.00033  +0.00016   2.54bps    -1.89
+  family_b_only         overnight   4  +0.00488  -0.00118  -0.42bps    -2.51
+
+READ (smoke-grade, honest): Family B does NOT lift the signal above the canary economically.
+- 30m: +family_b IC 0.0151→0.0160 (+0.0009) but the canary rose proportionally (-0.0092→-0.0099) —
+  the lift is WITHIN canary noise, not real. family_b_only IC 0.0026 ≈ its canary. Survivorship sharpe
+  stays deeply negative.
+- overnight: the only faintly-interesting cell is family_b_only IC +0.0049 (canary -0.0012) — the
+  idiosyncratic RESIDUAL alone shows a small standalone overnight IC above its canary. BUT breakeven
+  -0.42bps (loses money immediately) and survivorship sharpe -2.51 — uneconomic + survivorship-driven.
+VERDICT (preliminary, pending full panel): the idiosyncratic-residual idea has the faintest pulse at
+overnight but fails cost + survivorship; dispersion/beta add nothing at 30m. CONSISTENT WITH and
+SHARPENS "data-starved, not model-starved" — the one genuinely-new FREE signal shows ~nothing.
+Full-panel run launched (the firm read); 120d is directional only. If the full panel confirms, Family B
+is a discard (logged, not shipped) and the case for NEW DATA (OFI/news/ex-div) as the only path
+strengthens. NOTE: the within-snapshot beta is a cheap proxy; a true rolling-regression beta on bar
+history could differ — but a proxy showing zero is weak evidence FOR investing in the expensive version.
