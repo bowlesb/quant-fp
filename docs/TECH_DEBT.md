@@ -6,7 +6,8 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 
 | sev | item | why it's debt | rebuild/repay plan |
 |-----|------|---------------|--------------------|
-| P1 | experimenter ran STALE code → wrong results | no "running==intended" gate before trusting output | rebuild+restart+verify after edits (Manager duty added); consider a code-version stamp in experiment records |
+| P1 | experimenter ran STALE code → wrong results | no "running==intended" gate before trusting output | STRUCTURAL FIX STAGED 6/12 (#11): git-SHA baked into every image (ARG GIT_SHA) + content-based assert_image_fresh.sh v2 + `make rebuild-all`. Applied at post-close rebuild. |
+| P3 | scheduler maybe_refresh_asset_metadata (L137) uses datetime.now(UTC).date() as once/day gate | same UTC-vs-ET class as #13 but BENIGN — asset_metadata is idempotent UPSERT (not date-keyed); worst case one extra refresh in 20:00–24:00 ET | swap to et_session_date() next time scheduler is touched (not worth a dedicated restart) |
 | P1 | rebuild = ON CONFLICT DO NOTHING (can't overwrite) | recompute can't replace stale rows (today-panel UTC bug) | switch panel rebuild to DELETE-then-insert |
 | P2 | build_feature_store ~4k sequential round-trips/cadence + per-symbol daily-close query | N+1; fine at 30m, won't scale to tighter cadence/universe | batch bar/daily-close loads (ANY(array)); hoist shared queries |
 | P2 | trades/quotes only for 10 symbols | blocks universe-wide order-flow features (modeling roadmap) | the Architect's sharded ingestion-tier decision (see JOURNAL) |
@@ -15,7 +16,10 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
 | P3 | experimenter writes host files as root | permission paper-cuts | add user:uid to the service |
 
 ## Scheduled core-rebuilds (maintenance windows)
-- (none scheduled yet) — Architect proposes one when debt in an area crosses a threshold.
+- **POST-CLOSE 6/12 (~13:00 PT): `make rebuild-all`** — first build with GIT_SHA baked in; brings
+  EVERY service to running==intended in one batched restart (also picks up clean bar-subscription
+  membership, #13 scheduler already-live, and the ingestor quantlib-drift below). Batched to ONE
+  ingestor restart per the QA settled-day constraint.
 
 ## Incident log (running==intended)
 - **2026-06-12: STALE-IMAGE re-contamination caught.** The first M1 clean-universe rebuild ran
@@ -30,6 +34,21 @@ maintenance instead of letting debt compound silently. Severity: P1 bites soon, 
   FIRST — same for restarting long-running services. **GAP: no automated build-freshness gate.**
   Proposed: a `scripts/assert_image_fresh.sh` (image-created-at >= last commit touching its source)
   wired into the rebuild path + CI. Until then, manual image-age check before every pipeline run.
+- **2026-06-12: #11 STRUCTURAL FIX STAGED (git-SHA baked into images).** Verifying #13 surfaced the
+  timestamp check's fragility live: the scheduler image was built 00:10:03 PT — 36s BEFORE its own
+  commit 00:10:39 PT — yet CONTAINS the committed fix (build-then-commit ordering). A clock-based
+  guard calls that STALE (false positive); only a CONTENT check is trustworthy. FIX: every Dockerfile
+  now declares `ARG GIT_SHA` + `ENV GIT_SHA` (placed after the source COPY so it never busts the
+  pip-install layer); `make rebuild`/`rebuild-all`/`build-fresh` inject `--build-arg GIT_SHA=$(git
+  rev-parse --short HEAD)[-dirty]`; assert_image_fresh.sh v2 reads the baked SHA from the RUNNING
+  container (true running==intended), rejects `-dirty`/unknown SHAs, and asserts the baked SHA
+  CONTAINS the last commit touching the service source (git merge-base --is-ancestor) — falling back
+  to the old timestamp check only for legacy images with no SHA. Validated: dirty-detection + ancestry
+  + legacy fallback paths. Applied to live images at the post-close rebuild-all.
+  NB found while staging: ingestor image (built 06-11 12:50) predates 3 quantlib commits (OFI
+  b214dbf, is_etf_like→select_universe 814e548, v1.1.1 set 6eb5084) — but NONE touch the ingestor's
+  runtime path (it does aggregation + reads pre-built universe_membership; it never calls
+  select_universe or computes features), so no live correctness issue; rebuild-all clears the flag.
 
 | P1 | build_feature_store is O(n²) in per-symbol bars | rebuilds close_by_ts/vol_by_ts from the growing bars[:i+1] per cadence point — fine at 51 days, ~36-55h over 600 days (stuck the deep rebuild) | proper fix: precompute close_by_ts/vol_by_ts ONCE per symbol + pass past-only views (careful re lookahead). WORKAROUND IN USE: rebuild in monthly chunks (bounds per-symbol bars → ~2min/month). |
 | P1 | backfill SPLIT-ADJUSTMENT DISCONTINUITY (incremental fetch) | backfill-manager walks month-windows at different wall-clock times; when a split's adjustment data lands MID-backfill, pre-split months (fetched earlier, raw) and post-split months (fetched later, adjusted) land in ONE series → a clean Nx step inside a symbol. Found 2026-06-12: KLAC drops exactly 10× at 2026-06-01 (Alpaca ground-truth 2429 = stream correct, BACKFILL 10×-deflated — REVERSES QA's "stream feed error" read). Sweep of 785 names: 11 with >3× day-jumps (KLAC the clean artifact; rest mostly real small-cap/biotech moves). BLAST RADIUS: momentum features only (mom_* span multi-day daily_closes), ~10 days/symbol, ~0.03% of cells — fwd & overnight labels and intraday features unaffected. M1 panel = CAVEAT not invalidate. | (a) re-fetch full history per flagged symbol in ONE consistent Adjustment.ALL pass, then rebuild its v1.1.1 momentum cells; (b) backfill-manager should detect adjustment-version change (or always re-fetch a symbol's WHOLE history when any window changes) so months never mix states; (c) QA invariant: no >3× unexplained day-over-day backfill close jump (fail-loud); (d) LIVE path: model-server mixes correct STREAM intraday with deflated BACKFILL daily_closes → KLAC live score garbage (957/993, denylisted) — needs consistent adjustment basis live. |
