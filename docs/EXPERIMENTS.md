@@ -2012,3 +2012,38 @@ cost verdict since the open is high-cost, but it's the honest check). LIVE IMPAC
 executor currently trades the open cadence on the blended model; until a regime-split model exists, the
 open-cadence basket is ranked on gap_from_open alone (which is at least a REAL signal, not noise — so not
 harmful, just not optimal). No live change without exec sign-off Monday.
+| 2026-06-12T22:53:45+00:00 | W12_solo_rel_ret_30m_fwd_60m | fwd_60m | raw | 1 | 4416876 | 0.00148 | 1.805 | -0.001 | RECOVER poisoned C11_solo_rel_ret_30m (OOM-locks error permanently skipped). Standalone within-ts IC of rel_ret_30m at fwd_60m — the W11 position GROUP carries IC 0.029 at 30m (= full set); which member carries it? Resolves ret_5m-vs-position attribution. |
+
+## ★★★ GAP-FADE VERDICT — NOT A CANDIDATE: open-entry LOOK-AHEAD bug (Lead independent re-run, 2026-06-12)
+
+explorer-shapes escalated the conditional low-vol gap-fade as an M3 candidate (walk-forward OOS, net of
+measured open cost +2.6 to +3.0 Sharpe on liquid-50). Per my verdict rule (independent re-run before
+promotion — and because a +2.6 net Sharpe at a 15.3bps round-trip cost is too good), I checked the LABEL
+construction and found a fatal LOOK-AHEAD:
+
+THE BUG: the label is open_to_close = close_1600 / open_0930 − 1, and the signal gap = open_0930/prior_close
+− 1. BOTH use the 09:30 OPEN PRINT. The strategy computes the gap from the open AND books the return from
+that same open price. But you CANNOT execute at the 09:30 open (it's the auction); you observe the gap and
+enter at a LATER, worse price — and the fade is FASTEST in the first minutes (gap IC −0.072 at 09:30,
+decaying), so a large part of the "captured" move happens in the UN-TRADEABLE 09:30→entry window.
+
+LEAD VERIFICATION (liquid-30, 631 days, low-vol fade cohort, gross/no-cost):
+  open→close  (09:30 entry, LOOK-AHEAD):  +0.8 bps/day  Sharpe +0.08
+  10:00→close (TRADEABLE entry, px_1000): −10.9 bps/day  Sharpe −1.38
+Moving the entry from the un-executable 09:30 open to the tradeable 10:00 price FLIPS the fade from
+marginal-positive to strongly NEGATIVE. The entire apparent edge lived in the 09:30→10:00 segment you
+cannot trade. (The measured open spread 12.6bps was a red herring — even at ZERO spread, a tradeable-entry
+fade is net-negative.)
+
+VERDICT: NOT an M3 candidate. The conditional gap-fade is a REAL within-date PHENOMENON (the gap does fade,
+strongly, in the first 30 min) but it is NOT TRADEABLE — the fade completes before you can enter. The
+"3/4 M3 gates passed" was on a look-ahead label; the 4th-gate cost analysis never reached the real binding
+constraint because the RETURN itself was un-capturable. KILLED as a candidate. (Open question for shapes: a
+ten_to_close label (enter 10:00, hold to close) on the RESIDUAL post-10:00 gap signal — but my check says
+that residual is negative, so the prior is very low.)
+
+PROCESS NOTE (this is the system working): the Lead's independent-re-run-before-promotion rule caught a
+false edge before it reached the Manager/Ben. No false edge shipped. The gap-fade taught us the gap-fade is
+real but un-tradeable — a documented negative, the right outcome. THE STANDING LESSON for all shapes/labels:
+an open-anchored label MUST use a TRADEABLE entry price (>=09:35/10:00), never the 09:30 open print, or it
+look-aheads the fastest part of the move. Adding to the gate checklist.
