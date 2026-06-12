@@ -95,6 +95,15 @@ TRADE_AGG_MIN_WITHIN_RATE = 98.0  # >=98% of overlap within band -> PASS (M2 gat
 TRADE_AGG_MIN_SAMPLE = 200  # below this overlap, SKIP (not enough to judge)
 WARMUP_EARLY_LATE_GAP_PCT = 20.0  # early_nan - late_nan > this -> ragged warmup FAIL
 DEAD_FEATURE_NAN_PCT = 95.0  # NaN-rate above this on a non-warmup feature -> dead/FAIL
+# Steady-state mid-session NaN above this FAILS (the gap explorer-data caught 2026-06-13:
+# the ragged/dead pair is blind to a feature sitting at a constant moderate NaN — neither a
+# warmup gap nor 95%-dead). Measured EXCLUDING the first warmup hour of each session, where
+# intraday-return NaN is correct-by-construction (no N-min-lagged bar yet at the open).
+STEADY_STATE_NAN_PCT = 10.0
+STEADY_STATE_WARMUP_EXCLUDE_MIN = (
+    60  # skip the first 60 min/session (ret_60m by-construction NaN)
+)
+RTH_OPEN_MIN_OF_DAY = 570  # 09:30 ET
 PRED_MIN_DISTINCT_SCORES = (
     50  # latest model_version must have at least this many scores
 )
@@ -107,13 +116,24 @@ SESSION_FORWARD_SLACK_DAYS = (
 # submitted order is terminal. The hard gate that the per-cycle reconcile `ok` deliberately does NOT
 # enforce (it stays unexpected+rejected-only to avoid flap; see services/executor #19-Q3).
 # Mirrors services/executor/main.py TERMINAL_ORDER_STATES (kept in sync — Alpaca's terminal set).
-TERMINAL_ORDER_STATES = {"filled", "canceled", "expired", "rejected", "done_for_day", "replaced"}
+TERMINAL_ORDER_STATES = {
+    "filled",
+    "canceled",
+    "expired",
+    "rejected",
+    "done_for_day",
+    "replaced",
+}
 # Skew is RELATIVE to gross, not absolute dollars — at tiny paper sizes a fully one-sided basket is
 # only a few hundred $ absolute but still ~100% net exposure. |net|/gross is the size-independent
 # lopsidedness measure (0 = perfectly neutral, 1 = fully one-sided). A market-neutral intent should
 # realize near 0; 0.40 means 40% of gross is unhedged directional exposure.
-FILL_RECON_NET_EXPOSURE_TOL = 0.40  # |long-short|/(long+short) filled notional beyond this -> FAIL
-FILL_RECON_MIN_FILL_RATE_PCT = 60.0  # < this share of submitted legs filling -> FAIL (basket gutted)
+FILL_RECON_NET_EXPOSURE_TOL = (
+    0.40  # |long-short|/(long+short) filled notional beyond this -> FAIL
+)
+FILL_RECON_MIN_FILL_RATE_PCT = (
+    60.0  # < this share of submitted legs filling -> FAIL (basket gutted)
+)
 
 EXTREME_JUMP_RATIO = 3.0  # backfill daily-close day-over-day ratio beyond this -> flag
 DENYLIST_PATH = REPO / "tests" / "fixtures" / "known_funds.txt"
@@ -293,7 +313,8 @@ def _split_ex_dates() -> set[tuple[str, str]]:
 def _split_cutoffs() -> dict[str, str]:
     """{symbol: latest split ex_date 'YYYY-MM-DD'} from the #18 corporate_actions table. Used by
     the parity check to exclude a split name's RAW-stream-vs-ADJUSTED-backfill PRE-ex overlap,
-    which is incomparable by design (see check_backfill_realtime_parity). Empty if table absent."""
+    which is incomparable by design (see check_backfill_realtime_parity). Empty if table absent.
+    """
     if scalar("SELECT to_regclass('public.corporate_actions')") in ("", "NULL"):
         return {}
     rows = sql(
@@ -321,7 +342,9 @@ def check_no_extreme_backfill_jump() -> Result:
     nightly --full run, not the --fast wake. Scope to recent history with env QA_JUMP_SINCE.
     """
     symbol_wide, dated = _load_corporate_actions()
-    split_dates = _split_ex_dates()  # for ANNOTATION only (a jump on a split = adjustment failed)
+    split_dates = (
+        _split_ex_dates()
+    )  # for ANNOTATION only (a jump on a split = adjustment failed)
     since = os.environ.get("QA_JUMP_SINCE")
     et = "(ts AT TIME ZONE 'America/New_York')"
     since_clause = f"AND ts >= '{since}'" if since else ""
@@ -341,7 +364,9 @@ def check_no_extreme_backfill_jump() -> Result:
     )
     flagged = []
     manual_exempt = 0  # matched the curated allowlist (genuine non-split price events)
-    split_flagged = 0  # a flagged jump that lands ON a split ex_date = adjustment FAILED (worse)
+    split_flagged = (
+        0  # a flagged jump that lands ON a split ex_date = adjustment FAILED (worse)
+    )
     for sym, dt, prev, close, ratio in rows:
         if sym in symbol_wide or (sym, dt) in dated:
             manual_exempt += 1
@@ -353,7 +378,11 @@ def check_no_extreme_backfill_jump() -> Result:
     if flagged:
         details = [
             f"{sym:8s} {dt}: {prev} -> {close} ({ratio}×)"
-            + ("  <-- ON split ex_date: ADJUSTMENT FAILED (Adjustment.ALL should be smooth)" if on_split else "")
+            + (
+                "  <-- ON split ex_date: ADJUSTMENT FAILED (Adjustment.ALL should be smooth)"
+                if on_split
+                else ""
+            )
             for sym, dt, prev, close, ratio, on_split in flagged[:40]
         ]
         if len(flagged) > 40:
@@ -644,7 +673,9 @@ def check_backfill_realtime_parity() -> Result:
     split_cutoffs = _split_cutoffs()  # {symbol: latest split ex_date 'YYYY-MM-DD'}
     # VALUES list of (symbol, cutoff_date) so SQL can exclude stream bars on/before a split ex_date.
     if split_cutoffs:
-        values = ",".join(f"('{sym}','{dt}'::date)" for sym, dt in split_cutoffs.items())
+        values = ",".join(
+            f"('{sym}','{dt}'::date)" for sym, dt in split_cutoffs.items()
+        )
         excl_cte = f", splitcut(symbol, cutoff) AS (VALUES {values}) "
         excl_pred = (
             "AND NOT EXISTS (SELECT 1 FROM splitcut sc WHERE sc.symbol=s.symbol "
@@ -835,18 +866,46 @@ def check_warmup_coverage() -> Result:
         kind = "ragged warmup" if is_ragged else f"{all_f}% NaN (dead)"
         line = f"[{idx}] {feature}: early={early_f}% late={late_f}% — {kind}"
         (ragged if is_ragged else dead).append(line)
-    details = ragged + dead
-    if ragged or dead:
+
+    # Steady-state mid-session NaN (the explorer-data 2026-06-13 gap): a feature stuck at a
+    # constant moderate NaN escapes BOTH the ragged (early≈late) and dead (<95%) nets. Scan the
+    # WHOLE panel EXCLUDING the first warmup hour of each session (where intraday-return NaN is
+    # correct-by-construction), so what's left is genuine mid-session degrade.
+    open_cut = RTH_OPEN_MIN_OF_DAY + STEADY_STATE_WARMUP_EXCLUDE_MIN
+    steady_rows = sql(
+        "WITH d AS ("
+        "  SELECT f.vector, "
+        "    (EXTRACT(hour FROM f.ts AT TIME ZONE 'America/New_York')*60 "
+        "     + EXTRACT(minute FROM f.ts AT TIME ZONE 'America/New_York'))::int AS mod "
+        f"  FROM feature_vectors f WHERE f.source='historical' AND f.set_version='{active}'"
+        "), exploded AS ("
+        "  SELECT u.idx, (u.val='NaN'::float8)::int AS isnan "
+        f"  FROM d, LATERAL unnest(d.vector) WITH ORDINALITY AS u(val, idx) "
+        f"  WHERE d.mod >= {open_cut}"
+        ") "
+        "SELECT e.idx, fs.names[e.idx] AS feature, round(100.0*avg(isnan),1) AS nan_pct "
+        f"FROM exploded e JOIN feature_sets fs ON fs.version='{active}' "
+        "GROUP BY e.idx, fs.names[e.idx] "
+        f"HAVING round(100.0*avg(isnan),1) > {STEADY_STATE_NAN_PCT} ORDER BY e.idx"
+    )
+    steady: list[str] = [
+        f"[{int(idx)}] {feature}: {float(nan_pct)}% NaN mid-session (post-warmup, steady-state degrade)"
+        for idx, feature, nan_pct in steady_rows
+    ]
+
+    details = ragged + dead + steady
+    if ragged or dead or steady:
         return Result(
             "warmup_coverage",
             "FAIL",
-            f"ACTIVE set {active}: {len(ragged)} ragged-warmup, {len(dead)} dead feature(s)",
+            f"ACTIVE set {active}: {len(ragged)} ragged-warmup, {len(dead)} dead, "
+            f"{len(steady)} steady-state-NaN (>{STEADY_STATE_NAN_PCT}% mid-session) feature(s)",
             details,
         )
     return Result(
         "warmup_coverage",
         "PASS",
-        f"ACTIVE set {active}: no feature is ragged at warmup or dead",
+        f"ACTIVE set {active}: no feature is ragged at warmup, dead, or steady-state NaN-degraded",
         details,
     )
 
@@ -1134,7 +1193,11 @@ def check_fill_reconciliation() -> Result:
         "WHERE alpaca_order_id IS NOT NULL"
     )
     if not day:
-        return Result("fill_reconciliation", "SKIP", "no submitted orders yet (nothing to reconcile)")
+        return Result(
+            "fill_reconciliation",
+            "SKIP",
+            "no submitted orders yet (nothing to reconcile)",
+        )
     rows = sql(
         "SELECT o.symbol, o.side, o.qty, o.status, COALESCE(o.filled_qty,0), "
         "       COALESCE(f.price, 0) "
@@ -1148,8 +1211,12 @@ def check_fill_reconciliation() -> Result:
     non_terminal = [r[0] for r in rows if r[3] not in TERMINAL_ORDER_STATES]
     filled = [r for r in rows if float(r[4]) > 0]
     fill_rate = 100.0 * len(filled) / n if n else 0.0
-    long_notional = round(sum(float(r[4]) * float(r[5]) for r in filled if r[1] == "buy"), 2)
-    short_notional = round(sum(float(r[4]) * float(r[5]) for r in filled if r[1] == "sell"), 2)
+    long_notional = round(
+        sum(float(r[4]) * float(r[5]) for r in filled if r[1] == "buy"), 2
+    )
+    short_notional = round(
+        sum(float(r[4]) * float(r[5]) for r in filled if r[1] == "sell"), 2
+    )
     net_notional = round(long_notional - short_notional, 2)
     gross_notional = round(long_notional + short_notional, 2)
     net_exposure = abs(net_notional) / gross_notional if gross_notional else 0.0
