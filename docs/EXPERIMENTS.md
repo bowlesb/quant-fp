@@ -855,3 +855,29 @@ REVIEW VERDICT = PASS (against my pre-registered bar ~0.027 IC, clean canary, ma
   It is NOT promoted to live: the deliberate 18→21 contract upgrade waits for a model WORTH serving
   (v1.2.0/OFI post-M2) with three-way deploy sign-off. The staging artifact exists for provenance +
   to prove the clean trainer path produces the expected model. #16 (train + review) DONE.
+| 2026-06-12T19:22:40+00:00 | C11_30m_raw_all | fwd_30m | raw | 21 | 4840765 | 0.02678 | 19.558 | -0.00292 | Clean v1.1.1 30m raw, ALL 21 incl calendar. Quantify how much of any IC is the within-ts-constant calendar crutch (should add ~0 within-ts). |
+| 2026-06-12T19:24:48+00:00 | C11_solo_ret_5m | fwd_30m | raw | 1 | 4840765 | 0.01056 | 8.146 | 0.00111 | Single-feature interrogation: ret_5m ALONE at 30m raw. Isolates this feature's standalone within-ts IC — find which carry signal vs dead weight. |
+
+## FAMILY B PROTOTYPE — dispersion/beta/idiosyncratic-residual (Modeller, 2026-06-12, DO-IT-NOW)
+
+Started the Family B prototype NOW (zero data dependency, so no reason to defer). Script:
+experiments/family_b_dispersion.py (Tier-2 sandbox). Derives 4 NEW features PURELY from the existing
+v1.1.1 panel's return columns — no panel rebuild, no new collection:
+- univ_beta: each name's return-term-structure [ret_5m,15m,30m,60m] regressed on the cross-sectional
+  MEAN term-structure (its sensitivity to the common/market move), estimated WITHIN each snapshot.
+- idio_resid_30m / _60m: ret_30m/60m minus univ_beta * universe_ret — the IDIOSYNCRATIC return
+  (the "alpha" component raw momentum conflates with market beta).
+- dispersion_30m: cross-sectional std of ret_30m per ts — a regime feature (constant within ts, so
+  it can only act through interactions, like calendar).
+All strictly within-timestamp => point-in-time honest. Runs the SAME 4 battery gates (IC vs raw return
++ shuffle canary + net-of-cost L/S + survivorship demean) on three variants at 30m + overnight:
+baseline_price_only (19 feats) vs plus_family_b (23) vs family_b_only (4).
+HYPOTHESIS / WHAT WOULD CHANGE A VERDICT: if +family_b lifts IC ABOVE the canary AND improves
+breakeven vs baseline, it's worth a real feature group (proposed via Tier-1 PR). If it moves nothing,
+that SHARPENS the "data-starved, not model-starved" read — the one genuinely-new FREE signal this
+weekend showing nothing is strong evidence the price panel is exhausted and only new DATA (OFI, news,
+ex-div) can help. Honest either way; this is a prototype, NOT an edge claim.
+NOTE on the beta proxy: a true beta needs a trailing time series; this within-snapshot 4-horizon-vector
+beta is a cheap PROXY computable from the panel alone. If the proxy shows promise, the production
+version would use rolling per-name regression on the bar history (a real featurestore computation) —
+but the proxy is the cheap weekend read on whether the idea has ANY legs before investing in that.
