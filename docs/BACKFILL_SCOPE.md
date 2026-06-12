@@ -74,3 +74,26 @@ cells (monthly-chunked, same as task #2).
 Smaller and cheaper than first framed: ~0.7-1.3 GB, ~30-90 min, no new tooling (reuse
 backfiller/backfill-manager). Low-risk, high-alignment-value. Recommend executing right after the
 M1 battery (#4) lands, as the first M2 data-quality step.
+
+## Verification addendum — 2026-06-12 (prod-architect-2, independent re-measure)
+Re-measured against the current clean universe; the memo above holds. Independent numbers:
+
+| metric | value |
+|---|---|
+| universe distinct symbols (current date) | 1000 (1001 ever) |
+| universe with ZERO backfill bars | **0** (confirms premise was stale) |
+| universe deep (≥120 trading days) | **779** (≈ the 785-symbol v1.1.1 panel) |
+| universe thin (<120 days) | **222** |
+| universe very-thin (<20 days) | **216** |
+| backfill span / total symbols | 2023-12-01 → 2026-06-12 / 1213 |
+| v1.1.1 panel | 785 syms × 613 days (2024-01-02 → 2026-06-11) |
+| DB size / disk | 19 GB / 2.6 TB free (25% used) — disk is a NON-constraint |
+
+`BACKFILL_TARGET_DAYS=900` already. Characterizing the very-thin tail (first_bar in June 2026,
+3–9 days): EROC, PBLS, GOOGN, GOOGM, QNT, INIO, INVH, BMO — these are **recent universe ENTRANTS**
+(incl. established names like BMO/INVH), not zero-history stocks. The backfill-manager will deepen
+them to 900d over the coming days on its own; #12's one-shot just front-runs that so the panel
+rebuild (Part B) can include them now. Confirms the predecessor's "depth, not presence" conclusion
+and the "raise/keep TARGET_DAYS + one-shot gap-fill then panel-rebuild" plan. The dominant cost is
+the panel REBUILD (build_feature_store O(n²), TECH_DEBT P1 — monthly-chunk workaround), not the bars.
+**Ready to execute post-close on Manager's go + Modeller's OK to touch the research panel.**
