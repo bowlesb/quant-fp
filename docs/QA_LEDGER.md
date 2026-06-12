@@ -148,6 +148,18 @@ denylist — do NOT signal it until verified.
   per-day invariant, evaluated post-flatten when all orders are terminal. Deploy gated on my
   re-confirm of the updated diff + prod-architect-2 + Manager. SEPARATE from the KLAC denylist
   parity gate (that waits on tonight's re-fetch).
+  - **RE-REVIEW 2026-06-12 (fix 8ba6c89, exec): GREEN.** Both conditions correctly landed.
+    (1) detail now carries filled_long_notional/filled_short_notional/net_notional, sourced
+    live from `order.filled_avg_price` (accurate for mid-session partials, no fills_log
+    join-fanout) — my per-day invariant asserts realized dollar-neutrality on net_notional.
+    (2) fill_ts fallback now `filled_at or canceled_at or submitted_at` — submitted_at is
+    immutable (the branch only fires on filled_qty>0 ⇒ order was accepted ⇒ submitted_at
+    non-null), so one fills_log row/order, double-count class closed. filled_qty written even
+    when 0 (distinguishes terminal-0-fill from never-synced). Single file, no schema change.
+    My approval given; deploy still needs prod-architect-2 + Manager bless → rides the one
+    post-flatten executor rebuild. POST-DEPLOY I OWN: build the `fill_reconciliation` per-day
+    invariant against this schema + verify new recon rows carry the rich detail (before-
+    baseline captured: 1,557 rows today all ok:true, no new fields).
 
 ## Data provenance facts (encode so we don't re-derive them)
 
