@@ -200,6 +200,23 @@ Built the measured cost curve the cost-gate battery only ASSUMED (cost_bps_onewa
   then use `execution_slippage_daily.oneway_cost_bps_mean` (one-way, mid-referenced — directly
   comparable to the battery's breakeven_cost_bps). Round-trip ≈ 2× (entry + exit half-spread).
 
+### 2026-06-12 OPEN — executor-half #6 verified live (all GREEN)
+First live test of everything built last night, at the 09:30 ET open:
+- **Stale→fresh transition WORKS:** executor idle-rejected day-old preds overnight (0 orders,
+  staleness guard binding), then submitted ONE basket the cycle after model-server's first RTH
+  cadence landed (preds ts 13:30Z, age ~3min < 35). Longs KEEL/SATS/UUUU, shorts AMPX/FLY/W.
+- **Live NBBO arrival capture WORKS:** every order row has `nbbo_mid` populated; marketable limits
+  correct (buys > mid, sells < mid). First `arrival_src='nbbo'` slippage row computed end-to-end
+  (W sell: fill 80.00 vs arrival_mid 78.86). CAVEAT: n=1 filled leg → daily mean −144 bps is pure
+  submit→fill DRIFT noise, NOT a cost signal (as forewarned; needs ~5–10 sessions to mean anything).
+- **KLAC denylist BINDING in prod:** KLAC scored (rank 705, decile 9 = short candidate) but 0 KLAC
+  orders for 6/12 — excluded from the actual basket. (KLAC stream now ~238 post-split vs ~2429
+  yesterday — the 10:1 split took effect; denylist still HELD per the series-parity removal gate.)
+- **Scores non-degenerate before submit:** 782 names, 260 distinct, L/S sep ~0.0134 ≫ 0.0005.
+- **Reconcile = broker truth:** {W:-2, SATS:1}, unexpected=[], ok=t. Book building; partial fills
+  (only 2 of 6 legs positioned so far — the open partial-basket item; rest rest until fill/EOD).
+- Lifecycle now in MANAGE; EOD flatten will TERMINATE ~15:48 ET (verify post-close).
+
 ## Active live-basket exclusions (remove when the condition clears — don't let these rot)
 - **KLAC — excluded since 2026-06-12 (Manager pre-open directive).** Reason: KLAC's LIVE STREAM
   bars are persistently exactly 10× the true price (feed scaling bug, QA finding). The v1.1.x
