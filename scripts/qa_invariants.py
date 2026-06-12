@@ -260,9 +260,10 @@ def _load_corporate_actions() -> tuple[set[str], set[tuple[str, str]]]:
 def _split_ex_dates() -> set[tuple[str, str]]:
     """(symbol, date) for split-like corporate actions (forward/reverse/stock splits), each
     expanded to ex_date ±1 day to absorb ex-date vs first-adjusted-bar timing. Reads the live
-    #18 corporate_actions table so the jump check SELF-GATES against real splits; returns empty
-    if the table is absent (then only the manual allowlist applies). Cash dividends are excluded
-    — they don't move price >3×."""
+    #18 corporate_actions table to ANNOTATE the jump check (a >3× jump ON a split ex_date means
+    the Adjustment.ALL fetch FAILED — splits are NOT auto-exempted, the opposite: they're the
+    bug). Returns empty if the table is absent. Cash dividends are excluded — they don't move
+    price >3×."""
     if scalar("SELECT to_regclass('public.corporate_actions')") in ("", "NULL"):
         return set()
     rows = sql(
@@ -278,15 +279,20 @@ def check_no_extreme_backfill_jump() -> Result:
 
     A split landing mid-backfill leaves pre-split months on the old adjustment basis, deflating
     prices (the KLAC 10× class). This reaches the PANEL (momentum/return features), not just the
-    parity overlap, so it must be caught at the bars level. A flagged jump is exempted if it
-    matches a real split in the #18 corporate_actions table (self-gating, ex_date ±1d) OR the
-    curated manual allowlist (for non-split events — IPOs, restructurings — not in that table).
+    parity overlap, so it must be caught at the bars level. A flagged jump is exempted ONLY by the
+    curated manual allowlist (genuine non-split price events — IPOs, restructurings, real moves).
+
+    Splits are NOT auto-exempt — the opposite: under Adjustment.ALL a CORRECTLY-adjusted split is
+    SMOOTH (no >3× jump), so a jump landing ON a split ex_date means the adjustment FAILED. Auto-
+    exempting it would HIDE exactly the bug this check exists to catch. The #18 corporate_actions
+    table is therefore used only to ANNOTATE a flagged jump ("near split ex_date — adjustment may
+    have failed") for triage, never to suppress it.
 
     HEAVY: aggregates bars_1m (~253M rows) to daily RTH last-close. Part of the post-rebuild /
     nightly --full run, not the --fast wake. Scope to recent history with env QA_JUMP_SINCE.
     """
     symbol_wide, dated = _load_corporate_actions()
-    split_dates = _split_ex_dates()
+    split_dates = _split_ex_dates()  # for ANNOTATION only (a jump on a split = adjustment failed)
     since = os.environ.get("QA_JUMP_SINCE")
     et = "(ts AT TIME ZONE 'America/New_York')"
     since_clause = f"AND ts >= '{since}'" if since else ""
@@ -305,26 +311,28 @@ def check_no_extreme_backfill_jump() -> Result:
         "ORDER BY symbol, dt"
     )
     flagged = []
-    auto_exempt = 0  # matched a real split in the corporate_actions table
-    manual_exempt = (
-        0  # matched the curated allowlist (non-split events not in the table)
-    )
+    manual_exempt = 0  # matched the curated allowlist (genuine non-split price events)
+    split_flagged = 0  # a flagged jump that lands ON a split ex_date = adjustment FAILED (worse)
     for sym, dt, prev, close, ratio in rows:
-        if (sym, dt) in split_dates:
-            auto_exempt += 1
-        elif sym in symbol_wide or (sym, dt) in dated:
+        if sym in symbol_wide or (sym, dt) in dated:
             manual_exempt += 1
-        else:
-            flagged.append((sym, dt, prev, close, ratio))
-    exempt_note = f"{auto_exempt} via corporate_actions (#18), {manual_exempt} via manual allowlist"
+            continue
+        on_split = (sym, dt) in split_dates
+        if on_split:
+            split_flagged += 1
+        flagged.append((sym, dt, prev, close, ratio, on_split))
     if flagged:
         details = [
             f"{sym:8s} {dt}: {prev} -> {close} ({ratio}×)"
-            for sym, dt, prev, close, ratio in flagged[:40]
+            + ("  <-- ON split ex_date: ADJUSTMENT FAILED (Adjustment.ALL should be smooth)" if on_split else "")
+            for sym, dt, prev, close, ratio, on_split in flagged[:40]
         ]
         if len(flagged) > 40:
             details.append(f"... and {len(flagged) - 40} more")
-        details.append(f"({exempt_note})")
+        details.append(
+            f"({manual_exempt} via manual allowlist; {split_flagged} of the flagged land on a "
+            f"split ex_date = failed adjustment, the rest are mixed-basis / unexplained)"
+        )
         return Result(
             "no_extreme_backfill_jump",
             "FAIL",
@@ -336,7 +344,8 @@ def check_no_extreme_backfill_jump() -> Result:
         "no_extreme_backfill_jump",
         "PASS",
         f"no unexplained >{EXTREME_JUMP_RATIO}× backfill daily-close jumps "
-        f"({auto_exempt + manual_exempt} known corporate action(s) exempted: {exempt_note})",
+        f"({manual_exempt} genuine non-split event(s) exempted via manual allowlist; "
+        f"splits are NOT auto-exempt — a jump on a split ex_date would FAIL as adjustment-failed)",
     )
 
 
