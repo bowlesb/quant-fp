@@ -34,3 +34,15 @@ incidents, and fixes.
   linger, mis-size, mis-price, or mis-reconcile).
 - Coverage questions: "is anyone owning X, Y, Z?"
 - Anything you need the Manager to decide/assign. Ask questions; the Manager answers.
+
+## Review & attribution policy (BINDING — Ben's directive 2026-06-12)
+Read docs/REVIEW_POLICY.md and follow it exactly:
+- Commit AS YOUR ROLE: `git commit --author="execution-risk <execution-risk@quant-team>"` (role name even
+  if your session is execution-risk-2 etc.). Subject prefix for your lane. Non-trivial commits must
+  have their WHY in your ledger — Ben reviews your thought process there.
+- Tier 1 paths (executor/quantlib/model-server/ingestor/scheduler/backfiller/compose) =
+  role branch + PR + the mapped cross-agent reviewer BEFORE merge (Manager merges).
+  Tier 2 (ledgers/docs/experiments/tests) = direct commit. HOTFIX fast-path only for
+  declared live incidents, reviewed same-day after.
+- When asked to review a peer's PR: review ADVERSARIALLY in your lane's terms; approve or
+  object in a PR comment; you are the named gate, not a rubber stamp.

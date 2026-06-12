@@ -60,6 +60,13 @@ SYMBOL_DENYLIST = {
 # (10 trading days ≈ 14 calendar) → default 15. Splits only by default (dividends don't corrupt
 # intraday momentum). Pairs with QA's price-match invariant (the backstop for already-bad history).
 EX_DATE_LOOKBACK_DAYS = int(os.environ.get("EX_DATE_LOOKBACK_DAYS", "15"))
+# Marketable-limit cross beyond the touch, scaled to the spread so wide-spread/low-priced names
+# stay marketable even if the quote ticks between snapshot and submit (a fixed 1c cross left
+# FLY resting inside the bid on 6/12). buy = ask + buffer, sell = bid - buffer, where
+# buffer = max(1 tick, CROSS_SPREAD_FRAC x spread). Tunable; slippage view measures the cost.
+CROSS_SPREAD_FRAC = float(os.environ.get("CROSS_SPREAD_FRAC", "0.5"))
+# Alpaca terminal order states — an order here is done (won't fill further); anything else is open.
+TERMINAL_ORDER_STATES = {"filled", "canceled", "expired", "rejected", "done_for_day", "replaced"}
 _NY = ZoneInfo("America/New_York")
 
 DB_KWARGS = {
@@ -75,11 +82,12 @@ data_client = StockHistoricalDataClient(os.environ["ALPACA_KEY_ID"], os.environ[
 
 
 def marketable_limit(symbols: list[str], fallback: dict[str, float]) -> dict[str, dict[str, float | None]]:
-    """Per-symbol marketable-limit prices from the LIVE NBBO (buy=ask+1tick, sell=bid-1tick)
-    so orders actually CROSS — the morning's resting buys came from pricing off a stale bar
-    close. Also returns the arrival NBBO bid/ask/mid captured at submit; we persist mid on
-    orders_log so per-leg slippage (fill vs arrival mid = our measured one-way cost) is
-    computable. Falls back to last_close ±0.5% (mid=close) if a quote is missing."""
+    """Per-symbol marketable-limit prices from the LIVE NBBO: buy = ask + buffer, sell = bid - buffer,
+    where buffer = max(1 tick, CROSS_SPREAD_FRAC x spread). The spread-scaled cross keeps wide-spread/
+    low-priced names marketable even if the quote ticks between snapshot and submit — a fixed 1c cross
+    left FLY resting inside the bid on 6/12. Also returns the arrival NBBO bid/ask/mid captured at
+    submit; we persist mid on orders_log so per-leg slippage (fill vs arrival mid = our measured
+    one-way cost) is computable. Falls back to last_close ±0.5% (mid=close) if a quote is missing."""
     out: dict[str, dict[str, float | None]] = {}
     try:
         quotes = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbols))
@@ -90,7 +98,8 @@ def marketable_limit(symbols: list[str], fallback: dict[str, float]) -> dict[str
         ask = float(q.ask_price) if q and q.ask_price else 0.0
         bid = float(q.bid_price) if q and q.bid_price else 0.0
         if ask > 0 and bid > 0:
-            out[symbol] = {"buy": round(ask + 0.01, 2), "sell": round(bid - 0.01, 2),
+            buffer = max(0.01, round((ask - bid) * CROSS_SPREAD_FRAC, 2))
+            out[symbol] = {"buy": round(ask + buffer, 2), "sell": round(max(0.01, bid - buffer), 2),
                            "bid": bid, "ask": ask, "mid": round((bid + ask) / 2, 4)}
         else:
             close = fallback[symbol]
@@ -115,6 +124,7 @@ EXEC_DDL = [
     "ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS nbbo_bid numeric",
     "ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS nbbo_ask numeric",
     "ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS nbbo_mid numeric",
+    "ALTER TABLE orders_log ADD COLUMN IF NOT EXISTS filled_qty numeric",
     """CREATE OR REPLACE VIEW realized_pnl_by_name AS
        SELECT fill_ts::date AS day, symbol,
               round(sum(CASE WHEN side='sell' THEN qty*price ELSE -qty*price END), 2) AS realized_pnl,
@@ -279,22 +289,29 @@ def flatten_all(reason: str, positions: list) -> None:
         trading.close_all_positions(cancel_orders=True)
 
 
-def capture_fills(conn: psycopg.Connection, today: object) -> None:
-    """Record realized fills (broker truth) to fills_log for P&L/attribution. Filtered to
-    today so fills can't fall out of a fixed window."""
+def sync_orders_and_fills(conn: psycopg.Connection, orders: list) -> None:
+    """Single broker-truth pass over today's orders: (1) write each order's CURRENT status +
+    cumulative filled_qty back to orders_log (it used to be stuck at 'submitted' — terminal-blind,
+    so the ledger showed all-time filled=0 despite real fills); (2) record realized fills to
+    fills_log for P&L/attribution, including PARTIALS (a partially-filled order ends terminal as
+    'canceled' with filled_qty>0 and would otherwise be lost). fill_ts uses the order's stable
+    terminal timestamp so the (alpaca_order_id, fill_ts) upsert hits ONE row — no double counting.
+    Drives the symmetric reconcile + truthful realized P&L."""
     if DRY_RUN:
         return
-    after = datetime.combine(today, dtime.min, tzinfo=_NY)
-    orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=after, limit=500))
     with conn.cursor() as cur:
         for order in orders:
-            if order.filled_at and order.filled_avg_price and float(order.filled_qty or 0) > 0:
+            filled_qty = float(order.filled_qty or 0)
+            cur.execute("UPDATE orders_log SET status=%s, filled_qty=%s WHERE alpaca_order_id=%s",
+                        (order.status.value, filled_qty, str(order.id)))
+            if order.status.value in TERMINAL_ORDER_STATES and filled_qty > 0 and order.filled_avg_price:
+                fill_ts = order.filled_at or order.canceled_at or order.updated_at
                 cur.execute(
                     "INSERT INTO fills_log (alpaca_order_id, fill_ts, qty, price, symbol, side) "
                     "VALUES (%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (alpaca_order_id, fill_ts) DO UPDATE "
-                    "SET symbol=EXCLUDED.symbol, side=EXCLUDED.side",
-                    (str(order.id), order.filled_at, float(order.filled_qty),
+                    "SET qty=EXCLUDED.qty, price=EXCLUDED.price, symbol=EXCLUDED.symbol, side=EXCLUDED.side",
+                    (str(order.id), fill_ts, filled_qty,
                      float(order.filled_avg_price), order.symbol, order.side.value))
 
 

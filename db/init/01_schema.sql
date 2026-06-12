@@ -182,7 +182,8 @@ CREATE TABLE orders_log (
     model_version     text,
     nbbo_bid          numeric,                    -- live NBBO at submit (arrival benchmark)
     nbbo_ask          numeric,
-    nbbo_mid          numeric                     -- arrival mid: per-leg slippage reference
+    nbbo_mid          numeric,                    -- arrival mid: per-leg slippage reference
+    filled_qty        numeric                     -- broker-synced cumulative fill (terminal-aware)
 );
 CREATE INDEX orders_intended_idx ON orders_log (intended_at);
 

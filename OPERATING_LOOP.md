@@ -323,3 +323,10 @@ directions. For EACH exploration, state clearly up front:
   pressing goal — get the platform operational and backfilled. It informs
   `docs/RESEARCH.md` / `JOURNAL.md`; it does not divert from building the platform.
 Fold useful findings back into the research backlog; keep explorations bounded.
+
+## Review & attribution (Ben's directive 2026-06-12 — see docs/REVIEW_POLICY.md)
+All agents commit with --author="<role> <role@quant-team>" so contributions are reviewable
+per-role (git log --author / scripts/contributions.sh). Thought processes live in the role
+ledgers. Tier 1 code (live-trading path, quantlib, service runtime) requires a role-branch
+PR + mapped cross-agent reviewer before the Manager merges; Tier 2 (ledgers/docs/
+experiments/tests) commits direct. Incident HOTFIX fast-path with same-day post-review.
