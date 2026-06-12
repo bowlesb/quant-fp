@@ -774,3 +774,16 @@ opt-in fixtures (verified to still reproduce their FAILs). Purge-denied reasonin
 respected. Modeller: OFI close exclusion spec'd (drop >=15:50 ET; 16:00 permanent);
 requested the 15:30 parity number (overnight-label anchor) — QA folds into post-rebuild
 wake. Panel ~8-9/30 months. Everything holds for: panel lands -> battery go-signal.
+
+## 2026-06-12 (pre-open 8) — Manager: 15:30 anchor CLEAN; "at-scale" parity proof was ~10 names
+QA (b137128): per-minute parity 15:30/15:45/15:55 ALL 100%/100% — overnight-label anchor
+NOT tainted; Modeller's >=15:50 OFI exclusion line confirmed; 16:00 (14%) stays excluded.
+BIGGER CATCH: the "52-name" settled-day proof was really ~10 names full-day + 50 names
+for the final ~10 min — the live stream ran ~10 symbols until ~15:51 ET 6/11. Manager
+hypothesis: that's the 7dfb438 10->50 expansion deploying mid-session (one-off deploy,
+not systematic loss) — Prod to confirm timestamp + that today runs full-session.
+Consequences: #15 "at-scale" NOT yet met (first candidate full 50-name settled day =
+6/12); Modeller's OFI pilot trigger clock restarts from confirmed full-session capture
+(~6/26); M2 sharding design must include a live COVERAGE invariant (streamed==subscribed,
+alarmed) so partial capture can't masquerade as full. Backfill trade-agg is RTH-bounded
+=> post-close OFI has no validation reference (reinforces the close hard-stop).
