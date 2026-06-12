@@ -244,6 +244,28 @@ live. Holding the deploy until the mapped reviewer (prod-architect for schema + 
 reconcile-invariant contract) signs off; escalated to Manager to regularize. Mission stakes: M4's
 paper track record is meaningless if the basket we measure isn't the basket we decided.
 
+### 2026-06-12 — #19 cross-agent review outcome + fixes (commit 8ba6c89)
+Both mapped reviewers engaged (REVIEW_POLICY post-hoc review-before-deploy, Manager-ruled):
+- **prod-architect-2 (schema/runtime): APPROVE.** Verified the absorbed hunk is complete (no
+  half-WIP), filled_qty self-migrates via EXEC_DDL at startup (no UndefinedColumn window), and
+  the orders_log change is independent of their #20 (separate files).
+- **qa-2 (reconcile/fill contract): APPROVE with 2 must-fix conditions** — both landed in 8ba6c89:
+  1. **Realized notional neutrality.** `basket_neutral` was a name-COUNT check → a 1-share long vs
+     100-share short read "neutral" while dollar-skewed. Added `filled_long_notional`/
+     `filled_short_notional`/`net_notional` (filled_qty × avg fill price, sourced from the live
+     orders list so it's accurate mid-session too). qa's per-day invariant asserts realized dollar
+     neutrality on these.
+  2. **Deterministic fill_ts (real double-count bug).** The fills_log upsert fell back to mutable
+     `updated_at` for a partial ending done_for_day/expired (no filled_at/canceled_at) → two syncs →
+     two rows → double-counted realized P&L. This universe partial-fills routinely (4/6 on 6/11).
+     Fixed: fallback is now immutable `submitted_at` → one row/order, no PK migration (keeps prod's
+     schema surface unchanged).
+- **Agreed division of gates:** per-cycle reconcile `ok` = "dangerously desynced NOW" (unexpected +
+  rejected only); the hard incomplete-fill / lopsided-realized-notional gate lives in qa's per-day
+  fill_reconciliation invariant, evaluated post-flatten when every order is terminal. Clean split.
+Deploy gated on qa-2 re-green + Manager bless → one post-flatten targeted `make rebuild S=executor`
+(folds in #18 ex-date guard + #19). Re-review diff sent: /tmp/exec_19_fixes.diff.
+
 ## Active live-basket exclusions (remove when the condition clears — don't let these rot)
 - **KLAC — excluded since 2026-06-12 (Manager pre-open directive).** Reason: KLAC's LIVE STREAM
   bars are persistently exactly 10× the true price (feed scaling bug, QA finding). The v1.1.x
