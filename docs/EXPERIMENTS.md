@@ -825,3 +825,33 @@ announcement_date<=ts (anticipation) / ex_date<=ts (realized). Live rows land to
 (dividends specifically verified, not just splits, per Ben). Prod pings when queryable; QA owns the
 2.5yr-no-zero-month coverage check. I prototype the overnight-label ex-div hygiene adjustment
 post-weekend-read/#16 per my clock. Zero extra collection.
+| 2026-06-12T19:17:27+00:00 | C11_30m_raw_nocal | fwd_30m | raw | 19 | 4840765 | 0.02698 | 19.988 | -0.00175 | Clean v1.1.1 30m baseline: raw, no-calendar (19 feats). Anchor the per-feature interrogation; expect IC ~0.027 net-negative matching battery. |
+| 2026-06-12T19:20:13+00:00 | C11_30m_rank_nocal | fwd_30m | rank | 19 | 4840765 | 0.03179 | 21.404 | -0.00083 | Clean v1.1.1 30m: rank label, no-calendar. Trading-aligned loss; does rank beat raw IC on clean data? |
+
+## ★ #16 STAGING REVIEW — PASS (Modeller, 2026-06-12, fired early per Ben's DO-IT-NOW)
+
+Fired the #16 v1.1.1 staging train NOW (not post-close) per Ben's DO-IT-NOW directive. CAUGHT A
+LIVE-PATH HAZARD FIRST: the built trainer image was STALE (14h, predated the MODEL_FILENAME override
+4b6b7fe) — it hard-coded output to model_fwd_30m.txt, the LIVE model-server path. Training v1.1.1 on
+that stale image would have written a 21-feature file over the live 18-feature model and BROKEN live
+scoring on the model-server's next reload. Rebuilt the trainer image, diff-verified it matches source
+(MODEL_FILENAME present), THEN trained. (This is exactly the stale-image bug class that hit the team 3x;
+the diff-before-run check caught it.)
+
+STAGING TRAIN RESULT (MODEL_FILENAME=model_fwd_30m_v1.1.1.txt, FEATURE_SET_VERSION=v1.1.1):
+  panel: 4,840,765 rows / 21 feats / 7347 timestamps / set=v1.1.1 / fwd_30m
+  REAL  : mean rank-IC = 0.0266   NW t = 19.53   (6123 test ts)
+  CANARY: mean rank-IC = 0.0004   (clean ~0 — no leakage)
+  saved model_fwd_30m_v1.1.1.txt + .meta.json (21 features) to /models
+
+REVIEW VERDICT = PASS (against my pre-registered bar ~0.027 IC, clean canary, materially-higher=red):
+- IC 0.0266 is RIGHT ON the battery scorecard (30m raw IC 0.027) — NOT materially higher, no leakage
+  red flag. Cross-validates the experimenter's concurrent C11_30m_raw_nocal (IC 0.02698, canary
+  -0.00175) — independent code path (trainer 5-fold vs experimenter), same number => trustworthy.
+- CANARY 0.0004 ≈ 0 — clean, no train/serve leakage in the v1.1.1 contract.
+- LIVE MODEL UNTOUCHED (verified): models/model_fwd_30m.txt still Jun-10 14:03; staging file is the
+  new Jun-12 file. MODEL_FILENAME override worked as designed — zero live-path risk.
+- This is a NO-EDGE HYGIENE model (0.0266 IC is net-negative after cost per the battery — not edge).
+  It is NOT promoted to live: the deliberate 18→21 contract upgrade waits for a model WORTH serving
+  (v1.2.0/OFI post-M2) with three-way deploy sign-off. The staging artifact exists for provenance +
+  to prove the clean trainer path produces the expected model. #16 (train + review) DONE.
