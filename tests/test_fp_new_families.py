@@ -274,6 +274,46 @@ def test_market_context_live_buffer_matches_backfill(group_name: str) -> None:
         assert within, f"{feature}: live trailing-buffer diverged from backfill beyond tol={tol}"
 
 
+# --- reference groups: sector one-hot + asset flags ---
+
+
+def _ref_minutes(symbols: tuple[str, ...]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {"symbol": [s for s in symbols for _ in range(2)],
+         "minute": [BASE + timedelta(minutes=i) for _ in symbols for i in range(2)]}
+    )
+
+
+def test_sector_one_hot() -> None:
+    reference = pl.DataFrame(
+        {"symbol": ["AAA", "BBB", "CCC"], "sector": ["Technology", None, "Financial Services"]}
+    )
+    minutes = _ref_minutes(("AAA", "BBB", "CCC"))
+    out = run_group(REGISTRY.get_group("sector"), BatchContext(frames={"minute_agg": minutes, "reference": reference}))
+    aaa = out.filter(pl.col("symbol") == "AAA").row(0, named=True)
+    bbb = out.filter(pl.col("symbol") == "BBB").row(0, named=True)
+    ccc = out.filter(pl.col("symbol") == "CCC").row(0, named=True)
+    assert aaa["sector_is_technology"] == 1.0 and aaa["sector_is_unknown"] == 0.0
+    assert bbb["sector_is_unknown"] == 1.0  # no mapped sector
+    assert ccc["sector_is_financial_services"] == 1.0
+    # one-hot: exactly one bucket set per row
+    sector_cols = [c for c in out.columns if c.startswith("sector_is_")]
+    row_sums = out.select(pl.sum_horizontal([pl.col(c) for c in sector_cols]).alias("s"))["s"].to_list()
+    assert all(abs(value - 1.0) < 1e-12 for value in row_sums)
+
+
+def test_asset_flags_mapping() -> None:
+    reference = pl.DataFrame(
+        {"symbol": ["AAA"], "shortable": [True], "easy_to_borrow": [False],
+         "marginable": [True], "fractionable": [False]}
+    )
+    minutes = _ref_minutes(("AAA",))
+    out = run_group(REGISTRY.get_group("asset_flags"), BatchContext(frames={"minute_agg": minutes, "reference": reference}))
+    row = out.row(0, named=True)
+    assert row["is_shortable"] == 1.0 and row["is_easy_to_borrow"] == 0.0
+    assert row["is_marginable"] == 1.0 and row["is_fractionable"] == 0.0
+
+
 def test_undersized_buffer_diverges() -> None:
     """The buffer-size invariant BITES: a buffer equal to the feature window (one short of the lag it
     needs) makes the 60m window's leading-edge minute lose its return, so live != backfill. This is

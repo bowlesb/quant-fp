@@ -18,13 +18,16 @@ import polars as pl
 
 from quantlib.features.backfill_ticks import load_trades_backfill
 from quantlib.features.compare import coverage, diff, vectors
-from quantlib.features.loaders import load_minute_agg, load_tiers, load_trades_live
+from quantlib.features.loaders import load_minute_agg, load_reference, load_tiers, load_trades_live
 
 
 def parity_test(day: str, source_live: str = "stream", source_backfill: str = "backfill") -> pl.DataFrame:
-    """Minute-path (Layer A/B) T+1 parity for a settled day."""
-    live = vectors({"minute_agg": load_minute_agg(day, source_live)})
-    backfill = vectors({"minute_agg": load_minute_agg(day, source_backfill)})
+    """Minute-path (Layer A/B) T+1 parity for a settled day. The static reference snapshot is fed to
+    both sides (it is source-independent), so the sector/asset-flag groups are covered too — and being
+    identical they must score 100%, a standing check that the reference join itself is deterministic."""
+    reference = load_reference()
+    live = vectors({"minute_agg": load_minute_agg(day, source_live), "reference": reference})
+    backfill = vectors({"minute_agg": load_minute_agg(day, source_backfill), "reference": reference})
     return diff(live, backfill, load_tiers(day))
 
 

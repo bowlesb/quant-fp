@@ -14,6 +14,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 
 from quantlib.features.capture import DEFAULT_BUFFER_MINUTES, CaptureState, process_bars
+from quantlib.features.loaders import load_reference
 
 
 def build_stream() -> StockDataStream:
@@ -29,12 +30,15 @@ def build_stream() -> StockDataStream:
 def run_capture(symbols: list[str], root: str, mode: str, window: int = DEFAULT_BUFFER_MINUTES, day: str | None = None) -> None:
     state = CaptureState()
     pending: dict = {"minute": None, "bars": []}
+    # Load the slowly-changing reference snapshot ONCE at startup; held for the session so the sector
+    # / asset-flag groups serve live off the same static frame the backfill + parity paths use.
+    snapshots = {"reference": load_reference()}
     stream = build_stream()
 
     async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
         minute = bar.timestamp.replace(second=0, microsecond=0)
         if pending["minute"] is not None and minute != pending["minute"] and pending["bars"]:
-            process_bars(state, pending["bars"], root, mode, day, window)
+            process_bars(state, pending["bars"], root, mode, day, window, snapshots)
             pending["bars"] = []
         pending["minute"] = minute
         pending["bars"].append(

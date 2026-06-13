@@ -1,9 +1,13 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-422 features across 18 group(s).
+438 features across 20 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
+| `is_easy_to_borrow` | asset_flags | reference | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when the symbol is on the easy-to-borrow list (cheap, available short locate), else 0.0. |
+| `is_fractionable` | asset_flags | reference | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when the broker supports fractional-share trading of the symbol, else 0.0. |
+| `is_marginable` | asset_flags | reference | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when the symbol is marginable (can be held on margin), else 0.0. |
+| `is_shortable` | asset_flags | reference | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when the symbol can be sold short at the broker, else 0.0 (broadcast across the day). |
 | `day_of_week` | calendar | calendar | A | tolerance | Float64 | none | (1.0, 7.0) | ISO weekday of the bar in ET (Monday=1 .. Sunday=7). |
 | `is_regular_session` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1.0) | 1.0 if within the 09:30-16:00 ET regular session, else 0.0 (extended hours). |
 | `minute_of_day_et` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1440.0) | Minutes since ET midnight for this bar (0-1439); encodes time of day. |
@@ -321,6 +325,18 @@
 | `spread_bps_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 5 minutes. |
 | `spread_bps_60m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 60 minutes. |
 | `spread_bps_90m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 90 minutes. |
+| `sector_is_basic_materials` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is basic materials, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_communication_services` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is communication services, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_consumer_cyclical` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is consumer cyclical, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_consumer_defensive` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is consumer defensive, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_energy` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is energy, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_financial_services` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is financial services, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_healthcare` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is healthcare, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_industrials` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is industrials, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_real_estate` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is real estate, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_technology` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is technology, else 0.0 (one-hot, broadcast across the day). |
+| `sector_is_unknown` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol has no mapped sector (unlisted in the sector map or FMP could not classify it), else 0.0. |
+| `sector_is_utilities` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is utilities, else 0.0 (one-hot, broadcast across the day). |
 | `bb_position_20m` | technical | technical | A | tolerance | Float64 | warmup | None | Position of close within its 20-minute Bollinger band: (close - sma) / (2*std). |
 | `bb_width_20m` | technical | technical | A | tolerance | Float64 | warmup | (0.0, None) | Bollinger band width over 20 minutes: 4*std / sma (relative band width). |
 | `macd_hist` | technical | technical | A | tolerance | Float64 | warmup | None | MACD histogram: MACD line minus the MACD signal line. |

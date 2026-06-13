@@ -40,6 +40,17 @@ FROM universe_membership
 WHERE trade_date = %(day)s AND in_universe AND adv_dollar IS NOT NULL
 """
 
+# Slowly-changing per-symbol reference: sector (FMP, may be NULL until the key is wired) + Alpaca
+# tradability flags. Static, so it is IDENTICAL for the live and backfill sources — sector/flag
+# features are parity-true by construction. Based on asset_metadata so EVERY tradable symbol gets a
+# row even when its sector is unmapped (left join -> NULL sector -> bucketed as "unknown").
+_REFERENCE_SQL = """
+SELECT a.symbol, s.sector,
+       a.shortable, a.easy_to_borrow, a.marginable, a.fractionable
+FROM asset_metadata a
+LEFT JOIN sector_map s ON s.symbol = a.symbol
+"""
+
 
 def _query(sql: str, params: dict[str, str]) -> pl.DataFrame:
     with psycopg.connect(**DB_KWARGS) as conn, conn.cursor() as cur:
@@ -65,6 +76,26 @@ def load_trades_live(start: dt.datetime, end: dt.datetime, symbols: list[str]) -
     """Raw ticks the running system captured (trades_raw) — the LIVE side of Layer-C parity."""
     frame = _query(_TRADES_LIVE_SQL, {"start": start, "end": end, "symbols": symbols})
     return frame.cast(TICK_SCHEMA) if frame.height else pl.DataFrame(schema=TICK_SCHEMA)
+
+
+REFERENCE_SCHEMA = {
+    "symbol": pl.String,
+    "sector": pl.String,
+    "shortable": pl.Boolean,
+    "easy_to_borrow": pl.Boolean,
+    "marginable": pl.Boolean,
+    "fractionable": pl.Boolean,
+}
+
+
+def load_reference() -> pl.DataFrame:
+    """Per-symbol reference snapshot (sector + tradability flags) for the sector/asset-flag features.
+    Static and source-independent, so feeding it to both sides of the parity test yields trivial
+    100% agreement — the point is point-in-time correctness, not live-vs-backfill skew."""
+    frame = _query(_REFERENCE_SQL, {})
+    if frame.height == 0:
+        return pl.DataFrame(schema=REFERENCE_SCHEMA)
+    return frame.cast(REFERENCE_SCHEMA)
 
 
 def load_tiers(day: str) -> pl.DataFrame:

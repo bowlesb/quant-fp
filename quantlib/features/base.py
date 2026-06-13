@@ -34,6 +34,7 @@ class FeatureType(str, Enum):
     CANDLESTICK = "candlestick"
     PRICE_VOLUME = "price_volume"
     TREND_QUALITY = "trend_quality"
+    REFERENCE = "reference"
 
 
 @dataclass(frozen=True)

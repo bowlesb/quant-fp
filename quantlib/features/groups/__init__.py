@@ -4,6 +4,7 @@ To add a feature, add ONE module here decorated with ``@register`` and import it
 base/registry/engine/store/parity/introspect (FEATURE_PLATFORM.md §3.7).
 """
 from quantlib.features.groups import (  # noqa: F401
+    asset_flags,
     calendar,
     candlestick,
     distribution,
@@ -17,6 +18,7 @@ from quantlib.features.groups import (  # noqa: F401
     price_returns,
     price_volume,
     quote_spread,
+    sector,
     technical,
     trade_flow,
     trend_quality,

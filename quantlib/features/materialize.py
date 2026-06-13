@@ -15,7 +15,7 @@ from quantlib.features.backfill_bars import backfill_bars, backfill_daily, trada
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
-from quantlib.features.loaders import load_minute_agg
+from quantlib.features.loaders import load_minute_agg, load_reference
 
 
 def _write_all(root: str, day: str, source: str, frames: dict) -> int:
@@ -31,7 +31,11 @@ def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
     """Backfill bars for ANY symbols directly from Alpaca and write the bar features. Also loads the
     DAILY history so the multi-day features compute + broadcast (the full minute + daily horizon
     set). Returns the symbol count materialized."""
-    frames = {"minute_agg": backfill_bars(day, symbols), "daily": backfill_daily(day, symbols)}
+    frames = {
+        "minute_agg": backfill_bars(day, symbols),
+        "daily": backfill_daily(day, symbols),
+        "reference": load_reference(),
+    }
     return _write_all(root, day, "backfill", frames)
 
 
@@ -40,7 +44,7 @@ def materialize_minute(root: str, day: str, source: str, only_groups: list[str] 
     to specific groups — the REPAIR path: fix feature Y over period X by re-materializing only its
     group for those dates. Each (group, source, date) partition is independent, so a repair fans out
     in parallel across dates/groups with no contention and no global lock (atomic per partition)."""
-    frames = {"minute_agg": load_minute_agg(day, source)}
+    frames = {"minute_agg": load_minute_agg(day, source), "reference": load_reference()}
     ctx = BatchContext(frames=frames)
     groups = [g for g in runnable(frames) if only_groups is None or g.name in only_groups]
     for group in groups:

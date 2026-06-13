@@ -48,11 +48,23 @@ class CaptureState:
         self.minutes = 0
 
 
-def process_bars(state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None, window: int) -> None:
+def process_bars(
+    state: CaptureState,
+    bars: list[dict],
+    root: str,
+    mode: str,
+    day: str | None,
+    window: int,
+    snapshots: dict[str, pl.DataFrame] | None = None,
+) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
-    S, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
+    S, o, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
     normalize to this shape, then run through the identical code. Robust to RE-DELIVERED minutes
-    (reconnect/replay): de-dups on (symbol, minute) keep-last so no duplicate cells corrupt parity."""
+    (reconnect/replay): de-dups on (symbol, minute) keep-last so no duplicate cells corrupt parity.
+
+    ``snapshots`` are slowly-changing reference frames (e.g. ``reference`` for sector/flags, ``daily``
+    for multi-day) loaded once and held by the caller, merged into the compute context each minute so
+    those groups self-select and serve live — the same frames the backfill/parity path provides."""
     for bar in bars:
         state.buffer.append(
             {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
@@ -64,8 +76,9 @@ def process_bars(state: CaptureState, bars: list[dict], root: str, mode: str, da
     state.buffer = frame.to_dicts()  # bound memory to the trailing window (de-duped)
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
-    ctx = BatchContext(frames={"minute_agg": frame})
-    for group in runnable({"minute_agg": frame}):
+    frames = {"minute_agg": frame, **(snapshots or {})}
+    ctx = BatchContext(frames=frames)
+    for group in runnable(frames):
         out = run_group(group, ctx, validate=False).filter(pl.col("minute") == latest)
         prior = state.accumulated.get(group.name)
         combined = out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
@@ -75,7 +88,13 @@ def process_bars(state: CaptureState, bars: list[dict], root: str, mode: str, da
 
 
 async def capture(
-    url: str, symbols: list[str], root: str, mode: str, window: int = DEFAULT_BUFFER_MINUTES, day: str | None = None
+    url: str,
+    symbols: list[str],
+    root: str,
+    mode: str,
+    window: int = DEFAULT_BUFFER_MINUTES,
+    day: str | None = None,
+    snapshots: dict[str, pl.DataFrame] | None = None,
 ) -> int:
     """Websocket adapter (mock feed) → the shared core. Runs until the stream closes."""
     state = CaptureState()
@@ -84,7 +103,7 @@ async def capture(
         async for raw in websocket:
             bars = [b for b in json.loads(raw) if b.get("T") == "b"]
             if bars:
-                process_bars(state, bars, root, mode, day, window)
+                process_bars(state, bars, root, mode, day, window, snapshots)
     return state.minutes
 
 
