@@ -20,6 +20,7 @@ from quantlib.features.groups import (  # noqa: F401
     price_levels,
     price_returns,
     price_volume,
+    prior_day,
     quote_spread,
     return_dynamics,
     sector,

@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-478 features across 24 group(s).
+488 features across 25 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -329,6 +329,16 @@
 | `vwap_deviation_5m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 5-minute volume-weighted average price (close/vwap - 1). |
 | `vwap_deviation_60m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 60-minute volume-weighted average price (close/vwap - 1). |
 | `vwap_deviation_90m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 90-minute volume-weighted average price (close/vwap - 1). |
+| `above_pivot` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when the current close is above the prior-day floor pivot P, else 0.0. |
+| `dist_from_pivot_p` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to the pivot P from the prior day's OHLC (close/level - 1). |
+| `dist_from_pivot_r1` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to resistance R1 from the prior day's OHLC (close/level - 1). |
+| `dist_from_pivot_r2` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to resistance R2 from the prior day's OHLC (close/level - 1). |
+| `dist_from_pivot_s1` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to support S1 from the prior day's OHLC (close/level - 1). |
+| `dist_from_pivot_s2` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to support S2 from the prior day's OHLC (close/level - 1). |
+| `dist_from_prior_close` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to the prior day's close (close/prev_close - 1). |
+| `dist_from_prior_high` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to the prior day's high (close/prev_high - 1). |
+| `dist_from_prior_low` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Current close relative to the prior day's low (close/prev_low - 1). |
+| `gap_open` | prior_day | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Overnight gap: today's daily open relative to the prior day's close (open/prev_close - 1). |
 | `book_depth_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, None) | Mean total top-of-book size (bid_size + ask_size) over the last minute. |
 | `quote_imbalance_10m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 10 minutes. |
 | `quote_imbalance_120m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 120 minutes. |

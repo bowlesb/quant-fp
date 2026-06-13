@@ -41,8 +41,9 @@ As of 2026-06-13: **438 features across 22 groups** (`docs/FEATURES.md`).
   **Parity caveat:** these need whole-session retention, which the 300m trailing buffer can't hold —
   build a **per-symbol per-day session-stats snapshot** (same pattern as the daily cache) that the
   live path updates intra-session and the backfill recomputes; broadcast to minutes.
-- **A — prior-day pivots (propose):** floor-trader pivots P/R1/R2/S1/S2, prior-day close/high/low
-  anchors, round-number proximity. Needs the **daily** frame in the live + parity paths (see Gaps).
+- ✅ **prior-day pivots** (`prior_day`): floor pivots P/R1/R2/S1/S2, overnight gap, distance from
+  prior-day high/low/close. The `daily` frame is now wired into the live + parity paths (gap #1
+  closed). Round-number proximity still to add.
 
 ### 3. HOW IT'S MOVING — direction / momentum / trend  *(largely built)*
 - ✅ multi-horizon simple+log returns (`price_returns`), momentum/up-ratio (`momentum`), trend
@@ -101,11 +102,11 @@ As of 2026-06-13: **438 features across 22 groups** (`docs/FEATURES.md`).
 ---
 
 ## Known wiring gaps to close (parity-relevant)
-1. **`daily` frame is backfill-only.** `multi_day` is computed on the Alpaca-backfill path but the
-   `daily` frame is absent from the live capture path and the T+1 parity harness, so multi-day
-   features are not yet parity-covered or served live. The `snapshots` mechanism now exists (used for
-   `reference`); extend it to load a daily-history cache at capture startup and feed `daily` into
-   `parity_test`. Unlocks dimensions 2 (pivots), 4 (vol-vs-own-history), and prior-day anchors.
+1. ✅ **CLOSED (2026-06-13) — `daily` frame wired into live + parity.** `backfill_daily` now carries
+   full OHLC; `real_capture` loads the daily history once at startup into `snapshots`, and
+   `parity_test` feeds the same daily frame to both sources. `multi_day` and the new `prior_day`
+   group are now parity-covered and served live. (Validate against real captured-vs-backfilled data
+   on the next session.) Still open under this dimension: vol-vs-own-history (needs a daily-vol cache).
 2. **Numeric fundamentals need historization.** A single current snapshot is fine for parity-by-
    immutability only if stored per-date; market cap / short interest move, so capture a daily
    reference snapshot (not a live recompute) to keep point-in-time honest.

@@ -27,7 +27,14 @@ BARS_SCHEMA = {
     "low": pl.Float64,
     "volume": pl.Float64,
 }
-DAILY_SCHEMA = {"symbol": pl.String, "date": pl.Date, "close": pl.Float64}
+DAILY_SCHEMA = {
+    "symbol": pl.String,
+    "date": pl.Date,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+}
 
 _data_client: StockHistoricalDataClient | None = None
 
@@ -94,7 +101,7 @@ def backfill_daily(end_day: str, symbols: list[str], lookback_days: int = 370, c
         barset = _client().get_stock_bars(request)
         for symbol, bars in barset.data.items():
             for bar in bars:
-                rows.append((symbol, bar.timestamp.date(), float(bar.close)))
+                rows.append((symbol, bar.timestamp.date(), float(bar.open), float(bar.high), float(bar.low), float(bar.close)))
     if not rows:
         return pl.DataFrame(schema=DAILY_SCHEMA)
-    return pl.DataFrame(rows, schema=["symbol", "date", "close"], orient="row").cast(DAILY_SCHEMA)
+    return pl.DataFrame(rows, schema=["symbol", "date", "open", "high", "low", "close"], orient="row").cast(DAILY_SCHEMA)

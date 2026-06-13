@@ -7,7 +7,7 @@ tests pin the per-cell values the harness compares.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import polars as pl
 import pytest
@@ -323,6 +323,31 @@ def test_cross_sectional_rank_ordering() -> None:
     out = run_group(REGISTRY.get_group("cross_sectional_rank"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)}))
     ranks = {r["symbol"]: r["volume_rank_1m"] for r in out.iter_rows(named=True)}
     assert ranks["AAA"] == pytest.approx(0.0) and ranks["BBB"] == pytest.approx(0.5) and ranks["CCC"] == pytest.approx(1.0)
+
+
+# --- prior_day: gap + floor-trader pivots ---
+
+
+def test_prior_day_pivots_and_gap() -> None:
+    daily = pl.DataFrame(
+        {
+            "symbol": ["AAA", "AAA"],
+            "date": [date(2026, 6, 11), date(2026, 6, 12)],
+            "open": [99.0, 103.0],
+            "high": [105.0, 106.0],
+            "low": [95.0, 102.0],
+            "close": [102.0, 104.0],
+        }
+    )
+    minute = pl.DataFrame({"symbol": ["AAA"], "minute": [datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)], "close": [104.0]})
+    out = run_group(REGISTRY.get_group("prior_day"), BatchContext(frames={"daily": daily, "minute_agg": minute}))
+    row = out.row(0, named=True)
+    pivot = (105.0 + 95.0 + 102.0) / 3.0  # from the prior day (2026-06-11) OHLC
+    assert row["gap_open"] == pytest.approx(103.0 / 102.0 - 1.0)  # today's open vs prior close
+    assert row["dist_from_prior_high"] == pytest.approx(104.0 / 105.0 - 1.0)
+    assert row["above_pivot"] == 1.0  # 104 > P
+    assert row["dist_from_pivot_p"] == pytest.approx(104.0 / pivot - 1.0)
+    assert row["dist_from_pivot_r2"] == pytest.approx(104.0 / (pivot + 10.0) - 1.0)  # R2 = P + (H-L)
 
 
 # --- reference groups: sector one-hot + asset flags ---

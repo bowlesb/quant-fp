@@ -16,18 +16,26 @@ from datetime import datetime
 
 import polars as pl
 
+from quantlib.features.backfill_bars import backfill_daily
 from quantlib.features.backfill_ticks import load_trades_backfill
 from quantlib.features.compare import coverage, diff, vectors
 from quantlib.features.loaders import load_minute_agg, load_reference, load_tiers, load_trades_live
 
 
 def parity_test(day: str, source_live: str = "stream", source_backfill: str = "backfill") -> pl.DataFrame:
-    """Minute-path (Layer A/B) T+1 parity for a settled day. The static reference snapshot is fed to
-    both sides (it is source-independent), so the sector/asset-flag groups are covered too — and being
-    identical they must score 100%, a standing check that the reference join itself is deterministic."""
+    """Minute-path (Layer A/B) T+1 parity for a settled day. The static reference snapshot AND the
+    daily-history cache are fed to BOTH sides (both are source-independent settled artifacts), so the
+    sector/asset-flag, multi-day and prior-day groups are covered too — and being identical they must
+    score 100%, a standing check that those joins are deterministic and the daily broadcast is sound."""
+    live_minute = load_minute_agg(day, source_live)
+    backfill_minute = load_minute_agg(day, source_backfill)
     reference = load_reference()
-    live = vectors({"minute_agg": load_minute_agg(day, source_live), "reference": reference})
-    backfill = vectors({"minute_agg": load_minute_agg(day, source_backfill), "reference": reference})
+    symbols = sorted(
+        set(backfill_minute["symbol"].unique().to_list()) | set(live_minute["symbol"].unique().to_list())
+    )
+    daily = backfill_daily(day, symbols)
+    live = vectors({"minute_agg": live_minute, "reference": reference, "daily": daily})
+    backfill = vectors({"minute_agg": backfill_minute, "reference": reference, "daily": daily})
     return diff(live, backfill, load_tiers(day))
 
 
