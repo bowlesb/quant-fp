@@ -46,7 +46,8 @@ EXPECTED_BURST = {  # Layer C features computed from raw ticks
 }
 EXPECTED_QUOTE = {"spread_bps_1m", "quote_imbalance_1m", "book_depth_1m"}  # Layer B
 EXPECTED_VOL = {"high_low_range_1m", "realized_vol_5m"}  # Layer A
-EXPECTED_ALL = EXPECTED_MINUTE | EXPECTED_QUOTE | EXPECTED_VOL | EXPECTED_BURST
+EXPECTED_CAL = {"minute_of_day_et", "day_of_week", "minutes_since_open", "is_regular_session"}  # Layer A
+EXPECTED_ALL = EXPECTED_MINUTE | EXPECTED_QUOTE | EXPECTED_VOL | EXPECTED_CAL | EXPECTED_BURST
 
 
 def minute_groups() -> list:
@@ -327,6 +328,21 @@ def test_volatility_group() -> None:
     assert out.filter(pl.col("minute") == BASE_MINUTE).row(0, named=True)["high_low_range_1m"] == pytest.approx(0.01)
     late = out.filter(pl.col("minute") == BASE_MINUTE + timedelta(minutes=6)).row(0, named=True)
     assert late["realized_vol_5m"] is not None and late["realized_vol_5m"] > 0
+
+
+def test_calendar_group() -> None:
+    # 14:00 UTC = 10:00 ET (regular, minute_of_day 600); 12:00 UTC = 08:00 ET (pre-market)
+    minutes = [
+        datetime(2026, 6, 12, 14, 0, tzinfo=__import__("datetime").timezone.utc),
+        datetime(2026, 6, 12, 12, 0, tzinfo=__import__("datetime").timezone.utc),
+    ]
+    frame = pl.DataFrame({"symbol": ["AAA", "AAA"], "minute": minutes})
+    out = run_group(REGISTRY.get_group("calendar"), BatchContext(frames={"minute_agg": frame}))
+    regular = out.filter(pl.col("minute") == minutes[0]).row(0, named=True)
+    premarket = out.filter(pl.col("minute") == minutes[1]).row(0, named=True)
+    assert regular["minute_of_day_et"] == 600.0 and regular["is_regular_session"] == 1.0
+    assert regular["day_of_week"] == 5.0  # 2026-06-12 is a Friday
+    assert premarket["is_regular_session"] == 0.0
 
 
 def test_burst_group_sub_minute() -> None:
