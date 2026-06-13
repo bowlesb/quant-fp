@@ -17,8 +17,16 @@ MIN_PARITY_CELLS = 100  # below this a per-tier parity score is statistically me
 
 
 def runnable(frames: dict[str, pl.DataFrame]) -> list[FeatureGroup]:
-    """Groups whose every declared input is present — so a path runs only the right groups."""
-    return [g for g in REGISTRY.groups() if all(spec.name in frames for spec in g.inputs)]
+    """Groups whose every declared input frame AND its declared columns are present — so a bars-only
+    frame runs the bar groups (price/volatility/calendar) and skips the trade/quote groups."""
+    out = []
+    for group in REGISTRY.groups():
+        if all(
+            spec.name in frames and set(spec.columns) <= set(frames[spec.name].columns)
+            for spec in group.inputs
+        ):
+            out.append(group)
+    return out
 
 
 def vectors(frames: dict[str, pl.DataFrame]) -> pl.DataFrame:

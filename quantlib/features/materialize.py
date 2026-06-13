@@ -11,10 +11,26 @@ from __future__ import annotations
 import sys
 
 from quantlib.features import store
+from quantlib.features.backfill_bars import backfill_bars, tradable_universe
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
 from quantlib.features.loaders import load_minute_agg
+
+
+def _write_all(root: str, day: str, source: str, frames: dict) -> int:
+    ctx = BatchContext(frames=frames)
+    for group in runnable(frames):
+        out = run_group(group, ctx, validate=False)
+        store.write_group(root, group.name, group.version, source, day, out)
+        print(f"wrote group={group.name} source={source} date={day}: {out.height} rows")
+    return frames["minute_agg"]["symbol"].n_unique() if frames["minute_agg"].height else 0
+
+
+def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
+    """Backfill bars for ANY symbols directly from Alpaca and write the bar features (the scalable,
+    DB-independent backfill side of correspondence). Returns the symbol count materialized."""
+    return _write_all(root, day, "backfill", {"minute_agg": backfill_bars(day, symbols)})
 
 
 def materialize_minute(root: str, day: str, source: str, only_groups: list[str] | None = None) -> None:
@@ -32,12 +48,20 @@ def materialize_minute(root: str, day: str, source: str, only_groups: list[str] 
 
 
 def main() -> None:
-    if len(sys.argv) < 4:
+    args = sys.argv[1:]
+    if args and args[0] == "alpaca":
+        # alpaca <root> <day> <n_symbols>: backfill N tickers straight from Alpaca into the store
+        root, day, n = args[1], args[2], int(args[3])
+        symbols = tradable_universe(limit=n)
+        count = materialize_alpaca_bars(root, day, symbols)
+        print(f"materialized {count} symbols from Alpaca for {day} (requested {len(symbols)})")
+        return
+    if len(args) < 3:
         raise SystemExit(
-            "usage: python -m quantlib.features.materialize <root> <YYYY-MM-DD> <stream|backfill> [group,group]"
+            "usage: materialize <root> <day> <stream|backfill> [group,..]  |  materialize alpaca <root> <day> <n>"
         )
-    only = sys.argv[4].split(",") if len(sys.argv) > 4 else None
-    materialize_minute(sys.argv[1], sys.argv[2], sys.argv[3], only)
+    only = args[3].split(",") if len(args) > 3 else None
+    materialize_minute(args[0], args[1], args[2], only)
 
 
 if __name__ == "__main__":
