@@ -92,9 +92,29 @@ As of 2026-06-13: **438 features across 22 groups** (`docs/FEATURES.md`).
 - Article counts, FinBERT sentiment, keyword flags, embeddings. **Deferred:** model outputs must be
   version-pinned or backfill ≠ live; plus headline arrival-time ambiguity.
 
-### 10. FILINGS / INSIDER — *(bucket C)*
-- 8-K item flags, Form-4 insider direction, filing context. **Deferred:** parser must be
-  version-pinned and `filed_at` arrival-time pinned.
+### 10. FILINGS / INSIDER — EDGAR  *(split: structured = bucket B, NLP-derived = bucket C)*
+- 8-K item flags, Form-4 insider direction, filing counts, time-since-last-filing, filing context.
+- **YES, collectible in real time.** SEC EDGAR publishes filings within seconds of acceptance. Three
+  feed options: (a) the SEC's own real-time RSS/Atom index (free), (b) a third-party push API like
+  **sec-api.io** (websocket stream — likely the external API from the prior Edgar effort), (c) poll
+  `data.sec.gov` submissions. Backfill is the SAME data via the daily/full index on `data.sec.gov`.
+- **EDGAR is MORE parity-tractable than news** because every filing carries an authoritative SEC
+  **acceptance timestamp** (`accepted`). Key all event features on `accepted_at <= t`, not on when our
+  system received the filing, and live == backfill by construction. Architecture mirrors bars: stream
+  filings into a table keyed by `accepted_at` (live) / reconstruct the same table from the SEC index
+  (backfill) → identical point-in-time feature ("does an 8-K with item 2.02 exist as of minute t").
+- **The one real parity risk = receipt lag.** A filing accepted at 09:59 may reach our stream at
+  10:01, so at minute 10:00 the live path lacks it while backfill has it. **Mitigation:** define event
+  features with a deliberate **settlement delay** — only count filings with `accepted_at <= t - δ`
+  (e.g. δ = 2 min), and apply the SAME δ in backfill. Live receipt lag < δ → no divergence. This is
+  the event-feature analogue of the trailing-buffer invariant; bake δ into the feature spec.
+- **Bucket split:** STRUCTURED facts (form type, 8-K item numbers, Form-4 buy/sell/amount, counts,
+  recency) are parse-stable → **bucket B**, parity-tractable now via the δ-delay design. Only the
+  NLP-DERIVED features (filing sentiment, materiality scoring) are **bucket C** (version-pin the model
+  or backfill ≠ live). So we can ship most of the EDGAR value before solving model-versioning.
+- **Build order:** real-time EDGAR stream + `data.sec.gov` backfill into a `filings(accepted_at, cik,
+  form, items, ...)` table → a `filings` snapshot frame (like `reference`/`daily`) → an EDGAR feature
+  group with the δ-delay. Needs a CIK↔ticker map (SEC publishes one).
 
 ### 11. OPTIONS / DERIVATIVES — *(bucket C/B)*
 - IV rank / term structure, put/call ratio, dealer gamma, 25-delta skew. Needs an options feed.

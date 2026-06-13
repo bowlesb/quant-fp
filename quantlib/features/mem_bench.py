@@ -21,7 +21,7 @@ from quantlib.features.compare import runnable
 from quantlib.features.engine import run_all
 
 BASE = datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc)
-INTRADAY_COLS = ["close", "high", "low", "n_trades", "signed_volume", "mean_spread_bps", "quote_imbalance", "mean_bid_size", "mean_ask_size"]
+INTRADAY_COLS = ["open", "close", "high", "low", "volume", "n_trades", "signed_volume", "mean_spread_bps", "quote_imbalance", "mean_bid_size", "mean_ask_size"]
 
 
 def _rss_mb() -> float:
@@ -51,24 +51,32 @@ def main() -> None:
     print(f"intraday buffer  {n_tickers}x{window_min} ({intraday.height:,} rows): RSS {_rss_mb():.0f} MB")
 
     daily = _grid(n_tickers, daily_days, "date", BASE, timedelta(days=1)).with_columns(
-        [(100.0 + (pl.int_range(pl.len()) % 250) * 0.2).alias(f"d{c}") for c in range(10)]
+        [pl.col("date").dt.date()]  # backfill_daily yields pl.Date; match it so the date join keys line up
+        + [(100.0 + (pl.int_range(pl.len()) % 250) * 0.2).alias(c) for c in ("open", "high", "low", "close")]
     )
     print(f"+ daily cache    {n_tickers}x{daily_days} ({daily.height:,} rows): RSS {_rss_mb():.0f} MB")
+
+    reference = pl.DataFrame({"symbol": [f"S{i}" for i in range(n_tickers)]}).with_columns(
+        [pl.lit("Technology").alias("sector"), pl.lit(True).alias("shortable"),
+         pl.lit(True).alias("easy_to_borrow"), pl.lit(True).alias("marginable"), pl.lit(False).alias("fractionable")]
+    )
 
     vector = _grid(n_tickers, 1, "minute", BASE, timedelta(minutes=1)).with_columns(
         [(pl.int_range(pl.len()) % 13 * 0.07).alias(f"f{c}") for c in range(n_feature_cols)]
     )
     print(f"+ {n_feature_cols}-feature vector ({vector.height:,} rows): RSS {_rss_mb():.0f} MB")
 
-    groups = runnable({"minute_agg": intraday})
+    # ALL groups: intraday (rolling) + daily-broadcast (multi_day/prior_day) + reference (sector/flags)
+    frames = {"minute_agg": intraday, "daily": daily, "reference": reference}
+    groups = runnable(frames)
     n_features = sum(len(g.feature_names) for g in groups)
-    run_all(groups, BatchContext(frames={"minute_agg": intraday}), validate=False)  # warmup
+    run_all(groups, BatchContext(frames=frames), validate=False)  # warmup
     times = []
     for _ in range(3):
         start = time.perf_counter()
-        run_all(groups, BatchContext(frames={"minute_agg": intraday}), validate=False)
+        run_all(groups, BatchContext(frames=frames), validate=False)
         times.append(time.perf_counter() - start)
-    print(f"compute {n_features} live feats over the buffer: {min(times)*1000:.0f} ms | PEAK RSS {_rss_mb():.0f} MB")
+    print(f"compute ALL {n_features} feats ({len(groups)} groups) over the buffer: {min(times)*1000:.0f} ms | PEAK RSS {_rss_mb():.0f} MB")
 
 
 if __name__ == "__main__":
