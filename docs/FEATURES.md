@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-84 features across 9 group(s).
+108 features across 11 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -12,6 +12,14 @@
 | `inter_arrival_cv_1m` | microstructure_burst | microstructure | C | distributional | Float64 | sparse | (0.0, None) | Coefficient of variation of inter-trade gaps in the minute (burstiness of arrivals). |
 | `max_runup_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, None) | Largest within-minute price run-up: max over trades (in exchange-timestamp order) of price minus the running minimum. A PATH-DEPENDENT pattern feature. |
 | `peak_trades_per_second_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, 10000000.0) | Maximum trades printed in any single second within the minute (peak burst intensity). |
+| `mean_abs_ret_15m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 15 minutes (choppiness). |
+| `mean_abs_ret_30m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 30 minutes (choppiness). |
+| `mean_abs_ret_5m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 5 minutes (choppiness). |
+| `mean_abs_ret_60m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 60 minutes (choppiness). |
+| `up_ratio_15m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 15 minutes with a positive one-minute return (0-1). |
+| `up_ratio_30m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 30 minutes with a positive one-minute return (0-1). |
+| `up_ratio_5m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 5 minutes with a positive one-minute return (0-1). |
+| `up_ratio_60m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 60 minutes with a positive one-minute return (0-1). |
 | `daily_return_10d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 10 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_15d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 15 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_1d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 1 completed trading day(s), point-in-time as of the prior close. |
@@ -57,8 +65,24 @@
 | `ret_5m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 5 minute(s), point-in-time as of the minute open. |
 | `ret_60m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 60 minute(s), point-in-time as of the minute open. |
 | `book_depth_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, None) | Mean total top-of-book size (bid_size + ask_size) over the last minute. |
+| `quote_imbalance_15m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 15 minutes. |
 | `quote_imbalance_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance (bid-ask)/(bid+ask) over the last minute. |
+| `quote_imbalance_30m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 30 minutes. |
+| `quote_imbalance_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 5 minutes. |
+| `spread_bps_15m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 15 minutes. |
 | `spread_bps_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Average top-of-book bid-ask spread in basis points over the last minute. |
+| `spread_bps_30m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 30 minutes. |
+| `spread_bps_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 5 minutes. |
+| `bb_position_20m` | technical | technical | A | tolerance | Float64 | warmup | None | Position of close within its 20-minute Bollinger band: (close - sma) / (2*std). |
+| `bb_width_20m` | technical | technical | A | tolerance | Float64 | warmup | (0.0, None) | Bollinger band width over 20 minutes: 4*std / sma (relative band width). |
+| `macd_hist` | technical | technical | A | tolerance | Float64 | warmup | None | MACD histogram: MACD line minus the MACD signal line. |
+| `macd_line` | technical | technical | A | tolerance | Float64 | warmup | None | MACD line: 12-minute EMA minus 26-minute EMA of close. |
+| `macd_signal` | technical | technical | A | tolerance | Float64 | warmup | None | MACD signal line: 9-minute EMA of the MACD line. |
+| `rsi_14m` | technical | technical | A | tolerance | Float64 | warmup | (0.0, 100.0) | Relative Strength Index over the trailing 14 minutes (0-100). |
+| `sma_dist_100m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 100-minute simple moving average (close/sma - 1). |
+| `sma_dist_10m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 10-minute simple moving average (close/sma - 1). |
+| `sma_dist_20m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 20-minute simple moving average (close/sma - 1). |
+| `sma_dist_50m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 50-minute simple moving average (close/sma - 1). |
 | `signed_volume_15m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 15 minutes (net buy/sell pressure). |
 | `signed_volume_1m` | trade_flow | trade_flow | B | tolerance | Float64 | none | None | Buy-minus-sell signed share volume over the last minute (tick-rule signed). |
 | `signed_volume_30m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 30 minutes (net buy/sell pressure). |
