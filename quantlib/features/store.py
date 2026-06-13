@@ -32,7 +32,8 @@ def write_group(
 ) -> Path:
     """Write one group's features for one day+source. Atomic + idempotent (rerun overwrites cleanly)."""
     target = _partition_dir(root, group, version, source, day)
-    staging = target.with_name(target.name + ".staging")
+    # staging name must NOT match the `date=*` read glob, or a crashed write leaks into reads.
+    staging = target.parent / f".staging-{target.name}"
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
@@ -48,6 +49,16 @@ def _resolve(name: str) -> tuple[str, str]:
         if spec.name == name:
             return group.name, group.version
     raise KeyError(f"unknown/uncertified feature '{name}'")
+
+
+def _date_dirs(root: str | Path, group: str, version: str, source: str) -> set[str]:
+    base = Path(root) / f"group={group}" / f"v={version}" / f"source={source}"
+    return {p.name.removeprefix("date=") for p in base.glob("date=*")} if base.exists() else set()
+
+
+def settled_dates(root: str | Path, group: str, version: str) -> set[str]:
+    """Dates with a settled backfill partition for a group (the train-eligible days)."""
+    return _date_dirs(root, group, version, "backfill")
 
 
 def _scan_source(
@@ -70,13 +81,26 @@ def get_features(
     end: dt.datetime,
     root: str | Path,
     source: str = "auto",
+    require_settled: bool = False,
 ) -> pl.DataFrame:
     """Tidy frame keyed (symbol, minute), one column per requested feature, sorted, point-in-time.
     ``source``: "auto" returns backfill where available else stream (best-truth); or "stream"/"backfill"
-    for a specific source (e.g. for parity). RAISES on an unknown/uncertified feature."""
+    for a specific source (e.g. for parity). ``require_settled=True`` (use for TRAINING reads) RAISES
+    if any requested date is stream-only — so a model never trains on provisional, unsettled data.
+    RAISES on an unknown/uncertified feature."""
     by_group: dict[tuple[str, str], list[str]] = {}
     for name in names:
         by_group.setdefault(_resolve(name), []).append(name)
+
+    if require_settled:
+        for (group, version), _ in by_group.items():
+            unsettled = _date_dirs(root, group, version, "stream") - _date_dirs(root, group, version, "backfill")
+            in_range = {d for d in unsettled if start.date() <= dt.date.fromisoformat(d) <= end.date()}
+            if in_range:
+                raise ValueError(
+                    f"require_settled: group '{group}' has unsettled (stream-only) dates {sorted(in_range)} "
+                    f"in range — backfill them before using for training"
+                )
 
     result: pl.DataFrame | None = None
     for (group, version), feats in by_group.items():
