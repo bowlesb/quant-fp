@@ -26,6 +26,7 @@ BARS_SCHEMA = {
     "low": pl.Float64,
     "volume": pl.Float64,
 }
+DAILY_SCHEMA = {"symbol": pl.String, "date": pl.Date, "close": pl.Float64}
 
 _data_client: StockHistoricalDataClient | None = None
 
@@ -71,3 +72,27 @@ def backfill_bars(day: str, symbols: list[str], chunk: int = 200) -> pl.DataFram
     if not rows:
         return pl.DataFrame(schema=BARS_SCHEMA)
     return pl.DataFrame(rows, schema=["symbol", "minute", "close", "high", "low", "volume"], orient="row").cast(BARS_SCHEMA)
+
+
+def backfill_daily(end_day: str, symbols: list[str], lookback_days: int = 45, chunk: int = 200) -> pl.DataFrame:
+    """SPLIT-adjusted daily closes for the trailing ``lookback_days`` ending at ``end_day`` — the
+    DAILY history cache for multi-day features. Split-adjusted (not raw) so multi-day returns are
+    continuous across splits; this is a single shared artifact (no stream-vs-backfill divergence)."""
+    end = dt.datetime.fromisoformat(f"{end_day}T23:59:59+00:00")
+    start = end - dt.timedelta(days=lookback_days)
+    rows = []
+    for i in range(0, len(symbols), chunk):
+        request = StockBarsRequest(
+            symbol_or_symbols=symbols[i : i + chunk],
+            timeframe=TimeFrame.Day,
+            start=start,
+            end=end,
+            adjustment=Adjustment.SPLIT,
+        )
+        barset = _client().get_stock_bars(request)
+        for symbol, bars in barset.data.items():
+            for bar in bars:
+                rows.append((symbol, bar.timestamp.date(), float(bar.close)))
+    if not rows:
+        return pl.DataFrame(schema=DAILY_SCHEMA)
+    return pl.DataFrame(rows, schema=["symbol", "date", "close"], orient="row").cast(DAILY_SCHEMA)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 
 from quantlib.features import store
-from quantlib.features.backfill_bars import backfill_bars, tradable_universe
+from quantlib.features.backfill_bars import backfill_bars, backfill_daily, tradable_universe
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
@@ -28,9 +28,11 @@ def _write_all(root: str, day: str, source: str, frames: dict) -> int:
 
 
 def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
-    """Backfill bars for ANY symbols directly from Alpaca and write the bar features (the scalable,
-    DB-independent backfill side of correspondence). Returns the symbol count materialized."""
-    return _write_all(root, day, "backfill", {"minute_agg": backfill_bars(day, symbols)})
+    """Backfill bars for ANY symbols directly from Alpaca and write the bar features. Also loads the
+    DAILY history so the multi-day features compute + broadcast (the full minute + daily horizon
+    set). Returns the symbol count materialized."""
+    frames = {"minute_agg": backfill_bars(day, symbols), "daily": backfill_daily(day, symbols)}
+    return _write_all(root, day, "backfill", frames)
 
 
 def materialize_minute(root: str, day: str, source: str, only_groups: list[str] | None = None) -> None:
