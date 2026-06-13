@@ -207,7 +207,7 @@ def test_market_beta_exact_relationship() -> None:
     assert aaa_late["idio_vol_30m"] == pytest.approx(0.0, abs=1e-6)  # fully explained by the market
 
 
-@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume", "efficiency", "distribution", "ohlc_vol", "return_dynamics", "calendar_events"])
+@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume", "efficiency", "distribution", "ohlc_vol", "return_dynamics", "calendar_events", "round_levels"])
 def test_live_buffer_matches_backfill(group_name: str) -> None:
     group = REGISTRY.get_group(group_name)
     full = _wavy_ohlc(260)  # > LIVE_WINDOW so the trailing buffer genuinely evicts early minutes
@@ -323,6 +323,64 @@ def test_cross_sectional_rank_ordering() -> None:
     out = run_group(REGISTRY.get_group("cross_sectional_rank"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)}))
     ranks = {r["symbol"]: r["volume_rank_1m"] for r in out.iter_rows(named=True)}
     assert ranks["AAA"] == pytest.approx(0.0) and ranks["BBB"] == pytest.approx(0.5) and ranks["CCC"] == pytest.approx(1.0)
+
+
+# --- liquidity (Kyle lambda / Amihud / Roll) + round_levels ---
+
+
+def _signed_frame(n: int) -> pl.DataFrame:
+    """A frame with signed_volume where each price change is exactly 0.001 * signed_volume."""
+    import math
+
+    sv = [200.0 * math.sin(i / 4.0) + 50.0 * ((i % 3) - 1) for i in range(n)]
+    close = [100.0]
+    for i in range(1, n):
+        close.append(close[-1] + 0.001 * sv[i])
+    return pl.DataFrame(
+        {"symbol": ["AAA"] * n, "minute": [BASE + timedelta(minutes=i) for i in range(n)],
+         "close": close, "volume": [1000.0] * n, "signed_volume": sv}
+    )
+
+
+def test_liquidity_kyle_lambda_recovered() -> None:
+    frame = _signed_frame(40)
+    out = run_group(REGISTRY.get_group("liquidity"), BatchContext(frames={"minute_agg": frame}))
+    late = out.filter(pl.col("minute") == BASE + timedelta(minutes=39)).row(0, named=True)
+    assert late["kyle_lambda_30m"] == pytest.approx(0.001, rel=1e-4)  # dp = 0.001 * signed_volume
+    assert late["amihud_illiq_30m"] > 0.0
+    assert late["roll_spread_30m"] >= 0.0
+
+
+def test_liquidity_live_buffer_matches_backfill() -> None:
+    group = REGISTRY.get_group("liquidity")
+    import math
+
+    n = 260
+    sv = [300.0 * math.sin(i / 7.0) + 40.0 * ((i % 5) - 2) for i in range(n)]
+    close = [100.0 + 5.0 * math.sin(i / 11.0) + i * 0.02 for i in range(n)]
+    full = pl.DataFrame(
+        {"symbol": ["AAA"] * n, "minute": [BASE + timedelta(minutes=i) for i in range(n)],
+         "close": close, "volume": [800.0 + (i % 13) * 40.0 for i in range(n)], "signed_volume": sv}
+    )
+    backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
+    live = _replay_live(group, full)
+    joined = live.join(backfill, on=["symbol", "minute"], suffix="_bk")
+    for spec in group.declare():
+        pairs = joined.select([spec.name, f"{spec.name}_bk"]).drop_nulls()
+        within = pairs.select(
+            ((pl.col(spec.name) - pl.col(f"{spec.name}_bk")).abs() <= 1e-12 + spec.tolerance * pl.col(f"{spec.name}_bk").abs()).all()
+        ).item()
+        assert within, f"{spec.name}: live buffer diverged from backfill"
+
+
+def test_round_levels() -> None:
+    frame = _ohlc([(100.01, 100.01, 100.01, 100.01, 1.0), (100.50, 100.50, 100.50, 100.50, 1.0)])
+    out = run_group(REGISTRY.get_group("round_levels"), BatchContext(frames={"minute_agg": frame}))
+    near = _row(out, 0)
+    half = _row(out, 1)
+    assert near["dist_to_round_dollar"] == pytest.approx(0.01) and near["is_at_round_dollar"] == 1.0
+    assert half["dist_to_round_dollar"] == pytest.approx(0.5) and half["dist_to_half_dollar"] == pytest.approx(0.0)
+    assert half["is_at_round_dollar"] == 0.0
 
 
 # --- prior_day: gap + floor-trader pivots ---

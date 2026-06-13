@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-488 features across 25 group(s).
+506 features across 27 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -75,6 +75,21 @@
 | `efficiency_ratio_5m` | efficiency | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Kaufman efficiency over 5 minutes: |net price change| / total absolute minute-to-minute travel; 1 is a clean move, 0 is chop. |
 | `efficiency_ratio_60m` | efficiency | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Kaufman efficiency over 60 minutes: |net price change| / total absolute minute-to-minute travel; 1 is a clean move, 0 is chop. |
 | `efficiency_ratio_90m` | efficiency | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Kaufman efficiency over 90 minutes: |net price change| / total absolute minute-to-minute travel; 1 is a clean move, 0 is chop. |
+| `amihud_illiq_10m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 10 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
+| `amihud_illiq_120m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 120 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
+| `amihud_illiq_15m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 15 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
+| `amihud_illiq_30m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 30 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
+| `amihud_illiq_60m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 60 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
+| `kyle_lambda_10m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | None | Kyle's lambda over 10 minutes: price-change-per-share-of-signed-flow (OLS slope of close change on signed volume); higher = less liquid. |
+| `kyle_lambda_120m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | None | Kyle's lambda over 120 minutes: price-change-per-share-of-signed-flow (OLS slope of close change on signed volume); higher = less liquid. |
+| `kyle_lambda_15m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | None | Kyle's lambda over 15 minutes: price-change-per-share-of-signed-flow (OLS slope of close change on signed volume); higher = less liquid. |
+| `kyle_lambda_30m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | None | Kyle's lambda over 30 minutes: price-change-per-share-of-signed-flow (OLS slope of close change on signed volume); higher = less liquid. |
+| `kyle_lambda_60m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | None | Kyle's lambda over 60 minutes: price-change-per-share-of-signed-flow (OLS slope of close change on signed volume); higher = less liquid. |
+| `roll_spread_10m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1.0) | Roll implied effective spread over 10 minutes: 2*sqrt(-cov of consecutive price changes)/close, 0 when autocovariance is non-negative. |
+| `roll_spread_120m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1.0) | Roll implied effective spread over 120 minutes: 2*sqrt(-cov of consecutive price changes)/close, 0 when autocovariance is non-negative. |
+| `roll_spread_15m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1.0) | Roll implied effective spread over 15 minutes: 2*sqrt(-cov of consecutive price changes)/close, 0 when autocovariance is non-negative. |
+| `roll_spread_30m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1.0) | Roll implied effective spread over 30 minutes: 2*sqrt(-cov of consecutive price changes)/close, 0 when autocovariance is non-negative. |
+| `roll_spread_60m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1.0) | Roll implied effective spread over 60 minutes: 2*sqrt(-cov of consecutive price changes)/close, 0 when autocovariance is non-negative. |
 | `idio_vol_10m` | market_beta | cross_sectional | A | tolerance | Float64 | sparse | (0.0, 5.0) | Idiosyncratic volatility over 10 minutes: this ticker's return std times sqrt(1 - market R^2) (movement SPY does not explain). |
 | `idio_vol_120m` | market_beta | cross_sectional | A | tolerance | Float64 | sparse | (0.0, 5.0) | Idiosyncratic volatility over 120 minutes: this ticker's return std times sqrt(1 - market R^2) (movement SPY does not explain). |
 | `idio_vol_15m` | market_beta | cross_sectional | A | tolerance | Float64 | sparse | (0.0, 5.0) | Idiosyncratic volatility over 15 minutes: this ticker's return std times sqrt(1 - market R^2) (movement SPY does not explain). |
@@ -375,6 +390,9 @@
 | `ret_accel_30m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 30-minute return minus the prior 30-minute return (is the move speeding up or fading). |
 | `ret_accel_5m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 5-minute return minus the prior 5-minute return (is the move speeding up or fading). |
 | `ret_accel_60m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 60-minute return minus the prior 60-minute return (is the move speeding up or fading). |
+| `dist_to_half_dollar` | round_levels | price | A | tolerance | Float64 | none | (0.0, 0.26) | Absolute distance from the close to the nearest half dollar (x.00 or x.50), in dollars (0 to 0.25). |
+| `dist_to_round_dollar` | round_levels | price | A | tolerance | Float64 | none | (0.0, 0.51) | Absolute distance from the close to the nearest whole dollar, in dollars (0 to 0.5). |
+| `is_at_round_dollar` | round_levels | price | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the close is within 2 cents of a whole dollar, else 0.0 (round-number cluster). |
 | `sector_is_basic_materials` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is basic materials, else 0.0 (one-hot, broadcast across the day). |
 | `sector_is_communication_services` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is communication services, else 0.0 (one-hot, broadcast across the day). |
 | `sector_is_consumer_cyclical` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is consumer cyclical, else 0.0 (one-hot, broadcast across the day). |
