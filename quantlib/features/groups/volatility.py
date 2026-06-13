@@ -17,8 +17,8 @@ from quantlib.features.base import (
 )
 from quantlib.features.registry import register
 
-VOL_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60)
-RANGE_WINDOWS: tuple[int, ...] = (15, 30, 60)
+VOL_WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
+RANGE_WINDOWS: tuple[int, ...] = (15, 30, 60, 120)
 FOUR_LN2 = 2.772588722239781
 
 

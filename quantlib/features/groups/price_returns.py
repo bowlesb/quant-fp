@@ -17,7 +17,7 @@ from quantlib.features.base import (
 )
 from quantlib.features.registry import register
 
-WINDOWS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 20, 30, 45, 60)
+WINDOWS: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60, 90, 120)
 
 
 @register

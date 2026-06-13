@@ -235,7 +235,7 @@ def test_conformance_fails_duplicate_group_name() -> None:
 
 def test_introspect_passes_on_good_data() -> None:
     groups = minute_groups()
-    vector = run_all(groups, make_ctx(n=400))  # enough minutes for the largest window's warmup
+    vector = run_all(groups, make_ctx(n=800))  # enough minutes for the largest window's warmup (120m)
     specs = [spec for group in groups for spec in group.declare()]
     report = assert_sane(vector, specs)
     assert report.height == len(specs)

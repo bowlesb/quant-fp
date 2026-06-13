@@ -18,9 +18,9 @@ from quantlib.features.base import (
 )
 from quantlib.features.registry import register
 
-DAY_WINDOWS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 20, 30, 40, 60)
-VOL_DAYS: tuple[int, ...] = (5, 10, 20)
-HIGH_DAYS: tuple[int, ...] = (20, 60)
+DAY_WINDOWS: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 40, 60, 90, 120)
+VOL_DAYS: tuple[int, ...] = (5, 10, 20, 30, 60)
+HIGH_DAYS: tuple[int, ...] = (20, 60, 120)
 
 
 @register
