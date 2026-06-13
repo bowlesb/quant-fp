@@ -59,3 +59,25 @@ build-fresh:
 # Audit running==intended for all (or one) service: make check-fresh [S=scheduler]
 check-fresh:
 	scripts/assert_image_fresh.sh $(S)
+
+# --- Feature platform (FEATURE_PLATFORM.md) ---
+.PHONY: feature-catalog introspect parity test-fp
+
+FP_RUN := docker run --rm -v "$$PWD":/app -w /app
+FP_DB := --network quant_default --env-file .env
+
+# Regenerate docs/FEATURES.md from the registry (drift-gated in CI)
+feature-catalog:
+	$(FP_RUN) python:3.12-slim sh -c "pip install -q polars && python -m quantlib.features.catalog docs/FEATURES.md"
+
+# T+1 Settled-Day Parity for a day:  make parity DAY=2026-06-12
+parity:
+	$(FP_RUN) $(FP_DB) python:3.12-slim sh -c "pip install -q polars 'psycopg[binary]' && python -m quantlib.features.parity $(DAY)"
+
+# Introspect a day's features:  make introspect DAY=2026-06-12 [SOURCE=backfill]
+introspect:
+	$(FP_RUN) $(FP_DB) python:3.12-slim sh -c "pip install -q polars 'psycopg[binary]' && python -m quantlib.features.audit $(DAY) $(SOURCE)"
+
+# FP unit tests (registry / engine / introspection / store)
+test-fp:
+	$(FP_RUN) python:3.12-slim sh -c "pip install -q pytest polars && python -m pytest tests/test_fp_platform.py tests/test_fp_store.py -q"

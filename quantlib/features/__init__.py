@@ -25,8 +25,12 @@ from quantlib.features.registry import (
     Registry,
     register,
 )
+from quantlib.features.store import drop_before, get_features, write_group
 
 __all__ = [
+    "drop_before",
+    "get_features",
+    "write_group",
     "KEY_COLUMNS",
     "BatchContext",
     "FeatureGroup",
