@@ -1,4 +1,4 @@
-"""Volume features from per-minute bars (family: VOLUME, Layer A)."""
+"""Volume features from per-minute bars over windows (family: VOLUME, Layer A)."""
 from __future__ import annotations
 
 import polars as pl
@@ -12,6 +12,8 @@ from quantlib.features.base import (
 )
 from quantlib.features.registry import register
 
+WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
+
 
 @register
 class VolumeGroup(FeatureGroup):
@@ -22,7 +24,7 @@ class VolumeGroup(FeatureGroup):
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),)
 
     def declare(self) -> list[FeatureSpec]:
-        return [
+        specs = [
             FeatureSpec(
                 name="dollar_volume_1m",
                 description="Dollar volume traded in the last minute (close price * share volume).",
@@ -30,24 +32,37 @@ class VolumeGroup(FeatureGroup):
                 valid_range=(0.0, None),
                 nan_policy="none",
                 layer="A",
-            ),
-            FeatureSpec(
-                name="volume_zscore_30m",
-                description="Z-score of the last minute's share volume vs the trailing 30-minute mean and std.",
-                dtype="Float64",
-                nan_policy="warmup",
-                layer="A",
-            ),
+            )
         ]
+        for w in WINDOWS:
+            specs.append(
+                FeatureSpec(
+                    name=f"volume_zscore_{w}m",
+                    description=f"Z-score of the last minute's share volume vs the trailing {w}-minute mean and std.",
+                    dtype="Float64",
+                    nan_policy="warmup",
+                    layer="A",
+                )
+            )
+            specs.append(
+                FeatureSpec(
+                    name=f"volume_ratio_{w}m",
+                    description=f"Ratio of the last minute's share volume to its trailing {w}-minute mean.",
+                    dtype="Float64",
+                    valid_range=(0.0, None),
+                    nan_policy="warmup",
+                    layer="A",
+                )
+            )
+        return specs
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "volume"]).sort(["symbol", "minute"])
-        # TIME-based rolling so the 30-minute window is wall-clock, correct on gappy grids.
-        mean30 = pl.col("volume").rolling_mean_by("minute", window_size="30m").over("symbol")
-        std30 = pl.col("volume").rolling_std_by("minute", window_size="30m").over("symbol")
-        return frame.with_columns(
-            [
-                (pl.col("close") * pl.col("volume")).cast(pl.Float64).alias("dollar_volume_1m"),
-                ((pl.col("volume") - mean30) / std30).cast(pl.Float64).alias("volume_zscore_30m"),
-            ]
-        ).select(["symbol", "minute", "dollar_volume_1m", "volume_zscore_30m"])
+        exprs = [(pl.col("close") * pl.col("volume")).cast(pl.Float64).alias("dollar_volume_1m")]
+        for w in WINDOWS:
+            mean_w = pl.col("volume").rolling_mean_by("minute", window_size=f"{w}m").over("symbol")
+            std_w = pl.col("volume").rolling_std_by("minute", window_size=f"{w}m").over("symbol")
+            exprs.append(((pl.col("volume") - mean_w) / std_w).cast(pl.Float64).alias(f"volume_zscore_{w}m"))
+            exprs.append((pl.col("volume") / mean_w).cast(pl.Float64).alias(f"volume_ratio_{w}m"))
+        names = ["dollar_volume_1m"] + [f"volume_zscore_{w}m" for w in WINDOWS] + [f"volume_ratio_{w}m" for w in WINDOWS]
+        return frame.with_columns(exprs).select(["symbol", "minute", *names])

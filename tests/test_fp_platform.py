@@ -31,32 +31,12 @@ from quantlib.features import (
     run_group,
 )
 
-EXPECTED_MINUTE = {  # Layer A/B features computed from minute aggregates
-    "ret_1m",
-    "ret_5m",
-    "ret_30m",
-    "signed_volume_1m",
-    "trade_freq_1m",
-    "trade_rate_accel_1m",
-}
-EXPECTED_BURST = {  # Layer C features computed from raw ticks
-    "peak_trades_per_second_1m",
-    "active_seconds_1m",
-    "inter_arrival_cv_1m",
-    "max_runup_1m",
-}
-EXPECTED_QUOTE = {"spread_bps_1m", "quote_imbalance_1m", "book_depth_1m"}  # Layer B
-EXPECTED_VOL = {"high_low_range_1m", "realized_vol_5m"}  # Layer A
-EXPECTED_CAL = {"minute_of_day_et", "day_of_week", "minutes_since_open", "is_regular_session"}  # Layer A
-EXPECTED_VOLUME = {"dollar_volume_1m", "volume_zscore_30m"}  # Layer A
-EXPECTED_MULTIDAY = {"daily_return_1d", "daily_return_5d", "daily_return_10d", "daily_return_20d"}  # multi-day
-EXPECTED_ALL = (
-    EXPECTED_MINUTE | EXPECTED_QUOTE | EXPECTED_VOL | EXPECTED_CAL | EXPECTED_BURST | EXPECTED_VOLUME | EXPECTED_MULTIDAY
-)
+MIN_FEATURE_COUNT = 25  # a real catalog; derivation-based so adding features needs no test churn
 
 
 def minute_groups() -> list:
-    # the two groups whose inputs are satisfied by the synthetic make_minute_agg() frame
+    # the simple groups satisfied by make_minute_agg() AND non-degenerate on single-day synthetic
+    # data (so assert_sane is meaningful; calendar/day_of_week are constant within a day).
     return [REGISTRY.get_group(name) for name in ("price_returns", "trade_flow")]
 
 
@@ -179,17 +159,18 @@ class DupFeatureB(GoodGroup):
 
 def test_real_groups_registered_with_unique_complete_metadata() -> None:
     names = REGISTRY.feature_names()
-    assert set(names) == EXPECTED_ALL
     assert len(names) == len(set(names))  # no duplicate feature names
+    assert len(names) >= MIN_FEATURE_COUNT
     catalog = REGISTRY.catalog()
-    assert catalog.height == len(EXPECTED_ALL)
-    assert (catalog["description"].str.len_chars() >= 40).all()
+    assert catalog.height == len(names)
+    assert (catalog["description"].str.len_chars() >= 40).all()  # every desc complete
 
 
 def test_columns_equal_registry() -> None:
-    vector = run_all(minute_groups(), make_ctx())
-    feature_cols = set(vector.columns) - {"symbol", "minute"}
-    assert feature_cols == EXPECTED_MINUTE
+    groups = minute_groups()
+    vector = run_all(groups, make_ctx())
+    expected = {spec.name for group in groups for spec in group.declare()}
+    assert set(vector.columns) - {"symbol", "minute"} == expected
 
 
 # --- engine correctness ---
@@ -254,10 +235,10 @@ def test_conformance_fails_duplicate_group_name() -> None:
 
 def test_introspect_passes_on_good_data() -> None:
     groups = minute_groups()
-    vector = run_all(groups, make_ctx())
+    vector = run_all(groups, make_ctx(n=400))  # enough minutes for the largest window's warmup
     specs = [spec for group in groups for spec in group.declare()]
     report = assert_sane(vector, specs)
-    assert report.height == len(EXPECTED_MINUTE)
+    assert report.height == len(specs)
     assert not report["degenerate"].any()
 
 

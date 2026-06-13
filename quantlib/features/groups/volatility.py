@@ -1,4 +1,8 @@
-"""Volatility features from per-minute bars (family: VOLATILITY, Layer A)."""
+"""Volatility features from per-minute bars over many windows (family: VOLATILITY, Layer A).
+
+Realized vol (std of 1-min returns) and Parkinson vol (from the high-low range) over time-anchored
+windows — correct on gappy grids.
+"""
 from __future__ import annotations
 
 import polars as pl
@@ -13,7 +17,9 @@ from quantlib.features.base import (
 )
 from quantlib.features.registry import register
 
-VOL_WINDOW = 5
+VOL_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60)
+RANGE_WINDOWS: tuple[int, ...] = (15, 30, 60)
+FOUR_LN2 = 2.772588722239781
 
 
 @register
@@ -25,7 +31,7 @@ class VolatilityGroup(FeatureGroup):
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "high", "low", "close")),)
 
     def declare(self) -> list[FeatureSpec]:
-        return [
+        specs = [
             FeatureSpec(
                 name="high_low_range_1m",
                 description="Intra-minute high-low range as a fraction of close: (high - low) / close.",
@@ -33,31 +39,51 @@ class VolatilityGroup(FeatureGroup):
                 valid_range=(0.0, 5.0),
                 nan_policy="none",
                 layer="A",
-            ),
-            FeatureSpec(
-                name="realized_vol_5m",
-                description="Standard deviation of the last 5 one-minute close-to-close returns (realized vol).",
-                dtype="Float64",
-                valid_range=(0.0, 5.0),
-                nan_policy="warmup",
-                layer="A",
-                # 2% relative tolerance: a 2nd-order windowed stat amplifies thin-tier bar-close
-                # diffs. 90% of Tier-3 cells are exact; 2% lifts T3 to 96.4%. See LIFECYCLE_DEMOS.
-                tolerance=0.02,
-            ),
+            )
         ]
+        for w in VOL_WINDOWS:
+            specs.append(
+                FeatureSpec(
+                    name=f"realized_vol_{w}m",
+                    description=f"Standard deviation of one-minute close-to-close returns over the trailing {w} minutes.",
+                    dtype="Float64",
+                    valid_range=(0.0, 5.0),
+                    nan_policy="warmup",
+                    layer="A",
+                    tolerance=0.02,
+                )
+            )
+        for w in RANGE_WINDOWS:
+            specs.append(
+                FeatureSpec(
+                    name=f"parkinson_vol_{w}m",
+                    description=f"Parkinson high-low volatility estimator over the trailing {w} minutes (uses the bar range).",
+                    dtype="Float64",
+                    valid_range=(0.0, 5.0),
+                    nan_policy="warmup",
+                    layer="A",
+                    tolerance=0.02,
+                )
+            )
+        return specs
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "high", "low", "close"])
-        frame = lagged(frame, "close", 1, "_close_prev").sort(["symbol", "minute"])
-        frame = frame.with_columns((pl.col("close") / pl.col("_close_prev") - 1.0).alias("_ret_1m"))
-        return frame.with_columns(
+        frame = lagged(frame, "close", 1, "_cp").sort(["symbol", "minute"])
+        frame = frame.with_columns(
             [
-                ((pl.col("high") - pl.col("low")) / pl.col("close")).cast(pl.Float64).alias("high_low_range_1m"),
-                # TIME-based rolling (audit #2): positional rolling_std was wrong on gappy grids /
-                # session boundaries; "5m" anchors to wall-clock minutes regardless of gaps.
-                pl.col("_ret_1m").rolling_std_by("minute", window_size=f"{VOL_WINDOW}m").over("symbol").cast(pl.Float64).alias(
-                    "realized_vol_5m"
-                ),
+                (pl.col("close") / pl.col("_cp") - 1.0).alias("_ret"),
+                (pl.col("high") / pl.col("low")).log().pow(2).alias("_hl2"),
             ]
-        ).select(["symbol", "minute", "high_low_range_1m", "realized_vol_5m"])
+        )
+        exprs = [((pl.col("high") - pl.col("low")) / pl.col("close")).cast(pl.Float64).alias("high_low_range_1m")]
+        for w in VOL_WINDOWS:
+            exprs.append(
+                pl.col("_ret").rolling_std_by("minute", window_size=f"{w}m").over("symbol").cast(pl.Float64).alias(f"realized_vol_{w}m")
+            )
+        for w in RANGE_WINDOWS:
+            exprs.append(
+                (pl.col("_hl2").rolling_mean_by("minute", window_size=f"{w}m").over("symbol") / FOUR_LN2).sqrt().cast(pl.Float64).alias(f"parkinson_vol_{w}m")
+            )
+        names = ["high_low_range_1m"] + [f"realized_vol_{w}m" for w in VOL_WINDOWS] + [f"parkinson_vol_{w}m" for w in RANGE_WINDOWS]
+        return frame.with_columns(exprs).select(["symbol", "minute", *names])

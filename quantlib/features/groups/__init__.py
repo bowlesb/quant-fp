@@ -7,6 +7,7 @@ from quantlib.features.groups import (  # noqa: F401
     calendar,
     microstructure_burst,
     multi_day,
+    price_levels,
     price_returns,
     quote_spread,
     trade_flow,
