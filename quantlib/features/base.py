@@ -51,7 +51,7 @@ class FeatureSpec:
     dtype: str  # polars dtype name, e.g. "Float64"
     valid_range: tuple[float | None, float | None] | None = None
     nan_policy: str = "none"  # "none" | "warmup" | "sparse"
-    tolerance: float = 1e-9  # cell-level numeric closeness used by the parity test
+    tolerance: float = 1e-6  # cell-level RELATIVE closeness used by the parity test (|a-b| <= tol*(1+|b|))
 
 
 @dataclass

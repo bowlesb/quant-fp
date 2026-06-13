@@ -34,6 +34,12 @@ class TradeFlowGroup(FeatureGroup):
                 description="Buy-minus-sell signed share volume over the last minute (tick-rule signed).",
                 dtype="Float64",
                 nan_policy="none",
+                # 1% relative tolerance (vs the 1e-6 default): signed volume sums hundreds of
+                # provisional trades, so the live firehose and the settled tape rarely agree to the
+                # share. Justified — counts match 99.5%, net sign is 99.84% stable, the settled
+                # backfill is training truth; see docs/LIFECYCLE_DEMOS.md. Heavy tail = large
+                # closing-auction blocks (candidate for a more robust variant later).
+                tolerance=0.01,
             ),
             FeatureSpec(
                 name="trade_freq_1m",
