@@ -1,0 +1,16 @@
+# Feature-platform streaming — env-switchable mock<->real. Separate from the legacy stack.
+# Mock dry-run:  docker compose -f docker-compose.fp.yml up --build
+services:
+  mock-stream:
+    build: ./mock_stream
+    environment:
+      MOCK_MINUTES: "${MOCK_MINUTES:-390}"
+      MOCK_INTERVAL_SEC: "${MOCK_INTERVAL_SEC:-60}"   # 60 = real-time; 0.02 = fast test
+  capture:
+    build: { context: ., dockerfile: Dockerfile.fp }
+    depends_on: [mock-stream]
+    volumes: ["fp_store_mock:/store"]
+    # flip to the real feed (alpaca adapter) + mode=real + a real store volume for production
+    command: ["python", "-m", "quantlib.features.capture", "ws://mock-stream:9001", "SYM0,SYM1,SYM2,SYM3,SYM4", "/store", "mock", "2026-06-16"]
+volumes:
+  fp_store_mock:
