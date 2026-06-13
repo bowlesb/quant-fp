@@ -159,7 +159,55 @@ def _replay_live(group, full: pl.DataFrame, window: int = LIVE_WINDOW) -> pl.Dat
     return pl.concat(rows)
 
 
-@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume"])
+def test_efficiency_clean_vs_chop() -> None:
+    rising = _ohlc([(c, c + 0.1, c - 0.1, c, 1000.0) for c in [100.0 + i * 0.5 for i in range(15)]])
+    out = run_group(REGISTRY.get_group("efficiency"), BatchContext(frames={"minute_agg": rising}))
+    late = _row(out, 14)
+    assert late["efficiency_ratio_10m"] == pytest.approx(1.0)  # monotonic: net travel == total travel
+    assert late["directional_efficiency_10m"] == pytest.approx(1.0)
+    # a saw-tooth that returns to its start travels far but nets ~0 -> low efficiency
+    saw = [100.0 + (1.0 if i % 2 else 0.0) for i in range(15)]
+    chop = _ohlc([(c, c + 0.1, c - 0.1, c, 1000.0) for c in saw])
+    out2 = run_group(REGISTRY.get_group("efficiency"), BatchContext(frames={"minute_agg": chop}))
+    assert out2.filter(pl.col("minute") == BASE + timedelta(minutes=14)).row(0, named=True)["efficiency_ratio_10m"] < 0.3
+
+
+def test_distribution_semivariance_and_skew() -> None:
+    # returns with occasional large DOWN moves -> negative skew, downside_vol > upside_vol
+    import math
+
+    closes = [100.0]
+    for i in range(1, 60):
+        step = -2.0 if i % 11 == 0 else 0.15 * math.cos(i / 3.0)
+        closes.append(closes[-1] + step)
+    frame = _ohlc([(c, c + 0.05, c - 0.05, c, 1000.0) for c in closes])
+    out = run_group(REGISTRY.get_group("distribution"), BatchContext(frames={"minute_agg": frame}))
+    late = _row(out, 59)
+    assert late["ret_skew_30m"] < 0.0  # down-shocks make the distribution left-skewed
+    assert late["downside_vol_30m"] > late["upside_vol_30m"]
+
+
+def test_market_beta_exact_relationship() -> None:
+    import math
+
+    rets = [0.002 * math.sin(i / 5.0) for i in range(80)]
+    spy, aaa = [100.0], [50.0]
+    for r in rets[1:]:
+        spy.append(spy[-1] * (1.0 + r))
+        aaa.append(aaa[-1] * (1.0 + 2.0 * r))  # AAA moves exactly 2x SPY each minute
+    rows = []
+    for symbol, closes in (("SPY", spy), ("AAA", aaa)):
+        for i, c in enumerate(closes):
+            rows.append({"symbol": symbol, "minute": BASE + timedelta(minutes=i), "open": c, "high": c,
+                         "low": c, "close": c, "volume": 1000.0})
+    out = run_group(REGISTRY.get_group("market_beta"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)}))
+    aaa_late = out.filter((pl.col("symbol") == "AAA") & (pl.col("minute") == BASE + timedelta(minutes=79))).row(0, named=True)
+    assert aaa_late["market_beta_30m"] == pytest.approx(2.0, rel=1e-4)
+    assert aaa_late["market_corr_30m"] == pytest.approx(1.0, rel=1e-4)
+    assert aaa_late["idio_vol_30m"] == pytest.approx(0.0, abs=1e-6)  # fully explained by the market
+
+
+@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume", "efficiency", "distribution"])
 def test_live_buffer_matches_backfill(group_name: str) -> None:
     group = REGISTRY.get_group(group_name)
     full = _wavy_ohlc(220)  # > LIVE_WINDOW so the trailing buffer genuinely evicts early minutes
@@ -209,8 +257,9 @@ def test_market_context_broadcast_and_relative() -> None:
     assert aaa["outperforming_5m"] == (1.0 if aaa["relative_return_5m"] > 0 else 0.0)
 
 
-def test_market_context_live_buffer_matches_backfill() -> None:
-    group = REGISTRY.get_group("market_context")
+@pytest.mark.parametrize("group_name", ["market_context", "market_beta"])
+def test_market_context_live_buffer_matches_backfill(group_name: str) -> None:
+    group = REGISTRY.get_group(group_name)
     full = _multi_ohlc(("SPY", "QQQ", "AAA", "BBB"), 220)
     backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
     live = _replay_live(group, full)

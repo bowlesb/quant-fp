@@ -20,6 +20,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
+from quantlib.features.ols import centered_minutes, ols_window_exprs
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
@@ -53,42 +54,19 @@ class TrendQualityGroup(FeatureGroup):
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
-        x0 = frame.select(pl.col("minute").dt.epoch("s").min()).item()
-        frame = frame.with_columns(
-            [
-                ((pl.col("minute").dt.epoch("s").cast(pl.Float64) - float(x0)) / 60.0).alias("_x"),
-                pl.col("close").cast(pl.Float64).alias("_y"),
-                pl.lit(1.0).alias("_one"),
-            ]
-        )
-        frame = frame.with_columns(
-            [
-                (pl.col("_x") * pl.col("_y")).alias("_xy"),
-                (pl.col("_x") * pl.col("_x")).alias("_xx"),
-                (pl.col("_y") * pl.col("_y")).alias("_yy"),
-            ]
-        )
+        frame = centered_minutes(frame, "_t")
         exprs = []
         for w in WINDOWS:
             size = f"{w}m"
-            n = pl.col("_one").rolling_sum_by("minute", window_size=size).over("symbol")
-            sx = pl.col("_x").rolling_sum_by("minute", window_size=size).over("symbol")
-            sy = pl.col("_y").rolling_sum_by("minute", window_size=size).over("symbol")
-            sxy = pl.col("_xy").rolling_sum_by("minute", window_size=size).over("symbol")
-            sxx = pl.col("_xx").rolling_sum_by("minute", window_size=size).over("symbol")
-            syy = pl.col("_yy").rolling_sum_by("minute", window_size=size).over("symbol")
-            denom_x = n * sxx - sx * sx
-            denom_y = n * syy - sy * sy
-            cov_n = n * sxy - sx * sy
-            mean_y = sy / n
-            slope = cov_n / denom_x
-            slope_norm = slope / mean_y
-            r2 = (cov_n * cov_n) / (denom_x * denom_y)
-            defined = (n >= 2.0) & (denom_x > 0.0)
-            slope_norm_e = pl.when(defined).then(slope_norm).otherwise(None).cast(pl.Float64)
-            r2_e = pl.when(defined & (denom_y > 0.0)).then(r2).otherwise(None).cast(pl.Float64)
-            exprs.append(slope_norm_e.alias(f"price_slope_{w}m"))
-            exprs.append(r2_e.alias(f"price_r2_{w}m"))
-            exprs.append((slope_norm_e * r2_e).alias(f"trend_strength_{w}m"))
+            fit = ols_window_exprs("_t", "close", size)
+            mean_close = pl.col("close").rolling_mean_by("minute", window_size=size).over("symbol")
+            exprs.append((fit["slope"] / mean_close).cast(pl.Float64).alias(f"price_slope_{w}m"))
+            exprs.append(fit["r2"].cast(pl.Float64).alias(f"price_r2_{w}m"))
+        frame = frame.with_columns(exprs)
+        strength = [
+            (pl.col(f"price_slope_{w}m") * pl.col(f"price_r2_{w}m")).cast(pl.Float64).alias(f"trend_strength_{w}m")
+            for w in WINDOWS
+        ]
+        frame = frame.with_columns(strength)
         names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("price_slope", "price_r2", "trend_strength")]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+        return frame.select(["symbol", "minute", *names])
