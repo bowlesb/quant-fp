@@ -16,6 +16,9 @@ QUANTILES = (0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99)
 # Below this a per-tier parity score is statistically meaningless (anti-gaming §6.4). 1000 is the
 # ad-hoc sanity floor; FP0/FP3 CERTIFICATION uses the far higher 50k/100k cell floors (FP_GOALS).
 MIN_PARITY_CELLS = 1000
+# A feature must be COMPARABLE on this fraction of union cells, else parity is excluding too much
+# (audit #7): can't certify on a 99% score over only 80% of the universe-minutes.
+COVERAGE_FLOOR = 0.95
 
 
 def runnable(frames: dict[str, pl.DataFrame]) -> list[FeatureGroup]:
@@ -86,19 +89,24 @@ def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.
     methods = {spec.name: spec.parity_method for _, spec in REGISTRY.feature_specs()}
     tolerances = {spec.name: spec.tolerance for _, spec in REGISTRY.feature_specs()}
     feature_cols = [c for c in live.columns if c not in KEY_COLUMNS]
-    joined = live.join(backfill, on=list(KEY_COLUMNS), how="inner", suffix="_bk").join(
+    joined = live.join(backfill, on=list(KEY_COLUMNS), how="full", suffix="_bk", coalesce=True).join(
         tiers, on="symbol", how="left"
     ).with_columns(pl.col("tier").fill_null(3))
 
     rows = []
     for feature in feature_cols:
         live_col, back_col = pl.col(feature), pl.col(f"{feature}_bk")
-        both = live_col.is_not_null() & back_col.is_not_null()
+        live_present, back_present = live_col.is_not_null(), back_col.is_not_null()
         if joined.schema[feature].is_float():
-            both = both & live_col.is_not_nan() & back_col.is_not_nan()
+            live_present = live_present & live_col.is_not_nan()
+        if joined.schema[f"{feature}_bk"].is_float():
+            back_present = back_present & back_col.is_not_nan()
+        both, union = live_present & back_present, live_present | back_present
         for tier in (1, 2, 3):
             scope = joined.filter(pl.col("tier") == tier)
             compared = int(scope.select(both.sum()).item() or 0)
+            union_count = int(scope.select(union.sum()).item() or 0)
+            coverage = round(compared / union_count, 4) if union_count else None
             if methods[feature] == "distributional":
                 score, raw_pass = dist_score(scope, feature, tolerances[feature])
             else:
@@ -109,14 +117,19 @@ def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.
                 agree = int(scope.select(matched.sum()).item() or 0)
                 score = round(100.0 * agree / compared, 3) if compared else None
                 raw_pass = score >= 95.0 if score is not None else None
-            # A score on too few cells is not a valid pass OR fail — mark it insufficient (passed=None).
-            passed = (bool(raw_pass) if raw_pass is not None else None) if compared >= MIN_PARITY_CELLS else None
+            if compared < MIN_PARITY_CELLS:
+                passed = None  # too few cells to judge
+            elif coverage is None or coverage < COVERAGE_FLOOR:
+                passed = False  # coverage gap -> not trustworthy; can't silently exclude the missing cells
+            else:
+                passed = bool(raw_pass) if raw_pass is not None else None
             rows.append(
                 {
                     "feature": feature,
                     "tier": tier,
                     "method": methods[feature],
                     "compared": compared,
+                    "coverage": coverage,
                     "score": score,
                     "passed": passed,
                 }

@@ -47,7 +47,7 @@ def _print(report: pl.DataFrame, title: str) -> None:
     if insufficient.height:
         print(f"\nINSUFFICIENT SAMPLE (<100 cells, not certified): {insufficient.select('feature','tier','compared').rows()}")
     if failed.height:
-        print(f"\nFAILED (feature,tier,method,score): {failed.select('feature','tier','method','score').rows()}")
+        print(f"\nFAILED (feature,tier,score,coverage): {failed.select('feature','tier','score','coverage').rows()}")
     else:
         print("\nALL features/tiers with sufficient data PASS.")
 

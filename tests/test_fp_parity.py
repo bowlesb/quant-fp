@@ -37,6 +37,19 @@ def test_parity_passes_on_identical() -> None:
     assert row["score"] == 100.0 and row["passed"] is True
 
 
+def test_parity_fails_on_low_coverage() -> None:
+    # the compared cells agree PERFECTLY, but live is missing 30% of the cells backfill has ->
+    # coverage gap must FAIL it (can't certify 100% on the cells we happen to share).
+    live = _frame("ret_1m", [0.01] * N)  # cells 0..N-1
+    extra = pl.DataFrame(
+        {"symbol": ["AAA"] * 900, "minute": [BASE + timedelta(minutes=N + i) for i in range(900)], "ret_1m": [0.01] * 900}
+    )
+    backfill = pl.concat([_frame("ret_1m", [0.01] * N), extra])  # union = N+900, compared = N
+    row = diff(live, backfill, TIERS).filter((pl.col("feature") == "ret_1m") & (pl.col("tier") == 1)).row(0, named=True)
+    assert row["coverage"] is not None and row["coverage"] < 0.95
+    assert row["passed"] is False  # coverage gap -> fail despite perfect agreement on shared cells
+
+
 def test_distributional_method_catches_within_symbol_shuffle() -> None:
     values = [0.1 + (i % 50) * 0.02 for i in range(N)]
     shuffled = values[:]
