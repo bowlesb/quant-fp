@@ -64,6 +64,17 @@ def test_stale_version_not_contaminating(tmp_path: Path) -> None:
     assert _read(tmp_path)[0] == 3.0  # get_features resolves the registry version (1.0.0), not 9.9.9
 
 
+def test_coverage_detects_capture_gap() -> None:
+    from quantlib.features.compare import coverage
+
+    minutes = [BASE + timedelta(minutes=i) for i in range(10)]  # all within ET hour 10
+    backfill = pl.DataFrame({"symbol": ["AAA"] * 10, "minute": minutes, "x": [1.0] * 10})
+    live = pl.DataFrame({"symbol": ["AAA"] * 9, "minute": minutes[:5] + minutes[6:], "x": [1.0] * 9})  # drop idx 5
+    row = coverage(live, backfill).filter(pl.col("et_hour") == 10).row(0, named=True)
+    assert row["backfill_cells"] == 10 and row["live_gaps"] == 1 and row["live_extra"] == 0
+    assert row["live_coverage_pct"] == 90.0
+
+
 def test_require_settled_guards_against_mixing(tmp_path: Path) -> None:
     store.write_group(tmp_path, "price_returns", "1.0.0", "stream", "2026-06-12", _frame("AAA", 1.0))
     with pytest.raises(ValueError, match="unsettled"):

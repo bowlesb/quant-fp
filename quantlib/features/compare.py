@@ -40,6 +40,29 @@ def dist_score(scope: pl.DataFrame, feature: str, tol: float) -> tuple[float | N
     return round(100.0 * (1.0 - min(1.0, max_reldiff)), 3), max_reldiff <= tol
 
 
+def coverage(live: pl.DataFrame, backfill: pl.DataFrame) -> pl.DataFrame:
+    """Missing-data detection (distinct from value parity): the cell-PRESENCE diff between sources,
+    grouped by ET hour so the early-morning / after-hours sessions are visible. ``live_gaps`` =
+    (symbol, minute) cells the settled backfill has that we did NOT capture live (a capture gap);
+    ``live_extra`` = cells live has that backfill lacks (over-capture / busted-trade minutes)."""
+    keys = list(KEY_COLUMNS)
+    et_hour = pl.col("minute").dt.convert_time_zone("America/New_York").dt.hour().cast(pl.Int32).alias("et_hour")
+    live_keys = live.select(keys).unique()
+    backfill_keys = backfill.select(keys).unique()
+    gaps = backfill_keys.join(live_keys, on=keys, how="anti").with_columns(et_hour)
+    extra = live_keys.join(backfill_keys, on=keys, how="anti").with_columns(et_hour)
+    by_hour = (
+        backfill_keys.with_columns(et_hour).group_by("et_hour").agg(pl.len().alias("backfill_cells"))
+        .join(gaps.group_by("et_hour").agg(pl.len().alias("live_gaps")), on="et_hour", how="left")
+        .join(extra.group_by("et_hour").agg(pl.len().alias("live_extra")), on="et_hour", how="left")
+        .fill_null(0)
+        .sort("et_hour")
+    )
+    return by_hour.with_columns(
+        (100.0 * (1.0 - pl.col("live_gaps") / pl.col("backfill_cells"))).round(3).alias("live_coverage_pct")
+    )
+
+
 def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.DataFrame:
     """Per-feature, per-tier parity, dispatched on each feature's declared parity_method."""
     methods = {spec.name: spec.parity_method for _, spec in REGISTRY.feature_specs()}

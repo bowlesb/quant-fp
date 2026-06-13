@@ -17,7 +17,7 @@ from datetime import datetime
 import polars as pl
 
 from quantlib.features.backfill_ticks import load_trades_backfill
-from quantlib.features.compare import diff, vectors
+from quantlib.features.compare import coverage, diff, vectors
 from quantlib.features.loaders import load_minute_agg, load_tiers, load_trades_live
 
 
@@ -59,6 +59,12 @@ def main() -> None:
         start = datetime.fromisoformat(f"{day}T{start_hm}:00+00:00")
         end = datetime.fromisoformat(f"{day}T{end_hm}:00+00:00")
         _print(parity_test_ticks(start, end, syms), f"Layer-C tick parity {day} {start_hm}-{end_hm}Z {syms}")
+    elif args and args[0] == "coverage":
+        day = args[1]
+        report = coverage(load_minute_agg(day, "stream"), load_minute_agg(day, "backfill"))
+        pl.Config.set_tbl_rows(30)
+        print(f"=== Missing-data coverage by ET hour — {day} (live stream vs settled backfill) ===")
+        print(report)
     elif args:
         _print(parity_test(args[0]), f"T+1 Settled-Day Parity {args[0]} (per-feature method)")
     else:
