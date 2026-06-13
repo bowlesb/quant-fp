@@ -35,32 +35,33 @@ class CaptureState:
 
     def __init__(self) -> None:
         self.buffer: list[dict] = []
-        self.accumulated: dict[str, list[pl.DataFrame]] = {}
+        self.accumulated: dict[str, pl.DataFrame] = {}  # one DEDUPED frame per group
         self.minutes = 0
 
 
 def process_bars(state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None, window: int) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
-    S, c, h, l, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
-    normalize to this shape, then run through the identical code."""
+    S, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
+    normalize to this shape, then run through the identical code. Robust to RE-DELIVERED minutes
+    (reconnect/replay): de-dups on (symbol, minute) keep-last so no duplicate cells corrupt parity."""
     for bar in bars:
         state.buffer.append(
             {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]),
              "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"])}
         )
-    frame = pl.DataFrame(state.buffer, schema=BARS_SCHEMA)
+    frame = pl.DataFrame(state.buffer, schema=BARS_SCHEMA).unique(subset=["symbol", "minute"], keep="last")
     recent = sorted(frame["minute"].unique())[-window:]
     frame = frame.filter(pl.col("minute").is_in(recent))
-    state.buffer = frame.to_dicts()  # bound memory to the trailing window
+    state.buffer = frame.to_dicts()  # bound memory to the trailing window (de-duped)
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
     ctx = BatchContext(frames={"minute_agg": frame})
     for group in runnable({"minute_agg": frame}):
         out = run_group(group, ctx, validate=False).filter(pl.col("minute") == latest)
-        state.accumulated.setdefault(group.name, []).append(out)
-        store.write_group(
-            root, group.name, group.version, "stream", target_day, pl.concat(state.accumulated[group.name]), mode=mode
-        )
+        prior = state.accumulated.get(group.name)
+        combined = out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
+        state.accumulated[group.name] = combined
+        store.write_group(root, group.name, group.version, "stream", target_day, combined, mode=mode)
     state.minutes += 1
 
 

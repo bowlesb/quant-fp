@@ -6,7 +6,7 @@ a compressed interval, and verifies features land in a mock-tagged store (never 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
@@ -14,7 +14,25 @@ import websockets
 
 from mock_stream.server import make_handler
 from quantlib.features import store
-from quantlib.features.capture import capture
+from quantlib.features.capture import CaptureState, capture, process_bars
+
+DEDUP_BASE = datetime(2026, 6, 16, 14, 0, tzinfo=timezone.utc)
+
+
+def _dbar(symbol: str, minute: int, close: float) -> dict:
+    return {"S": symbol, "c": close, "h": close + 0.1, "l": close - 0.1, "v": 1000.0,
+            "t": (DEDUP_BASE + timedelta(minutes=minute)).isoformat()}
+
+
+def test_capture_dedups_redelivered_minutes(tmp_path: Path) -> None:
+    root = str(tmp_path / "mock")
+    state = CaptureState()
+    process_bars(state, [_dbar("AAA", 0, 100.0), _dbar("BBB", 0, 200.0)], root, "mock", "2026-06-16", 60)
+    process_bars(state, [_dbar("AAA", 1, 101.0), _dbar("BBB", 1, 201.0)], root, "mock", "2026-06-16", 60)
+    process_bars(state, [_dbar("AAA", 1, 101.0), _dbar("BBB", 1, 201.0)], root, "mock", "2026-06-16", 60)  # RE-DELIVERY
+    df = store.get_features(["ret_1m"], "universe", DEDUP_BASE, DEDUP_BASE + timedelta(minutes=5), root, source="stream")
+    assert df.height == 4  # 2 symbols x 2 minutes — re-delivered minute did NOT duplicate
+    assert int(df.select(["symbol", "minute"]).is_duplicated().sum()) == 0
 
 
 def test_streaming_mock_to_store(tmp_path: Path) -> None:
