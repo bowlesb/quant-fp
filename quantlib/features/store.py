@@ -21,16 +21,38 @@ from quantlib.features.base import KEY_COLUMNS
 from quantlib.features.registry import REGISTRY
 
 SOURCES = ("backfill", "stream")  # priority order for source="auto" (backfill = truth, preferred)
+MODE_FILE = "_store_mode"  # "real" | "mock" — physically separates real and simulated data
 
 
 def _partition_dir(root: str | Path, group: str, version: str, source: str, day: str) -> Path:
     return Path(root) / f"group={group}" / f"v={version}" / f"source={source}" / f"date={day}"
 
 
+def store_mode(root: str | Path) -> str | None:
+    marker = Path(root) / MODE_FILE
+    return marker.read_text().strip() if marker.exists() else None
+
+
+def set_mode(root: str | Path, mode: str) -> None:
+    """Tag a store root as 'real' or 'mock' and REFUSE to mix — mock streaming data can never be
+    written into the real store (or vice versa), so simulated data is never confused for real."""
+    if mode not in ("real", "mock"):
+        raise ValueError(f"store mode must be 'real' or 'mock', got {mode!r}")
+    Path(root).mkdir(parents=True, exist_ok=True)
+    marker = Path(root) / MODE_FILE
+    existing = marker.read_text().strip() if marker.exists() else None
+    if existing is not None and existing != mode:
+        raise ValueError(f"store '{root}' is mode '{existing}'; refusing to write '{mode}' data (mock/real separation)")
+    if existing is None:
+        marker.write_text(mode)
+
+
 def write_group(
-    root: str | Path, group: str, version: str, source: str, day: str, frame: pl.DataFrame
+    root: str | Path, group: str, version: str, source: str, day: str, frame: pl.DataFrame, mode: str = "real"
 ) -> Path:
-    """Write one group's features for one day+source. Atomic + idempotent (rerun overwrites cleanly)."""
+    """Write one group's features for one day+source. Atomic + idempotent (rerun overwrites cleanly).
+    ``mode`` ('real'|'mock') is enforced per root so simulated data never lands in the real store."""
+    set_mode(root, mode)
     target = _partition_dir(root, group, version, source, day)
     # staging name must NOT match the `date=*` read glob, or a crashed write leaks into reads.
     staging = target.parent / f".staging-{target.name}"

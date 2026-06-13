@@ -64,6 +64,17 @@ def test_stale_version_not_contaminating(tmp_path: Path) -> None:
     assert _read(tmp_path)[0] == 3.0  # get_features resolves the registry version (1.0.0), not 9.9.9
 
 
+def test_mock_real_storage_separation(tmp_path: Path) -> None:
+    frame = pl.DataFrame({"symbol": ["AAA"], "minute": [BASE], "ret_1m": [1.0]})
+    real, mock = tmp_path / "real", tmp_path / "mock"
+    store.write_group(real, "price_returns", "1.0.0", "stream", "2026-06-12", frame, mode="real")
+    store.write_group(mock, "price_returns", "1.0.0", "stream", "2026-06-12", frame, mode="mock")
+    assert store.store_mode(real) == "real" and store.store_mode(mock) == "mock"
+    # writing simulated (mock) data into the REAL store is refused — never confused
+    with pytest.raises(ValueError, match="separation"):
+        store.write_group(real, "price_returns", "1.0.0", "stream", "2026-06-12", frame, mode="mock")
+
+
 def test_coverage_detects_capture_gap() -> None:
     from quantlib.features.compare import coverage
 
