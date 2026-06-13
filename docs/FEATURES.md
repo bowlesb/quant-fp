@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-155 features across 11 group(s).
+183 features across 11 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -15,27 +15,35 @@
 | `mean_abs_ret_10m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 10 minutes (choppiness). |
 | `mean_abs_ret_120m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 120 minutes (choppiness). |
 | `mean_abs_ret_15m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 15 minutes (choppiness). |
+| `mean_abs_ret_20m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 20 minutes (choppiness). |
 | `mean_abs_ret_30m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 30 minutes (choppiness). |
 | `mean_abs_ret_3m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 3 minutes (choppiness). |
+| `mean_abs_ret_45m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 45 minutes (choppiness). |
 | `mean_abs_ret_5m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 5 minutes (choppiness). |
 | `mean_abs_ret_60m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 60 minutes (choppiness). |
 | `up_ratio_10m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 10 minutes with a positive one-minute return (0-1). |
 | `up_ratio_120m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 120 minutes with a positive one-minute return (0-1). |
 | `up_ratio_15m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 15 minutes with a positive one-minute return (0-1). |
+| `up_ratio_20m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 20 minutes with a positive one-minute return (0-1). |
 | `up_ratio_30m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 30 minutes with a positive one-minute return (0-1). |
 | `up_ratio_3m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 3 minutes with a positive one-minute return (0-1). |
+| `up_ratio_45m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 45 minutes with a positive one-minute return (0-1). |
 | `up_ratio_5m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 5 minutes with a positive one-minute return (0-1). |
 | `up_ratio_60m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 60 minutes with a positive one-minute return (0-1). |
 | `daily_return_10d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 10 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_120d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 120 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_15d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 15 completed trading day(s), point-in-time as of the prior close. |
+| `daily_return_180d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 180 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_1d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 1 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_20d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 20 completed trading day(s), point-in-time as of the prior close. |
+| `daily_return_240d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 240 completed trading day(s), point-in-time as of the prior close. |
+| `daily_return_25d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 25 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_2d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 2 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_30d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 30 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_3d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 3 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_40d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 40 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_4d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 4 completed trading day(s), point-in-time as of the prior close. |
+| `daily_return_50d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 50 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_5d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 5 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_60d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 60 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_7d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 7 completed trading day(s), point-in-time as of the prior close. |
@@ -45,51 +53,71 @@
 | `daily_vol_30d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (0.0, 5.0) | Standard deviation of daily returns over the last 30 completed trading days (point-in-time). |
 | `daily_vol_5d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (0.0, 5.0) | Standard deviation of daily returns over the last 5 completed trading days (point-in-time). |
 | `daily_vol_60d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (0.0, 5.0) | Standard deviation of daily returns over the last 60 completed trading days (point-in-time). |
+| `dist_from_10d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 10-day high (close[D-1]/max - 1), point-in-time; <= 0. |
 | `dist_from_120d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 120-day high (close[D-1]/max - 1), point-in-time; <= 0. |
 | `dist_from_20d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 20-day high (close[D-1]/max - 1), point-in-time; <= 0. |
+| `dist_from_250d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 250-day high (close[D-1]/max - 1), point-in-time; <= 0. |
 | `dist_from_60d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 60-day high (close[D-1]/max - 1), point-in-time; <= 0. |
+| `dist_from_high_10m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 10-minute high (close / max_high - 1); <= 0. |
 | `dist_from_high_120m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 120-minute high (close / max_high - 1); <= 0. |
 | `dist_from_high_15m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 15-minute high (close / max_high - 1); <= 0. |
+| `dist_from_high_240m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 240-minute high (close / max_high - 1); <= 0. |
 | `dist_from_high_30m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 30-minute high (close / max_high - 1); <= 0. |
 | `dist_from_high_5m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 5-minute high (close / max_high - 1); <= 0. |
 | `dist_from_high_60m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 60-minute high (close / max_high - 1); <= 0. |
+| `dist_from_low_10m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 5.0) | Close relative to the trailing 10-minute low (close / min_low - 1); >= 0. |
 | `dist_from_low_120m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 5.0) | Close relative to the trailing 120-minute low (close / min_low - 1); >= 0. |
 | `dist_from_low_15m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 5.0) | Close relative to the trailing 15-minute low (close / min_low - 1); >= 0. |
+| `dist_from_low_240m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 5.0) | Close relative to the trailing 240-minute low (close / min_low - 1); >= 0. |
 | `dist_from_low_30m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 5.0) | Close relative to the trailing 30-minute low (close / min_low - 1); >= 0. |
 | `dist_from_low_5m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 5.0) | Close relative to the trailing 5-minute low (close / min_low - 1); >= 0. |
 | `dist_from_low_60m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 5.0) | Close relative to the trailing 60-minute low (close / min_low - 1); >= 0. |
+| `position_in_range_10m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Where close sits in its trailing 10-minute high-low range: (close - min_low) / (max_high - min_low). |
 | `position_in_range_120m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Where close sits in its trailing 120-minute high-low range: (close - min_low) / (max_high - min_low). |
 | `position_in_range_15m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Where close sits in its trailing 15-minute high-low range: (close - min_low) / (max_high - min_low). |
+| `position_in_range_240m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Where close sits in its trailing 240-minute high-low range: (close - min_low) / (max_high - min_low). |
 | `position_in_range_30m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Where close sits in its trailing 30-minute high-low range: (close - min_low) / (max_high - min_low). |
 | `position_in_range_5m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Where close sits in its trailing 5-minute high-low range: (close - min_low) / (max_high - min_low). |
 | `position_in_range_60m` | price_levels | price | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Where close sits in its trailing 60-minute high-low range: (close - min_low) / (max_high - min_low). |
 | `log_ret_10m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-10m) over the trailing 10 minute(s), point-in-time. |
 | `log_ret_120m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-120m) over the trailing 120 minute(s), point-in-time. |
+| `log_ret_12m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-12m) over the trailing 12 minute(s), point-in-time. |
 | `log_ret_15m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-15m) over the trailing 15 minute(s), point-in-time. |
+| `log_ret_180m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-180m) over the trailing 180 minute(s), point-in-time. |
 | `log_ret_1m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-1m) over the trailing 1 minute(s), point-in-time. |
 | `log_ret_20m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-20m) over the trailing 20 minute(s), point-in-time. |
+| `log_ret_25m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-25m) over the trailing 25 minute(s), point-in-time. |
 | `log_ret_2m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-2m) over the trailing 2 minute(s), point-in-time. |
 | `log_ret_30m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-30m) over the trailing 30 minute(s), point-in-time. |
 | `log_ret_3m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-3m) over the trailing 3 minute(s), point-in-time. |
+| `log_ret_40m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-40m) over the trailing 40 minute(s), point-in-time. |
 | `log_ret_45m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-45m) over the trailing 45 minute(s), point-in-time. |
 | `log_ret_4m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-4m) over the trailing 4 minute(s), point-in-time. |
 | `log_ret_5m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-5m) over the trailing 5 minute(s), point-in-time. |
 | `log_ret_60m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-60m) over the trailing 60 minute(s), point-in-time. |
+| `log_ret_6m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-6m) over the trailing 6 minute(s), point-in-time. |
 | `log_ret_7m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-7m) over the trailing 7 minute(s), point-in-time. |
+| `log_ret_8m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-8m) over the trailing 8 minute(s), point-in-time. |
 | `log_ret_90m` | price_returns | price | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Log close-to-close return ln(close/close_-90m) over the trailing 90 minute(s), point-in-time. |
 | `ret_10m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 10 minute(s), point-in-time as of the minute open. |
 | `ret_120m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 120 minute(s), point-in-time as of the minute open. |
+| `ret_12m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 12 minute(s), point-in-time as of the minute open. |
 | `ret_15m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 15 minute(s), point-in-time as of the minute open. |
+| `ret_180m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 180 minute(s), point-in-time as of the minute open. |
 | `ret_1m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 1 minute(s), point-in-time as of the minute open. |
 | `ret_20m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 20 minute(s), point-in-time as of the minute open. |
+| `ret_25m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 25 minute(s), point-in-time as of the minute open. |
 | `ret_2m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 2 minute(s), point-in-time as of the minute open. |
 | `ret_30m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 30 minute(s), point-in-time as of the minute open. |
 | `ret_3m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 3 minute(s), point-in-time as of the minute open. |
+| `ret_40m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 40 minute(s), point-in-time as of the minute open. |
 | `ret_45m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 45 minute(s), point-in-time as of the minute open. |
 | `ret_4m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 4 minute(s), point-in-time as of the minute open. |
 | `ret_5m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 5 minute(s), point-in-time as of the minute open. |
 | `ret_60m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 60 minute(s), point-in-time as of the minute open. |
+| `ret_6m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 6 minute(s), point-in-time as of the minute open. |
 | `ret_7m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 7 minute(s), point-in-time as of the minute open. |
+| `ret_8m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 8 minute(s), point-in-time as of the minute open. |
 | `ret_90m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 90 minute(s), point-in-time as of the minute open. |
 | `book_depth_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, None) | Mean total top-of-book size (bid_size + ask_size) over the last minute. |
 | `quote_imbalance_10m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 10 minutes. |
