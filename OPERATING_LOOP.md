@@ -15,6 +15,11 @@ wins; the implementation gets rebuilt. (Note: "A. Correctness & uptime" below ke
 system healthy only until its replacement lands — it is not a reason to preserve a design FP
 supersedes.)
 
+**Standing data/parity schedule:** `docs/PARITY_PLAYBOOK.md` is the time-anchored plan — what we
+capture when, when backfill settles, and which parity test each feature gets (the T+1 run at
+~09:00 D+1; the harder sub-minute/Layer-C rules). Re-read it at every feature proposal (the
+per-feature parity lens) and run its daily schedule even when focus is elsewhere.
+
 ---
 
 This file defines how I (Claude) operate this project continuously and proactively,
