@@ -163,6 +163,43 @@ The implementing agents choose the stack. Two suggestions, with reasons — not 
 and backfill feature logic across two implementations — that is the §2 failure mode. A capture
 layer that only writes raw ticks (no feature math) does not violate this.
 
+### 3.3.1 Storage & compute architecture — DECIDED (2026-06-12)
+A **two-store split**, chosen against the full read/write pattern inventory:
+
+- **Postgres / TimescaleDB** keeps the *transactional, operational* state — orders, fills, pnl,
+  executor state, reconciliation, universe membership, asset metadata, corporate actions. ACID +
+  concurrent executor writes; the right tool, left in place.
+- **The feature platform is columnar: Parquet (durable storage) + DuckDB (heavy SQL / out-of-core
+  joins) + Polars (compute).** This is the raw-ticks → minute-aggregates → feature-vectors stack.
+
+Why columnar maps 1:1 to the requirements: per-feature update (rewrite one partition), 1,000×10k
+in <2 s (column/predicate pushdown; live compute in-RAM), parity (one Polars function → identical
+Parquet schema live+backfill), introspection (inspectable files), additive versioning (new version
+= new path). Every read/write pattern (live ingest, backfill, per-feature recompute, retention,
+hot-path read, `get_features` analytical scan, T+1 parity diff, cross-sectional, point-in-time,
+introspection) is covered locally by Polars+Parquet(+DuckDB).
+
+Load-bearing invariants of the store:
+- **One group = one partitioned file-set** (`.../group=<name>/v=<ver>/date=<d>/...`). Adding or
+  updating a feature never widens an existing file — schema evolution never bites; per-feature
+  recompute touches only that group's partitions.
+- **Immutable Parquet + atomic publish** (write-temp-then-rename): readers always see consistent
+  files; one writer per partition (our capture-is-separate design guarantees it). A Delta-lite
+  pattern — we get atomic partition swaps without a transactional DB across the feature store.
+- **Retention by partition-drop** to hold the free-disk floor (R11).
+
+Extensibility — **extend Polars, do NOT fork it.** Custom native-speed kernels (tick-burst
+detection, stateful cross-minute aggregations) ship as **Polars plugins (`pyo3-polars`)** — our
+Rust expression inside the upstream engine; ergonomic accessors (`group.features.ret_5m(...)`) ship
+as **custom expression namespaces**; `map_batches` is the last-resort Python escape hatch. We own
+the parts that are ours (the storage/access layer + custom kernels) and ride upstream for the
+engine — ~all the control of "build it ourselves," ~none of the fork maintenance.
+
+Escape hatches (named, so we don't fork): if the FP1 10k live-tick firehose (the one pattern Polars
+doesn't manage — it's a buffer/rotation problem, decided by measurement in FP1.c/f) or query
+concurrency outgrows embedded Parquet, swap the **storage engine to ClickHouse** — the **compute
+stays Polars**, protecting the parity invariant. Forking Polars is never the answer.
+
 ### 3.4 Feature groups — the unit of extension
 A **FeatureGroup** is the primary building block and the unit an agent adds. It is a cohesive
 batch of related features that share inputs and computation. Individual **features** are the
