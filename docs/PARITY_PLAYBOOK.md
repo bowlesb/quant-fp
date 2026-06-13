@@ -109,3 +109,45 @@ G5). Until capture is live it runs on demand (`make parity DAY=…`).
 - This playbook is re-read at every feature proposal (the §4 lens) and every schedule fire (§5).
 - Activation note: §5's automated cadence turns on with **FP1 live capture**; until then the
   manual `make parity` / `make introspect` cover it and the schedule is the target state.
+
+---
+
+## 7. Post-session correspondence & missing-data plan (the Monday → Tuesday check)
+
+Every settled day runs **two independent checks, broken out by ET hour** so the early-morning and
+after-hours sessions are visible separately:
+
+1. **VALUE parity** — `make parity DAY=<D>`. Do the feature *values* match within tolerance? Built;
+   per-feature, per-tier, per-method, ≥95% with the min-sample floor (§5).
+2. **COVERAGE / missing-data** — `python -m quantlib.features.parity coverage <D>`. Do the same
+   `(symbol, minute)` cells *exist* in both sources? Reports per ET hour:
+   - `live_gaps` = cells the settled backfill has that we did NOT capture live → a **capture gap**.
+   - `live_extra` = cells we captured that backfill lacks → over-capture / busted-trade / universe drift.
+   - `live_coverage_pct` = 1 − gaps/backfill.
+
+   These are distinct: value-parity says "the numbers we both have agree"; coverage says "did we
+   even capture everything." You need both.
+
+**Baseline findings (run 2026-06-13, pre-Monday):**
+- A **partial-capture day** (Jun 10) shows **0% coverage before ~noon** — the check pinpoints exactly
+  when the ingestor started. This is the canary for "did capture run all session."
+- Even a **full day** (Jun 12) shows only **~80% live coverage vs backfill during RTH** (plus ~12k
+  extra cells/hour). So stream and backfill do NOT cover the same ~20% of cells. **OPEN ACTION
+  (before trusting live breadth Monday): root-cause the stream-vs-backfill universe/coverage gap**
+  (likely universe-membership timing vs the backfill symbol set, or live bar drops).
+
+**AM / PM collection nuances (must be handled, not assumed):**
+- **Pre-market (04:00–09:30 ET):** the ingestor MUST be subscribed *before 04:00* or we lose the
+  extended-hours open. Thin liquidity → low cell counts → expect more "INSUFFICIENT sample" tiers
+  (min-sample floor), not failures. Alpaca historical covers extended-hours bars/trades/quotes.
+- **After-hours (16:00–20:00 ET):** the **16:00 closing auction** is a special large print →
+  excluded from signed-flow aggregates (the `signed_volume` close-tail finding, LIFECYCLE_DEMOS).
+  Thinner; report per hour; don't treat thin-tail mismatches as failures.
+- **Settlement timing:** backfill for day D is reliable ~D+1 morning; run both checks at ~09:00 D+1.
+
+**Tuesday checklist for Monday's data (2026-06-16):**
+- [ ] `python -m quantlib.features.parity coverage 2026-06-16` — per-hour live coverage; investigate
+      any hour materially below the Jun-12 baseline, especially RTH and the pre-market open.
+- [ ] `make parity DAY=2026-06-16` — per-feature/tier value parity ≥95% on sufficient samples.
+- [ ] `materialize` both sources into the store; confirm `get_features(require_settled=True)` admits
+      Monday once backfilled (and refuses it before).
