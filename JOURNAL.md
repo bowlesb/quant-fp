@@ -1197,3 +1197,15 @@ gaps); shared featurestore path; lands WITH the 512 populate. Day's epistemic
 scoreboard: 2 false-signal kills, 2 lore corrections, 0 promotable candidates, every
 kill now a permanent rule. Exec Sunday-night respawn packet must include: 09:30-skip
 sign-off, fill-prob data delivery, Monday deploy matrix role.
+
+## 2026-06-12 (evening 3) — Manager: M2 BRANCH MERGED to master; 2nd absorption -> prod worktree approved
+MERGED: master fast-forwarded 86d8213 -> 8c18222 (ref-only, no tree disturbance) after
+QA's consolidated APPROVE + my own HEAD verification of cond #2 (OFI_MIN_COUNT assert,
+RuntimeError on floor violation, test) + cond #1 alert rules (staleness-keyed heartbeat
+alarm, promtool-validated, crash-loop page). Monday deploy = from master at ~06:10 PT GO.
+ATTRIBUTION RECORD (for Ben's contribution reviews): commit 8c18222 is authored
+"modeller" but its M2 deploy-blocker content (cond #2 assert + ingestor_alerts.yml) is
+PROD-ARCHITECT's work, absorbed by a concurrent peer git add -A — the SECOND absorption
+incident. My named revisit-trigger fired: prod-architect moves to an ISOLATED git
+worktree for Tier-1 work (approved); shared tree remains for research/Tier-2; a
+mechanical add -A guard (hook) to be proposed — discipline-by-policy failed twice.
