@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-378 features across 18 group(s).
+422 features across 18 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -80,25 +80,41 @@
 | `market_corr_60m` | market_beta | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Rolling correlation of this ticker's one-minute return with SPY's over 60 minutes, in [-1, 1]. |
 | `market_corr_90m` | market_beta | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Rolling correlation of this ticker's one-minute return with SPY's over 90 minutes, in [-1, 1]. |
 | `market_return_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 10-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_120m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 120-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
 | `market_return_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 15-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_20m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 20-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
 | `market_return_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 30-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_45m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 45-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
 | `market_return_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 5-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
 | `market_return_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 60-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_90m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 90-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
 | `nasdaq_return_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 10-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_120m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 120-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
 | `nasdaq_return_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 15-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_20m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 20-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
 | `nasdaq_return_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 30-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_45m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 45-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
 | `nasdaq_return_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 5-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
 | `nasdaq_return_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 60-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_90m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 90-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
 | `outperforming_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 10-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_120m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 120-minute return exceeds SPY's over the same window, else 0.0. |
 | `outperforming_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 15-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_20m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 20-minute return exceeds SPY's over the same window, else 0.0. |
 | `outperforming_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 30-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_45m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 45-minute return exceeds SPY's over the same window, else 0.0. |
 | `outperforming_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 5-minute return exceeds SPY's over the same window, else 0.0. |
 | `outperforming_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 60-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_90m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 90-minute return exceeds SPY's over the same window, else 0.0. |
 | `relative_return_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 10-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_120m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 120-minute return minus SPY's over the same window (market-relative excess return). |
 | `relative_return_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 15-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_20m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 20-minute return minus SPY's over the same window (market-relative excess return). |
 | `relative_return_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 30-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_45m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 45-minute return minus SPY's over the same window (market-relative excess return). |
 | `relative_return_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 5-minute return minus SPY's over the same window (market-relative excess return). |
 | `relative_return_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 60-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_90m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 90-minute return minus SPY's over the same window (market-relative excess return). |
 | `active_seconds_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, 60.0) | Count of distinct seconds within the minute that had at least one trade (0-60). |
 | `inter_arrival_cv_1m` | microstructure_burst | microstructure | C | distributional | Float64 | sparse | (0.0, None) | Coefficient of variation of inter-trade gaps in the minute (burstiness of arrivals). |
 | `max_runup_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, None) | Largest within-minute price run-up: max over trades (in exchange-timestamp order) of price minus the running minimum. A PATH-DEPENDENT pattern feature. |
@@ -106,21 +122,25 @@
 | `mean_abs_ret_10m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 10 minutes (choppiness). |
 | `mean_abs_ret_120m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 120 minutes (choppiness). |
 | `mean_abs_ret_15m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 15 minutes (choppiness). |
+| `mean_abs_ret_180m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 180 minutes (choppiness). |
 | `mean_abs_ret_20m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 20 minutes (choppiness). |
 | `mean_abs_ret_30m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 30 minutes (choppiness). |
 | `mean_abs_ret_3m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 3 minutes (choppiness). |
 | `mean_abs_ret_45m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 45 minutes (choppiness). |
 | `mean_abs_ret_5m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 5 minutes (choppiness). |
 | `mean_abs_ret_60m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 60 minutes (choppiness). |
+| `mean_abs_ret_90m` | momentum | momentum | A | tolerance | Float64 | warmup | (0.0, 5.0) | Mean absolute one-minute return over the trailing 90 minutes (choppiness). |
 | `up_ratio_10m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 10 minutes with a positive one-minute return (0-1). |
 | `up_ratio_120m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 120 minutes with a positive one-minute return (0-1). |
 | `up_ratio_15m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 15 minutes with a positive one-minute return (0-1). |
+| `up_ratio_180m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 180 minutes with a positive one-minute return (0-1). |
 | `up_ratio_20m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 20 minutes with a positive one-minute return (0-1). |
 | `up_ratio_30m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 30 minutes with a positive one-minute return (0-1). |
 | `up_ratio_3m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 3 minutes with a positive one-minute return (0-1). |
 | `up_ratio_45m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 45 minutes with a positive one-minute return (0-1). |
 | `up_ratio_5m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 5 minutes with a positive one-minute return (0-1). |
 | `up_ratio_60m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 60 minutes with a positive one-minute return (0-1). |
+| `up_ratio_90m` | momentum | momentum | A | tolerance | Float64 | warmup | (-0.01, 1.01) | Fraction of the trailing 90 minutes with a positive one-minute return (0-1). |
 | `daily_return_10d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 10 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_120d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 120 completed trading day(s), point-in-time as of the prior close. |
 | `daily_return_15d` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 20.0) | Return over the last 15 completed trading day(s), point-in-time as of the prior close. |
@@ -282,6 +302,7 @@
 | `vwap_deviation_90m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 90-minute volume-weighted average price (close/vwap - 1). |
 | `book_depth_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, None) | Mean total top-of-book size (bid_size + ask_size) over the last minute. |
 | `quote_imbalance_10m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 10 minutes. |
+| `quote_imbalance_120m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 120 minutes. |
 | `quote_imbalance_15m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 15 minutes. |
 | `quote_imbalance_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance (bid-ask)/(bid+ask) over the last minute. |
 | `quote_imbalance_20m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 20 minutes. |
@@ -289,7 +310,9 @@
 | `quote_imbalance_45m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 45 minutes. |
 | `quote_imbalance_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 5 minutes. |
 | `quote_imbalance_60m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 60 minutes. |
+| `quote_imbalance_90m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 90 minutes. |
 | `spread_bps_10m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 10 minutes. |
+| `spread_bps_120m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 120 minutes. |
 | `spread_bps_15m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 15 minutes. |
 | `spread_bps_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Average top-of-book bid-ask spread in basis points over the last minute. |
 | `spread_bps_20m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 20 minutes. |
@@ -297,6 +320,7 @@
 | `spread_bps_45m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 45 minutes. |
 | `spread_bps_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 5 minutes. |
 | `spread_bps_60m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 60 minutes. |
+| `spread_bps_90m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 90 minutes. |
 | `bb_position_20m` | technical | technical | A | tolerance | Float64 | warmup | None | Position of close within its 20-minute Bollinger band: (close - sma) / (2*std). |
 | `bb_width_20m` | technical | technical | A | tolerance | Float64 | warmup | (0.0, None) | Bollinger band width over 20 minutes: 4*std / sma (relative band width). |
 | `macd_hist` | technical | technical | A | tolerance | Float64 | warmup | None | MACD histogram: MACD line minus the MACD signal line. |
@@ -312,7 +336,9 @@
 | `sma_dist_50m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 50-minute simple moving average (close/sma - 1). |
 | `sma_dist_5m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 5-minute simple moving average (close/sma - 1). |
 | `signed_volume_10m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 10 minutes (net buy/sell pressure). |
+| `signed_volume_120m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 120 minutes (net buy/sell pressure). |
 | `signed_volume_15m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 15 minutes (net buy/sell pressure). |
+| `signed_volume_180m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 180 minutes (net buy/sell pressure). |
 | `signed_volume_1m` | trade_flow | trade_flow | B | tolerance | Float64 | none | None | Buy-minus-sell signed share volume over the last minute (tick-rule signed). |
 | `signed_volume_20m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 20 minutes (net buy/sell pressure). |
 | `signed_volume_30m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 30 minutes (net buy/sell pressure). |
@@ -321,7 +347,9 @@
 | `signed_volume_60m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 60 minutes (net buy/sell pressure). |
 | `signed_volume_90m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 90 minutes (net buy/sell pressure). |
 | `trade_freq_10m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 10 minutes. |
+| `trade_freq_120m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 120 minutes. |
 | `trade_freq_15m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 15 minutes. |
+| `trade_freq_180m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 180 minutes. |
 | `trade_freq_1m` | trade_flow | trade_flow | B | tolerance | Float64 | none | (0.0, 10000000.0) | Number of trades printed in the last minute (raw trade frequency). |
 | `trade_freq_20m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 20 minutes. |
 | `trade_freq_30m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 30 minutes. |
@@ -331,23 +359,35 @@
 | `trade_freq_90m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 90 minutes. |
 | `trade_rate_accel_1m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Change in trades-per-second versus the prior minute (trade-rate acceleration). |
 | `price_r2_10m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 10-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_120m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 120-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
 | `price_r2_15m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 15-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_180m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 180-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
 | `price_r2_20m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 20-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
 | `price_r2_30m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 30-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_45m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 45-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
 | `price_r2_5m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 5-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
 | `price_r2_60m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 60-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_90m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 90-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
 | `price_slope_10m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 10 minutes, normalized as a fractional price move per minute. |
+| `price_slope_120m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 120 minutes, normalized as a fractional price move per minute. |
 | `price_slope_15m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 15 minutes, normalized as a fractional price move per minute. |
+| `price_slope_180m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 180 minutes, normalized as a fractional price move per minute. |
 | `price_slope_20m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 20 minutes, normalized as a fractional price move per minute. |
 | `price_slope_30m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 30 minutes, normalized as a fractional price move per minute. |
+| `price_slope_45m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 45 minutes, normalized as a fractional price move per minute. |
 | `price_slope_5m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 5 minutes, normalized as a fractional price move per minute. |
 | `price_slope_60m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 60 minutes, normalized as a fractional price move per minute. |
+| `price_slope_90m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 90 minutes, normalized as a fractional price move per minute. |
 | `trend_strength_10m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 10 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_120m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 120 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
 | `trend_strength_15m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 15 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_180m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 180 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
 | `trend_strength_20m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 20 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
 | `trend_strength_30m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 30 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_45m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 45 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
 | `trend_strength_5m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 5 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
 | `trend_strength_60m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 60 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_90m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 90 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
 | `high_low_range_1m` | volatility | volatility | A | tolerance | Float64 | none | (0.0, 5.0) | Intra-minute high-low range as a fraction of close: (high - low) / close. |
 | `parkinson_vol_120m` | volatility | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Parkinson high-low volatility estimator over the trailing 120 minutes (uses the bar range). |
 | `parkinson_vol_15m` | volatility | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Parkinson high-low volatility estimator over the trailing 15 minutes (uses the bar range). |
@@ -367,18 +407,22 @@
 | `volume_ratio_10m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 10-minute mean. |
 | `volume_ratio_120m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 120-minute mean. |
 | `volume_ratio_15m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 15-minute mean. |
+| `volume_ratio_180m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 180-minute mean. |
 | `volume_ratio_20m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 20-minute mean. |
 | `volume_ratio_30m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 30-minute mean. |
 | `volume_ratio_3m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 3-minute mean. |
 | `volume_ratio_45m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 45-minute mean. |
 | `volume_ratio_5m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 5-minute mean. |
 | `volume_ratio_60m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 60-minute mean. |
+| `volume_ratio_90m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 90-minute mean. |
 | `volume_zscore_10m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 10-minute mean and std. |
 | `volume_zscore_120m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 120-minute mean and std. |
 | `volume_zscore_15m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 15-minute mean and std. |
+| `volume_zscore_180m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 180-minute mean and std. |
 | `volume_zscore_20m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 20-minute mean and std. |
 | `volume_zscore_30m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 30-minute mean and std. |
 | `volume_zscore_3m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 3-minute mean and std. |
 | `volume_zscore_45m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 45-minute mean and std. |
 | `volume_zscore_5m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 5-minute mean and std. |
 | `volume_zscore_60m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 60-minute mean and std. |
+| `volume_zscore_90m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 90-minute mean and std. |

@@ -15,9 +15,9 @@ import pytest
 from quantlib.features import BatchContext, REGISTRY, run_group
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
-# A correct live buffer must exceed the largest feature window (price_volume 120m here) + lag, or the
-# buffer's leading-edge minutes lose lag context and diverge from backfill. 150 > 120 + headroom.
-LIVE_WINDOW = 150
+# A correct live buffer must exceed the largest feature window (180m across these groups) + lag, or
+# the buffer's leading-edge minutes lose lag context and diverge from backfill. 210 > 180 + headroom.
+LIVE_WINDOW = 210
 
 
 def _ohlc(bars: list[tuple[float, float, float, float, float]]) -> pl.DataFrame:
@@ -210,7 +210,7 @@ def test_market_beta_exact_relationship() -> None:
 @pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume", "efficiency", "distribution"])
 def test_live_buffer_matches_backfill(group_name: str) -> None:
     group = REGISTRY.get_group(group_name)
-    full = _wavy_ohlc(220)  # > LIVE_WINDOW so the trailing buffer genuinely evicts early minutes
+    full = _wavy_ohlc(260)  # > LIVE_WINDOW so the trailing buffer genuinely evicts early minutes
     backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
     live = _replay_live(group, full)
 
@@ -260,7 +260,7 @@ def test_market_context_broadcast_and_relative() -> None:
 @pytest.mark.parametrize("group_name", ["market_context", "market_beta"])
 def test_market_context_live_buffer_matches_backfill(group_name: str) -> None:
     group = REGISTRY.get_group(group_name)
-    full = _multi_ohlc(("SPY", "QQQ", "AAA", "BBB"), 220)
+    full = _multi_ohlc(("SPY", "QQQ", "AAA", "BBB"), 260)
     backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
     live = _replay_live(group, full)
     tolerances = {spec.name: spec.tolerance for spec in group.declare()}
