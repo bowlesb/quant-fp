@@ -60,6 +60,15 @@ class MicrostructureBurstGroup(FeatureGroup):
                 parity_method="distributional",
                 tolerance=0.10,
             ),
+            FeatureSpec(
+                name="max_runup_1m",
+                description="Largest within-minute price run-up: max over trades (in exchange-timestamp order) of price minus the running minimum. A PATH-DEPENDENT pattern feature.",
+                dtype="Float64",
+                valid_range=(0.0, None),
+                nan_policy="none",
+                layer="C",
+                parity_method="tolerance",
+            ),
         ]
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
@@ -72,12 +81,23 @@ class MicrostructureBurstGroup(FeatureGroup):
             pl.col("tps").max().cast(pl.Float64).alias("peak_trades_per_second_1m"),
             pl.len().cast(pl.Float64).alias("active_seconds_1m"),
         )
-        gaps = ticks.sort(["symbol", "minute", "ts"]).with_columns(
+        # SORT BY EXCHANGE TIMESTAMP makes both order-sensitive features (gaps, run-up) invariant to
+        # the order ticks were *received* — so live (buffer in arrival order) == backfill (tape order).
+        ordered = ticks.sort(["symbol", "minute", "ts"])
+        gaps = ordered.with_columns(
             pl.col("ts").diff().over(["symbol", "minute"]).dt.total_microseconds().alias("gap_us")
         )
         cv = gaps.group_by(["symbol", "minute"]).agg(
             (pl.col("gap_us").std() / pl.col("gap_us").mean()).cast(pl.Float64).alias("inter_arrival_cv_1m")
         )
-        return per_minute.join(cv, on=["symbol", "minute"], how="left").select(
-            ["symbol", "minute", "peak_trades_per_second_1m", "active_seconds_1m", "inter_arrival_cv_1m"]
+        runup = ordered.with_columns(
+            (pl.col("price") - pl.col("price").cum_min().over(["symbol", "minute"])).alias("_runup")
+        ).group_by(["symbol", "minute"]).agg(pl.col("_runup").max().cast(pl.Float64).alias("max_runup_1m"))
+        return (
+            per_minute.join(cv, on=["symbol", "minute"], how="left")
+            .join(runup, on=["symbol", "minute"], how="left")
+            .select(
+                ["symbol", "minute", "peak_trades_per_second_1m", "active_seconds_1m",
+                 "inter_arrival_cv_1m", "max_runup_1m"]
+            )
         )

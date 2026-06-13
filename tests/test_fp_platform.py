@@ -43,6 +43,7 @@ EXPECTED_BURST = {  # Layer C features computed from raw ticks
     "peak_trades_per_second_1m",
     "active_seconds_1m",
     "inter_arrival_cv_1m",
+    "max_runup_1m",
 }
 EXPECTED_QUOTE = {"spread_bps_1m", "quote_imbalance_1m", "book_depth_1m"}  # Layer B
 EXPECTED_VOL = {"high_low_range_1m", "realized_vol_5m"}  # Layer A
