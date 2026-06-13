@@ -460,7 +460,10 @@ is real. A criterion violating any rule below is **RED**, regardless of headline
 ## 7. Engineering Milestones (FP ladder)
 
 Each milestone: a one-line goal, then exit criteria as `[ ] CRITERION — THRESHOLD — VERIFY:
-<command/query> — EVIDENCE: <committed artifact>`. §6 applies throughout.
+<command/query> — EVIDENCE: <committed artifact>`. §6 applies throughout. The concrete pinned
+numbers + the countable goal scoreboard for this ladder live in **`docs/FP_GOALS.md`** (headline:
+**1,000 features × 10,000 tickers in < 2 s**, the growth curve 10→50→150→500→1,000, the
+lifecycle-demo counts, and the NaN/QA/parity goals).
 
 ### FP0 — Registry, catalog, introspection, and the parity harness (current scale)
 **Goal:** replace the monolithic feature function with a self-describing registry + the
