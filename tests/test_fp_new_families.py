@@ -15,6 +15,9 @@ import pytest
 from quantlib.features import BatchContext, REGISTRY, run_group
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
+# A correct live buffer must exceed the largest feature window (price_volume 120m here) + lag, or the
+# buffer's leading-edge minutes lose lag context and diverge from backfill. 150 > 120 + headroom.
+LIVE_WINDOW = 150
 
 
 def _ohlc(bars: list[tuple[float, float, float, float, float]]) -> pl.DataFrame:
@@ -124,3 +127,68 @@ def test_price_volume_down_bar_pressure() -> None:
     assert late["down_volume_ratio_5m"] == pytest.approx(1.0)
     assert late["volume_delta_5m"] == pytest.approx(-1.0)
     assert late["buying_pressure_5m"] == pytest.approx(-1.0)
+
+
+# --- live-buffer vs backfill parity (the rebuild's whole point) ---
+
+
+def _wavy_ohlc(n: int) -> pl.DataFrame:
+    """A non-trivial OHLCV series: a trend with curvature and noise so the rolling features actually
+    vary (a straight line would make R^2 a constant and hide a centering bug)."""
+    import math
+
+    bars = []
+    for i in range(n):
+        close = 100.0 + 5.0 * math.sin(i / 11.0) + i * 0.03 + (0.2 if i % 5 == 0 else -0.1)
+        bars.append((close - 0.04, close + 0.09, close - 0.08, close, 800.0 + (i % 13) * 40.0))
+    return _ohlc(bars)
+
+
+def _replay_live(group, full: pl.DataFrame, window: int = LIVE_WINDOW) -> pl.DataFrame:
+    """Reproduce the live path: at each minute, compute the group over ONLY the trailing ``window``
+    minutes of bars (the streaming buffer) and keep that minute's row, exactly as
+    capture.process_bars does. The accumulation of these per-minute live rows is what must match the
+    one-shot backfill over the full series."""
+    minutes = sorted(full["minute"].unique())
+    rows = []
+    for i, minute in enumerate(minutes):
+        buf_minutes = minutes[max(0, i - window + 1): i + 1]
+        buf = full.filter(pl.col("minute").is_in(buf_minutes))
+        out = run_group(group, BatchContext(frames={"minute_agg": buf}), validate=False)
+        rows.append(out.filter(pl.col("minute") == minute))
+    return pl.concat(rows)
+
+
+@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume"])
+def test_live_buffer_matches_backfill(group_name: str) -> None:
+    group = REGISTRY.get_group(group_name)
+    full = _wavy_ohlc(220)  # > LIVE_WINDOW so the trailing buffer genuinely evicts early minutes
+    backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
+    live = _replay_live(group, full)
+
+    tolerances = {spec.name: spec.tolerance for spec in group.declare()}
+    joined = live.join(backfill, on=["symbol", "minute"], suffix="_bk")
+    for feature, tol in tolerances.items():
+        pairs = joined.select(["minute", feature, f"{feature}_bk"]).drop_nulls()
+        assert pairs.height > 0, f"{feature}: no settled cells to compare"
+        within = pairs.select(
+            ((pl.col(feature) - pl.col(f"{feature}_bk")).abs() <= 1e-12 + tol * pl.col(f"{feature}_bk").abs()).all()
+        ).item()
+        assert within, f"{feature}: live trailing-buffer value diverged from backfill beyond tol={tol}"
+
+
+def test_undersized_buffer_diverges() -> None:
+    """The buffer-size invariant BITES: a buffer equal to the feature window (one short of the lag it
+    needs) makes the 60m window's leading-edge minute lose its return, so live != backfill. This is
+    the exact failure class the rebuild exists to catch — proven here so the 300-min default is not
+    cargo-culted."""
+    group = REGISTRY.get_group("price_volume")
+    full = _wavy_ohlc(160)
+    backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
+    live_bad = _replay_live(group, full, window=60)  # < the 60m+lag the feature needs
+    joined = live_bad.join(backfill, on=["symbol", "minute"], suffix="_bk")
+    pairs = joined.select(["up_volume_ratio_60m", "up_volume_ratio_60m_bk"]).drop_nulls()
+    diverged = pairs.select(
+        ((pl.col("up_volume_ratio_60m") - pl.col("up_volume_ratio_60m_bk")).abs() > 1e-6).any()
+    ).item()
+    assert diverged  # undersized buffer MUST be detectable as a parity break

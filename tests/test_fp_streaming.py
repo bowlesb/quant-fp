@@ -20,7 +20,7 @@ DEDUP_BASE = datetime(2026, 6, 16, 14, 0, tzinfo=timezone.utc)
 
 
 def _dbar(symbol: str, minute: int, close: float) -> dict:
-    return {"S": symbol, "c": close, "h": close + 0.1, "l": close - 0.1, "v": 1000.0,
+    return {"S": symbol, "o": close - 0.05, "c": close, "h": close + 0.1, "l": close - 0.1, "v": 1000.0,
             "t": (DEDUP_BASE + timedelta(minutes=minute)).isoformat()}
 
 

@@ -30,6 +30,14 @@ BARS_SCHEMA = {
     "volume": pl.Float64,
 }
 
+# The trailing buffer MUST exceed the largest declared feature window plus the deepest intra-feature
+# lag. Below that, the buffer's leading-edge minutes lack the lookback/lag context the settled
+# backfill has (e.g. their one-minute return is null live but defined in backfill), so the longest-
+# window features diverge live-vs-backfill — a parity break. Our longest minute window today is
+# price_levels' 240m; 300 leaves headroom. (The separate latest-minute compute mode removes the
+# per-minute cost of recomputing this whole buffer at 10k-ticker scale.)
+DEFAULT_BUFFER_MINUTES = 300
+
 
 class CaptureState:
     """Rolling buffer + accumulated per-group output. Shared across any connection adapter."""
@@ -67,7 +75,7 @@ def process_bars(state: CaptureState, bars: list[dict], root: str, mode: str, da
 
 
 async def capture(
-    url: str, symbols: list[str], root: str, mode: str, window: int = 60, day: str | None = None
+    url: str, symbols: list[str], root: str, mode: str, window: int = DEFAULT_BUFFER_MINUTES, day: str | None = None
 ) -> int:
     """Websocket adapter (mock feed) → the shared core. Runs until the stream closes."""
     state = CaptureState()

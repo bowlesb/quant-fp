@@ -13,7 +13,7 @@ import sys
 from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 
-from quantlib.features.capture import CaptureState, process_bars
+from quantlib.features.capture import DEFAULT_BUFFER_MINUTES, CaptureState, process_bars
 
 
 def build_stream() -> StockDataStream:
@@ -26,7 +26,7 @@ def build_stream() -> StockDataStream:
     )
 
 
-def run_capture(symbols: list[str], root: str, mode: str, window: int = 60, day: str | None = None) -> None:
+def run_capture(symbols: list[str], root: str, mode: str, window: int = DEFAULT_BUFFER_MINUTES, day: str | None = None) -> None:
     state = CaptureState()
     pending: dict = {"minute": None, "bars": []}
     stream = build_stream()
