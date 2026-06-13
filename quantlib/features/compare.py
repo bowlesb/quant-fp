@@ -13,6 +13,7 @@ from quantlib.features.engine import run_all
 from quantlib.features.registry import REGISTRY
 
 QUANTILES = (0.1, 0.5, 0.9)
+MIN_PARITY_CELLS = 100  # below this a per-tier parity score is statistically meaningless (anti-gaming §6.4)
 
 
 def runnable(frames: dict[str, pl.DataFrame]) -> list[FeatureGroup]:
@@ -58,7 +59,7 @@ def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.
             scope = joined.filter(pl.col("tier") == tier)
             compared = int(scope.select(both.sum()).item() or 0)
             if methods[feature] == "distributional":
-                score, passed = dist_score(scope, feature, tolerances[feature])
+                score, raw_pass = dist_score(scope, feature, tolerances[feature])
             else:
                 # numpy-isclose semantics: genuine RELATIVE tolerance + a tiny absolute floor for
                 # zero-protection. (A blended tol*(1+|b|) silently becomes absolute for small-scale
@@ -66,7 +67,9 @@ def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.
                 matched = both & ((live_col - back_col).abs() <= 1e-12 + tolerances[feature] * back_col.abs())
                 agree = int(scope.select(matched.sum()).item() or 0)
                 score = round(100.0 * agree / compared, 3) if compared else None
-                passed = score >= 95.0 if score is not None else None
+                raw_pass = score >= 95.0 if score is not None else None
+            # A score on too few cells is not a valid pass OR fail — mark it insufficient (passed=None).
+            passed = (bool(raw_pass) if raw_pass is not None else None) if compared >= MIN_PARITY_CELLS else None
             rows.append(
                 {
                     "feature": feature,
@@ -74,7 +77,7 @@ def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.
                     "method": methods[feature],
                     "compared": compared,
                     "score": score,
-                    "passed": (bool(passed) if compared else None),
+                    "passed": passed,
                 }
             )
     return pl.DataFrame(rows)

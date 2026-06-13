@@ -1,4 +1,4 @@
-"""FP0 store tests: the Parquet read API (R13) round-trips and raises on unknown features."""
+"""FP0 store tests: the Parquet read API (R13) round-trips, tracks source, raises on unknown."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -24,11 +24,17 @@ def _minute_agg(n: int = 60) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+def _ret1m_frame(value: float, n: int) -> pl.DataFrame:
+    return pl.DataFrame(
+        {"symbol": ["AAA"] * n, "minute": [BASE_MINUTE + timedelta(minutes=i) for i in range(n)], "ret_1m": [value] * n}
+    )
+
+
 def test_store_roundtrip(tmp_path: Path) -> None:
     ctx = BatchContext(frames={"minute_agg": _minute_agg()})
     price = REGISTRY.get_group("price_returns")
     vector = run_all([price], ctx)
-    store.write_group(tmp_path, price.name, price.version, "2026-06-12", vector)
+    store.write_group(tmp_path, price.name, price.version, "backfill", "2026-06-12", vector)
 
     got = store.get_features(
         ["ret_5m"], ["AAA"], BASE_MINUTE, BASE_MINUTE + timedelta(minutes=59), tmp_path
@@ -45,10 +51,21 @@ def test_store_idempotent_overwrite(tmp_path: Path) -> None:
     ctx = BatchContext(frames={"minute_agg": _minute_agg()})
     price = REGISTRY.get_group("price_returns")
     vector = run_all([price], ctx)
-    store.write_group(tmp_path, price.name, price.version, "2026-06-12", vector)
-    store.write_group(tmp_path, price.name, price.version, "2026-06-12", vector)  # rerun
+    store.write_group(tmp_path, price.name, price.version, "backfill", "2026-06-12", vector)
+    store.write_group(tmp_path, price.name, price.version, "backfill", "2026-06-12", vector)  # rerun
     got = store.get_features(["ret_1m"], "universe", BASE_MINUTE, BASE_MINUTE + timedelta(minutes=59), tmp_path)
     assert got.height == 120  # 2 symbols x 60 minutes, not doubled
+
+
+def test_store_auto_prefers_backfill_then_stream(tmp_path: Path) -> None:
+    store.write_group(tmp_path, "price_returns", "1.0.0", "stream", "2026-06-12", _ret1m_frame(1.0, 10))
+    store.write_group(tmp_path, "price_returns", "1.0.0", "backfill", "2026-06-12", _ret1m_frame(2.0, 5))
+    got = store.get_features(
+        ["ret_1m"], "universe", BASE_MINUTE, BASE_MINUTE + timedelta(minutes=9), tmp_path
+    ).sort("minute")
+    values = got["ret_1m"].to_list()
+    assert values[:5] == [2.0] * 5  # backfill (settled truth) wins where available
+    assert values[5:] == [1.0] * 5  # stream fills the unsettled remainder
 
 
 def test_store_unknown_feature_raises(tmp_path: Path) -> None:

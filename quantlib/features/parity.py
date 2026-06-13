@@ -43,10 +43,13 @@ def _print(report: pl.DataFrame, title: str) -> None:
     print(f"=== {title} ===")
     print(report)
     failed = report.filter(pl.col("passed") == False)  # noqa: E712 (Polars boolean filter)
+    insufficient = report.filter(pl.col("passed").is_null() & (pl.col("compared") > 0))
+    if insufficient.height:
+        print(f"\nINSUFFICIENT SAMPLE (<100 cells, not certified): {insufficient.select('feature','tier','compared').rows()}")
     if failed.height:
         print(f"\nFAILED (feature,tier,method,score): {failed.select('feature','tier','method','score').rows()}")
     else:
-        print("\nALL features/tiers with data PASS.")
+        print("\nALL features/tiers with sufficient data PASS.")
 
 
 def main() -> None:

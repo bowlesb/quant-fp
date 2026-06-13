@@ -341,8 +341,9 @@ def test_burst_group_sub_minute() -> None:
 def test_distributional_parity_passes_and_fails() -> None:
     from quantlib.features.compare import diff  # local: keep alpaca-free loaders out of import
 
-    minutes = [BASE_MINUTE + timedelta(minutes=i) for i in range(5)]
-    live = pl.DataFrame({"symbol": ["AAA"] * 5, "minute": minutes, "inter_arrival_cv_1m": [0.1, 0.2, 0.3, 0.4, 0.5]})
+    minutes = [BASE_MINUTE + timedelta(minutes=i) for i in range(120)]  # >= MIN_PARITY_CELLS
+    values = [0.1 + (i % 10) * 0.05 for i in range(120)]
+    live = pl.DataFrame({"symbol": ["AAA"] * 120, "minute": minutes, "inter_arrival_cv_1m": values})
     tiers = pl.DataFrame({"symbol": ["AAA"], "tier": [1]}, schema={"symbol": pl.String, "tier": pl.Int32})
 
     same = diff(live, live.clone(), tiers).filter(pl.col("feature") == "inter_arrival_cv_1m").row(0, named=True)

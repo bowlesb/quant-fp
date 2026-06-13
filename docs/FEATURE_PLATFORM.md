@@ -180,9 +180,16 @@ hot-path read, `get_features` analytical scan, T+1 parity diff, cross-sectional,
 introspection) is covered locally by Polars+Parquet(+DuckDB).
 
 Load-bearing invariants of the store:
-- **One group = one partitioned file-set** (`.../group=<name>/v=<ver>/date=<d>/...`). Adding or
-  updating a feature never widens an existing file — schema evolution never bites; per-feature
-  recompute touches only that group's partitions.
+- **One group = one partitioned file-set** (`.../group=<name>/v=<ver>/source=<stream|backfill>/date=<d>/...`).
+  Adding or updating a feature never widens an existing file — schema evolution never bites;
+  per-feature recompute touches only that group's partitions.
+- **Source is first-class; both ways are stored and tracked.** Features are written BOTH live
+  (`source=stream`, provisional) and by backfill (`source=backfill`, settled truth ~T+1), partitioned
+  by source and retained. This is required, not optional: the T+1 parity test compares the two, and a
+  model trains on `backfill` but infers on `stream`, so the train/serve gap *is* the stream-vs-backfill
+  difference. `get_features(source="auto")` returns backfill where available, stream for the unsettled
+  recent window; `source="stream"|"backfill"` reads a specific one. Provenance carried per partition:
+  source, producing group version, and computed-at.
 - **Immutable Parquet + atomic publish** (write-temp-then-rename): readers always see consistent
   files; one writer per partition (our capture-is-separate design guarantees it). A Delta-lite
   pattern — we get atomic partition swaps without a transactional DB across the feature store.
