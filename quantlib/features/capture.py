@@ -23,6 +23,7 @@ from quantlib.features.engine import run_group
 BARS_SCHEMA = {
     "symbol": pl.String,
     "minute": pl.Datetime("us", "UTC"),
+    "open": pl.Float64,
     "close": pl.Float64,
     "high": pl.Float64,
     "low": pl.Float64,
@@ -46,7 +47,7 @@ def process_bars(state: CaptureState, bars: list[dict], root: str, mode: str, da
     (reconnect/replay): de-dups on (symbol, minute) keep-last so no duplicate cells corrupt parity."""
     for bar in bars:
         state.buffer.append(
-            {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]),
+            {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
              "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"])}
         )
     frame = pl.DataFrame(state.buffer, schema=BARS_SCHEMA).unique(subset=["symbol", "minute"], keep="last")

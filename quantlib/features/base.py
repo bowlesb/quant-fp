@@ -31,6 +31,9 @@ class FeatureType(str, Enum):
     CALENDAR = "calendar"
     CROSS_SECTIONAL = "cross_sectional"
     MULTI_DAY = "multi_day"
+    CANDLESTICK = "candlestick"
+    PRICE_VOLUME = "price_volume"
+    TREND_QUALITY = "trend_quality"
 
 
 @dataclass(frozen=True)

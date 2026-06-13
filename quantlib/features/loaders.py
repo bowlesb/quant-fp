@@ -23,7 +23,7 @@ DB_KWARGS: dict[str, str | int] = {
 }
 
 _MINUTE_AGG_SQL = """
-SELECT b.symbol, b.ts AS minute, b.close, b.high, b.low, b.volume,
+SELECT b.symbol, b.ts AS minute, b.open, b.close, b.high, b.low, b.volume,
        t.n_trades, t.signed_volume,
        q.mean_spread_bps, q.quote_imbalance, q.mean_bid_size, q.mean_ask_size
 FROM bars_1m b

@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-199 features across 11 group(s).
+259 features across 14 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -8,6 +8,18 @@
 | `is_regular_session` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1.0) | 1.0 if within the 09:30-16:00 ET regular session, else 0.0 (extended hours). |
 | `minute_of_day_et` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1440.0) | Minutes since ET midnight for this bar (0-1439); encodes time of day. |
 | `minutes_since_open` | calendar | calendar | A | tolerance | Float64 | none | (-570.0, 870.0) | Minutes since the 09:30 ET regular open (negative during pre-market). |
+| `body_ratio` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | Real-body size as a fraction of the bar's high-low range: |close-open| / (high-low); 0 when the range is zero. |
+| `is_bullish` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the minute closed above its open (a green/up bar), else 0.0. |
+| `is_doji` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the real body is under 10% of the bar range (indecision/doji), else 0.0. |
+| `is_hammer` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 for a hammer: long lower wick (>60% of range), tiny upper wick, small body. |
+| `is_marubozu` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 for a marubozu: real body fills over 90% of the bar range (almost no wicks). |
+| `is_shooting_star` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 for a shooting star: long upper wick (>60% of range), tiny lower wick, small body. |
+| `lower_shadow_ratio` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | Lower wick as a fraction of the high-low range: (min(open,close) - low) / (high-low). |
+| `pattern_engulfing_bearish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a bearish bar's body fully engulfs the prior bullish bar's body (two-candle reversal). |
+| `pattern_engulfing_bullish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a bullish bar's body fully engulfs the prior bearish bar's body (two-candle reversal). |
+| `pattern_harami_bearish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a small bearish bar's body sits inside the prior larger bullish bar's body (harami). |
+| `pattern_harami_bullish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a small bullish bar's body sits inside the prior larger bearish bar's body (harami). |
+| `upper_shadow_ratio` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | Upper wick as a fraction of the high-low range: (high - max(open,close)) / (high-low). |
 | `active_seconds_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, 60.0) | Count of distinct seconds within the minute that had at least one trade (0-60). |
 | `inter_arrival_cv_1m` | microstructure_burst | microstructure | C | distributional | Float64 | sparse | (0.0, None) | Coefficient of variation of inter-trade gaps in the minute (burstiness of arrivals). |
 | `max_runup_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, None) | Largest within-minute price run-up: max over trades (in exchange-timestamp order) of price minus the running minimum. A PATH-DEPENDENT pattern feature. |
@@ -119,6 +131,36 @@
 | `ret_7m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 7 minute(s), point-in-time as of the minute open. |
 | `ret_8m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 8 minute(s), point-in-time as of the minute open. |
 | `ret_90m` | price_returns | price | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Simple close-to-close return over the trailing 90 minute(s), point-in-time as of the minute open. |
+| `buying_pressure_10m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Volume-weighted money-flow position over 10 minutes: mean of (2*close-high-low)/(high-low) weighted by volume, in [-1, 1]. |
+| `buying_pressure_120m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Volume-weighted money-flow position over 120 minutes: mean of (2*close-high-low)/(high-low) weighted by volume, in [-1, 1]. |
+| `buying_pressure_15m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Volume-weighted money-flow position over 15 minutes: mean of (2*close-high-low)/(high-low) weighted by volume, in [-1, 1]. |
+| `buying_pressure_30m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Volume-weighted money-flow position over 30 minutes: mean of (2*close-high-low)/(high-low) weighted by volume, in [-1, 1]. |
+| `buying_pressure_5m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Volume-weighted money-flow position over 5 minutes: mean of (2*close-high-low)/(high-low) weighted by volume, in [-1, 1]. |
+| `buying_pressure_60m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Volume-weighted money-flow position over 60 minutes: mean of (2*close-high-low)/(high-low) weighted by volume, in [-1, 1]. |
+| `down_volume_ratio_10m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 10-minute share volume that printed on down-bars (negative one-minute return). |
+| `down_volume_ratio_120m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 120-minute share volume that printed on down-bars (negative one-minute return). |
+| `down_volume_ratio_15m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 15-minute share volume that printed on down-bars (negative one-minute return). |
+| `down_volume_ratio_30m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 30-minute share volume that printed on down-bars (negative one-minute return). |
+| `down_volume_ratio_5m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 5-minute share volume that printed on down-bars (negative one-minute return). |
+| `down_volume_ratio_60m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 60-minute share volume that printed on down-bars (negative one-minute return). |
+| `up_volume_ratio_10m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 10-minute share volume that printed on up-bars (positive one-minute return). |
+| `up_volume_ratio_120m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 120-minute share volume that printed on up-bars (positive one-minute return). |
+| `up_volume_ratio_15m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 15-minute share volume that printed on up-bars (positive one-minute return). |
+| `up_volume_ratio_30m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 30-minute share volume that printed on up-bars (positive one-minute return). |
+| `up_volume_ratio_5m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 5-minute share volume that printed on up-bars (positive one-minute return). |
+| `up_volume_ratio_60m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the trailing 60-minute share volume that printed on up-bars (positive one-minute return). |
+| `volume_delta_10m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net directional volume over 10 minutes: (up-bar volume - down-bar volume) / total volume, in [-1, 1]. |
+| `volume_delta_120m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net directional volume over 120 minutes: (up-bar volume - down-bar volume) / total volume, in [-1, 1]. |
+| `volume_delta_15m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net directional volume over 15 minutes: (up-bar volume - down-bar volume) / total volume, in [-1, 1]. |
+| `volume_delta_30m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net directional volume over 30 minutes: (up-bar volume - down-bar volume) / total volume, in [-1, 1]. |
+| `volume_delta_5m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net directional volume over 5 minutes: (up-bar volume - down-bar volume) / total volume, in [-1, 1]. |
+| `volume_delta_60m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net directional volume over 60 minutes: (up-bar volume - down-bar volume) / total volume, in [-1, 1]. |
+| `vwap_deviation_10m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 10-minute volume-weighted average price (close/vwap - 1). |
+| `vwap_deviation_120m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 120-minute volume-weighted average price (close/vwap - 1). |
+| `vwap_deviation_15m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 15-minute volume-weighted average price (close/vwap - 1). |
+| `vwap_deviation_30m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 30-minute volume-weighted average price (close/vwap - 1). |
+| `vwap_deviation_5m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 5-minute volume-weighted average price (close/vwap - 1). |
+| `vwap_deviation_60m` | price_volume | price_volume | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Close relative to its trailing 60-minute volume-weighted average price (close/vwap - 1). |
 | `book_depth_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, None) | Mean total top-of-book size (bid_size + ask_size) over the last minute. |
 | `quote_imbalance_10m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 10 minutes. |
 | `quote_imbalance_15m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 15 minutes. |
@@ -169,6 +211,24 @@
 | `trade_freq_60m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 60 minutes. |
 | `trade_freq_90m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 90 minutes. |
 | `trade_rate_accel_1m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Change in trades-per-second versus the prior minute (trade-rate acceleration). |
+| `price_r2_10m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 10-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_15m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 15-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_20m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 20-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_30m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 30-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_5m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 5-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_r2_60m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-0.01, 1.01) | R-squared of the trailing 60-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy. |
+| `price_slope_10m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 10 minutes, normalized as a fractional price move per minute. |
+| `price_slope_15m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 15 minutes, normalized as a fractional price move per minute. |
+| `price_slope_20m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 20 minutes, normalized as a fractional price move per minute. |
+| `price_slope_30m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 30 minutes, normalized as a fractional price move per minute. |
+| `price_slope_5m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 5 minutes, normalized as a fractional price move per minute. |
+| `price_slope_60m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | OLS slope of close on time over the trailing 60 minutes, normalized as a fractional price move per minute. |
+| `trend_strength_10m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 10 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_15m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 15 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_20m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 20 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_30m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 30 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_5m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 5 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
+| `trend_strength_60m` | trend_quality | trend_quality | A | tolerance | Float64 | warmup | (-1.0, 1.0) | Signed quality-weighted trend over 60 minutes: normalized slope times R-squared (steep AND clean moves score highest). |
 | `high_low_range_1m` | volatility | volatility | A | tolerance | Float64 | none | (0.0, 5.0) | Intra-minute high-low range as a fraction of close: (high - low) / close. |
 | `parkinson_vol_120m` | volatility | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Parkinson high-low volatility estimator over the trailing 120 minutes (uses the bar range). |
 | `parkinson_vol_15m` | volatility | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Parkinson high-low volatility estimator over the trailing 15 minutes (uses the bar range). |

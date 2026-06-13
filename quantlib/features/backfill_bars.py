@@ -21,6 +21,7 @@ from alpaca.trading.requests import GetAssetsRequest
 BARS_SCHEMA = {
     "symbol": pl.String,
     "minute": pl.Datetime("us", "UTC"),
+    "open": pl.Float64,
     "close": pl.Float64,
     "high": pl.Float64,
     "low": pl.Float64,
@@ -68,10 +69,10 @@ def backfill_bars(day: str, symbols: list[str], chunk: int = 200) -> pl.DataFram
         barset = _client().get_stock_bars(request)
         for symbol, bars in barset.data.items():
             for bar in bars:
-                rows.append((symbol, bar.timestamp, float(bar.close), float(bar.high), float(bar.low), float(bar.volume)))
+                rows.append((symbol, bar.timestamp, float(bar.open), float(bar.close), float(bar.high), float(bar.low), float(bar.volume)))
     if not rows:
         return pl.DataFrame(schema=BARS_SCHEMA)
-    return pl.DataFrame(rows, schema=["symbol", "minute", "close", "high", "low", "volume"], orient="row").cast(BARS_SCHEMA)
+    return pl.DataFrame(rows, schema=["symbol", "minute", "open", "close", "high", "low", "volume"], orient="row").cast(BARS_SCHEMA)
 
 
 def backfill_daily(end_day: str, symbols: list[str], lookback_days: int = 370, chunk: int = 200) -> pl.DataFrame:
