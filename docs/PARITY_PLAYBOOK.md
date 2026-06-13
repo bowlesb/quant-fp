@@ -84,6 +84,24 @@ Planned contract enhancement: add `layer` and `parity_method` fields to `Feature
 is **enforced** by the registry, not just documented — the catalog then shows every feature's layer
 and parity method, and the daily run picks the right test automatically.
 
+### 4.1 The trailing-buffer invariant (live-path correctness for windowed features)
+
+The live capture path computes features over a **trailing in-memory buffer** of recent minutes, not
+the whole day. For a windowed feature (any rolling/lagged Layer-A/B feature) to match the one-shot
+backfill, the buffer MUST hold strictly more history than the feature consumes:
+
+> **buffer_minutes ≥ max_feature_window + max_intra-feature_lag**
+
+If the buffer equals the window, the buffer's leading-edge minute has no predecessor bar, so its
+one-minute return (and anything derived from it) is **null live but defined in backfill** — the
+long-window features silently diverge. This is a textbook instance of the trust-the-backfill failure
+the platform exists to prevent, and it is invisible to a single-frame unit test; only a
+**live-buffer-vs-backfill replay test** catches it. Such a test now exists
+(`tests/test_fp_new_families.py::test_live_buffer_matches_backfill` plus an adversarial
+`test_undersized_buffer_diverges`). Current longest minute window is `price_levels` 240m, so
+`capture.DEFAULT_BUFFER_MINUTES = 300`. Whenever a feature with a window larger than ~290m is added,
+this default MUST be raised in lockstep (until the buffer size is derived from the registry).
+
 ---
 
 ## 5. The standing schedule (runs regardless of what else we are focused on)
