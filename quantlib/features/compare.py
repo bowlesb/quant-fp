@@ -12,7 +12,7 @@ from quantlib.features.base import KEY_COLUMNS, BatchContext, FeatureGroup
 from quantlib.features.engine import run_all
 from quantlib.features.registry import REGISTRY
 
-QUANTILES = (0.1, 0.5, 0.9)
+QUANTILES = (0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99)
 # Below this a per-tier parity score is statistically meaningless (anti-gaming §6.4). 1000 is the
 # ad-hoc sanity floor; FP0/FP3 CERTIFICATION uses the far higher 50k/100k cell floors (FP_GOALS).
 MIN_PARITY_CELLS = 1000
@@ -36,7 +36,11 @@ def vectors(frames: dict[str, pl.DataFrame]) -> pl.DataFrame:
 
 
 def dist_score(scope: pl.DataFrame, feature: str, tol: float) -> tuple[float | None, bool | None]:
-    """Distributional agreement: max relative gap between live & backfill quantiles (P10/P50/P90)."""
+    """Distributional agreement, PAIRED. Marginal-quantile match alone (the old version) passes a
+    within-symbol SHUFFLE that has the same shape but disagrees cell-by-cell (audit #5). So we require
+    BOTH: the quantile distributions agree (shape) AND most cells agree within a loose per-cell
+    tolerance (pairing). The loose cell tolerance allows genuine tick-order sensitivity while still
+    catching scrambled values."""
     pairs = scope.drop_nulls([feature, f"{feature}_bk"])
     if pairs.height == 0:
         return None, None
@@ -47,7 +51,11 @@ def dist_score(scope: pl.DataFrame, feature: str, tol: float) -> tuple[float | N
         if live_q is None or back_q is None:
             continue
         max_reldiff = max(max_reldiff, abs(live_q - back_q) / (abs(back_q) + 1e-9))
-    return round(100.0 * (1.0 - min(1.0, max_reldiff)), 3), max_reldiff <= tol
+    live_col, back_col = pl.col(feature), pl.col(f"{feature}_bk")
+    paired_frac = pairs.select(((live_col - back_col).abs() <= (3.0 * tol) * (1.0 + back_col.abs())).mean()).item()
+    score = round(100.0 * (1.0 - min(1.0, max_reldiff)), 3)
+    passed = (max_reldiff <= tol) and (float(paired_frac or 0.0) >= 0.80)
+    return score, passed
 
 
 def coverage(live: pl.DataFrame, backfill: pl.DataFrame) -> pl.DataFrame:
