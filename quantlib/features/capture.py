@@ -26,6 +26,7 @@ BARS_SCHEMA = {
     "close": pl.Float64,
     "high": pl.Float64,
     "low": pl.Float64,
+    "volume": pl.Float64,
 }
 
 
@@ -45,7 +46,7 @@ def process_bars(state: CaptureState, bars: list[dict], root: str, mode: str, da
     for bar in bars:
         state.buffer.append(
             {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]),
-             "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"])}
+             "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"])}
         )
     frame = pl.DataFrame(state.buffer, schema=BARS_SCHEMA)
     recent = sorted(frame["minute"].unique())[-window:]

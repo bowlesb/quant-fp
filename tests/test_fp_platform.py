@@ -48,7 +48,11 @@ EXPECTED_BURST = {  # Layer C features computed from raw ticks
 EXPECTED_QUOTE = {"spread_bps_1m", "quote_imbalance_1m", "book_depth_1m"}  # Layer B
 EXPECTED_VOL = {"high_low_range_1m", "realized_vol_5m"}  # Layer A
 EXPECTED_CAL = {"minute_of_day_et", "day_of_week", "minutes_since_open", "is_regular_session"}  # Layer A
-EXPECTED_ALL = EXPECTED_MINUTE | EXPECTED_QUOTE | EXPECTED_VOL | EXPECTED_CAL | EXPECTED_BURST
+EXPECTED_VOLUME = {"dollar_volume_1m", "volume_zscore_30m"}  # Layer A
+EXPECTED_MULTIDAY = {"daily_return_1d", "daily_return_5d", "daily_return_10d", "daily_return_20d"}  # multi-day
+EXPECTED_ALL = (
+    EXPECTED_MINUTE | EXPECTED_QUOTE | EXPECTED_VOL | EXPECTED_CAL | EXPECTED_BURST | EXPECTED_VOLUME | EXPECTED_MULTIDAY
+)
 
 
 def minute_groups() -> list:

@@ -24,6 +24,7 @@ BARS_SCHEMA = {
     "close": pl.Float64,
     "high": pl.Float64,
     "low": pl.Float64,
+    "volume": pl.Float64,
 }
 
 _data_client: StockHistoricalDataClient | None = None
@@ -66,7 +67,7 @@ def backfill_bars(day: str, symbols: list[str], chunk: int = 200) -> pl.DataFram
         barset = _client().get_stock_bars(request)
         for symbol, bars in barset.data.items():
             for bar in bars:
-                rows.append((symbol, bar.timestamp, float(bar.close), float(bar.high), float(bar.low)))
+                rows.append((symbol, bar.timestamp, float(bar.close), float(bar.high), float(bar.low), float(bar.volume)))
     if not rows:
         return pl.DataFrame(schema=BARS_SCHEMA)
-    return pl.DataFrame(rows, schema=["symbol", "minute", "close", "high", "low"], orient="row").cast(BARS_SCHEMA)
+    return pl.DataFrame(rows, schema=["symbol", "minute", "close", "high", "low", "volume"], orient="row").cast(BARS_SCHEMA)

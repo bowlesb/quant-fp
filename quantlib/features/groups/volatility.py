@@ -48,15 +48,15 @@ class VolatilityGroup(FeatureGroup):
         ]
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "high", "low", "close"]).sort(
-            ["symbol", "minute"]
-        )
-        frame = lagged(frame, "close", 1, "_close_prev")
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "high", "low", "close"])
+        frame = lagged(frame, "close", 1, "_close_prev").sort(["symbol", "minute"])
         frame = frame.with_columns((pl.col("close") / pl.col("_close_prev") - 1.0).alias("_ret_1m"))
         return frame.with_columns(
             [
                 ((pl.col("high") - pl.col("low")) / pl.col("close")).cast(pl.Float64).alias("high_low_range_1m"),
-                pl.col("_ret_1m").rolling_std(window_size=VOL_WINDOW).over("symbol").cast(pl.Float64).alias(
+                # TIME-based rolling (audit #2): positional rolling_std was wrong on gappy grids /
+                # session boundaries; "5m" anchors to wall-clock minutes regardless of gaps.
+                pl.col("_ret_1m").rolling_std_by("minute", window_size=f"{VOL_WINDOW}m").over("symbol").cast(pl.Float64).alias(
                     "realized_vol_5m"
                 ),
             ]

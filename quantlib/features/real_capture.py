@@ -38,7 +38,8 @@ def run_capture(symbols: list[str], root: str, mode: str, window: int = 60, day:
             pending["bars"] = []
         pending["minute"] = minute
         pending["bars"].append(
-            {"S": bar.symbol, "c": float(bar.close), "h": float(bar.high), "l": float(bar.low), "t": bar.timestamp.isoformat()}
+            {"S": bar.symbol, "c": float(bar.close), "h": float(bar.high), "l": float(bar.low),
+             "v": float(bar.volume), "t": bar.timestamp.isoformat()}
         )
 
     stream.subscribe_bars(on_bar, *symbols)
