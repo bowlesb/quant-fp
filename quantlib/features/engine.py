@@ -24,18 +24,22 @@ class ContractError(Exception):
     """Raised when a group's compute output violates its declared FeatureSpec contract."""
 
 
-def run_group(group: FeatureGroup, ctx: BatchContext) -> pl.DataFrame:
-    """Compute one group and validate its output against the declared contract."""
+def run_group(group: FeatureGroup, ctx: BatchContext, validate: bool = True) -> pl.DataFrame:
+    """Compute one group. With ``validate`` (the conformance-gate default) the output is checked
+    against the declared contract and a violation RAISES. Production compute over real data passes
+    ``validate=False`` — a real data anomaly (e.g. a split) is a data issue surfaced by
+    introspection/parity, not a reason to crash the run."""
     out = group.compute(ctx)
-    _validate_output(group, out)
+    if validate:
+        _validate_output(group, out)
     return out
 
 
-def run_all(groups: list[FeatureGroup], ctx: BatchContext) -> pl.DataFrame:
-    """Compute every group and join the validated outputs into one wide vector frame."""
+def run_all(groups: list[FeatureGroup], ctx: BatchContext, validate: bool = True) -> pl.DataFrame:
+    """Compute every group and join the outputs into one wide vector frame."""
     vector: pl.DataFrame | None = None
     for group in groups:
-        out = run_group(group, ctx)
+        out = run_group(group, ctx, validate=validate)
         vector = out if vector is None else vector.join(out, on=list(KEY_COLUMNS), how="full", coalesce=True)
     return vector if vector is not None else pl.DataFrame()
 

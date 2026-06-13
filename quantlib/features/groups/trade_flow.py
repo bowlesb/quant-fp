@@ -14,6 +14,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    lagged,
 )
 from quantlib.features.registry import register
 
@@ -50,16 +51,13 @@ class TradeFlowGroup(FeatureGroup):
         ]
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = (
-            ctx.frame("minute_agg")
-            .select(["symbol", "minute", "n_trades", "signed_volume"])
-            .sort(["symbol", "minute"])
-        )
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "n_trades", "signed_volume"])
+        frame = lagged(frame, "n_trades", 1, "_n_trades_prev")
         return frame.with_columns(
             [
                 pl.col("signed_volume").cast(pl.Float64).alias("signed_volume_1m"),
                 pl.col("n_trades").cast(pl.Float64).alias("trade_freq_1m"),
-                ((pl.col("n_trades") - pl.col("n_trades").shift(1).over("symbol")).cast(pl.Float64) / 60.0).alias(
+                ((pl.col("n_trades") - pl.col("_n_trades_prev")).cast(pl.Float64) / 60.0).alias(
                     "trade_rate_accel_1m"
                 ),
             ]

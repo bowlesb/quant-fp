@@ -6,8 +6,12 @@ catches degenerate/out-of-range features.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import polars as pl
 import pytest
+
+BASE_MINUTE = datetime(2026, 6, 12, 8, 0)
 
 from quantlib.features import (
     REGISTRY,
@@ -42,13 +46,13 @@ def make_minute_agg(symbols: tuple[str, ...] = ("AAA", "BBB"), n: int = 200) -> 
     rows = [
         {
             "symbol": symbol,
-            "minute": minute,
-            "close": 100.0 + minute * 0.1 + (0.0 if symbol == "AAA" else 1.0),
-            "n_trades": 10 + (minute % 7),
-            "signed_volume": float((minute % 5) - 2) * 100.0,
+            "minute": BASE_MINUTE + timedelta(minutes=i),
+            "close": 100.0 + i * 0.1 + (0.0 if symbol == "AAA" else 1.0),
+            "n_trades": 10 + (i % 7),
+            "signed_volume": float((i % 5) - 2) * 100.0,
         }
         for symbol in symbols
-        for minute in range(n)
+        for i in range(n)
     ]
     return pl.DataFrame(rows)
 
@@ -174,11 +178,13 @@ def test_columns_equal_registry() -> None:
 
 def test_returns_are_correct() -> None:
     vector = run_all(REGISTRY.groups(), make_ctx())
-    row = vector.filter((pl.col("symbol") == "AAA") & (pl.col("minute") == 100)).row(0, named=True)
+    minute_100 = BASE_MINUTE + timedelta(minutes=100)
+    row = vector.filter((pl.col("symbol") == "AAA") & (pl.col("minute") == minute_100)).row(0, named=True)
     # close rises by 0.1/min; ret_1m = (c_100 - c_99)/c_99
     expected = 0.1 / (100.0 + 99 * 0.1)
     assert row["ret_1m"] == pytest.approx(expected, rel=1e-9)
-    assert vector.filter(pl.col("minute") == 0)["ret_1m"].null_count() == 2  # warmup both symbols
+    # first minute has no prior bar -> warmup null for both symbols
+    assert vector.filter(pl.col("minute") == BASE_MINUTE)["ret_1m"].null_count() == 2
 
 
 # --- conformance gate: PASSES clean, FAILS on each break type ---

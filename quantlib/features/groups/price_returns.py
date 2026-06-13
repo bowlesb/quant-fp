@@ -14,6 +14,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    lagged,
 )
 from quantlib.features.registry import register
 
@@ -44,12 +45,12 @@ class PriceReturnGroup(FeatureGroup):
         ]
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        for w in WINDOWS:
+            frame = lagged(frame, "close", w, f"_close_lag_{w}")
         return frame.with_columns(
             [
-                (pl.col("close") / pl.col("close").shift(w).over("symbol") - 1.0)
-                .cast(pl.Float64)
-                .alias(f"ret_{w}m")
+                (pl.col("close") / pl.col(f"_close_lag_{w}") - 1.0).cast(pl.Float64).alias(f"ret_{w}m")
                 for w in WINDOWS
             ]
         ).select(["symbol", "minute", *[f"ret_{w}m" for w in WINDOWS]])

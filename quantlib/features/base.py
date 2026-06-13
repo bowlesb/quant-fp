@@ -90,3 +90,17 @@ class FeatureGroup(ABC):
     @property
     def feature_names(self) -> list[str]:
         return [spec.name for spec in self.declare()]
+
+
+def lagged(frame: pl.DataFrame, value: str, minutes: int, alias: str) -> pl.DataFrame:
+    """Attach ``alias`` = ``value`` as of (minute − ``minutes``), via a TIME-BASED self-join per
+    symbol. Time-based (not positional) so it is correct on a gappy grid and point-in-time: a cell
+    is null when the bar exactly ``minutes`` ago is absent, rather than silently using a closer bar.
+    Requires ``minute`` to be a Datetime column.
+    """
+    lag = frame.select(
+        pl.col("symbol"),
+        (pl.col("minute") + pl.duration(minutes=minutes)).alias("minute"),
+        pl.col(value).alias(alias),
+    )
+    return frame.join(lag, on=["symbol", "minute"], how="left")
