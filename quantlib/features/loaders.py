@@ -11,8 +11,6 @@ import os
 
 import polars as pl
 import psycopg
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockTradesRequest
 
 TICK_SCHEMA = {"symbol": pl.String, "ts": pl.Datetime("us", "UTC"), "price": pl.Float64, "size": pl.Float64}
 
@@ -25,11 +23,14 @@ DB_KWARGS: dict[str, str | int] = {
 }
 
 _MINUTE_AGG_SQL = """
-SELECT b.symbol, b.ts AS minute, b.close,
-       t.n_trades, t.signed_volume
+SELECT b.symbol, b.ts AS minute, b.close, b.high, b.low,
+       t.n_trades, t.signed_volume,
+       q.mean_spread_bps, q.quote_imbalance, q.mean_bid_size, q.mean_ask_size
 FROM bars_1m b
 LEFT JOIN trade_agg_1m t
   ON t.symbol = b.symbol AND t.ts = b.ts AND t.source = %(source)s
+LEFT JOIN quote_agg_1m q
+  ON q.symbol = b.symbol AND q.ts = b.ts AND q.source = %(source)s
 WHERE b.ts::date = %(day)s AND b.source = %(source)s
 """
 
@@ -60,38 +61,10 @@ SELECT symbol, ts, price, size FROM trades_raw
 WHERE ts >= %(start)s AND ts < %(end)s AND symbol = ANY(%(symbols)s)
 """
 
-_alpaca_client: StockHistoricalDataClient | None = None
-
-
-def _client() -> StockHistoricalDataClient:
-    global _alpaca_client
-    if _alpaca_client is None:
-        _alpaca_client = StockHistoricalDataClient(
-            os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
-        )
-    return _alpaca_client
-
-
 def load_trades_live(start: dt.datetime, end: dt.datetime, symbols: list[str]) -> pl.DataFrame:
     """Raw ticks the running system captured (trades_raw) — the LIVE side of Layer-C parity."""
     frame = _query(_TRADES_LIVE_SQL, {"start": start, "end": end, "symbols": symbols})
     return frame.cast(TICK_SCHEMA) if frame.height else pl.DataFrame(schema=TICK_SCHEMA)
-
-
-def load_trades_backfill(start: dt.datetime, end: dt.datetime, symbols: list[str]) -> pl.DataFrame:
-    """Raw ticks from Alpaca's settled historical trades API — the BACKFILL side. Normalized to the
-    SAME (symbol, ts, price, size) shape and exchange timestamp as the live loader: the one tick
-    codepath that makes Layer-C parity meaningful (PARITY_PLAYBOOK §3)."""
-    request = StockTradesRequest(symbol_or_symbols=symbols, start=start, end=end)
-    response = _client().get_stock_trades(request)
-    rows = [
-        (symbol, trade.timestamp, float(trade.price), float(trade.size))
-        for symbol, trades in response.data.items()
-        for trade in trades
-    ]
-    if not rows:
-        return pl.DataFrame(schema=TICK_SCHEMA)
-    return pl.DataFrame(rows, schema=["symbol", "ts", "price", "size"], orient="row").cast(TICK_SCHEMA)
 
 
 def load_tiers(day: str) -> pl.DataFrame:

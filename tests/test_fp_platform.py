@@ -44,10 +44,13 @@ EXPECTED_BURST = {  # Layer C features computed from raw ticks
     "active_seconds_1m",
     "inter_arrival_cv_1m",
 }
-EXPECTED_ALL = EXPECTED_MINUTE | EXPECTED_BURST
+EXPECTED_QUOTE = {"spread_bps_1m", "quote_imbalance_1m", "book_depth_1m"}  # Layer B
+EXPECTED_VOL = {"high_low_range_1m", "realized_vol_5m"}  # Layer A
+EXPECTED_ALL = EXPECTED_MINUTE | EXPECTED_QUOTE | EXPECTED_VOL | EXPECTED_BURST
 
 
 def minute_groups() -> list:
+    # the two groups whose inputs are satisfied by the synthetic make_minute_agg() frame
     return [REGISTRY.get_group(name) for name in ("price_returns", "trade_flow")]
 
 
@@ -290,6 +293,40 @@ def _ticks() -> pl.DataFrame:
     rows.append({"symbol": "AAA", "ts": BASE_MINUTE + timedelta(minutes=1), "price": 100.0, "size": 10.0})
     rows.append({"symbol": "AAA", "ts": BASE_MINUTE + timedelta(minutes=1, seconds=5), "price": 100.0, "size": 10.0})
     return pl.DataFrame(rows)
+
+
+def test_quote_spread_group() -> None:
+    frame = pl.DataFrame(
+        {
+            "symbol": ["AAA"] * 3,
+            "minute": [BASE_MINUTE + timedelta(minutes=i) for i in range(3)],
+            "mean_spread_bps": [1.5, 2.0, 2.5],
+            "quote_imbalance": [-0.2, 0.0, 0.3],
+            "mean_bid_size": [100.0, 120.0, 90.0],
+            "mean_ask_size": [110.0, 80.0, 130.0],
+        }
+    )
+    out = run_group(REGISTRY.get_group("quote_spread"), BatchContext(frames={"minute_agg": frame}))
+    row = out.filter(pl.col("minute") == BASE_MINUTE).row(0, named=True)
+    assert row["spread_bps_1m"] == 1.5
+    assert row["book_depth_1m"] == 210.0
+
+
+def test_volatility_group() -> None:
+    closes = [100.0, 101.0, 100.5, 102.0, 101.0, 103.0, 102.5]
+    frame = pl.DataFrame(
+        {
+            "symbol": ["AAA"] * len(closes),
+            "minute": [BASE_MINUTE + timedelta(minutes=i) for i in range(len(closes))],
+            "high": [c + 0.5 for c in closes],
+            "low": [c - 0.5 for c in closes],
+            "close": closes,
+        }
+    )
+    out = run_group(REGISTRY.get_group("volatility"), BatchContext(frames={"minute_agg": frame}))
+    assert out.filter(pl.col("minute") == BASE_MINUTE).row(0, named=True)["high_low_range_1m"] == pytest.approx(0.01)
+    late = out.filter(pl.col("minute") == BASE_MINUTE + timedelta(minutes=6)).row(0, named=True)
+    assert late["realized_vol_5m"] is not None and late["realized_vol_5m"] > 0
 
 
 def test_burst_group_sub_minute() -> None:

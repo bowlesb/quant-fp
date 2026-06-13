@@ -72,7 +72,7 @@ feature-catalog:
 
 # T+1 Settled-Day Parity for a day:  make parity DAY=2026-06-12
 parity:
-	$(FP_RUN) $(FP_DB) python:3.12-slim sh -c "pip install -q polars 'psycopg[binary]' && python -m quantlib.features.parity $(DAY)"
+	$(FP_RUN) $(FP_DB) python:3.12-slim sh -c "pip install -q polars 'psycopg[binary]' 'alpaca-py>=0.30,<1.0' && python -m quantlib.features.parity $(DAY)"
 
 # Introspect a day's features:  make introspect DAY=2026-06-12 [SOURCE=backfill]
 introspect:

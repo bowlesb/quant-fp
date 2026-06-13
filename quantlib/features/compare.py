@@ -60,7 +60,10 @@ def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.
             if methods[feature] == "distributional":
                 score, passed = dist_score(scope, feature, tolerances[feature])
             else:
-                matched = both & ((live_col - back_col).abs() <= tolerances[feature] * (1.0 + back_col.abs()))
+                # numpy-isclose semantics: genuine RELATIVE tolerance + a tiny absolute floor for
+                # zero-protection. (A blended tol*(1+|b|) silently becomes absolute for small-scale
+                # features like realized_vol ~1e-3 and would fake a pass — see LIFECYCLE_DEMOS.)
+                matched = both & ((live_col - back_col).abs() <= 1e-12 + tolerances[feature] * back_col.abs())
                 agree = int(scope.select(matched.sum()).item() or 0)
                 score = round(100.0 * agree / compared, 3) if compared else None
                 passed = score >= 95.0 if score is not None else None

@@ -16,13 +16,9 @@ from datetime import datetime
 
 import polars as pl
 
+from quantlib.features.backfill_ticks import load_trades_backfill
 from quantlib.features.compare import diff, vectors
-from quantlib.features.loaders import (
-    load_minute_agg,
-    load_tiers,
-    load_trades_backfill,
-    load_trades_live,
-)
+from quantlib.features.loaders import load_minute_agg, load_tiers, load_trades_live
 
 
 def parity_test(day: str, source_live: str = "stream", source_backfill: str = "backfill") -> pl.DataFrame:
