@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-438 features across 20 group(s).
+478 features across 24 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -12,6 +12,13 @@
 | `is_regular_session` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1.0) | 1.0 if within the 09:30-16:00 ET regular session, else 0.0 (extended hours). |
 | `minute_of_day_et` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1440.0) | Minutes since ET midnight for this bar (0-1439); encodes time of day. |
 | `minutes_since_open` | calendar | calendar | A | tolerance | Float64 | none | (-570.0, 870.0) | Minutes since the 09:30 ET regular open (negative during pre-market). |
+| `day_of_month_norm` | calendar_events | calendar | A | tolerance | Float64 | none | (0.0, 1.04) | Calendar day of month in ET divided by 31 (position through the month, 0-1). |
+| `is_first_week` | calendar_events | calendar | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the ET calendar day of month is 7 or earlier (first week), else 0.0. |
+| `is_last_week` | calendar_events | calendar | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the ET calendar day of month is 22 or later (last week, month-end window), else 0.0. |
+| `is_opex_day` | calendar_events | calendar | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the bar is on monthly options-expiration Friday (the third Friday of the month) in ET, else 0.0. |
+| `is_quarter_end_month` | calendar_events | calendar | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the bar falls in a quarter-end month (Mar/Jun/Sep/Dec) in ET, else 0.0. |
+| `is_triple_witching` | calendar_events | calendar | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 on quarterly triple-witching (third Friday of March/June/September/December) in ET, else 0.0. |
+| `week_of_month` | calendar_events | calendar | A | tolerance | Float64 | none | (1.0, 5.0) | Week of the month in ET (1-5), as ceil(day_of_month / 7). |
 | `body_ratio` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | Real-body size as a fraction of the bar's high-low range: |close-open| / (high-low); 0 when the range is zero. |
 | `is_bullish` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the minute closed above its open (a green/up bar), else 0.0. |
 | `is_doji` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the real body is under 10% of the bar range (indecision/doji), else 0.0. |
@@ -24,6 +31,12 @@
 | `pattern_harami_bearish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a small bearish bar's body sits inside the prior larger bullish bar's body (harami). |
 | `pattern_harami_bullish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a small bullish bar's body sits inside the prior larger bearish bar's body (harami). |
 | `upper_shadow_ratio` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | Upper wick as a fraction of the high-low range: (high - max(open,close)) / (high-low). |
+| `dollar_volume_rank_1m` | cross_sectional_rank | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Cross-sectional percentile (0-1) of this ticker's last-minute dollar volume (close*volume) across all symbols present that minute. |
+| `return_rank_15m` | cross_sectional_rank | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Cross-sectional percentile (0-1) of this ticker's trailing 15-minute return across all symbols present that minute. |
+| `return_rank_30m` | cross_sectional_rank | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Cross-sectional percentile (0-1) of this ticker's trailing 30-minute return across all symbols present that minute. |
+| `return_rank_5m` | cross_sectional_rank | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Cross-sectional percentile (0-1) of this ticker's trailing 5-minute return across all symbols present that minute. |
+| `return_rank_60m` | cross_sectional_rank | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Cross-sectional percentile (0-1) of this ticker's trailing 60-minute return across all symbols present that minute. |
+| `volume_rank_1m` | cross_sectional_rank | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Cross-sectional percentile (0-1) of this ticker's last-minute share volume across all symbols present that minute. |
 | `downside_vol_10m` | distribution | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Downside semi-deviation of one-minute returns over 10 minutes: root-mean-square of the negative returns only. |
 | `downside_vol_120m` | distribution | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Downside semi-deviation of one-minute returns over 120 minutes: root-mean-square of the negative returns only. |
 | `downside_vol_15m` | distribution | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Downside semi-deviation of one-minute returns over 15 minutes: root-mean-square of the negative returns only. |
@@ -173,6 +186,18 @@
 | `dist_from_20d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 20-day high (close[D-1]/max - 1), point-in-time; <= 0. |
 | `dist_from_250d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 250-day high (close[D-1]/max - 1), point-in-time; <= 0. |
 | `dist_from_60d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 60-day high (close[D-1]/max - 1), point-in-time; <= 0. |
+| `garman_klass_vol_10m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 10 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
+| `garman_klass_vol_120m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 120 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
+| `garman_klass_vol_15m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 15 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
+| `garman_klass_vol_30m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 30 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
+| `garman_klass_vol_5m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 5 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
+| `garman_klass_vol_60m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 60 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
+| `rogers_satchell_vol_10m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Rogers-Satchell volatility over 10 minutes: drift-independent OHLC variance (ln(H/C)ln(H/O)+ln(L/C)ln(L/O)) averaged then rooted. |
+| `rogers_satchell_vol_120m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Rogers-Satchell volatility over 120 minutes: drift-independent OHLC variance (ln(H/C)ln(H/O)+ln(L/C)ln(L/O)) averaged then rooted. |
+| `rogers_satchell_vol_15m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Rogers-Satchell volatility over 15 minutes: drift-independent OHLC variance (ln(H/C)ln(H/O)+ln(L/C)ln(L/O)) averaged then rooted. |
+| `rogers_satchell_vol_30m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Rogers-Satchell volatility over 30 minutes: drift-independent OHLC variance (ln(H/C)ln(H/O)+ln(L/C)ln(L/O)) averaged then rooted. |
+| `rogers_satchell_vol_5m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Rogers-Satchell volatility over 5 minutes: drift-independent OHLC variance (ln(H/C)ln(H/O)+ln(L/C)ln(L/O)) averaged then rooted. |
+| `rogers_satchell_vol_60m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Rogers-Satchell volatility over 60 minutes: drift-independent OHLC variance (ln(H/C)ln(H/O)+ln(L/C)ln(L/O)) averaged then rooted. |
 | `dist_from_high_10m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 10-minute high (close / max_high - 1); <= 0. |
 | `dist_from_high_120m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 120-minute high (close / max_high - 1); <= 0. |
 | `dist_from_high_15m` | price_levels | price | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Close relative to the trailing 15-minute high (close / max_high - 1); <= 0. |
@@ -325,6 +350,21 @@
 | `spread_bps_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 5 minutes. |
 | `spread_bps_60m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 60 minutes. |
 | `spread_bps_90m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 90 minutes. |
+| `autocorr_1_10m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-1 autocorrelation of one-minute returns over 10 minutes (negative = mean-reverting, positive = trending), in [-1, 1]. |
+| `autocorr_1_120m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-1 autocorrelation of one-minute returns over 120 minutes (negative = mean-reverting, positive = trending), in [-1, 1]. |
+| `autocorr_1_15m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-1 autocorrelation of one-minute returns over 15 minutes (negative = mean-reverting, positive = trending), in [-1, 1]. |
+| `autocorr_1_30m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-1 autocorrelation of one-minute returns over 30 minutes (negative = mean-reverting, positive = trending), in [-1, 1]. |
+| `autocorr_1_60m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-1 autocorrelation of one-minute returns over 60 minutes (negative = mean-reverting, positive = trending), in [-1, 1]. |
+| `autocorr_2_10m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-2 autocorrelation of one-minute returns over 10 minutes (two-step return persistence), in [-1, 1]. |
+| `autocorr_2_120m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-2 autocorrelation of one-minute returns over 120 minutes (two-step return persistence), in [-1, 1]. |
+| `autocorr_2_15m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-2 autocorrelation of one-minute returns over 15 minutes (two-step return persistence), in [-1, 1]. |
+| `autocorr_2_30m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-2 autocorrelation of one-minute returns over 30 minutes (two-step return persistence), in [-1, 1]. |
+| `autocorr_2_60m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Lag-2 autocorrelation of one-minute returns over 60 minutes (two-step return persistence), in [-1, 1]. |
+| `ret_accel_10m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 10-minute return minus the prior 10-minute return (is the move speeding up or fading). |
+| `ret_accel_15m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 15-minute return minus the prior 15-minute return (is the move speeding up or fading). |
+| `ret_accel_30m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 30-minute return minus the prior 30-minute return (is the move speeding up or fading). |
+| `ret_accel_5m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 5-minute return minus the prior 5-minute return (is the move speeding up or fading). |
+| `ret_accel_60m` | return_dynamics | momentum | A | tolerance | Float64 | warmup | (-5.0, 5.0) | Return acceleration: the trailing 60-minute return minus the prior 60-minute return (is the move speeding up or fading). |
 | `sector_is_basic_materials` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is basic materials, else 0.0 (one-hot, broadcast across the day). |
 | `sector_is_communication_services` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is communication services, else 0.0 (one-hot, broadcast across the day). |
 | `sector_is_consumer_cyclical` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is consumer cyclical, else 0.0 (one-hot, broadcast across the day). |

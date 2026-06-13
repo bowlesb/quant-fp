@@ -207,7 +207,7 @@ def test_market_beta_exact_relationship() -> None:
     assert aaa_late["idio_vol_30m"] == pytest.approx(0.0, abs=1e-6)  # fully explained by the market
 
 
-@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume", "efficiency", "distribution"])
+@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume", "efficiency", "distribution", "ohlc_vol", "return_dynamics", "calendar_events"])
 def test_live_buffer_matches_backfill(group_name: str) -> None:
     group = REGISTRY.get_group(group_name)
     full = _wavy_ohlc(260)  # > LIVE_WINDOW so the trailing buffer genuinely evicts early minutes
@@ -257,7 +257,7 @@ def test_market_context_broadcast_and_relative() -> None:
     assert aaa["outperforming_5m"] == (1.0 if aaa["relative_return_5m"] > 0 else 0.0)
 
 
-@pytest.mark.parametrize("group_name", ["market_context", "market_beta"])
+@pytest.mark.parametrize("group_name", ["market_context", "market_beta", "cross_sectional_rank"])
 def test_market_context_live_buffer_matches_backfill(group_name: str) -> None:
     group = REGISTRY.get_group(group_name)
     full = _multi_ohlc(("SPY", "QQQ", "AAA", "BBB"), 260)
@@ -272,6 +272,57 @@ def test_market_context_live_buffer_matches_backfill(group_name: str) -> None:
             ((pl.col(feature) - pl.col(f"{feature}_bk")).abs() <= 1e-12 + tol * pl.col(f"{feature}_bk").abs()).all()
         ).item()
         assert within, f"{feature}: live trailing-buffer diverged from backfill beyond tol={tol}"
+
+
+# --- ohlc_vol / return_dynamics / calendar_events / cross_sectional_rank ---
+
+
+def test_ohlc_vol_known_values() -> None:
+    import math
+
+    # identical bars O=C=100, H=101, L=99 -> gk_var = rs_var = 0.5*ln(101/99)^2 (the ln(C/O) term is 0)
+    frame = _ohlc([(100.0, 101.0, 99.0, 100.0, 1000.0) for _ in range(12)])
+    out = run_group(REGISTRY.get_group("ohlc_vol"), BatchContext(frames={"minute_agg": frame}))
+    late = _row(out, 11)
+    expected_gk = math.sqrt(0.5 * math.log(101.0 / 99.0) ** 2)  # ln(C/O) term is 0 since C==O
+    # O==C so ln(H/C)=ln(H/O) and ln(L/C)=ln(L/O): rs_var = ln(H/C)^2 + ln(L/C)^2
+    expected_rs = math.sqrt(math.log(101.0 / 100.0) ** 2 + math.log(99.0 / 100.0) ** 2)
+    assert late["garman_klass_vol_5m"] == pytest.approx(expected_gk, rel=1e-9)
+    assert late["rogers_satchell_vol_5m"] == pytest.approx(expected_rs, rel=1e-9)
+
+
+def test_return_dynamics_mean_reversion() -> None:
+    closes = [100.0 + (1.0 if i % 2 else 0.0) for i in range(40)]  # alternating -> mean-reverting
+    frame = _ohlc([(c, c + 0.1, c - 0.1, c, 1000.0) for c in closes])
+    out = run_group(REGISTRY.get_group("return_dynamics"), BatchContext(frames={"minute_agg": frame}))
+    assert _row(out, 39)["autocorr_1_30m"] < -0.5  # sign flips every step -> strong negative lag-1
+
+
+def test_calendar_events_triple_witching() -> None:
+    # 2026-06-19 is the 3rd Friday of June (a quarter-end month) -> OPEX + triple witching
+    minutes = [
+        datetime(2026, 6, 19, 14, 0, tzinfo=timezone.utc),  # 10:00 ET, same date
+        datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc),  # 2nd Friday -> not OPEX
+    ]
+    frame = pl.DataFrame({"symbol": ["AAA", "AAA"], "minute": minutes})
+    out = run_group(REGISTRY.get_group("calendar_events"), BatchContext(frames={"minute_agg": frame}))
+    opex = out.filter(pl.col("minute") == minutes[0]).row(0, named=True)
+    plain = out.filter(pl.col("minute") == minutes[1]).row(0, named=True)
+    assert opex["is_opex_day"] == 1.0 and opex["is_triple_witching"] == 1.0 and opex["is_quarter_end_month"] == 1.0
+    assert opex["week_of_month"] == 3.0
+    assert plain["is_opex_day"] == 0.0 and plain["is_triple_witching"] == 0.0
+
+
+def test_cross_sectional_rank_ordering() -> None:
+    minute = BASE
+    rows = [
+        {"symbol": "AAA", "minute": minute, "close": 100.0, "volume": 100.0},
+        {"symbol": "BBB", "minute": minute, "close": 100.0, "volume": 200.0},
+        {"symbol": "CCC", "minute": minute, "close": 100.0, "volume": 300.0},
+    ]
+    out = run_group(REGISTRY.get_group("cross_sectional_rank"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)}))
+    ranks = {r["symbol"]: r["volume_rank_1m"] for r in out.iter_rows(named=True)}
+    assert ranks["AAA"] == pytest.approx(0.0) and ranks["BBB"] == pytest.approx(0.5) and ranks["CCC"] == pytest.approx(1.0)
 
 
 # --- reference groups: sector one-hot + asset flags ---
