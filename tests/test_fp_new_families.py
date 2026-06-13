@@ -177,6 +177,54 @@ def test_live_buffer_matches_backfill(group_name: str) -> None:
         assert within, f"{feature}: live trailing-buffer value diverged from backfill beyond tol={tol}"
 
 
+def _multi_ohlc(symbols: tuple[str, ...], n: int) -> pl.DataFrame:
+    """Distinct wavy OHLCV series per symbol (each phase-shifted) so index and ticker returns differ."""
+    import math
+
+    rows = []
+    for s_idx, symbol in enumerate(symbols):
+        for i in range(n):
+            close = 100.0 + 4.0 * math.sin((i + s_idx * 7) / 9.0) + i * (0.02 + 0.01 * s_idx)
+            rows.append(
+                {"symbol": symbol, "minute": BASE + timedelta(minutes=i), "open": close - 0.04,
+                 "high": close + 0.09, "low": close - 0.08, "close": close, "volume": 900.0 + (i % 11) * 30.0}
+            )
+    return pl.DataFrame(rows)
+
+
+def test_market_context_broadcast_and_relative() -> None:
+    frame = _multi_ohlc(("SPY", "QQQ", "AAA"), 30)
+    out = run_group(REGISTRY.get_group("market_context"), BatchContext(frames={"minute_agg": frame}))
+    minute = BASE + timedelta(minutes=20)
+    at = out.filter(pl.col("minute") == minute)
+    spy = at.filter(pl.col("symbol") == "SPY").row(0, named=True)
+    aaa = at.filter(pl.col("symbol") == "AAA").row(0, named=True)
+    # the index return is broadcast: identical for every ticker at this minute
+    assert aaa["market_return_5m"] == pytest.approx(spy["market_return_5m"])
+    # SPY's own return relative to SPY is zero, so it never "outperforms" itself
+    assert spy["relative_return_5m"] == pytest.approx(0.0, abs=1e-12)
+    assert spy["outperforming_5m"] == 0.0
+    # AAA's relative return is defined and its outperforming flag agrees with the sign
+    assert aaa["relative_return_5m"] is not None
+    assert aaa["outperforming_5m"] == (1.0 if aaa["relative_return_5m"] > 0 else 0.0)
+
+
+def test_market_context_live_buffer_matches_backfill() -> None:
+    group = REGISTRY.get_group("market_context")
+    full = _multi_ohlc(("SPY", "QQQ", "AAA", "BBB"), 220)
+    backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
+    live = _replay_live(group, full)
+    tolerances = {spec.name: spec.tolerance for spec in group.declare()}
+    joined = live.join(backfill, on=["symbol", "minute"], suffix="_bk")
+    for feature, tol in tolerances.items():
+        pairs = joined.select([feature, f"{feature}_bk"]).drop_nulls()
+        assert pairs.height > 0, f"{feature}: no settled cells"
+        within = pairs.select(
+            ((pl.col(feature) - pl.col(f"{feature}_bk")).abs() <= 1e-12 + tol * pl.col(f"{feature}_bk").abs()).all()
+        ).item()
+        assert within, f"{feature}: live trailing-buffer diverged from backfill beyond tol={tol}"
+
+
 def test_undersized_buffer_diverges() -> None:
     """The buffer-size invariant BITES: a buffer equal to the feature window (one short of the lag it
     needs) makes the 60m window's leading-edge minute lose its return, so live != backfill. This is

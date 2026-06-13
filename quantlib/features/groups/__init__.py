@@ -6,6 +6,7 @@ base/registry/engine/store/parity/introspect (FEATURE_PLATFORM.md §3.7).
 from quantlib.features.groups import (  # noqa: F401
     calendar,
     candlestick,
+    market_context,
     microstructure_burst,
     momentum,
     multi_day,

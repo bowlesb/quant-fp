@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-259 features across 14 group(s).
+279 features across 15 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -20,6 +20,26 @@
 | `pattern_harami_bearish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a small bearish bar's body sits inside the prior larger bullish bar's body (harami). |
 | `pattern_harami_bullish` | candlestick | candlestick | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when a small bullish bar's body sits inside the prior larger bearish bar's body (harami). |
 | `upper_shadow_ratio` | candlestick | candlestick | A | tolerance | Float64 | none | (-0.01, 1.01) | Upper wick as a fraction of the high-low range: (high - max(open,close)) / (high-low). |
+| `market_return_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 10-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 15-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 30-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 5-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `market_return_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 60-minute close-to-close return of the SPY index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 10-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 15-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 30-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 5-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `nasdaq_return_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Trailing 60-minute close-to-close return of the QQQ index, broadcast to every ticker as of the minute open. |
+| `outperforming_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 10-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 15-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 30-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 5-minute return exceeds SPY's over the same window, else 0.0. |
+| `outperforming_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when this ticker's trailing 60-minute return exceeds SPY's over the same window, else 0.0. |
+| `relative_return_10m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 10-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_15m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 15-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_30m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 30-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 5-minute return minus SPY's over the same window (market-relative excess return). |
+| `relative_return_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 60-minute return minus SPY's over the same window (market-relative excess return). |
 | `active_seconds_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, 60.0) | Count of distinct seconds within the minute that had at least one trade (0-60). |
 | `inter_arrival_cv_1m` | microstructure_burst | microstructure | C | distributional | Float64 | sparse | (0.0, None) | Coefficient of variation of inter-trade gaps in the minute (burstiness of arrivals). |
 | `max_runup_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, None) | Largest within-minute price run-up: max over trades (in exchange-timestamp order) of price minus the running minimum. A PATH-DEPENDENT pattern feature. |
