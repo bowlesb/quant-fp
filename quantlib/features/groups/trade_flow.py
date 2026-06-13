@@ -33,6 +33,7 @@ class TradeFlowGroup(FeatureGroup):
                 name="signed_volume_1m",
                 description="Buy-minus-sell signed share volume over the last minute (tick-rule signed).",
                 dtype="Float64",
+                layer="B",
                 nan_policy="none",
                 # 1% relative tolerance (vs the 1e-6 default): signed volume sums hundreds of
                 # provisional trades, so the live firehose and the settled tape rarely agree to the
@@ -45,6 +46,7 @@ class TradeFlowGroup(FeatureGroup):
                 name="trade_freq_1m",
                 description="Number of trades printed in the last minute (raw trade frequency).",
                 dtype="Float64",
+                layer="B",
                 valid_range=(0.0, 1e7),
                 nan_policy="none",
             ),
@@ -52,6 +54,7 @@ class TradeFlowGroup(FeatureGroup):
                 name="trade_rate_accel_1m",
                 description="Change in trades-per-second versus the prior minute (trade-rate acceleration).",
                 dtype="Float64",
+                layer="B",
                 nan_policy="warmup",
             ),
         ]

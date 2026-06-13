@@ -88,6 +88,8 @@ class Registry:
                 "type": group.type.value,
                 "version": group.version,
                 "owner": group.owner,
+                "layer": spec.layer,
+                "parity_method": spec.parity_method,
                 "dtype": spec.dtype,
                 "nan_policy": spec.nan_policy,
                 "valid_range": str(spec.valid_range),

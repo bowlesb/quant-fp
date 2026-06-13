@@ -52,6 +52,8 @@ class FeatureSpec:
     valid_range: tuple[float | None, float | None] | None = None
     nan_policy: str = "none"  # "none" | "warmup" | "sparse"
     tolerance: float = 1e-6  # cell-level RELATIVE closeness used by the parity test (|a-b| <= tol*(1+|b|))
+    layer: str = "A"  # data layer (PARITY_PLAYBOOK §2): "A" minute bars | "B" minute tick-agg | "C" sub-minute ticks
+    parity_method: str = "tolerance"  # "tolerance" (cell rel-tol) | "distributional" (quantile match)
 
 
 @dataclass

@@ -31,7 +31,7 @@ from quantlib.features import (
     run_group,
 )
 
-EXPECTED_FEATURES = {
+EXPECTED_MINUTE = {  # Layer A/B features computed from minute aggregates
     "ret_1m",
     "ret_5m",
     "ret_30m",
@@ -39,6 +39,16 @@ EXPECTED_FEATURES = {
     "trade_freq_1m",
     "trade_rate_accel_1m",
 }
+EXPECTED_BURST = {  # Layer C features computed from raw ticks
+    "peak_trades_per_second_1m",
+    "active_seconds_1m",
+    "inter_arrival_cv_1m",
+}
+EXPECTED_ALL = EXPECTED_MINUTE | EXPECTED_BURST
+
+
+def minute_groups() -> list:
+    return [REGISTRY.get_group(name) for name in ("price_returns", "trade_flow")]
 
 
 def make_minute_agg(symbols: tuple[str, ...] = ("AAA", "BBB"), n: int = 200) -> pl.DataFrame:
@@ -160,24 +170,24 @@ class DupFeatureB(GoodGroup):
 
 def test_real_groups_registered_with_unique_complete_metadata() -> None:
     names = REGISTRY.feature_names()
-    assert set(names) == EXPECTED_FEATURES
+    assert set(names) == EXPECTED_ALL
     assert len(names) == len(set(names))  # no duplicate feature names
     catalog = REGISTRY.catalog()
-    assert catalog.height == len(EXPECTED_FEATURES)
+    assert catalog.height == len(EXPECTED_ALL)
     assert (catalog["description"].str.len_chars() >= 40).all()
 
 
 def test_columns_equal_registry() -> None:
-    vector = run_all(REGISTRY.groups(), make_ctx())
+    vector = run_all(minute_groups(), make_ctx())
     feature_cols = set(vector.columns) - {"symbol", "minute"}
-    assert feature_cols == EXPECTED_FEATURES
+    assert feature_cols == EXPECTED_MINUTE
 
 
 # --- engine correctness ---
 
 
 def test_returns_are_correct() -> None:
-    vector = run_all(REGISTRY.groups(), make_ctx())
+    vector = run_all(minute_groups(), make_ctx())
     minute_100 = BASE_MINUTE + timedelta(minutes=100)
     row = vector.filter((pl.col("symbol") == "AAA") & (pl.col("minute") == minute_100)).row(0, named=True)
     # close rises by 0.1/min; ret_1m = (c_100 - c_99)/c_99
@@ -234,11 +244,11 @@ def test_conformance_fails_duplicate_group_name() -> None:
 
 
 def test_introspect_passes_on_good_data() -> None:
-    groups = REGISTRY.groups()
+    groups = minute_groups()
     vector = run_all(groups, make_ctx())
     specs = [spec for group in groups for spec in group.declare()]
     report = assert_sane(vector, specs)
-    assert report.height == len(EXPECTED_FEATURES)
+    assert report.height == len(EXPECTED_MINUTE)
     assert not report["degenerate"].any()
 
 
@@ -263,3 +273,45 @@ def test_introspect_catches_range_violation() -> None:
     frame = pl.DataFrame({"symbol": ["A", "A"], "minute": [0, 1], "bounded_probe": [0.5, 9.0]})
     with pytest.raises(IntrospectionError):
         assert_sane(frame, [spec])
+
+
+# --- Layer C: sub-minute burst group + distributional parity ---
+
+
+def _ticks() -> pl.DataFrame:
+    """AAA minute0: 5 trades over seconds 0(x3),1,2 -> peak 3, active 3; minute1: 2 trades."""
+    rows = []
+    for second, count in [(0, 3), (1, 1), (2, 1)]:
+        for k in range(count):
+            rows.append(
+                {"symbol": "AAA", "ts": BASE_MINUTE + timedelta(seconds=second, milliseconds=120 * k + 30 * second),
+                 "price": 100.0, "size": 10.0}
+            )
+    rows.append({"symbol": "AAA", "ts": BASE_MINUTE + timedelta(minutes=1), "price": 100.0, "size": 10.0})
+    rows.append({"symbol": "AAA", "ts": BASE_MINUTE + timedelta(minutes=1, seconds=5), "price": 100.0, "size": 10.0})
+    return pl.DataFrame(rows)
+
+
+def test_burst_group_sub_minute() -> None:
+    burst = REGISTRY.get_group("microstructure_burst")
+    out = run_group(burst, BatchContext(frames={"trades": _ticks()}))
+    row = out.filter((pl.col("symbol") == "AAA") & (pl.col("minute") == BASE_MINUTE)).row(0, named=True)
+    assert row["peak_trades_per_second_1m"] == 3.0
+    assert row["active_seconds_1m"] == 3.0
+    assert row["inter_arrival_cv_1m"] is not None  # >=2 gaps -> defined
+
+
+def test_distributional_parity_passes_and_fails() -> None:
+    from quantlib.features.compare import diff  # local: keep alpaca-free loaders out of import
+
+    minutes = [BASE_MINUTE + timedelta(minutes=i) for i in range(5)]
+    live = pl.DataFrame({"symbol": ["AAA"] * 5, "minute": minutes, "inter_arrival_cv_1m": [0.1, 0.2, 0.3, 0.4, 0.5]})
+    tiers = pl.DataFrame({"symbol": ["AAA"], "tier": [1]}, schema={"symbol": pl.String, "tier": pl.Int32})
+
+    same = diff(live, live.clone(), tiers).filter(pl.col("feature") == "inter_arrival_cv_1m").row(0, named=True)
+    assert same["method"] == "distributional"
+    assert same["passed"] is True
+
+    shifted = live.with_columns((pl.col("inter_arrival_cv_1m") * 3.0).alias("inter_arrival_cv_1m"))
+    bad = diff(live, shifted, tiers).filter(pl.col("feature") == "inter_arrival_cv_1m").row(0, named=True)
+    assert bad["passed"] is False

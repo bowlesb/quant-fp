@@ -18,12 +18,13 @@ def render_markdown() -> str:
         "",
         f"{catalog.height} features across {catalog['group'].n_unique()} group(s).",
         "",
-        "| feature | group | type | dtype | nan_policy | valid_range | description |",
-        "|---|---|---|---|---|---|---|",
+        "| feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     rows = [
-        f"| `{row['feature']}` | {row['group']} | {row['type']} | {row['dtype']} | "
-        f"{row['nan_policy']} | {row['valid_range']} | {row['description']} |"
+        f"| `{row['feature']}` | {row['group']} | {row['type']} | {row['layer']} | "
+        f"{row['parity_method']} | {row['dtype']} | {row['nan_policy']} | {row['valid_range']} | "
+        f"{row['description']} |"
         for row in catalog.iter_rows(named=True)
     ]
     return "\n".join(header + rows) + "\n"
