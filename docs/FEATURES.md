@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-183 features across 11 group(s).
+199 features across 11 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -123,13 +123,17 @@
 | `quote_imbalance_10m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 10 minutes. |
 | `quote_imbalance_15m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 15 minutes. |
 | `quote_imbalance_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance (bid-ask)/(bid+ask) over the last minute. |
+| `quote_imbalance_20m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 20 minutes. |
 | `quote_imbalance_30m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 30 minutes. |
+| `quote_imbalance_45m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 45 minutes. |
 | `quote_imbalance_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 5 minutes. |
 | `quote_imbalance_60m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean top-of-book size imbalance over the trailing 60 minutes. |
 | `spread_bps_10m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 10 minutes. |
 | `spread_bps_15m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 15 minutes. |
 | `spread_bps_1m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Average top-of-book bid-ask spread in basis points over the last minute. |
+| `spread_bps_20m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 20 minutes. |
 | `spread_bps_30m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 30 minutes. |
+| `spread_bps_45m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 45 minutes. |
 | `spread_bps_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 5 minutes. |
 | `spread_bps_60m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 60 minutes. |
 | `bb_position_20m` | technical | technical | A | tolerance | Float64 | warmup | None | Position of close within its 20-minute Bollinger band: (close - sma) / (2*std). |
@@ -140,22 +144,30 @@
 | `rsi_14m` | technical | technical | A | tolerance | Float64 | warmup | (0.0, 100.0) | Relative Strength Index over the trailing 14 minutes (0-100). |
 | `sma_dist_100m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 100-minute simple moving average (close/sma - 1). |
 | `sma_dist_10m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 10-minute simple moving average (close/sma - 1). |
+| `sma_dist_15m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 15-minute simple moving average (close/sma - 1). |
 | `sma_dist_200m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 200-minute simple moving average (close/sma - 1). |
 | `sma_dist_20m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 20-minute simple moving average (close/sma - 1). |
+| `sma_dist_30m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 30-minute simple moving average (close/sma - 1). |
 | `sma_dist_50m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 50-minute simple moving average (close/sma - 1). |
 | `sma_dist_5m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 5-minute simple moving average (close/sma - 1). |
 | `signed_volume_10m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 10 minutes (net buy/sell pressure). |
 | `signed_volume_15m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 15 minutes (net buy/sell pressure). |
 | `signed_volume_1m` | trade_flow | trade_flow | B | tolerance | Float64 | none | None | Buy-minus-sell signed share volume over the last minute (tick-rule signed). |
+| `signed_volume_20m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 20 minutes (net buy/sell pressure). |
 | `signed_volume_30m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 30 minutes (net buy/sell pressure). |
+| `signed_volume_45m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 45 minutes (net buy/sell pressure). |
 | `signed_volume_5m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 5 minutes (net buy/sell pressure). |
 | `signed_volume_60m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 60 minutes (net buy/sell pressure). |
+| `signed_volume_90m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 90 minutes (net buy/sell pressure). |
 | `trade_freq_10m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 10 minutes. |
 | `trade_freq_15m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 15 minutes. |
 | `trade_freq_1m` | trade_flow | trade_flow | B | tolerance | Float64 | none | (0.0, 10000000.0) | Number of trades printed in the last minute (raw trade frequency). |
+| `trade_freq_20m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 20 minutes. |
 | `trade_freq_30m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 30 minutes. |
+| `trade_freq_45m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 45 minutes. |
 | `trade_freq_5m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 5 minutes. |
 | `trade_freq_60m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 60 minutes. |
+| `trade_freq_90m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | (0.0, 1000000000.0) | Total number of trades over the trailing 90 minutes. |
 | `trade_rate_accel_1m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Change in trades-per-second versus the prior minute (trade-rate acceleration). |
 | `high_low_range_1m` | volatility | volatility | A | tolerance | Float64 | none | (0.0, 5.0) | Intra-minute high-low range as a fraction of close: (high - low) / close. |
 | `parkinson_vol_120m` | volatility | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Parkinson high-low volatility estimator over the trailing 120 minutes (uses the bar range). |
@@ -176,14 +188,18 @@
 | `volume_ratio_10m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 10-minute mean. |
 | `volume_ratio_120m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 120-minute mean. |
 | `volume_ratio_15m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 15-minute mean. |
+| `volume_ratio_20m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 20-minute mean. |
 | `volume_ratio_30m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 30-minute mean. |
 | `volume_ratio_3m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 3-minute mean. |
+| `volume_ratio_45m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 45-minute mean. |
 | `volume_ratio_5m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 5-minute mean. |
 | `volume_ratio_60m` | volume | volume | A | tolerance | Float64 | warmup | (0.0, None) | Ratio of the last minute's share volume to its trailing 60-minute mean. |
 | `volume_zscore_10m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 10-minute mean and std. |
 | `volume_zscore_120m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 120-minute mean and std. |
 | `volume_zscore_15m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 15-minute mean and std. |
+| `volume_zscore_20m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 20-minute mean and std. |
 | `volume_zscore_30m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 30-minute mean and std. |
 | `volume_zscore_3m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 3-minute mean and std. |
+| `volume_zscore_45m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 45-minute mean and std. |
 | `volume_zscore_5m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 5-minute mean and std. |
 | `volume_zscore_60m` | volume | volume | A | tolerance | Float64 | warmup | None | Z-score of the last minute's share volume vs the trailing 60-minute mean and std. |
