@@ -1,8 +1,11 @@
 """Feature-store lifecycle management: status, completeness, delete/retire — with restore recipes.
 
-CORE PRINCIPLE: the store is a REPRODUCIBLE CACHE. The source of truth is the group code (in git) +
-Alpaca (free, unlimited). So deleting store data is ALWAYS safe — restore = re-materialize. Every
-deletion logs a restore recipe to ``RETIREMENT_LOG`` so nothing is ever unrecoverable.
+CORE PRINCIPLE: ``source=backfill`` is a REPRODUCIBLE CACHE — its source of truth is the group code
+(git) + Alpaca (settled history), so deleting it is always safe (restore = re-materialize). BUT
+``source=stream`` is the LIVE provisional capture and is NOT reproducible (Alpaca only serves
+settled data) — once a past day's stream is gone, the train/serve-gap record and that day's parity
+reference are gone forever. So deletions REFUSE stream partitions unless explicitly forced. Every
+deletion logs a restore recipe to ``RETIREMENT_LOG``.
 
 Supports the iteration lifecycle: an abandoned partial backfill (verify what's there, resume the
 rest, or delete it), and disk reclamation (retire old dates / drop a low-value feature, restorable).
@@ -70,8 +73,15 @@ def _log(root: str | Path, entry: dict) -> None:
         handle.write(json.dumps(entry) + "\n")
 
 
-def _delete(root: str | Path, matching, action: str, restore: str) -> dict:
+def _delete(root: str | Path, matching, action: str, restore: str, include_stream: bool = False) -> dict:
     parts = [p for p in _iter_partitions(root) if matching(p)]
+    stream_parts = [p for p in parts if p["source"] == "stream"]
+    if stream_parts and not include_stream:
+        raise ValueError(
+            f"{action}: refusing to delete {len(stream_parts)} source=stream partition(s) — live "
+            f"stream is NOT reproducible (Alpaca only serves settled backfill). Pass "
+            f"include_stream=True to override and accept PERMANENT loss."
+        )
     freed = sum(_bytes(p["path"]) for p in parts)
     dates = sorted({p["date"] for p in parts})
     for p in parts:
@@ -89,13 +99,15 @@ def _delete(root: str | Path, matching, action: str, restore: str) -> dict:
     return entry
 
 
-def delete_feature_group(root: str | Path, group: str, version: str | None = None) -> dict:
-    """Wipe ALL partitions of a feature group (every source/date). Code stays in git → restorable."""
-    restore = f"re-materialize group '{group}' (code in git): backfill via `materialize alpaca <root> <day> <n>` then re-collect stream live"
-    return _delete(root, lambda p: p["group"] == group and (version is None or p["version"] == version), f"delete_feature_group:{group}", restore)
+def delete_feature_group(root: str | Path, group: str, version: str | None = None, include_stream: bool = False) -> dict:
+    """Wipe a feature group's BACKFILL partitions (code stays in git → re-materializable). Stream
+    partitions are protected unless ``include_stream=True`` (they are irreplaceable)."""
+    restore = f"re-materialize group '{group}' backfill via `materialize alpaca <root> <day> <n>` (code in git); stream is NOT re-collectable for past days"
+    return _delete(root, lambda p: p["group"] == group and (version is None or p["version"] == version), f"delete_feature_group:{group}", restore, include_stream)
 
 
-def retire_before(root: str | Path, before_date: str) -> dict:
-    """Reclaim disk: wipe all partitions strictly older than ``before_date``. Backfill is restorable."""
-    restore = f"re-backfill dates < {before_date} from Alpaca via `materialize alpaca <root> <day> <n>` (settled bars are reproducible)"
-    return _delete(root, lambda p: p["date"] < before_date, f"retire_before:{before_date}", restore)
+def retire_before(root: str | Path, before_date: str, include_stream: bool = False) -> dict:
+    """Reclaim disk: wipe BACKFILL partitions older than ``before_date`` (re-backfillable from
+    Alpaca). Stream partitions are protected unless ``include_stream=True``."""
+    restore = f"re-backfill dates < {before_date} from Alpaca via `materialize alpaca <root> <day> <n>` (settled bars reproducible; stream is not)"
+    return _delete(root, lambda p: p["date"] < before_date, f"retire_before:{before_date}", restore, include_stream)

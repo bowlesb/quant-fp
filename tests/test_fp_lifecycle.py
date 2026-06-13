@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from quantlib.features import lifecycle, store
 
@@ -37,7 +38,10 @@ def test_A_delete_entire_feature_logs_restore(tmp_path: Path) -> None:
     for day in DATES_10[:3]:
         _write(tmp_path, "price_returns", "backfill", day)
         _write(tmp_path, "price_returns", "stream", day)
-    result = lifecycle.delete_feature_group(tmp_path, "price_returns")
+    # stream is irreplaceable -> deletion is REFUSED unless explicitly forced
+    with pytest.raises(ValueError, match="stream"):
+        lifecycle.delete_feature_group(tmp_path, "price_returns")
+    result = lifecycle.delete_feature_group(tmp_path, "price_returns", include_stream=True)
     assert result["partitions"] == 6  # 3 dates x 2 sources, all gone
     assert not list(tmp_path.glob("group=price_returns/**/data.parquet"))
     log = (tmp_path / lifecycle.RETIREMENT_LOG).read_text()

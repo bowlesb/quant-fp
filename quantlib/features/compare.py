@@ -13,7 +13,9 @@ from quantlib.features.engine import run_all
 from quantlib.features.registry import REGISTRY
 
 QUANTILES = (0.1, 0.5, 0.9)
-MIN_PARITY_CELLS = 100  # below this a per-tier parity score is statistically meaningless (anti-gaming §6.4)
+# Below this a per-tier parity score is statistically meaningless (anti-gaming §6.4). 1000 is the
+# ad-hoc sanity floor; FP0/FP3 CERTIFICATION uses the far higher 50k/100k cell floors (FP_GOALS).
+MIN_PARITY_CELLS = 1000
 
 
 def runnable(frames: dict[str, pl.DataFrame]) -> list[FeatureGroup]:

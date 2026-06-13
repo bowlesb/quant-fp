@@ -25,13 +25,14 @@ class ContractError(Exception):
 
 
 def run_group(group: FeatureGroup, ctx: BatchContext, validate: bool = True) -> pl.DataFrame:
-    """Compute one group. With ``validate`` (the conformance-gate default) the output is checked
-    against the declared contract and a violation RAISES. Production compute over real data passes
-    ``validate=False`` — a real data anomaly (e.g. a split) is a data issue surfaced by
-    introspection/parity, not a reason to crash the run."""
+    """Compute one group. SCHEMA (columns + dtype) is ALWAYS validated — the structural guard that
+    a group can't corrupt the store stays on in production. ``validate`` additionally gates RANGE
+    checks (the conformance-gate default True); production passes False because a real data anomaly
+    (e.g. a split) is a data issue surfaced by introspection/parity, not a reason to crash."""
     out = group.compute(ctx)
+    _validate_schema(group, out)
     if validate:
-        _validate_output(group, out)
+        _validate_ranges(group, out)
     return out
 
 
@@ -44,7 +45,8 @@ def run_all(groups: list[FeatureGroup], ctx: BatchContext, validate: bool = True
     return vector if vector is not None else pl.DataFrame()
 
 
-def _validate_output(group: FeatureGroup, out: pl.DataFrame) -> None:
+def _validate_schema(group: FeatureGroup, out: pl.DataFrame) -> None:
+    """Columns + dtypes match the declaration. Cheap; ALWAYS run (incl. production)."""
     specs = group.declare()
     expected = set(KEY_COLUMNS) | {spec.name for spec in specs}
     actual = set(out.columns)
@@ -61,6 +63,11 @@ def _validate_output(group: FeatureGroup, out: pl.DataFrame) -> None:
             raise ContractError(
                 f"{group.name}.{spec.name}: dtype {out.schema[spec.name]} != declared {spec.dtype}"
             )
+
+
+def _validate_ranges(group: FeatureGroup, out: pl.DataFrame) -> None:
+    """Values inside declared ranges. Gated (off on real data, where anomalies are expected)."""
+    for spec in group.declare():
         if spec.valid_range is not None:
             _check_range(group.name, out, spec.name, spec.valid_range)
 

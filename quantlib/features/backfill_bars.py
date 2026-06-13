@@ -57,7 +57,11 @@ def backfill_bars(day: str, symbols: list[str], chunk: int = 200) -> pl.DataFram
             timeframe=TimeFrame.Minute,
             start=start,
             end=end,
-            adjustment=Adjustment.ALL,
+            # RAW to MATCH the raw, unadjusted live tape — Adjustment.ALL back-adjusts every
+            # historical price by dividend/split factors, so adjusted-backfill != raw-stream and
+            # parity breaks by construction on any name with a corporate action (audit P0 #1).
+            # Splits are handled explicitly at the feature layer via the corporate_actions table.
+            adjustment=Adjustment.RAW,
         )
         barset = _client().get_stock_bars(request)
         for symbol, bars in barset.data.items():
