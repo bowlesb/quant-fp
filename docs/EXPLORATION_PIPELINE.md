@@ -1,5 +1,12 @@
 # Exploration Pipeline (Ben's directive 2026-06-12)
 
+> This is the DOWNSTREAM edge/strategy track (FEATURE_PLATFORM §9). The team's primary spine is
+> the Feature Platform (`docs/FEATURE_PLATFORM.md`, FP0–FP4); this exploration runs only on idle
+> capacity and never preempts an open FP criterion. Its primary output back to the platform is
+> *certifiable feature-group ideas* fed into the FP4 loop — not standalone edge claims (no edge
+> claim is trusted unless its features are FP3-certified).
+
+
 On weekends and overnight, FIVE modelling/experimenting minds run in parallel: the
 **Research Lead** (the modeller role) + four **Explorers**, each with a distinct lens.
 Rigor comes from pre-registration, per-agent journals, single-writer rules, and the

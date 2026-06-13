@@ -1,5 +1,29 @@
 # STATE — read this first
 
+## The plan — read first
+**The team's primary spine is the Feature Platform: `docs/FEATURE_PLATFORM.md`** (vision,
+requirements R1–R19, milestones **FP0–FP4**, anti-gaming rules). **Current milestone: FP0.**
+
+We are building a trustworthy, fast, parity-true, introspectable feature platform: **500 features
+× 10,000 tickers in ≤2 s at every minute boundary, extended hours 04:00–20:00 ET, ≥95%
+live-vs-backfill parity per feature (the T+1 Settled-Day Parity Test), and a self-describing
+feature registry + catalog that many agents extend safely.** **Prime directive (FEATURE_PLATFORM §1.2):** design from day one to compute the
+FULL complex feature set (§11) **identically** in real time and backfill, so a model trained on
+backfilled features runs live with **zero train/serve skew** — parity is the spine, not a test
+bolted on, and it must hold for the hardest (sub-minute, stateful, cross-sectional) features, not
+just easy ones. The platform is the deliverable; its
+success does not depend on the market having edge. Modelling is a downstream track
+(FEATURE_PLATFORM §9) that feeds certifiable feature ideas — no edge claim is trusted unless its
+features are FP3-certified.
+
+**No incumbency bias:** treat the existing services, the TimescaleDB schema and its data, and the
+current features as THROWAWAY — rebuild or wipe whatever doesn't serve FP0–FP4 (FEATURE_PLATFORM
+§1.1). The design wins; the implementation gets rebuilt. Sunk cost / "it already works" is not a
+reason to keep anything.
+
+---
+
+
 **Mode:** paper | **Last updated:** 2026-06-12
 **Operating mode:** autonomous maintainer loop (`OPERATING_LOOP.md`) — 5-role team every wake;
 self-schedules WITH A FALLBACK (never silent); bar = don't stop until edge-in-production.

@@ -1,5 +1,22 @@
 # Autonomous Operating Loop
 
+## The plan — read first
+**The team's primary spine is the Feature Platform: `docs/FEATURE_PLATFORM.md`** (milestones
+**FP0–FP4**, requirements R1–R19, anti-gaming rules). **Current milestone: FP0.** We are building a
+trustworthy, fast, parity-true, introspectable feature platform: 500 features × 10,000 tickers in
+≤2 s/minute, extended hours 04:00–20:00 ET, ≥95% live-vs-backfill parity (the T+1 Settled-Day
+Parity Test), a self-describing registry + catalog many agents extend safely. The never-idle
+energy drives the FP ladder — see "THE PLATFORM NEVER IDLES" below. The edge hunt is a downstream
+track (FEATURE_PLATFORM §9).
+
+**No incumbency bias:** the existing services, DB schema + data, and current features are
+THROWAWAY — rebuild or wipe whatever doesn't serve FP0–FP4 (FEATURE_PLATFORM §1.1). The design
+wins; the implementation gets rebuilt. (Note: "A. Correctness & uptime" below keeps the CURRENT
+system healthy only until its replacement lands — it is not a reason to preserve a design FP
+supersedes.)
+
+---
+
 This file defines how I (Claude) operate this project continuously and proactively,
 without waiting to be asked. Each time I wake (scheduled timer, background-job
 completion, or a user message), I run this loop. Continuity lives here and in
@@ -212,6 +229,10 @@ quality over speed: a false edge is worse than no edge.
 
 ## Task priority (STRICT order — satisfy each before spending time on the next)
 
+**The primary BUILD objective is the current FP milestone in `docs/FEATURE_PLATFORM.md`** — the
+team's product work, advanced alongside A below (correctness/uptime is always first). "E. Side
+experiments" is the downstream edge/strategy track and never preempts an open FP criterion.
+
 **A. Correctness & uptime — always first.** No errors; system running well: all
    containers healthy (no crash-loops), bars landing every minute, reconciliation
    OK, validation gates green, disk headroom fine. If anything is broken or
@@ -339,22 +360,25 @@ Valid reasons look like: "ingestor restart would break QA's full-session capture
 "live basket in manage — executor deploy waits for the flatten", "writes the live model
 file the server reloads". Precaution without evidence is a habit, not a reason.
 
-## THE EDGE HUNT NEVER IDLES (Ben's directive 2026-06-12 — supreme standing order)
-There is ZERO reason to be idle while no edge is identified. Lights-on + QA being green
-is the FLOOR, not the job. Binding mechanics:
-- **The experimenter queue must NEVER be empty.** Every Manager wake checks queue depth;
-  if pending < 5, wake the Modeller to refill IMMEDIATELY. An empty queue overnight or
-  on a weekend is a P-milestone regression and gets journaled as a failure.
-- **The Modeller maintains TWO living backlogs** in EXPERIMENTS.md: (a) FEATURES (new
-  data families + transforms, each with collection lead time), and (b) STRATEGY SHAPES —
-  elegant, not-too-complex hypotheses beyond cross-sectional L/S ranking (event-reaction,
-  gap dynamics, sector-relative reversion, volume-shock, horizon ensembles, ...). Every
-  battery/experiment cycle pulls from these; both must never be exhausted.
-- **More tickers, more labels**: universe breadth and label-horizon variety are cheap
-  levers — expand them when data supports it; don't wait to be asked.
-- **Manager cadence**: during active exploration the Manager wakes at ≤30min, reads new
-  results, and re-aims the Modeller. Innovation is half the Manager's job — stubborn,
-  persistent pursuit of new explorations, not just operations.
+## THE PLATFORM NEVER IDLES (supreme standing order)
+There is ZERO reason to be idle while the feature platform is incomplete. Lights-on + QA
+being green is the FLOOR, not the job. The never-idle energy drives the FP ladder
+(`docs/FEATURE_PLATFORM.md`). Binding mechanics:
+- **The FP work queue must NEVER be empty.** Every Manager wake checks the CURRENT FP
+  milestone's open exit criteria and assigns them; when the current milestone is fully
+  green (every sub-bullet objectively met with its evidence artifact), advance to the next
+  and assign its criteria. An idle platform cycle is a P-milestone regression, journaled.
+- **The Modeller's primary platform duty is to FEED CERTIFIABLE FEATURES.** Maintain a
+  living backlog in EXPERIMENTS.md of feature *groups* to add (each with its data
+  dependency + window family), pulled into the registry via the FP4 loop. Strategy-shape
+  exploration continues as the downstream edge track (FEATURE_PLATFORM §9) but never
+  preempts an open FP criterion.
+- **More tickers, more sessions, more features** are the cheap levers now — universe
+  breadth toward 10k, extended hours 04:00–20:00 ET, feature count toward 500 — expand
+  them when the FP gates (parity/latency/introspection) stay green; don't wait to be asked.
+- **Manager cadence**: during active platform build the Manager wakes at ≤30min, reads new
+  parity/latency/introspection results, and re-aims the team at the next open FP criterion.
+  Building the platform is the job; the edge hunt rides on top once it exists.
 
 ## 8-hour progress cadence (Ben's directive 2026-06-12)
 The 24h day divides into three periods (PT): MARKET 06:00-14:00 / EVENING 14:00-22:00 /

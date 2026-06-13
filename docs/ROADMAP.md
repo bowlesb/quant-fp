@@ -1,5 +1,24 @@
 # Roadmap — the Manager's milestone ladder (owned by the Manager, re-read every wake)
 
+## The plan — read first
+**The primary milestone ladder is FP0–FP4 in `docs/FEATURE_PLATFORM.md`** (the Feature Platform:
+vision, requirements R1–R19, anti-gaming rules). **Current milestone: FP0.** Re-read that doc every
+wake and assign against its exit criteria.
+
+We are building a trustworthy, fast, parity-true, introspectable feature platform: 500 features ×
+10,000 tickers in ≤2 s/minute, extended hours 04:00–20:00 ET, ≥95% live-vs-backfill parity (the
+T+1 Settled-Day Parity Test), a self-describing registry + catalog many agents extend safely. The
+M-series ladder below is the **downstream edge track** (FEATURE_PLATFORM §9): it consumes the
+certified platform — order flow is one feature *group* that must pass FP certification, and no edge
+claim is trusted until its features are FP3-certified.
+
+**No incumbency bias:** the existing services, DB schema + data, and current features are
+THROWAWAY — rebuild or wipe whatever doesn't serve FP0–FP4 (FEATURE_PLATFORM §1.1). The design
+wins; the implementation gets rebuilt.
+
+---
+
+
 This is the single source of truth for **where we are going, what we are driving toward NOW,
 and how every agent's work ladders up to the goal.** The Manager keeps it current and
 communicates it in both directions (see Communication Protocol below). Every other role reads
@@ -172,20 +191,14 @@ milestone can REGRESS — the Manager re-checks these, not just the M-series, ev
 ---
 
 ## Current focus (the Manager updates this line every wake)
-**M2 in flight (sharded 512-name capture: built + reviewed, Monday pre-open deploy) — and the
-edge thesis is now SINGLE-PATH: M3 = OFI-or-bust on current data (decided 2026-06-12 eve).**
-The fork question is CLOSED: full-depth re-gate shows ret_5m+position does NOT survive on the
-liquid tier (liquid-50 IC 0.009, breakeven 0.82bps vs ~3bps measured median cost; only 11 names
-<1.4bps — signal and cheap names are DISJOINT; random-50 control 0.017 confirms partly
-liquidity-specific). OFI's job, precisely: lift breakeven ~1-2bps to unlock the 19-29-name
-liquid tier. (ATTRIBUTION CORRECTED 2026-06-12 eve: the 30m signal is VWAP_DEV — intraday
-VWAP-mean-reversion, IC 0.028 solo ≈ the whole set — not ret_5m (0.011, redundant); economic
-verdict unchanged; the OFI pilot baseline = the TRUE carriers vwap_dev+gap+ret_5m so OFI's
-marginal isn't overstated against a weak proxy.) Tempering: literature says OFI's predictive content is <3min → pilot MUST test
-native 5m/15m horizons; prior honestly 35%. Diversification if OFI nulls = explorer families
-(volume/vol-structure/shapes — note shapes/002 low-vol fade showing early liquid-tier promise)
-+ sector/news axes (sector map landing via #8). Weekend: 5-mind pipeline grinding toward the
-Monday bar (every lens ≥3 completed runs + ranked leads + kill list).
+**Current milestone: FP0 — stand up the feature-platform foundations** (`docs/FEATURE_PLATFORM.md`):
+the self-describing feature registry + generated catalog, first-class introspection
+(`make introspect`), and the T+1 Settled-Day Parity harness (`parity_test` / `make parity`). Port
+the existing ~25 features into the registry and get each to ≥95% per-tier, per-session parity on a
+settled day. Then FP1 (raw-tick capture for the full universe + extended hours 04:00–20:00 ET) →
+FP2 (the point-in-time minute vector, 500 features × 10k tickers in ≤2 s) → FP3 (daily parity
+gate) → FP4 (grow to 500 certified features). Order flow is one feature *group* in this ladder;
+the edge/strategy work is the downstream track (§9) and consumes only FP3-certified features.
 
 ---
 

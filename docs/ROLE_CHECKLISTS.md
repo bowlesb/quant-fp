@@ -1,5 +1,10 @@
 # Role checklists — a FLOOR, not a ceiling
 
+> Primary spine: the Feature Platform (`docs/FEATURE_PLATFORM.md`, milestones FP0–FP4). Frame
+> your wake's work against the current FP milestone's open exit criteria. The edge/strategy work
+> is the downstream track (FEATURE_PLATFORM §9) and never preempts an open FP criterion.
+
+
 Each role has a checklist of EXAMPLE concerns below. Rules:
 1. **Floor:** every wake, at least consider these — they guarantee baseline coverage so
    the obvious stuff is never missed.

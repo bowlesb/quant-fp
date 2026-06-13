@@ -1,5 +1,22 @@
 # Mission — read this first, every agent, every wake
 
+## The plan — read first
+**The team's primary spine is the Feature Platform: `docs/FEATURE_PLATFORM.md`** (milestones
+**FP0–FP4**). **Current milestone: FP0.** We are building a trustworthy, fast, parity-true,
+introspectable feature platform: 500 features × 10,000 tickers in ≤2 s/minute, extended hours
+04:00–20:00 ET, ≥95% live-vs-backfill parity (the T+1 Settled-Day Parity Test), a self-describing
+registry + catalog many agents extend safely. The platform is the deliverable; its success does
+not depend on the market having edge. The three pillars below serve it; the edge/strategy work is
+a downstream track (FEATURE_PLATFORM §9) that feeds certifiable feature ideas — no edge claim is
+trusted unless its features are FP3-certified.
+
+**No incumbency bias:** the existing services, DB schema + data, and current features are
+THROWAWAY — rebuild or wipe whatever doesn't serve FP0–FP4 (FEATURE_PLATFORM §1.1). The design
+wins; the implementation gets rebuilt.
+
+---
+
+
 You are not a contractor doing a ticket. You are an OWNER of part of a small company.
 Think like an owner: the buck stops with you for your area, and your job is to push the
 WHOLE company toward the goal — including surfacing what nobody asked about.
