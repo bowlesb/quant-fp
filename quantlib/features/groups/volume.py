@@ -1,29 +1,32 @@
-"""Volume features from per-minute bars over windows (family: VOLUME, Layer A)."""
-from __future__ import annotations
+"""Volume features from per-minute bars over windows (family: VOLUME, Layer A).
 
-import datetime as dt
+Migrated to the declarative reduction engine: it declares ``reduced``/``points``/``assemble`` ONCE and the
+engine generates both the rolling backfill form and the at-T live form (parity by construction). See
+quantlib/features/declarative.py.
+"""
+from __future__ import annotations
 
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
 )
+from quantlib.features.declarative import ReductionGroup, mean_, pt_, std_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
 
 
 @register
-class VolumeGroup(FeatureGroup):
+class VolumeGroup(ReductionGroup):
     name = "volume"
     version = "1.0.0"
     owner = "modeller"
     type = FeatureType.VOLUME
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),)
+    windows = WINDOWS
 
     def declare(self) -> list[FeatureSpec]:
         specs = [
@@ -58,40 +61,15 @@ class VolumeGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "volume"]).sort(["symbol", "minute"])
-        exprs = [(pl.col("close") * pl.col("volume")).cast(pl.Float64).alias("dollar_volume_1m")]
-        for w in WINDOWS:
-            mean_w = pl.col("volume").rolling_mean_by("minute", window_size=f"{w}m").over("symbol")
-            std_w = pl.col("volume").rolling_std_by("minute", window_size=f"{w}m").over("symbol")
-            exprs.append(((pl.col("volume") - mean_w) / std_w).cast(pl.Float64).alias(f"volume_zscore_{w}m"))
-            exprs.append((pl.col("volume") / mean_w).cast(pl.Float64).alias(f"volume_ratio_{w}m"))
-        names = ["dollar_volume_1m"] + [f"volume_zscore_{w}m" for w in WINDOWS] + [f"volume_ratio_{w}m" for w in WINDOWS]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...]]]:
+        return {"volume": (pl.col("volume"), ("mean", "std"))}
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE form: emit ONLY the most recent minute's value per symbol, via a windowed
-        aggregate at T (group_by over each window's slice) instead of a rolling pass over the whole
-        buffer. ~window× less work per feature; proven byte-identical to compute().filter(T) by
-        tests/test_fp_latest.py. The live path uses this; backfill keeps the vectorized rolling form."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "volume"])
-        latest = frame["minute"].max()
-        result = frame.filter(pl.col("minute") == latest).select(
-            ["symbol", (pl.col("close") * pl.col("volume")).cast(pl.Float64).alias("dollar_volume_1m"),
-             pl.col("volume").alias("_volT")]
-        )
+    def points(self) -> dict[str, pl.Expr]:
+        return {"volT": pl.col("volume"), "dv": pl.col("close") * pl.col("volume")}
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {"dollar_volume_1m": pt_("dv")}
         for w in WINDOWS:
-            low = latest - dt.timedelta(minutes=w)
-            agg = (
-                frame.filter((pl.col("minute") > low) & (pl.col("minute") <= latest))
-                .group_by("symbol")
-                .agg([pl.col("volume").mean().alias("_m"), pl.col("volume").std().alias("_s")])
-            )
-            result = result.join(agg, on="symbol", how="left").with_columns(
-                [
-                    ((pl.col("_volT") - pl.col("_m")) / pl.col("_s")).cast(pl.Float64).alias(f"volume_zscore_{w}m"),
-                    (pl.col("_volT") / pl.col("_m")).cast(pl.Float64).alias(f"volume_ratio_{w}m"),
-                ]
-            ).drop(["_m", "_s"])
-        names = ["dollar_volume_1m"] + [f"volume_zscore_{w}m" for w in WINDOWS] + [f"volume_ratio_{w}m" for w in WINDOWS]
-        return result.with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
+            feats[f"volume_zscore_{w}m"] = (pt_("volT") - mean_("volume", w)) / std_("volume", w)
+            feats[f"volume_ratio_{w}m"] = pt_("volT") / mean_("volume", w)
+        return feats
