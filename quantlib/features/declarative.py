@@ -23,6 +23,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from dataclasses import dataclass
 
+import numpy as np
 import polars as pl
 
 from quantlib.features import _phase
@@ -370,6 +371,119 @@ def assemble_from_long(
         glong = long.select(["symbol", "window", *canon, pl.lit(0.0).alias("__c_z")])
         piv = glong.pivot(on="window", index="symbol")
         piv = piv.rename({c: "__" + c[4:] for c in piv.columns if c.startswith("__c_") and not c.startswith("__c_z")})
+        wide = latest_frame.select(
+            ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
+        ).join(piv, on="symbol", how="left")
+        feats = group.assemble()
+        results[group.name] = (
+            wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
+            .with_columns(pl.lit(latest).alias("minute"))
+            .select(["symbol", "minute", *group._feature_names()])
+        )
+    return results
+
+
+def _canonical_numpy(
+    sums: np.ndarray, stats: tuple[str, ...], col_index: dict[str, int], base: str
+) -> dict[str, np.ndarray]:
+    """Numpy twin of ``_canonical`` for ONE reduced column over ONE window. ``sums`` is the ``(n_symbols,
+    n_value_cols)`` running-sum row for the window. Reproduces the IDENTICAL algebra cell-for-cell, with
+    ``np.nan`` standing in for polars ``null`` (the same guard conditions): mean = sum/count guarded count>0,
+    std(ddof=1) = sqrt((sumsq - sum^2/count)/(count-1)) guarded count>1. Returns {canonical_col_name: column}
+    keyed ``__c_<stat>_<name>`` to mirror the polars path's intermediate names."""
+    total = sums[:, col_index[base]]
+    out: dict[str, np.ndarray] = {}
+    name = base  # key the returned dict by ``base`` (the caller looks up ``__c_<stat>_<base>`` directly)
+    if "sum" in stats:
+        out[f"__c_sum_{name}"] = total
+    if "mean" in stats:
+        count = sums[:, col_index[f"{base}__p"]]
+        mean = np.where(count > 0, np.divide(total, count, out=np.zeros_like(total), where=count > 0), np.nan)
+        out[f"__c_mean_{name}"] = mean
+    if "std" in stats:
+        count = sums[:, col_index[f"{base}__p"]]
+        sumsq = sums[:, col_index[f"{base}__sq"]]
+        safe = count > 1
+        # ((sumsq - total^2/count) / (count - 1)).sqrt() — guarded count>1 (else null), matching _canonical.
+        # Sentinel count=2 on unsafe rows (count<=1) so the intermediate never divides by zero; those rows are
+        # then masked to NaN. On SAFE rows the algebra is bit-identical to the polars _canonical expression.
+        cnt_safe = np.where(safe, count, 2.0)
+        var_calc = (sumsq - total * total / cnt_safe) / (cnt_safe - 1.0)
+        out[f"__c_std_{name}"] = np.where(safe, np.sqrt(var_calc), np.nan)
+    return out
+
+
+def _ols_stat_numpy(
+    sums: np.ndarray, stats: tuple[str, ...], col_index: dict[str, int], ns: str
+) -> dict[str, np.ndarray]:
+    """Numpy twin of ``_ols_stat_exprs`` for ONE regression over ONE window — IDENTICAL algebra to
+    ``_ols_derived``/``ols.py``, with ``np.nan`` for polars ``null`` and the SAME defined guards (b>=2 &
+    denom_x>0 for slope; additionally denom_y>0 for corr/r2). The six paired sums are columns
+    ``__rd_<ns>_{b,x,y,xy,xx,yy}`` in the running-sum row."""
+    base_sums = {key: sums[:, col_index[f"__rd_{ns}_{key}"]] for key in ("b", "x", "y", "xy", "xx", "yy")}
+    b, sx, sy, sxy, sxx, syy = (base_sums[key] for key in ("b", "x", "y", "xy", "xx", "yy"))
+    denom_x = b * sxx - sx * sx
+    denom_y = b * syy - sy * sy
+    cov_n = b * sxy - sx * sy
+    defined = (b >= 2.0) & (denom_x > 0.0)
+    defined_corr = defined & (denom_y > 0.0)
+    out: dict[str, np.ndarray] = {}
+    if "slope" in stats:
+        slope = np.where(defined, np.divide(cov_n, denom_x, out=np.zeros_like(cov_n), where=defined), np.nan)
+        out["slope"] = slope
+    if "corr" in stats:
+        denom = np.sqrt(denom_x * denom_y)
+        corr = np.where(defined_corr, np.divide(cov_n, denom, out=np.zeros_like(cov_n), where=defined_corr), np.nan)
+        out["corr"] = corr
+    if "r2" in stats:
+        prod = denom_x * denom_y
+        r2 = np.where(defined_corr, np.divide(cov_n * cov_n, prod, out=np.zeros_like(cov_n), where=defined_corr), np.nan)
+        out["r2"] = r2
+    if "mean_y" in stats:
+        out["mean_y"] = np.where(b > 0, np.divide(sy, b, out=np.zeros_like(sy), where=b > 0), np.nan)
+    return out
+
+
+def emit_numpy(
+    groups: list[ReductionGroup],
+    running: np.ndarray,
+    symbols: list[str],
+    windows: tuple[int, ...],
+    col_index: dict[str, int],
+    latest_frame: pl.DataFrame,
+    latest: object,
+    plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+    reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+) -> dict[str, pl.DataFrame]:
+    """NUMPY-NATIVE alternative to ``assemble_from_long`` — builds each group's per-window canonical columns
+    (``__<stat>_<name>_<w>``) DIRECTLY from the ``(n_windows, n_symbols, n_value_cols)`` running-sum array,
+    BYPASSING the polars pivot. The canonical/OLS algebra is the numpy twin of ``_canonical``/``_ols_stat_exprs``
+    (parity-true by construction; null↔NaN), and a column is only emitted for the windows a group actually
+    declares (so the wide frame already has the accessor-expected columns, no pivot/rename). ``running`` is
+    ``WindowedSumState.running``; ``col_index`` maps value-col name -> column index. Returns the SAME
+    {group_name: feature_frame} shape as ``assemble_from_long``."""
+    win_index = {int(w): wi for wi, w in enumerate(windows)}
+    results: dict[str, pl.DataFrame] = {}
+    for gi, group in enumerate(groups):
+        wide_cols: dict[str, pl.Series] = {}
+        for pgi, name, stats, group_windows, base in plan:
+            if pgi != gi:
+                continue
+            for w in group_windows:
+                row_sums = running[win_index[int(w)]]
+                canon = _canonical_numpy(row_sums, stats, col_index, base)
+                for stat in stats:
+                    column = canon[f"__c_{stat}_{base}"]
+                    wide_cols[f"__{stat}_{name}_{w}"] = pl.Series(column, dtype=pl.Float64)
+        for pgi, name, stats, group_windows, ns in reg_plan:
+            if pgi != gi:
+                continue
+            for w in group_windows:
+                row_sums = running[win_index[int(w)]]
+                ols = _ols_stat_numpy(row_sums, stats, col_index, ns)
+                for stat in stats:
+                    wide_cols[f"__{stat}_{name}_{w}"] = pl.Series(ols[stat], dtype=pl.Float64)
+        piv = pl.DataFrame({"symbol": symbols, **wide_cols})
         wide = latest_frame.select(
             ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
         ).join(piv, on="symbol", how="left")

@@ -31,6 +31,7 @@ from quantlib.features.declarative import (
     StatefulRegressor,
     assemble_from_long,
     build_plan,
+    emit_numpy,
 )
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
@@ -280,6 +281,31 @@ class IncrementalEngine:
         long = self._running_long()
         latest_frame = frame.filter(pl.col("minute") == latest)
         return assemble_from_long(self.groups, long, latest_frame, latest, self.plan, self.reg_plan)
+
+    def step_numpy(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
+        """NUMPY-EMIT alternative to ``step``: fold the new minute, then assemble features DIRECTLY from the
+        running-sum numpy array via ``emit_numpy`` (no ``_running_long`` long-frame build, no polars pivot in
+        assemble). Parity-true by construction — ``emit_numpy`` uses the IDENTICAL canonical/OLS algebra as the
+        polars ``assemble_from_long``. Guarded against it cell-for-cell by tests/test_fp_incremental_emit.py."""
+        latest = frame["minute"].max()
+        if self.state is None:
+            self.seed(frame)
+        else:
+            self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
+            self.state.trim()
+        assert self.state is not None
+        latest_frame = frame.filter(pl.col("minute") == latest)
+        return emit_numpy(
+            self.groups,
+            self.state.running,
+            self.symbols or [],
+            self.windows,
+            self.col_index,
+            latest_frame,
+            latest,
+            self.plan,
+            self.reg_plan,
+        )
 
     def _running_long(self) -> pl.DataFrame:
         """The running sums as a LONG (symbol, window, <value-col sum>) frame — the exact shape
