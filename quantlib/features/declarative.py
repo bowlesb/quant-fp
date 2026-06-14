@@ -48,15 +48,15 @@ def pt_(name: str) -> pl.Expr:
 
 
 class ReductionGroup(FeatureGroup):
-    """Base for a windowed-reduction feature group. Set ``windows`` + ``reduce_input`` and implement
-    ``reduced()`` / ``points()`` / ``assemble()``; ``compute()`` and ``compute_latest()`` are generated."""
+    """Base for a windowed-reduction feature group. Set ``reduce_input`` and implement ``reduced()`` /
+    ``points()`` / ``assemble()``; ``compute()`` and ``compute_latest()`` are generated."""
 
-    windows: tuple[int, ...]
     reduce_input: str = "minute_agg"
 
     @abstractmethod
-    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...]]]:
-        """{column_name: (expr_over_input, stats)} — the values to reduce and which stats each needs."""
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        """{column_name: (expr_over_input, stats, windows)} — the value to reduce, which stats each needs
+        ("mean"|"std"|"sum"), and the windows (in minutes) for that column (each column may differ)."""
 
     def points(self) -> dict[str, pl.Expr]:
         """{name: expr_over_input} — at-T scalar columns referenced via pt_() in assemble(). Default none."""
@@ -79,11 +79,11 @@ class ReductionGroup(FeatureGroup):
         """Generated BACKFILL form: rolling_*_by over every minute (source of truth)."""
         frame = ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
         reduced = self.reduced()
-        frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _) in reduced.items()])
+        frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
         mats: list[pl.Expr] = []
-        for name, (_, stats) in reduced.items():
+        for name, (_, stats, windows) in reduced.items():
             source = pl.col(f"__d_{name}")
-            for w in self.windows:
+            for w in windows:
                 size = f"{w}m"
                 if "mean" in stats:
                     mats.append(source.rolling_mean_by("minute", window_size=size).over("symbol").alias(f"__mean_{name}_{w}"))
@@ -102,15 +102,15 @@ class ReductionGroup(FeatureGroup):
         """Generated LIVE form: aggregate-at-T via the Rust reduction kernel, one row per symbol."""
         frame = ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
         reduced = self.reduced()
-        frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _) in reduced.items()])
+        frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
         latest = frame["minute"].max()
         wide = frame.filter(pl.col("minute") == latest).select(
             ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in self.points().items()]]
         )
-        for name, (_, stats) in reduced.items():
-            long = rust_reductions(frame, f"__d_{name}", self.windows)
+        for name, (_, stats, windows) in reduced.items():
+            long = rust_reductions(frame, f"__d_{name}", windows)
             for stat in stats:
-                wide = wide.join(pivot_stat(long, stat, f"__{stat}_{name}_{{w}}", self.windows), on="symbol", how="left")
+                wide = wide.join(pivot_stat(long, stat, f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left")
         feats = self.assemble()
         return (
             wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])

@@ -61,8 +61,8 @@ class VolumeGroup(ReductionGroup):
             )
         return specs
 
-    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...]]]:
-        return {"volume": (pl.col("volume"), ("mean", "std"))}
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        return {"volume": (pl.col("volume"), ("mean", "std"), WINDOWS)}
 
     def points(self) -> dict[str, pl.Expr]:
         return {"volT": pl.col("volume"), "dv": pl.col("close") * pl.col("volume")}
