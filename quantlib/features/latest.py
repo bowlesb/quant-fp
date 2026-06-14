@@ -79,43 +79,58 @@ def rust_reductions(frame: pl.DataFrame, value_col: str, windows: tuple[int, ...
     ).select(["symbol", "window", "sum", "mean", "std", "min", "max"])
 
 
+def rust_windowed_sums(
+    frame: pl.DataFrame, value_cols: list[str], windows: tuple[int, ...] | list[int], by: str = "minute"
+) -> pl.DataFrame:
+    """SINGLE-PASS windowed sums of MANY columns via the Rust kernel (quant_tick.windowed_sums) — the
+    replacement for one-buffer-scan-per-window Polars slicing. ``frame`` sorted by (symbol, by). Nulls
+    are summed as 0 (the caller passes a present-indicator column if it needs the non-null count).
+    Returns a LONG frame (symbol, window, _n, <sum of each value_col under its own name>)."""
+    latest = frame[by].max()
+    t = int(latest.timestamp())
+    uniq = sorted(frame["symbol"].unique().to_list())
+    codes = pl.DataFrame({"symbol": uniq, "_c": list(range(len(uniq)))}, schema={"symbol": pl.String, "_c": pl.Int64})
+    prepared = (
+        frame.join(codes, on="symbol", how="left")
+        .with_columns([pl.col(by).dt.epoch("s").alias("_mi")] + [pl.col(c).fill_null(0.0) for c in value_cols])
+        .sort(["_c", "_mi"])
+    )
+    win_min = sorted(int(w) for w in windows)
+    sym, win, n, sums = quant_tick.windowed_sums(
+        prepared["_c"].to_list(), prepared["_mi"].to_list(),
+        [prepared[c].to_list() for c in value_cols], [w * 60 for w in win_min], t,
+    )
+    reverse = dict(enumerate(uniq))
+    data: dict[str, list] = {"symbol": [reverse[c] for c in sym], "window": [w // 60 for w in win], "_n": n}
+    for idx, col in enumerate(value_cols):
+        data[col] = sums[idx]
+    return pl.DataFrame(data)
+
+
 def windowed_ols_latest(
     frame: pl.DataFrame, x: str, y: str, windows: tuple[int, ...] | list[int], by: str = "minute"
 ) -> pl.DataFrame:
-    """Aggregate-at-T OLS of ``y`` on ``x`` per window: one slice+group_by per window computing the six
-    rolling sums, then the same slope/corr/r2/mean algebra as ``with_ols_columns`` — so the live OLS
-    matches the rolling backfill form (parity-guarded). Pairs only where BOTH x,y are present. Returns a
-    LONG frame (symbol, window, slope, corr, r2, mean_y). The group pivots what it needs."""
-    latest = frame[by].max()
+    """Aggregate-at-T OLS of ``y`` on ``x`` per window via the SINGLE-PASS Rust sums kernel, then the same
+    slope/corr/r2/mean algebra as ``with_ols_columns`` — so the live OLS matches the rolling backfill form
+    (parity-guarded). Pairs only where BOTH x,y are present. Returns LONG (symbol, window, slope, corr,
+    r2, mean_y)."""
     both = pl.col(x).is_not_null() & pl.col(y).is_not_null()
     prepared = frame.with_columns(
         [
-            pl.when(both).then(pl.col(x)).otherwise(0.0).alias("_x"),
-            pl.when(both).then(pl.col(y)).otherwise(0.0).alias("_y"),
-            both.cast(pl.Float64).alias("_b"),
+            pl.when(both).then(pl.col(x)).otherwise(0.0).alias("_olx"),
+            pl.when(both).then(pl.col(y)).otherwise(0.0).alias("_oly"),
+            both.cast(pl.Float64).alias("_olb"),
         ]
     )
-    parts = []
-    for w in windows:
-        low = latest - dt.timedelta(minutes=w)
-        agg = (
-            prepared.filter((pl.col(by) > low) & (pl.col(by) <= latest))
-            .group_by("symbol")
-            .agg(
-                [
-                    pl.col("_b").sum().alias("n"),
-                    pl.col("_x").sum().alias("sx"),
-                    pl.col("_y").sum().alias("sy"),
-                    (pl.col("_x") * pl.col("_y")).sum().alias("sxy"),
-                    (pl.col("_x") * pl.col("_x")).sum().alias("sxx"),
-                    (pl.col("_y") * pl.col("_y")).sum().alias("syy"),
-                ]
-            )
-            .with_columns(pl.lit(w, dtype=pl.Int64).alias("window"))
-        )
-        parts.append(agg)
-    long = pl.concat(parts)
-    n, sx, sy, sxy, sxx, syy = (pl.col(c) for c in ("n", "sx", "sy", "sxy", "sxx", "syy"))
+    prepared = prepared.with_columns(
+        [
+            (pl.col("_olx") * pl.col("_oly")).alias("_olxy"),
+            (pl.col("_olx") * pl.col("_olx")).alias("_olxx"),
+            (pl.col("_oly") * pl.col("_oly")).alias("_olyy"),
+        ]
+    )
+    long = rust_windowed_sums(prepared, ["_olb", "_olx", "_oly", "_olxy", "_olxx", "_olyy"], windows, by=by)
+    n, sx, sy, sxy, sxx, syy = (pl.col(c) for c in ("_olb", "_olx", "_oly", "_olxy", "_olxx", "_olyy"))
     denom_x = n * sxx - sx * sx
     denom_y = n * syy - sy * sy
     cov_n = n * sxy - sx * sy

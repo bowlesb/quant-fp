@@ -166,9 +166,79 @@ fn windowed_reduce(
     Ok((out_sym, out_win, out_n, out_sum, out_sumsq, out_min, out_max))
 }
 
+/// Generic single-pass windowed SUMS of MANY columns at once — the kernel every reduction feature
+/// group calls instead of one-buffer-scan-per-window Polars slicing. For each (symbol, window) it
+/// returns the count + the sum of each value column, computed in ONE backward pass per symbol (snapshot
+/// at each window boundary). The caller precomputes whatever columns it needs (x, y, x*y, x², r, r², r³,
+/// r⁴, signed volume, …) and derives means / std / OLS slope-corr-r² / moments from the sums. Fresh
+/// each minute (no accumulator drift). ~n_windows× less work than per-window slicing.
+///
+/// Inputs sorted by (symbol, minute). ``values`` is a list of columns (each len == n_rows). ``windows``
+/// ascending seconds; ``t`` the latest minute (epoch s); window w covers minutes in (t-w, t].
+/// Returns (out_symbol, out_window, n, sums) where ``sums`` has one column per input value column, each
+/// flattened in (symbol, ascending-window) order.
+#[pyfunction]
+fn windowed_sums(
+    symbol: Vec<i64>,
+    minute: Vec<i64>,
+    values: Vec<Vec<f64>>,
+    windows: Vec<i64>,
+    t: i64,
+) -> PyResult<(Vec<i64>, Vec<i64>, Vec<f64>, Vec<Vec<f64>>)> {
+    let n_rows = symbol.len();
+    let nw = windows.len();
+    let nc = values.len();
+    let mut out_sym: Vec<i64> = Vec::new();
+    let mut out_win: Vec<i64> = Vec::new();
+    let mut out_n: Vec<f64> = Vec::new();
+    let mut out_sums: Vec<Vec<f64>> = (0..nc).map(|_| Vec::new()).collect();
+
+    let mut i: usize = 0;
+    while i < n_rows {
+        let s = symbol[i];
+        let mut j = i;
+        while j < n_rows && symbol[j] == s {
+            j += 1;
+        }
+        let mut count = 0.0;
+        let mut acc = vec![0.0f64; nc];
+        let mut k: usize = 0;
+        let mut r = j;
+        while r > i {
+            r -= 1;
+            let d = t - minute[r];
+            while k < nw && d >= windows[k] {
+                out_sym.push(s);
+                out_win.push(windows[k]);
+                out_n.push(count);
+                for c in 0..nc {
+                    out_sums[c].push(acc[c]);
+                }
+                k += 1;
+            }
+            count += 1.0;
+            for c in 0..nc {
+                acc[c] += values[c][r];
+            }
+        }
+        while k < nw {
+            out_sym.push(s);
+            out_win.push(windows[k]);
+            out_n.push(count);
+            for c in 0..nc {
+                out_sums[c].push(acc[c]);
+            }
+            k += 1;
+        }
+        i = j;
+    }
+    Ok((out_sym, out_win, out_n, out_sums))
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
     m.add_function(wrap_pyfunction!(windowed_reduce, m)?)?;
+    m.add_function(wrap_pyfunction!(windowed_sums, m)?)?;
     Ok(())
 }
