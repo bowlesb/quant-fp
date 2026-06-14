@@ -18,7 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
-from quantlib.features.ols import ols_window_exprs
+from quantlib.features.ols import with_ols_columns
 from quantlib.features.registry import register
 
 AUTOCORR_WINDOWS: tuple[int, ...] = (10, 15, 30, 60, 120)
@@ -54,19 +54,25 @@ class ReturnDynamicsGroup(FeatureGroup):
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev1")
-        for w in ACCEL_WINDOWS:
-            frame = lagged(frame, "close", w, f"_lag{w}")
-            frame = lagged(frame, "close", 2 * w, f"_lag{2 * w}")
+        # Each distinct close-lag is a self-join; compute each ONCE (dedup w/2w overlaps) and derive
+        # the return-lags from the close-lags instead of two more joins on _ret. _ret_lag1 at t is the
+        # return at t-1 = close[t-1]/close[t-2] - 1, etc — byte-identical to lagging _ret directly.
+        lags = sorted({1, 2, 3} | {w for w in ACCEL_WINDOWS} | {2 * w for w in ACCEL_WINDOWS})
+        for offset in lags:
+            frame = lagged(frame, "close", offset, f"_lag{offset}")
         frame = frame.sort(["symbol", "minute"])
-        frame = frame.with_columns((pl.col("close") / pl.col("_prev1") - 1.0).alias("_ret"))
-        frame = lagged(frame, "_ret", 1, "_ret_lag1")
-        frame = lagged(frame, "_ret", 2, "_ret_lag2").sort(["symbol", "minute"])
-        exprs = []
+        frame = frame.with_columns(
+            [
+                (pl.col("close") / pl.col("_lag1") - 1.0).alias("_ret"),
+                (pl.col("_lag1") / pl.col("_lag2") - 1.0).alias("_ret_lag1"),
+                (pl.col("_lag2") / pl.col("_lag3") - 1.0).alias("_ret_lag2"),
+            ]
+        )
         for w in AUTOCORR_WINDOWS:
             size = f"{w}m"
-            exprs.append(ols_window_exprs("_ret_lag1", "_ret", size)["corr"].cast(pl.Float64).alias(f"autocorr_1_{w}m"))
-            exprs.append(ols_window_exprs("_ret_lag2", "_ret", size)["corr"].cast(pl.Float64).alias(f"autocorr_2_{w}m"))
+            frame = with_ols_columns(frame, "_ret_lag1", "_ret", size, {"corr": f"autocorr_1_{w}m"})
+            frame = with_ols_columns(frame, "_ret_lag2", "_ret", size, {"corr": f"autocorr_2_{w}m"})
+        exprs = []
         for w in ACCEL_WINDOWS:
             recent = pl.col("close") / pl.col(f"_lag{w}") - 1.0
             prior = pl.col(f"_lag{w}") / pl.col(f"_lag{2 * w}") - 1.0
