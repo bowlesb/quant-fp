@@ -39,29 +39,35 @@ Optimal config measured: **10 shards × 3 polars threads** at 10k/32-cores.
 
 ## The three tracks
 - **A — feature types: DONE.** Guide: `docs/FEATURE_TYPES.md`. ~54% smaller on disk; reads widen to Float64.
-- **B — declarative/fused engine: BUILT (core done; migration ongoing).** `quantlib/features/declarative.py`:
-  a `ReductionGroup` declares `reduced()`/`points()`/`assemble()` ONCE → engine generates `compute()`
-  (rolling backfill) + `compute_latest()` (at-T live). `compute_reduction_batch()` runs MANY declarative
-  groups in ONE shared marshal+kernel pass and IS WIRED INTO `process_bars` (the live path). Migrated so far:
-  **volume, volatility, ohlc_vol** (each parity-gated; `tests/test_fp_declarative.py`). Batching speedup
-  scales with group count: 1.69× (2 groups) → 1.88× (3) toward the one-marshal-vs-N limit.
+- **B — declarative/fused engine: BUILT incl. OLS (migration ongoing).** `quantlib/features/declarative.py`:
+  a `ReductionGroup` declares `reduced()` (mean/std/sum) + `regressions()` (OLS slope/corr/r2/mean_y) +
+  `points()` + `assemble()` ONCE → engine generates `compute()` (rolling backfill) + `compute_latest()`
+  (at-T live), and `compute_reduction_batch()` runs MANY groups in ONE shared marshal+kernel pass (wired
+  into `process_bars`). OLS is just six paired windowed sums, so it folds into the same batch. **Migrated
+  (6): volume, volatility, ohlc_vol, trade_flow, quote_spread, return_dynamics (OLS).** Each parity-gated;
+  `tests/test_fp_declarative.py` proves batched==per-group for reduction+OLS. Speedup scales: 1.69× (2) →
+  2.33× (5) groups. **Async writes evaluated and REJECTED** (background-thread zstd contends: 10k sync
+  884ms vs async 981ms p99); `StoreWriter` is opt-in (`FP_ASYNC_WRITE`), default sync. For the bet-latency
+  decoupling, REORDER (compute→bet→write sync) when a bet step exists, don't use a contending thread.
 - **C — GPU: SPIKED AND RULED OUT for feature compute.** RTX 3090 works post-reboot; `fp-gpu` image built.
   But the polars GPU engine is SLOWER on our ops (transfer/launch overhead at 1–4M rows) and `rolling_*_by`
   (every backfill feature) is unsupported → CPU fallback. Parity was fine (1e-16…1e-13). CPU path wins +
   stays readable. 3090 → reserve for model TRAINING. Details in `docs/FUSED_ENGINE.md`.
 
 ## Exact next steps (in order)
-1. **Migrate the remaining pure mean/std/sum reduction groups** to `ReductionGroup` (mechanical, each
-   parity-gated by `tests/test_fp_latest.py`): candidates `trade_flow`, `quote_spread`, `liquidity`,
-   `price_levels`, `trend_quality`, `momentum`, `price_returns`. Each one joins the batch → bigger speedup.
-2. **Extend the engine for two more reduction shapes**, then migrate the groups that need them:
-   - OLS/correlation (sum of x, y, xy, x², y²) → `price_volume`, `market_beta`, `return_dynamics`,
-     `trend_quality` (R²). Add a `corr_`/`slope_` accessor backed by `windowed_sums`.
-   - 3rd/4th moments (sum of r³, r⁴ + an `n_` accessor) → `distribution` (skew/kurt).
-3. **Re-benchmark the full 10k streaming run** once most groups are declarative — expect the per-shard
-   compute to drop well below the current ~0.9s p99 (one marshal for ~12 groups instead of 12).
-4. **Sharded backfill runner** so a new feature backfills over months×10k across all cores "in minutes"
-   (reuse the live sharding infra; reads from the store / raw bars on disk) — the modeling-iteration payoff.
+1. **Migrate the remaining reduction/OLS groups** (mechanical, each parity-gated by `tests/test_fp_latest.py`;
+   the engine already supports mean/std/sum + OLS): `price_volume` (sums + corr + obv-slope, 70 feats — the
+   biggest single win), `trend_quality` (R² + sums), `liquidity` (mean/sum + roll-spread autocovariance),
+   `price_returns`, `momentum`. Each joins the batch → bigger speedup.
+2. **Two small engine extensions, then migrate their groups:**
+   - **min/max** stat (rust_reductions already returns them; add `max_`/`min_` accessors + a windowed
+     min/max kernel for the BATCH since windowed_sums can't do min/max) → `price_levels`.
+   - **3rd/4th moments** (sum of r³, r⁴ + expose `n_`) → `distribution` (skew/kurt).
+   - **a `prepare(frame)` hook** for groups whose x/y need a cross-symbol join (broadcast SPY return) →
+     `market_beta` (regresses stock ret on SPY ret).
+3. **Re-benchmark 10k** as groups migrate (current 6-group ~0.88s p99); the more migrate, the lower.
+4. **Sharded backfill runner** — a new feature backfills months×10k across all cores "in minutes" (reuse
+   live sharding; read from the store / raw bars on disk) — the modeling-iteration payoff.
 
 ## Key commands (all in ~/quant-fp)
 ```bash
