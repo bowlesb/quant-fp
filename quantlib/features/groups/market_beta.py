@@ -18,7 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
-from quantlib.features.ols import ols_window_exprs
+from quantlib.features.ols import with_ols_columns
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (10, 15, 30, 45, 60, 90, 120)
@@ -59,14 +59,19 @@ class MarketBetaGroup(FeatureGroup):
             .select(["minute", pl.col("_ret").alias("_mret")])
         )
         frame = frame.join(market, on="minute", how="left").sort(["symbol", "minute"])
-        exprs = []
+        r2_cols = []
         for w in WINDOWS:
             size = f"{w}m"
-            fit = ols_window_exprs("_mret", "_ret", size)
-            ret_std = pl.col("_ret").rolling_std_by("minute", window_size=size).over("symbol")
-            idio = ret_std * (1.0 - fit["r2"]).clip(0.0, 1.0).sqrt()
-            exprs.append(fit["slope"].cast(pl.Float64).alias(f"market_beta_{w}m"))
-            exprs.append(fit["corr"].cast(pl.Float64).alias(f"market_corr_{w}m"))
-            exprs.append(idio.cast(pl.Float64).alias(f"idio_vol_{w}m"))
+            r2_col = f"_r2_{w}"
+            frame = with_ols_columns(
+                frame, "_mret", "_ret", size,
+                {"slope": f"market_beta_{w}m", "corr": f"market_corr_{w}m", "r2": r2_col},
+            )
+            r2_cols.append(r2_col)
+        idio = []
+        for w in WINDOWS:
+            ret_std = pl.col("_ret").rolling_std_by("minute", window_size=f"{w}m").over("symbol")
+            idio.append((ret_std * (1.0 - pl.col(f"_r2_{w}")).clip(0.0, 1.0).sqrt()).cast(pl.Float64).alias(f"idio_vol_{w}m"))
+        frame = frame.with_columns(idio).drop(r2_cols)
         names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("market_beta", "market_corr", "idio_vol")]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+        return frame.select(["symbol", "minute", *names])

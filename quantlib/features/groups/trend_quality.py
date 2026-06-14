@@ -20,7 +20,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
-from quantlib.features.ols import centered_minutes, ols_window_exprs
+from quantlib.features.ols import centered_minutes, with_ols_columns
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
@@ -55,14 +55,14 @@ class TrendQualityGroup(FeatureGroup):
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
         frame = centered_minutes(frame, "_t")
-        exprs = []
         for w in WINDOWS:
             size = f"{w}m"
-            fit = ols_window_exprs("_t", "close", size)
-            mean_close = pl.col("close").rolling_mean_by("minute", window_size=size).over("symbol")
-            exprs.append((fit["slope"] / mean_close).cast(pl.Float64).alias(f"price_slope_{w}m"))
-            exprs.append(fit["r2"].cast(pl.Float64).alias(f"price_r2_{w}m"))
-        frame = frame.with_columns(exprs)
+            frame = with_ols_columns(frame, "_t", "close", size, {"slope": f"_rawslope_{w}", "r2": f"price_r2_{w}m"})
+        slope_exprs = []
+        for w in WINDOWS:
+            mean_close = pl.col("close").rolling_mean_by("minute", window_size=f"{w}m").over("symbol")
+            slope_exprs.append((pl.col(f"_rawslope_{w}") / mean_close).cast(pl.Float64).alias(f"price_slope_{w}m"))
+        frame = frame.with_columns(slope_exprs).drop([f"_rawslope_{w}" for w in WINDOWS])
         strength = [
             (pl.col(f"price_slope_{w}m") * pl.col(f"price_r2_{w}m")).cast(pl.Float64).alias(f"trend_strength_{w}m")
             for w in WINDOWS

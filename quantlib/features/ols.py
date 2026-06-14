@@ -26,6 +26,49 @@ def centered_minutes(frame: pl.DataFrame, out: str = "_t", by: str = "minute") -
     return frame.with_columns(((pl.col(by).dt.epoch("s").cast(pl.Float64) - float(t0)) / 60.0).alias(out))
 
 
+def with_ols_columns(
+    frame: pl.DataFrame,
+    x: str,
+    y: str,
+    window: str,
+    outputs: dict[str, str],
+    by: str = "minute",
+    over: str = "symbol",
+) -> pl.DataFrame:
+    """Add OLS outputs for ``y`` on ``x`` over ``window`` as named columns, materializing the six
+    rolling sums ONCE as temporaries (then dropped) so slope/corr/r2 share them instead of each
+    re-deriving the rolling work. ``outputs`` maps a kind in {"slope","corr","r2"} to a column name.
+    Byte-identical to ``ols_window_exprs`` — pure algebra reuse, no value change. The frame must
+    contain x, y, ``by`` and be sorted by (``over``, ``by``)."""
+    cx, cy = pl.col(x), pl.col(y)
+    both = cx.is_not_null() & cy.is_not_null()
+    x_paired = pl.when(both).then(cx).otherwise(0.0)
+    y_paired = pl.when(both).then(cy).otherwise(0.0)
+    tmp = f"__ols_{x}_{y}_{window}_"
+    sums = {
+        "n": both.cast(pl.Float64).rolling_sum_by(by, window).over(over),
+        "sx": x_paired.rolling_sum_by(by, window).over(over),
+        "sy": y_paired.rolling_sum_by(by, window).over(over),
+        "sxy": (x_paired * y_paired).rolling_sum_by(by, window).over(over),
+        "sxx": (x_paired * x_paired).rolling_sum_by(by, window).over(over),
+        "syy": (y_paired * y_paired).rolling_sum_by(by, window).over(over),
+    }
+    frame = frame.with_columns([expr.alias(tmp + key) for key, expr in sums.items()])
+    n, sx, sy, sxy, sxx, syy = (pl.col(tmp + key) for key in ("n", "sx", "sy", "sxy", "sxx", "syy"))
+    denom_x = n * sxx - sx * sx
+    denom_y = n * syy - sy * sy
+    cov_n = n * sxy - sx * sy
+    defined = (n >= 2.0) & (denom_x > 0.0)
+    defined_corr = defined & (denom_y > 0.0)
+    derived = {
+        "slope": pl.when(defined).then(cov_n / denom_x).otherwise(None),
+        "corr": pl.when(defined_corr).then(cov_n / (denom_x * denom_y).sqrt()).otherwise(None),
+        "r2": pl.when(defined_corr).then((cov_n * cov_n) / (denom_x * denom_y)).otherwise(None),
+    }
+    frame = frame.with_columns([derived[kind].cast(pl.Float64).alias(name) for kind, name in outputs.items()])
+    return frame.drop([tmp + key for key in sums])
+
+
 def ols_window_exprs(x: str, y: str, window: str, by: str = "minute", over: str = "symbol") -> dict[str, pl.Expr]:
     """Polars expressions for the rolling OLS of ``y`` on ``x`` over a time-anchored ``window`` (e.g.
     "30m"), grouped ``over`` symbol. Returns ``{"slope","corr","r2","n"}``. The frame must contain

@@ -88,12 +88,16 @@ Live needs minute T's value, not the whole buffer. Two complementary moves, both
   the rolling form (whole day at once is efficient there). Same window spec drives both, so the test
   guards a mechanical transform, not hand-rewrites.
 
-### 4. Kernel optimization (immediate, no parity change — identical values)
-The OLS-kernel groups dominate because `ols_window_exprs` recomputes 6 rolling sums per call, and
-price_volume calls it 20×/window. Compute the shared rolling sums (Sx, Sy, Sxy, Sxx, Syy, n) ONCE per
-(column-pair, window) and derive slope/corr/r²/cov from them. Expect 2-5× on the five hot groups with
-byte-identical output (pure algebra reuse). Same for re-sorting: groups each `.sort` the frame; sort
-once upstream and pass a pre-sorted frame.
+### 4. Kernel optimization (DONE for trend_quality/market_beta — MEASURED ~9×, byte-identical)
+The OLS-kernel groups dominated because polars eager does NOT common-subexpression-eliminate the
+rolling sums: each slope/corr/r² extraction re-derived all six `rolling_sum_by` ops. `with_ols_columns`
+(quantlib/features/ols.py) materializes the six sums ONCE as temporaries, then derives the outputs
+cheaply. Measured @ 2000 tickers: trend_quality **1984 → 213 ms (9.3×)**, market_beta **1770 → 172 ms
+(10×)** — byte-identical (all correctness + parity tests still pass). Total fell 13.3s → 5.2s. Remaining
+to apply: price_volume (now the bottleneck — materialize the per-window volume sums once; it recomputes
+`vol_w` 5×), distribution (the 4 power sums). return_dynamics is instead `lagged()`-join-bound (13
+self-joins) — a separate fix (compute lags in one pass). Same idea for re-sorting: groups each `.sort`;
+sort once upstream and pass a pre-sorted frame.
 
 ### 5. DB write concurrency (real-time, parallel workers)
 Each shard writes only its own symbols, so writes are naturally partition-disjoint (no row
