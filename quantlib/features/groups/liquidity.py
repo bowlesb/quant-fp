@@ -22,6 +22,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import pivot_stat, slice_aggregates, windowed_ols_latest
 from quantlib.features.ols import ols_window_exprs
 from quantlib.features.registry import register
 
@@ -84,3 +85,44 @@ class LiquidityGroup(FeatureGroup):
             exprs.append(kyle.cast(pl.Float64).alias(f"kyle_lambda_{w}m"))
         names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("amihud_illiq", "roll_spread", "kyle_lambda")]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: Amihud = mean term; Roll from per-window price-change autocovariance sums;
+        Kyle = aggregate-at-T OLS slope of price change on signed flow. Same formulas as compute()."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "volume", "signed_volume"])
+        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
+        dp = pl.col("close") - pl.col("_prev")
+        dollar = pl.col("close") * pl.col("volume")
+        abs_ret = (pl.col("close") / pl.col("_prev") - 1.0).abs()
+        frame = frame.with_columns([dp.alias("_dp"), (abs_ret / dollar).alias("_amihud_term")])
+        frame = lagged(frame, "_dp", 1, "_dp_lag").sort(["symbol", "minute"])
+        both = pl.col("_dp").is_not_null() & pl.col("_dp_lag").is_not_null()
+        frame = frame.with_columns(
+            [
+                both.cast(pl.Float64).alias("_pair"),
+                pl.when(both).then(pl.col("_dp")).otherwise(0.0).alias("_dpz"),
+                pl.when(both).then(pl.col("_dp_lag")).otherwise(0.0).alias("_dplz"),
+            ]
+        )
+        frame = frame.with_columns((pl.col("_dpz") * pl.col("_dplz")).alias("_dpprod"))
+
+        def aggs(w: int) -> list[pl.Expr]:
+            return [
+                pl.col("_amihud_term").mean().alias(f"_amihud{w}"), pl.col("_pair").sum().alias(f"_n{w}"),
+                pl.col("_dpz").sum().alias(f"_sdp{w}"), pl.col("_dplz").sum().alias(f"_sdpl{w}"),
+                pl.col("_dpprod").sum().alias(f"_sprod{w}"),
+            ]
+
+        out, latest = slice_aggregates(frame, WINDOWS, aggs)
+        kyle = pivot_stat(windowed_ols_latest(frame, "signed_volume", "_dp", WINDOWS), "slope", "kyle_lambda_{w}m", WINDOWS)
+        close_t = frame.filter(pl.col("minute") == latest).select(["symbol", pl.col("close").alias("_cT")])
+        out = out.join(kyle, on="symbol", how="left").join(close_t, on="symbol", how="left")
+        exprs = []
+        for w in WINDOWS:
+            n, sdp, sdpl, sprod = pl.col(f"_n{w}"), pl.col(f"_sdp{w}"), pl.col(f"_sdpl{w}"), pl.col(f"_sprod{w}")
+            cov = pl.when(n >= 2.0).then(sprod / n - (sdp / n) * (sdpl / n)).otherwise(None)
+            roll = pl.when(cov < 0.0).then(2.0 * (-cov).sqrt() / pl.col("_cT")).otherwise(0.0)
+            exprs.append(pl.col(f"_amihud{w}").cast(pl.Float64).alias(f"amihud_illiq_{w}m"))
+            exprs.append(roll.cast(pl.Float64).alias(f"roll_spread_{w}m"))
+        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("amihud_illiq", "roll_spread", "kyle_lambda")]
+        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])

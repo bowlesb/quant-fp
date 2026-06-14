@@ -51,7 +51,9 @@ def test_compute_latest_matches_rolling_for_every_group(group_name: str) -> None
         bad = joined.filter(
             ~(
                 (pl.col(feature).is_null() & pl.col("_a").is_null())
-                | ((pl.col(feature) - pl.col("_a")).abs() <= 1e-12 + tol * pl.col(feature).abs())
+                # 1e-9 absolute floor: float-noise near zero (e.g. a sqrt of an autocovariance that
+                # flips sign at ~0 between rolling-sum and group_by-sum order) is not a real divergence.
+                | ((pl.col(feature) - pl.col("_a")).abs() <= 1e-9 + tol * pl.col(feature).abs())
             )
         )
         assert bad.height == 0, f"{group_name}.{feature}: compute_latest != compute().last on {bad.height} (tol={tol})"

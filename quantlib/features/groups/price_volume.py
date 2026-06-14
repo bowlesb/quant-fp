@@ -18,6 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import pivot_stat, slice_aggregates, windowed_ols_latest
 from quantlib.features.ols import centered_minutes, with_ols_columns
 from quantlib.features.registry import register
 
@@ -117,3 +118,53 @@ class PriceVolumeGroup(FeatureGroup):
             for stat in ("vwap_deviation", "up_volume_ratio", "down_volume_ratio", "volume_delta", "buying_pressure", "pv_correlation", "obv_slope")
         ]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def _prep_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "high", "low", "close", "volume"])
+        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
+        frame = centered_minutes(frame, "_t")
+        rng = pl.col("high") - pl.col("low")
+        mfm = pl.when(rng > 0.0).then((2.0 * pl.col("close") - pl.col("high") - pl.col("low")) / rng).otherwise(0.0)
+        ret = pl.col("close") / pl.col("_prev") - 1.0
+        signed = pl.when(ret > 0.0).then(pl.col("volume")).when(ret < 0.0).then(-pl.col("volume")).otherwise(0.0)
+        frame = frame.with_columns(
+            [
+                ret.alias("_ret"), (pl.col("close") * pl.col("volume")).alias("_cv"), (mfm * pl.col("volume")).alias("_mfv"),
+                pl.when(ret > 0.0).then(pl.col("volume")).otherwise(0.0).alias("_up_vol"),
+                pl.when(ret < 0.0).then(pl.col("volume")).otherwise(0.0).alias("_dn_vol"), signed.alias("_signed"),
+            ]
+        )
+        return frame.with_columns(pl.col("_signed").cum_sum().over("symbol").alias("_obv"))
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: the per-window volume sums become aggregate-at-T group_bys; pv-correlation and
+        obv-slope use the windowed-OLS-at-T helper. Same formulas as compute(), parity-guarded."""
+        frame = self._prep_latest(ctx)
+
+        def aggs(w: int) -> list[pl.Expr]:
+            return [
+                pl.col("volume").sum().alias(f"_volw_{w}"), pl.col("volume").mean().alias(f"_meanvol_{w}"),
+                pl.col("_cv").sum().alias(f"_cvw_{w}"), pl.col("_mfv").sum().alias(f"_mfvw_{w}"),
+                pl.col("_up_vol").sum().alias(f"_upw_{w}"), pl.col("_dn_vol").sum().alias(f"_dnw_{w}"),
+            ]
+
+        out, latest = slice_aggregates(frame, WINDOWS, aggs)
+        corr = pivot_stat(windowed_ols_latest(frame, "_ret", "volume", WINDOWS), "corr", "pv_correlation_{w}m", WINDOWS)
+        obv = pivot_stat(windowed_ols_latest(frame, "_t", "_obv", WINDOWS), "slope", "_obvslope_{w}", WINDOWS)
+        close_t = frame.filter(pl.col("minute") == latest).select(["symbol", pl.col("close").alias("_cT")])
+        out = out.join(corr, on="symbol", how="left").join(obv, on="symbol", how="left").join(close_t, on="symbol", how="left")
+        exprs = []
+        for w in WINDOWS:
+            vol_w = pl.col(f"_volw_{w}")
+            exprs.append((pl.col("_cT") / (pl.col(f"_cvw_{w}") / vol_w) - 1.0).cast(pl.Float64).alias(f"vwap_deviation_{w}m"))
+            exprs.append((pl.col(f"_upw_{w}") / vol_w).cast(pl.Float64).alias(f"up_volume_ratio_{w}m"))
+            exprs.append((pl.col(f"_dnw_{w}") / vol_w).cast(pl.Float64).alias(f"down_volume_ratio_{w}m"))
+            exprs.append(((pl.col(f"_upw_{w}") - pl.col(f"_dnw_{w}")) / vol_w).cast(pl.Float64).alias(f"volume_delta_{w}m"))
+            exprs.append((pl.col(f"_mfvw_{w}") / vol_w).cast(pl.Float64).alias(f"buying_pressure_{w}m"))
+            exprs.append((pl.col(f"_obvslope_{w}") / pl.col(f"_meanvol_{w}")).cast(pl.Float64).alias(f"obv_slope_{w}m"))
+        names = [
+            f"{stat}_{w}m"
+            for w in WINDOWS
+            for stat in ("vwap_deviation", "up_volume_ratio", "down_volume_ratio", "volume_delta", "buying_pressure", "pv_correlation", "obv_slope")
+        ]
+        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
