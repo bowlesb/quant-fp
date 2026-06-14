@@ -98,6 +98,10 @@ Measured @ 2000 tickers, all byte-identical (every correctness + parity test sti
 - distribution **1824 → 106 ms (7.5×)**
 - price_volume **3067 → 488 ms (6.3×)**
 - **Profiler total 13.3s → 3.6s at 2k tickers (3.7×), pure compute, zero parity change.**
+- **End-to-end mem_bench 10k × 120m single-process: 47.5s → 27.5s (1.7×)** — the end-to-end gain is
+  smaller than the per-group 3.7× because run_all overlaps some work and the unoptimized groups +
+  return_dynamics' lagged joins now dominate. Stacking the measured sharding 3.4× on top: ~8s @120m;
+  at the 300m correctness buffer ~24s, under the 60s minute — before latest-minute emission.
 
 Remaining: `return_dynamics` is now the slowest (644 ms) but it is `lagged()`-join-bound (13 self-joins),
 not kernel-bound — a separate fix (compute all close-lags in one pass). And groups each `.sort` the
