@@ -242,10 +242,80 @@ fn windowed_sums(
     Ok((out_sym, out_win, out_n, out_sums))
 }
 
+/// Per-symbol LAG values of many columns at the latest row — the slice-derive primitive that lets the
+/// incremental engine drop Polars' costly ``shift(k).over("symbol")`` partitioning.
+///
+/// The incremental V2 slice-derive computes ~short-lag value columns over a tiny trailing slice. Every
+/// per-symbol-grouped operation in that derive is a ``shift(k).over("symbol")`` (e.g. the prior close for
+/// a one-minute return); the elementwise arithmetic around it needs no grouping. Polars still re-partitions
+/// the whole slice by symbol for each shift expression, which DOMINATES the minute (~53ms at 1250×60). This
+/// kernel resolves those shifts in ONE ordered pass so the engine can evaluate the derive globally (no
+/// ``over``) on the one-row-per-symbol latest frame.
+///
+/// Inputs are PARALLEL arrays sorted by (symbol, minute):
+///   symbol   — integer code per symbol (a contiguous block per symbol)
+///   values   — a list of columns (each len == n_rows) to lag
+///   max_lag  — the largest lag needed (lags 1..=max_lag are returned)
+/// Returns, one row per symbol in ASCENDING first-seen symbol-block order:
+///   out_symbol — the symbol code
+///   out_lags   — ``values.len()`` columns, each a Vec<f64> of length n_symbols; column c holds, for every
+///                symbol's LATEST row, the lag-(lag) value of input column c, flattened as
+///                lag index 0..max_lag-1 outer? No — see layout below.
+///
+/// Layout of ``out_lags``: ``out_lags[c]`` is a flat Vec of length ``n_symbols * max_lag``; for symbol
+/// index ``si`` (0-based, block order) and lag ``L`` in 1..=max_lag, the value sits at
+/// ``out_lags[c][si * max_lag + (L - 1)]``. A lag that reaches before the symbol's first row in the slice
+/// is ``f64::NAN`` — EXACTLY the ``null`` Polars ``shift(L).over("symbol")`` produces at warmup / a
+/// missing prior bar. (The caller fills the lag columns into a frame and rewrites
+/// ``col.shift(L).over("symbol")`` -> ``col(__lagL_<name>)``; the derive then runs with no partition.)
+///
+/// The slice is assumed minute-CONTIGUOUS per symbol (the engine's trailing buffer is), so the L-th prior
+/// ROW is the L-th prior MINUTE — matching Polars ``shift`` (which is positional, not time-aware). Symbol
+/// blocks must be contiguous and minute-ascending within a block (the engine sorts (symbol, minute)).
+#[pyfunction]
+fn slice_derive_lags(
+    symbol: PyReadonlyArray1<i64>,
+    values: Vec<PyReadonlyArray1<f64>>,
+    max_lag: usize,
+) -> PyResult<(Vec<i64>, Vec<Vec<f64>>)> {
+    let symbol = symbol.as_slice()?;
+    let values: Vec<&[f64]> = values.iter().map(|v| v.as_slice().unwrap()).collect();
+    let n_rows = symbol.len();
+    let nc = values.len();
+    let mut out_sym: Vec<i64> = Vec::new();
+    let mut out_lags: Vec<Vec<f64>> = (0..nc).map(|_| Vec::new()).collect();
+
+    let mut i: usize = 0;
+    while i < n_rows {
+        let s = symbol[i];
+        // block [i, j) for this symbol; last row of the block (j-1) is the latest minute
+        let mut j = i;
+        while j < n_rows && symbol[j] == s {
+            j += 1;
+        }
+        let latest = j - 1;
+        out_sym.push(s);
+        for c in 0..nc {
+            for lag in 1..=max_lag {
+                // lag-L value of the latest row = value at row (latest - L), if still inside this block
+                let val = if latest >= lag && (latest - lag) >= i {
+                    values[c][latest - lag]
+                } else {
+                    f64::NAN
+                };
+                out_lags[c].push(val);
+            }
+        }
+        i = j;
+    }
+    Ok((out_sym, out_lags))
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
     m.add_function(wrap_pyfunction!(windowed_reduce, m)?)?;
     m.add_function(wrap_pyfunction!(windowed_sums, m)?)?;
+    m.add_function(wrap_pyfunction!(slice_derive_lags, m)?)?;
     Ok(())
 }

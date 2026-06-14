@@ -21,6 +21,7 @@ columns that depend on long history — a frame-relative OLS time axis and a cum
 maintained as running per-symbol engine state (``stateful_regressors()``). Both produce the IDENTICAL value
 matrix the batch would, so the running sums (and therefore every feature) stay parity-true by construction.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -33,6 +34,7 @@ from quantlib.features.declarative import (
     build_plan,
     emit_numpy,
 )
+from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
 
@@ -99,7 +101,8 @@ class IncrementalEngine:
 
     DERIVE_SLICE = 6  # minutes of history needed to slice-derive a minute's short-lag value columns (max lag + slack)
 
-    def __init__(self, groups: list[ReductionGroup]) -> None:
+    def __init__(self, groups: list[ReductionGroup], *, rust_slice: bool = True) -> None:
+        self.rust_slice = rust_slice
         self.groups = [g for g in groups if isinstance(g, ReductionGroup)]
         self.derived, self.extra, self.value_cols, self.plan, self.reg_plan, self.windows = build_plan(self.groups)
         self.col_index = {col: i for i, col in enumerate(self.value_cols)}
@@ -145,6 +148,19 @@ class IncrementalEngine:
                 self.regy_col[ns] = name
         self.aux_cols = [expr.meta.output_name() for expr in self.stateful_aux]
 
+        # Rust slice-derive path: the only per-symbol op in the safe/aux/extra derive is
+        # ``Column(c).shift(k).over("symbol")``, so resolve those lags in Rust (one ordered pass) and rewrite
+        # the exprs to read plain ``__lag{k}_{c}`` columns — the derive then runs GLOBALLY (no Polars partition,
+        # the ~53ms cost). lag_columns: col -> [lags needed]; rewritten exprs evaluate on the kernel's lag frame.
+        all_derive_exprs = [*self.safe_derived, *self.stateful_aux, *self.extra]
+        lags, _ = lag_specs(all_derive_exprs)
+        self.lag_columns: dict[str, list[int]] = {}
+        for column, lag in sorted(lags):
+            self.lag_columns.setdefault(column, []).append(lag)
+        self.rust_safe_derived = [rewrite_global(expr) for expr in self.safe_derived]
+        self.rust_stateful_aux = [rewrite_global(expr) for expr in self.stateful_aux]
+        self.rust_extra = [rewrite_global(expr) for expr in self.extra]
+
         self.symbols: list[str] | None = None
         self.state: WindowedSumState | None = None
         self.ref_epoch: int | None = None  # fixed origin for "time" regressors (OLS is origin-invariant)
@@ -189,6 +205,16 @@ class IncrementalEngine:
             .sort("symbol")
             .collect()
         )
+
+    def _derived_row_rust(self, frame: pl.DataFrame, minute: object) -> pl.DataFrame:
+        """Rust slice-derive: resolve the per-symbol ``shift(k).over("symbol")`` lags in one Rust pass, then
+        derive the SAME safe value cols + presence/square + stateful aux cols GLOBALLY (no Polars per-symbol
+        partition — the ~53ms cost). ``rust_slice_derive`` returns one row per symbol (the latest minute) plus
+        ``__lag{k}_{c}`` columns (missing prior bar -> ``null``); the rewritten exprs read those lag columns
+        instead of ``shift().over()``, so the result is the SAME single-row-per-symbol derive as
+        ``_derived_row`` (guarded cell-for-cell by tests/test_fp_slice_derive_rust.py)."""
+        lag_row = rust_slice_derive(frame, self.input_cols, self.lag_columns, minute)
+        return lag_row.with_columns([*self.rust_safe_derived, *self.rust_stateful_aux]).with_columns(self.rust_extra)
 
     def _stateful_matrix(self, row: pl.DataFrame, minute: object) -> dict[int, np.ndarray]:
         """Rebuild the 6 OLS paired columns (b, x, y, xy, xx, yy) for every stateful regression at ``minute``
@@ -238,7 +264,7 @@ class IncrementalEngine:
         if slice_derive:
             cutoff = minute - pl.duration(minutes=self.DERIVE_SLICE)  # type: ignore[operator]
             source = frame.filter(pl.col("minute") > cutoff)
-        row = self._derived_row(source, minute)
+        row = self._derived_row_rust(source, minute) if self.rust_slice else self._derived_row(source, minute)
         n_sym = len(self.symbols or [])
         if row.height != n_sym:
             raise ValueError(f"incremental: symbol set changed ({row.height} != {n_sym}); re-seed")
