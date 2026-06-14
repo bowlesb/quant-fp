@@ -463,3 +463,16 @@ def test_undersized_buffer_diverges() -> None:
         ((pl.col("up_volume_ratio_60m") - pl.col("up_volume_ratio_60m_bk")).abs() > 1e-6).any()
     ).item()
     assert diverged  # undersized buffer MUST be detectable as a parity break
+
+
+# --- profiler (first-class per-group timing) ---
+
+
+def test_profiler_covers_all_runnable_groups() -> None:
+    from quantlib.features.profile import build_frames, profile
+
+    frames = build_frames(n_tickers=40, window_min=30, daily_days=20)
+    table = profile(frames, reps=1)
+    assert table.height >= 20  # every runnable group timed
+    assert set(table.columns) == {"group", "type", "n_features", "ms", "us_per_feature"}
+    assert (table["ms"] >= 0.0).all() and (table["n_features"] > 0).all()
