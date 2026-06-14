@@ -38,33 +38,30 @@ in `docs/FUSED_ENGINE.md`), with a **GPU-backfill** track unblocked by the reboo
 Optimal config measured: **10 shards × 3 polars threads** at 10k/32-cores.
 
 ## The three tracks
-- **A — feature types: DONE.** Guide: `docs/FEATURE_TYPES.md`. Tests: `tests/test_fp_storage_dtype.py`,
-  `tests/test_fp_compaction.py`. ~54% smaller on disk; reads widen back to Float64 (transparent).
-- **B — fused/declarative engine: DESIGNED, NOT YET BUILT.** See `docs/FUSED_ENGINE.md`. The reshaped plan
-  (per the modeling constraint): a feature DECLARES its windowed reduction ONCE → engine generates both the
-  backfill (rolling) and live (at-T) forms → parity by construction + half the code. Two tiers (declarative
-  fast/batched + arbitrary-polars escape hatch). Backfill runs on the SAME sharded engine as live (fast
-  modeling iteration). Build it **additively** (new opt-in base class; existing groups untouched; migrate
-  reduction-shaped groups one at a time, each parity-gated). This collapses the ~12× per-group marshaling
-  (the current floor — groups are marshal-bound, not compute-bound).
-- **C — GPU: diagnosed, unblocked by reboot.** RTX 3090 (Ampere, cc 8.6). After reboot + `polars[gpu]`,
-  same polars code runs via `.collect(engine="gpu")`. Its home is **backfill** (truth-defining + huge
-  batch; parity only checked live-CPU vs backfill-GPU within tolerance). Caveat: GPU engine falls back to
-  CPU per-node for unsupported ops — benchmark the real feature graph, don't assume speedup.
+- **A — feature types: DONE.** Guide: `docs/FEATURE_TYPES.md`. ~54% smaller on disk; reads widen to Float64.
+- **B — declarative/fused engine: BUILT (core done; migration ongoing).** `quantlib/features/declarative.py`:
+  a `ReductionGroup` declares `reduced()`/`points()`/`assemble()` ONCE → engine generates `compute()`
+  (rolling backfill) + `compute_latest()` (at-T live). `compute_reduction_batch()` runs MANY declarative
+  groups in ONE shared marshal+kernel pass and IS WIRED INTO `process_bars` (the live path). Migrated so far:
+  **volume, volatility, ohlc_vol** (each parity-gated; `tests/test_fp_declarative.py`). Batching speedup
+  scales with group count: 1.69× (2 groups) → 1.88× (3) toward the one-marshal-vs-N limit.
+- **C — GPU: SPIKED AND RULED OUT for feature compute.** RTX 3090 works post-reboot; `fp-gpu` image built.
+  But the polars GPU engine is SLOWER on our ops (transfer/launch overhead at 1–4M rows) and `rolling_*_by`
+  (every backfill feature) is unsupported → CPU fallback. Parity was fine (1e-16…1e-13). CPU path wins +
+  stays readable. 3090 → reserve for model TRAINING. Details in `docs/FUSED_ENGINE.md`.
 
 ## Exact next steps (in order)
-1. **GPU verify** (above), then bake `polars[gpu]` into `fp-dev` and confirm `pl.LazyFrame(...).collect(engine="gpu")` works on a toy feature.
-2. **Build the declarative reduction core** (`quantlib/features/declarative.py`, additive): a base that, from
-   one reduction declaration, generates `compute()` (rolling) + `compute_latest()` (at-T via the existing
-   `rust_windowed_sums`/`rust_reductions`). Unit-test that generated-rolling == generated-at-T (parity by
-   construction). Then migrate ONE simple reduction group (e.g. `volume`) as proof; the generic parity test
-   `tests/test_fp_latest.py` validates it.
-3. **Batch the kernel pass** (Stage 2 in FUSED_ENGINE.md): collect all declarative groups' derived columns,
-   one marshal + one `windowed_sums` over all columns, distribute back. Target per-shard ~300ms→~100ms.
+1. **Migrate the remaining pure mean/std/sum reduction groups** to `ReductionGroup` (mechanical, each
+   parity-gated by `tests/test_fp_latest.py`): candidates `trade_flow`, `quote_spread`, `liquidity`,
+   `price_levels`, `trend_quality`, `momentum`, `price_returns`. Each one joins the batch → bigger speedup.
+2. **Extend the engine for two more reduction shapes**, then migrate the groups that need them:
+   - OLS/correlation (sum of x, y, xy, x², y²) → `price_volume`, `market_beta`, `return_dynamics`,
+     `trend_quality` (R²). Add a `corr_`/`slope_` accessor backed by `windowed_sums`.
+   - 3rd/4th moments (sum of r³, r⁴ + an `n_` accessor) → `distribution` (skew/kurt).
+3. **Re-benchmark the full 10k streaming run** once most groups are declarative — expect the per-shard
+   compute to drop well below the current ~0.9s p99 (one marshal for ~12 groups instead of 12).
 4. **Sharded backfill runner** so a new feature backfills over months×10k across all cores "in minutes"
-   (reuse the live sharding infra; reads from the store / raw bars on disk).
-5. **GPU backfill spike**: run the backfill compute via `engine="gpu"`, measure speed + the live-CPU vs
-   backfill-GPU parity delta against the declared tolerances.
+   (reuse the live sharding infra; reads from the store / raw bars on disk) — the modeling-iteration payoff.
 
 ## Key commands (all in ~/quant-fp)
 ```bash
