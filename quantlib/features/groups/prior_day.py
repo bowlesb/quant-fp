@@ -34,6 +34,7 @@ class PriorDayGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "open", "high", "low", "close")),
         InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),
     )
+    _daily_cache: tuple[int, pl.DataFrame] | None = None  # cached prior-day levels (fixed all day)
 
     def declare(self) -> list[FeatureSpec]:
         specs = [
@@ -56,8 +57,15 @@ class PriorDayGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        daily = ctx.frame("daily").select(["symbol", "date", "open", "high", "low", "close"]).sort(["symbol", "date"])
+    def _daily_levels(self, ctx: BatchContext) -> pl.DataFrame:
+        """Per-(symbol, date) prior-day levels (gap, prior H/L/C, pivots) — depend only on the daily
+        snapshot, so cache them on its identity (constant all day); the close-relative distances are
+        applied per minute in compute()."""
+        source = ctx.frame("daily")
+        cached = self._daily_cache
+        if cached is not None and cached[0] == id(source):
+            return cached[1]
+        daily = source.select(["symbol", "date", "open", "high", "low", "close"]).sort(["symbol", "date"])
         prev_high = pl.col("high").shift(1).over("symbol")
         prev_low = pl.col("low").shift(1).over("symbol")
         prev_close = pl.col("close").shift(1).over("symbol")
@@ -77,10 +85,15 @@ class PriorDayGroup(FeatureGroup):
             ]
         )
         level_cols = ["_gap_open", "_prev_high", "_prev_low", "_prev_close", *[f"_{p}" for p in PIVOTS]]
+        result = daily.select(["symbol", "date", *level_cols])
+        self._daily_cache = (id(source), result)
+        return result
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
         minutes = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).with_columns(
             pl.col("minute").dt.date().alias("date")
         )
-        joined = minutes.join(daily.select(["symbol", "date", *level_cols]), on=["symbol", "date"], how="left")
+        joined = minutes.join(self._daily_levels(ctx), on=["symbol", "date"], how="left")
         exprs = [
             pl.col("_gap_open").cast(pl.Float64).alias("gap_open"),
             (pl.col("close") / pl.col("_prev_high") - 1.0).cast(pl.Float64).alias("dist_from_prior_high"),

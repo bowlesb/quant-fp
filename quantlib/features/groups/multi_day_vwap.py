@@ -32,6 +32,9 @@ class MultiDayVwapGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "close", "volume", "vwap")),
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
     )
+    # Daily features are identical every minute (the snapshot is fixed all day) — cache them on the
+    # snapshot identity so they are computed once, not re-derived over the full daily history per minute.
+    _daily_cache: tuple[int, pl.DataFrame, list[str]] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
@@ -46,8 +49,13 @@ class MultiDayVwapGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        daily = ctx.frame("daily").select(["symbol", "date", "close", "volume", "vwap"]).sort(["symbol", "date"])
+    def _daily(self, ctx: BatchContext) -> tuple[pl.DataFrame, list[str]]:
+        """Per-(symbol, date) daily VWAP-distance features, cached on the daily-snapshot identity."""
+        source = ctx.frame("daily")
+        cached = self._daily_cache
+        if cached is not None and cached[0] == id(source):
+            return cached[1], cached[2]
+        daily = source.select(["symbol", "date", "close", "volume", "vwap"]).sort(["symbol", "date"])
         # shift by 1 so the rolling windows end at the PRIOR completed day (never today's incomplete bar)
         daily = daily.with_columns(
             [
@@ -63,12 +71,15 @@ class MultiDayVwapGroup(FeatureGroup):
             vwap_n = sum_pv / sum_vol
             exprs.append((pl.col("_pc") / vwap_n - 1.0).cast(pl.Float64).alias(f"dist_from_vwap_{days}d"))
             exprs.append((pl.col("_pc") > vwap_n).cast(pl.Float64).alias(f"above_vwap_{days}d"))
-        daily = daily.with_columns(exprs)
         names = [spec.name for spec in self.declare()]
+        result = daily.with_columns(exprs).select(["symbol", "date", *names])
+        self._daily_cache = (id(source), result, names)
+        return result, names
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        daily, names = self._daily(ctx)
         minutes = ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(pl.col("minute").dt.date().alias("date"))
-        return minutes.join(daily.select(["symbol", "date", *names]), on=["symbol", "date"], how="left").select(
-            ["symbol", "minute", *names]
-        )
+        return minutes.join(daily, on=["symbol", "date"], how="left").select(["symbol", "minute", *names])
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
         """Same code as compute(), run on a minute_agg restricted to the latest minute (broadcast to one

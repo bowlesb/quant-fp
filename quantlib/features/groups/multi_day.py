@@ -33,6 +33,10 @@ class MultiDayReturnGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "close")),
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
     )
+    # Per-session cache of the daily features keyed by the daily-snapshot object id. The snapshot is fixed
+    # for the whole trading day, so its derived daily features are identical every minute — compute once,
+    # broadcast each minute (this recompute-every-minute over the full daily history was the group's cost).
+    _daily_cache: tuple[int, pl.DataFrame, list[str]] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
@@ -73,8 +77,13 @@ class MultiDayReturnGroup(FeatureGroup):
 
     def _daily(self, ctx: BatchContext) -> tuple[pl.DataFrame, list[str]]:
         """The per-(symbol, date) daily features (point-in-time as of the prior close). Shared by both
-        compute() and compute_latest() — the SAME code; only the minute broadcast differs."""
-        daily = ctx.frame("daily").select(["symbol", "date", "close"]).sort(["symbol", "date"])
+        compute() and compute_latest() — the SAME code; only the minute broadcast differs. Cached on the
+        daily-snapshot identity so the (identical-all-day) daily features are computed once, not per minute."""
+        source = ctx.frame("daily")
+        cached = self._daily_cache
+        if cached is not None and cached[0] == id(source):
+            return cached[1], cached[2]
+        daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
         daily = daily.with_columns((pl.col("_asof") / pl.col("_asof").shift(1).over("symbol") - 1.0).alias("_dret"))
         exprs = []
@@ -89,7 +98,9 @@ class MultiDayReturnGroup(FeatureGroup):
             + [f"daily_vol_{w}d" for w in VOL_DAYS]
             + [f"dist_from_{w}d_high" for w in HIGH_DAYS]
         )
-        return daily.with_columns(exprs).select(["symbol", "date", *names]), names
+        result = daily.with_columns(exprs).select(["symbol", "date", *names])
+        self._daily_cache = (id(source), result, names)
+        return result, names
 
     def _broadcast(self, minutes: pl.DataFrame, daily: pl.DataFrame, names: list[str]) -> pl.DataFrame:
         minutes = minutes.with_columns(pl.col("minute").dt.date().alias("date"))
