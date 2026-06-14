@@ -71,9 +71,10 @@ class MultiDayReturnGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+    def _daily(self, ctx: BatchContext) -> tuple[pl.DataFrame, list[str]]:
+        """The per-(symbol, date) daily features (point-in-time as of the prior close). Shared by both
+        compute() and compute_latest() — the SAME code; only the minute broadcast differs."""
         daily = ctx.frame("daily").select(["symbol", "date", "close"]).sort(["symbol", "date"])
-        # as-of close = the PRIOR completed day's close (never today's incomplete bar)
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
         daily = daily.with_columns((pl.col("_asof") / pl.col("_asof").shift(1).over("symbol") - 1.0).alias("_dret"))
         exprs = []
@@ -88,8 +89,20 @@ class MultiDayReturnGroup(FeatureGroup):
             + [f"daily_vol_{w}d" for w in VOL_DAYS]
             + [f"dist_from_{w}d_high" for w in HIGH_DAYS]
         )
-        daily = daily.with_columns(exprs)
-        minutes = ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(pl.col("minute").dt.date().alias("date"))
-        return minutes.join(daily.select(["symbol", "date", *names]), on=["symbol", "date"], how="left").select(
-            ["symbol", "minute", *names]
-        )
+        return daily.with_columns(exprs).select(["symbol", "date", *names]), names
+
+    def _broadcast(self, minutes: pl.DataFrame, daily: pl.DataFrame, names: list[str]) -> pl.DataFrame:
+        minutes = minutes.with_columns(pl.col("minute").dt.date().alias("date"))
+        return minutes.join(daily, on=["symbol", "date"], how="left").select(["symbol", "minute", *names])
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        daily, names = self._daily(ctx)
+        return self._broadcast(ctx.frame("minute_agg").select(["symbol", "minute"]), daily, names)
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Broadcast the daily features to ONLY the latest minute's rows (not all 390) — the daily
+        computation is identical to compute()."""
+        minutes = ctx.frame("minute_agg").select(["symbol", "minute"])
+        latest = minutes["minute"].max()
+        daily, names = self._daily(ctx)
+        return self._broadcast(minutes.filter(pl.col("minute") == latest), daily, names)

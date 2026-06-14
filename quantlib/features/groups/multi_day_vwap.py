@@ -69,3 +69,11 @@ class MultiDayVwapGroup(FeatureGroup):
         return minutes.join(daily.select(["symbol", "date", *names]), on=["symbol", "date"], how="left").select(
             ["symbol", "minute", *names]
         )
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Same code as compute(), run on a minute_agg restricted to the latest minute (broadcast to one
+        minute, not all 390)."""
+        minute_agg = ctx.frame("minute_agg")
+        latest = minute_agg["minute"].max()
+        sub = BatchContext(frames={**ctx.frames, "minute_agg": minute_agg.filter(pl.col("minute") == latest)})
+        return self.compute(sub)

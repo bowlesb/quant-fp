@@ -92,3 +92,11 @@ class PriorDayGroup(FeatureGroup):
             exprs.append((pl.col("close") / pl.col(f"_{pivot_name}") - 1.0).cast(pl.Float64).alias(f"dist_from_pivot_{pivot_name}"))
         names = [spec.name for spec in self.declare()]
         return joined.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Same code as compute(), run on a minute_agg restricted to the latest minute — the daily
+        computation is identical; only the broadcast shrinks from all minutes to one."""
+        minute_agg = ctx.frame("minute_agg")
+        latest = minute_agg["minute"].max()
+        sub = BatchContext(frames={**ctx.frames, "minute_agg": minute_agg.filter(pl.col("minute") == latest)})
+        return self.compute(sub)
