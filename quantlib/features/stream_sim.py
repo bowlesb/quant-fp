@@ -30,13 +30,16 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     of the batch path, where fatter shards won). So the incremental fast path itself clears the 100ms bar.
   * FULL flow (519 features) is ~777ms p99 (was ~910ms before technical+candlestick moved off batch): the
     remaining 211 NON-reduction features (13 groups) still run the batch ``compute_latest`` and dominate
-    (non-reduction "rest" p50 467ms). technical+candlestick (26 features) now fold on the per-symbol
-    StatefulEngine (recursive EMA + lag-ring kinds) — a separate ``stateful emit`` line (p99 157ms at 10k,
-    of which technical's still-batched RSI/SMA windowed reductions are the bulk; the recursive MACD fold and
-    candlestick lag-ring are ~O(symbols)). The next distinct piece is the CROSS-SECTIONAL groups
-    (market_context 36 + market_beta 21) — a per-minute universe-wide gather (each symbol vs SPY/QQQ/IWM),
-    NOT per-symbol state, so a different engine phase. (Budget is 60000ms/minute, so 777ms is operationally
-    safe for Monday — the 100ms bar is the aspirational fast-path target.)
+    (non-reduction "rest"). technical+candlestick (26 features) fold on the per-symbol StatefulEngine
+    (recursive EMA + lag-ring kinds) — a separate ``stateful emit`` line. The CROSS-SECTIONAL market groups
+    are now off the batch path too: ``market_beta`` (21 features) decomposes into market-relative windowed
+    reductions (the broadcast-regressor OLS: beta=slope, corr, idio_vol=std·sqrt(1-r2)) and rides the
+    incremental fast path as a ReductionGroup, while ``market_context`` (36 features) is a per-minute UNIVERSE
+    GATHER (index broadcasts + own-return point lags, O(universe) once) timed as its own ``cross-sectional
+    gather`` line. That leaves ~154 NON-reduction features (11 groups: liquidity / price_returns /
+    price_levels / distribution / efficiency / multi_day / ...) on the batch ``compute_latest`` — now the
+    dominant "rest". (Budget is 60000ms/minute, so the full flow is operationally safe for Monday — the 100ms
+    bar is the aspirational fast-path target.)
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
@@ -78,6 +81,12 @@ from quantlib.features.tick_capture import enrich_bars_with_ticks
 TRADES_GROUPS: tuple[str, ...] = ("tick_runlength",)
 # Per-symbol stateful groups now on the incremental fold path (StatefulEngine) instead of batch compute_latest.
 STATEFUL_GROUPS: tuple[str, ...] = ("technical", "candlestick")
+# CROSS-SECTIONAL gather groups: a per-minute UNIVERSE GATHER (index broadcasts + own-return point lags),
+# O(universe) once per minute — timed as its own phase, not the per-symbol "rest". market_beta is NOT here:
+# it decomposes into market-relative windowed reductions (the broadcast-regressor OLS) and rides the
+# incremental fast path as a ReductionGroup. cross_sectional_rank stays a separate full-universe reduce
+# (REDUCE_GROUPS) run by the reader, excluded here.
+GATHER_GROUPS: tuple[str, ...] = ("market_context",)
 
 
 def _bucket_ticks_by_symbol_minute(
@@ -134,6 +143,7 @@ class StreamShardState:
         self.emit_ms = 0.0  # reduction emit_numpy + non-reduction compute_latest (the full per-minute emit)
         self.reduction_emit_ms = 0.0  # the INCREMENTAL fast path's emit (emit_numpy off the running sums)
         self.stateful_emit_ms = 0.0  # technical/candlestick via StatefulEngine.step (the per-symbol fold path)
+        self.gather_emit_ms = 0.0  # the cross-sectional UNIVERSE GATHER (market_context) — O(universe) at-T
         self.other_emit_ms = 0.0  # the remaining non-reduction groups' at-T compute_latest (calendar/sector/...)
         self.write_ms = 0.0
 
@@ -202,7 +212,12 @@ def process_stream_minute(
     non_reduction = [g for g in selected if not isinstance(g, ReductionGroup)]
     fast_path_only = bool(os.environ.get("FP_SIM_FAST_PATH_ONLY"))
     stateful_groups = [] if fast_path_only else [g for g in non_reduction if g.name in STATEFUL_GROUPS]
-    other_groups = [] if fast_path_only else [g for g in non_reduction if g.name not in STATEFUL_GROUPS]
+    gather_groups = [] if fast_path_only else [g for g in non_reduction if g.name in GATHER_GROUPS]
+    other_groups = (
+        []
+        if fast_path_only
+        else [g for g in non_reduction if g.name not in STATEFUL_GROUPS and g.name not in GATHER_GROUPS]
+    )
 
     # 2) FOLD: seed once, then fold the new minute's value matrix into the running sums (incremental path).
     fold_start = time.perf_counter()
@@ -241,8 +256,15 @@ def process_stream_minute(
         out = engine_s.step(frame, ctx)
         outputs.append((group.name, group.version, out))
     state.stateful_emit_ms = (time.perf_counter() - stateful_emit_start) * 1000.0
-    # The remaining non-reduction groups (calendar/sector/market-context/tick-runlength/...) at-T — NOT the
-    # incremental fast path; timed apart so the fast-path cost is visible against the full-flow cost.
+    # The CROSS-SECTIONAL gather groups (market_context) — a per-minute universe gather (index broadcasts +
+    # own-return point lags), O(universe) once, NOT per-symbol rolling. Timed apart as the cross-sectional phase.
+    gather_emit_start = time.perf_counter()
+    for group in gather_groups:
+        out = group.compute_latest(ctx)
+        outputs.append((group.name, group.version, out))
+    state.gather_emit_ms = (time.perf_counter() - gather_emit_start) * 1000.0
+    # The remaining non-reduction groups (calendar/sector/tick-runlength/...) at-T — NOT the incremental fast
+    # path; timed apart so the fast-path cost is visible against the full-flow cost.
     other_emit_start = time.perf_counter()
     trades_frame = _trades_frame(trades_by_symbol, minute_dt)
     for group in other_groups:
@@ -299,7 +321,7 @@ def stream_worker_main(  # pragma: no cover (process entry)
                 "shard": shard_id, "minute": bars[0]["t"], "ms": compute_ms, "write_ms": state.write_ms,
                 "tick_agg_ms": state.tick_agg_ms, "fold_ms": state.fold_ms, "emit_ms": state.emit_ms,
                 "reduction_emit_ms": state.reduction_emit_ms, "stateful_emit_ms": state.stateful_emit_ms,
-                "other_emit_ms": state.other_emit_ms,
+                "gather_emit_ms": state.gather_emit_ms, "other_emit_ms": state.other_emit_ms,
                 "fast_path_ms": state.tick_agg_ms + state.fold_ms + state.reduction_emit_ms,
             }
             with bench_log.open("a") as handle:
@@ -428,6 +450,7 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     emit = critical("emit_ms") or [0.0]
     reduction_emit = critical("reduction_emit_ms") or [0.0]
     stateful_emit = critical("stateful_emit_ms") or [0.0]
+    gather_emit = critical("gather_emit_ms") or [0.0]
     other_emit = critical("other_emit_ms") or [0.0]
     fast_path = critical("fast_path_ms") or [0.0]
     writes = critical("write_ms") or [0.0]
@@ -444,8 +467,9 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     print("  decomposition:")
     print(line("tick-agg", tick_agg))
     print(line("fold (incr update)", fold))
-    print(line("reduction emit (269)", reduction_emit))
+    print(line("reduction emit (290)", reduction_emit))
     print(line("stateful emit (tech+candle)", stateful_emit))
+    print(line("cross-sectional gather", gather_emit))
     print(line("non-reduction (rest)", other_emit))
     print(line("[full emit]", emit))
     print("INCREMENTAL FAST PATH only (tick-agg + fold + reduction emit) — the 269 reduction features:")

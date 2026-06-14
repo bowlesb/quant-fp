@@ -94,9 +94,8 @@ def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[st
 
 @dataclass(frozen=True)
 class StatefulRegressor:
-    """Declares that a regression's ``slot`` (``"x"`` or ``"y"``) is NOT a short-lag column the incremental
-    engine can slice-derive, but a value that depends on long history, so the engine must maintain it as
-    running per-symbol state. Two kinds (the only two that occur):
+    """Declares that a regression's ``slot`` (``"x"`` or ``"y"``) is NOT a short-lag PER-SYMBOL column the
+    incremental engine can slice-derive, but a value the engine must source specially each minute. Three kinds:
 
     - ``kind="time"``: a frame-relative time axis ``(epoch_minutes - origin)``. Slice-derive can't reproduce
       a frame-relative origin, so the engine substitutes a FIXED origin (its seed minute). OLS is
@@ -104,14 +103,21 @@ class StatefulRegressor:
     - ``kind="cumulative"``: a running total ``v[T] = v[T-1] + increment[T]`` (e.g. OBV = cum_sum(signed)).
       The group provides ``increment`` (a short-lag expr the engine evaluates per minute) and the engine keeps
       the running per-symbol total. The centered-time *partner* slot may also be ``"time"``.
+    - ``kind="broadcast"``: a CROSS-SYMBOL value that is the SAME for every symbol at a given minute — a market
+      index's per-minute value broadcast to the whole universe (e.g. SPY's one-minute return as the market-beta
+      regressor). The group provides ``broadcast_symbol`` (the index ticker whose row carries the value) and
+      ``increment`` (the short-lag expr that yields that ticker's per-minute value, e.g. ``close/close.shift(1)
+      - 1``). Each minute the engine reads that expr at the index symbol's row and broadcasts it to all symbols'
+      slot — the cross-symbol minute-join the batch path does, without a per-symbol rolling.
 
     Backfill / live-batch ignore this entirely — they evaluate the group's own ``regressions()`` exprs
-    directly. It only tells the incremental engine HOW to source that regressor from running state instead of
-    re-deriving over the buffer."""
+    directly (over a frame the group's ``prepare`` has already broadcast onto). It only tells the incremental
+    engine HOW to source that regressor instead of re-deriving over the buffer."""
 
     slot: str  # "x" or "y"
-    kind: str  # "time" or "cumulative"
-    increment: pl.Expr | None = None  # required iff kind == "cumulative"
+    kind: str  # "time" | "cumulative" | "broadcast"
+    increment: pl.Expr | None = None  # required iff kind in {"cumulative", "broadcast"}
+    broadcast_symbol: str | None = None  # required iff kind == "broadcast" (the index ticker carrying the value)
 
 
 def _ols_derived(name: str, x_expr: pl.Expr, y_expr: pl.Expr) -> list[pl.Expr]:
@@ -136,6 +142,15 @@ class ReductionGroup(FeatureGroup):
     ``points()`` / ``assemble()``; ``compute()`` and ``compute_latest()`` are generated."""
 
     reduce_input: str = "minute_agg"
+
+    def prepare(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Optional per-minute preprocessing of the (symbol, minute)-sorted input frame BEFORE the reduced /
+        regression exprs are evaluated — for a CROSS-SYMBOL column the per-symbol exprs need (e.g. broadcasting
+        a market index's per-minute return onto every symbol's row). Applied identically in ``compute`` (rolling
+        backfill), ``compute_latest`` (live), and the batched path, so both forms see the same column. The
+        incremental engine sources such broadcast regressors from running state (``broadcast`` StatefulRegressor)
+        and therefore does NOT call ``prepare``. Default: identity (no extra columns)."""
+        return frame
 
     @abstractmethod
     def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
@@ -174,7 +189,7 @@ class ReductionGroup(FeatureGroup):
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         """Generated BACKFILL form: rolling_*_by over every minute (source of truth)."""
-        frame = ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
+        frame = self.prepare(ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"]))
         reduced, regressions = self.reduced(), self.regressions()
         frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
         if regressions:
@@ -210,7 +225,7 @@ class ReductionGroup(FeatureGroup):
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
         """Generated LIVE form: aggregate-at-T via the Rust reduction kernel, one row per symbol."""
-        frame = ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
+        frame = self.prepare(ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"]))
         reduced, regressions = self.reduced(), self.regressions()
         frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
         if regressions:
@@ -327,6 +342,8 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
                 input_cols.append(col)
     with _phase.phase("batch.sort"):
         frame = ctx.frame(reduce_input).select(input_cols).sort(["symbol", "minute"])
+    for group in groups:
+        frame = group.prepare(frame)
     latest = frame["minute"].max()
 
     derived, extra, value_cols, plan, reg_plan, windows = build_plan(groups)

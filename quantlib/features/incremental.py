@@ -129,6 +129,8 @@ class IncrementalEngine:
         # (__inc_<ns>) and the base values of a stateful regression's NON-stateful partner slot (__reg{x,y}_<ns>).
         self.stateful_aux: list[pl.Expr] = []
         self.inc_col: dict[str, str] = {}  # ns -> increment col name
+        self.bcast_col: dict[str, str] = {}  # ns -> broadcast-value col name (the index ticker's per-minute value)
+        self.bcast_symbol: dict[str, str] = {}  # ns -> the index ticker whose row carries the broadcast value
         self.regx_col: dict[str, str] = {}  # ns -> non-stateful x base col name
         self.regy_col: dict[str, str] = {}
         for ns, slots in self.stateful_specs.items():
@@ -138,6 +140,12 @@ class IncrementalEngine:
                     name = f"__inc_{ns}"
                     self.stateful_aux.append(slot_spec.increment.alias(name))
                     self.inc_col[ns] = name
+                elif slot_spec.kind == "broadcast":
+                    assert slot_spec.increment is not None and slot_spec.broadcast_symbol is not None
+                    name = f"__bcast_{ns}"
+                    self.stateful_aux.append(slot_spec.increment.alias(name))
+                    self.bcast_col[ns] = name
+                    self.bcast_symbol[ns] = slot_spec.broadcast_symbol
             if "x" not in slots:
                 name = f"__regx_{ns}"
                 self.stateful_aux.append(self.reg_x_expr[ns].alias(name))
@@ -226,7 +234,12 @@ class IncrementalEngine:
         minute_epoch = int(minute.timestamp())  # type: ignore[attr-defined]
         time_x = np.full(n_sym, (minute_epoch - self.ref_epoch) / 60.0, dtype=np.float64)
         for ns, slots in self.stateful_specs.items():
-            x = time_x if slots.get("x") and slots["x"].kind == "time" else self._aux_value(row, self.regx_col[ns])
+            if slots.get("x") and slots["x"].kind == "broadcast":
+                x = self._broadcast_value(row, ns, n_sym)
+            elif slots.get("x") and slots["x"].kind == "time":
+                x = time_x
+            else:
+                x = self._aux_value(row, self.regx_col[ns])
             if "y" in slots and slots["y"].kind == "cumulative":
                 inc = row.select(self.inc_col[ns]).fill_null(0.0).to_numpy().reshape(-1)
                 running = self.obv_running.setdefault(ns, np.zeros(n_sym, dtype=np.float64))
@@ -234,6 +247,8 @@ class IncrementalEngine:
                 y = running.copy()
             elif "y" in slots and slots["y"].kind == "time":
                 y = time_x
+            elif "y" in slots and slots["y"].kind == "broadcast":
+                y = self._broadcast_value(row, ns, n_sym)
             else:
                 y = self._aux_value(row, self.regy_col[ns])
             both = np.isfinite(x) & np.isfinite(y)
@@ -254,6 +269,20 @@ class IncrementalEngine:
     def _aux_value(self, row: pl.DataFrame, col: str) -> np.ndarray:
         """A non-stateful regressor base value at the row, kept as NaN where null so pairing drops it."""
         return row.select(col).to_numpy().reshape(-1).astype(np.float64)
+
+    def _broadcast_value(self, row: pl.DataFrame, ns: str, n_sym: int) -> np.ndarray:
+        """The cross-symbol broadcast regressor for ``ns``: read the index ticker's per-minute value (the
+        ``__bcast_<ns>`` aux column at the index symbol's row) and broadcast it to every symbol — the SAME
+        minute-broadcast the batch path does by a minute-join on the index series. NaN-everywhere when the
+        index ticker is absent this minute or its value is null (so the regression pairs nothing, exactly as
+        the batch left-join would leave the broadcast column null and ``_ols_derived`` drop the pair)."""
+        index_symbol = self.bcast_symbol[ns]
+        symbols = self.symbols or []
+        if index_symbol not in symbols:
+            return np.full(n_sym, np.nan, dtype=np.float64)
+        position = symbols.index(index_symbol)  # row is symbol-sorted == self.symbols order
+        value = float(row.select(self.bcast_col[ns]).to_numpy().reshape(-1)[position])
+        return np.full(n_sym, value, dtype=np.float64)
 
     def _matrix_at(self, frame: pl.DataFrame, minute: object, *, slice_derive: bool) -> np.ndarray:
         """The (n_symbols, n_value_cols) value matrix for ``minute``, symbol-aligned to ``self.symbols`` (nulls

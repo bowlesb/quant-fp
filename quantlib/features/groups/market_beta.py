@@ -5,29 +5,45 @@ windowed-OLS kernel): the slope is rolling beta, the correlation is how tightly 
 and idiosyncratic volatility is the part of its movement the market does not explain. SPY is already
 in minute_agg (streamed + backfilled as a market-context symbol), so this is pure-bar and parity-true
 by construction — the same minute_agg feeds the same regression live and in backfill.
+
+DECOMPOSITION (port onto the fast path): every feature here is a MARKET-RELATIVE windowed reduction over
+paired sums, so the group is a ``ReductionGroup`` riding the proven additive-window kernel:
+  * ``market_beta``/``market_corr`` are the slope/corr of the windowed OLS of the ticker's one-minute return
+    (y, a per-symbol short-lag column) on SPY's one-minute return (x). SPY's return is the SAME for every
+    symbol at a minute, so it is a CROSS-SYMBOL BROADCAST — ``prepare`` joins it onto every row for the
+    polars backfill/live forms, and the incremental engine sources it via a ``broadcast`` StatefulRegressor
+    (read SPY's row, broadcast to the universe) instead of re-deriving over the buffer.
+  * ``idio_vol`` = the ticker's return std (a windowed ``std`` reduction) times ``sqrt(1 - r2)`` (the
+    regression's r2). Both ride the same kernel pass.
+Backfill is the rolling source of truth; live-batch and the incremental fold both reach the SAME paired
+sums, so beta/corr/r2 are cell-for-cell identical (parity-gated by tests/test_fp_market_relative.py).
 """
 from __future__ import annotations
 
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
-from quantlib.features.latest import pivot_stat, rust_reductions, windowed_ols_latest
-from quantlib.features.ols import with_ols_columns
+from quantlib.features.declarative import (
+    ReductionGroup,
+    StatefulRegressor,
+    corr_,
+    r2_,
+    slope_,
+    std_,
+)
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (10, 15, 30, 45, 60, 90, 120)
 MARKET_TICKER = "SPY"
+BETA_TOL = 1e-4
 
 
 @register
-class MarketBetaGroup(FeatureGroup):
+class MarketBetaGroup(ReductionGroup):
     name = "market_beta"
     version = "1.0.0"
     owner = "modeller"
@@ -39,64 +55,48 @@ class MarketBetaGroup(FeatureGroup):
         for w in WINDOWS:
             specs.append(
                 FeatureSpec(name=f"market_beta_{w}m", description=f"Rolling beta to SPY over {w} minutes: slope of this ticker's one-minute return regressed on SPY's.",
-                            dtype="Float64", valid_range=(-15.0, 15.0), nan_policy="sparse", layer="A", tolerance=1e-4)
+                            dtype="Float64", valid_range=(-15.0, 15.0), nan_policy="sparse", layer="A", tolerance=BETA_TOL)
             )
             specs.append(
                 FeatureSpec(name=f"market_corr_{w}m", description=f"Rolling correlation of this ticker's one-minute return with SPY's over {w} minutes, in [-1, 1].",
-                            dtype="Float64", valid_range=(-1.01, 1.01), nan_policy="sparse", layer="A", tolerance=1e-4)
+                            dtype="Float64", valid_range=(-1.01, 1.01), nan_policy="sparse", layer="A", tolerance=BETA_TOL)
             )
             specs.append(
                 FeatureSpec(name=f"idio_vol_{w}m", description=f"Idiosyncratic volatility over {w} minutes: this ticker's return std times sqrt(1 - market R^2) (movement SPY does not explain).",
-                            dtype="Float64", valid_range=(0.0, 5.0), nan_policy="sparse", layer="A", tolerance=1e-4)
+                            dtype="Float64", valid_range=(0.0, 5.0), nan_policy="sparse", layer="A", tolerance=BETA_TOL)
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        frame = frame.with_columns((pl.col("close") / pl.col("_prev") - 1.0).alias("_ret"))
+    def prepare(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Broadcast SPY's one-minute return onto every symbol's row by a minute-join (the cross-symbol market
+        regressor). The polars backfill/live forms read ``_mret`` from this; the incremental engine sources it
+        from running state (the ``broadcast`` regressor) and ignores this column."""
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
         market = (
-            frame.filter(pl.col("symbol") == MARKET_TICKER)
+            frame.with_columns(ret.alias("_ret"))
+            .filter(pl.col("symbol") == MARKET_TICKER)
             .select(["minute", pl.col("_ret").alias("_mret")])
         )
-        frame = frame.join(market, on="minute", how="left").sort(["symbol", "minute"])
-        r2_cols = []
-        for w in WINDOWS:
-            size = f"{w}m"
-            r2_col = f"_r2_{w}"
-            frame = with_ols_columns(
-                frame, "_mret", "_ret", size,
-                {"slope": f"market_beta_{w}m", "corr": f"market_corr_{w}m", "r2": r2_col},
-            )
-            r2_cols.append(r2_col)
-        idio = []
-        for w in WINDOWS:
-            ret_std = pl.col("_ret").rolling_std_by("minute", window_size=f"{w}m").over("symbol")
-            idio.append((ret_std * (1.0 - pl.col(f"_r2_{w}")).clip(0.0, 1.0).sqrt()).cast(pl.Float64).alias(f"idio_vol_{w}m"))
-        frame = frame.with_columns(idio).drop(r2_cols)
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("market_beta", "market_corr", "idio_vol")]
-        return frame.select(["symbol", "minute", *names])
+        return frame.join(market, on="minute", how="left")
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: rolling beta/corr vs SPY via aggregate-at-T OLS; idio = ret std * sqrt(1-r2)."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        frame = frame.with_columns((pl.col("close") / pl.col("_prev") - 1.0).alias("_ret"))
-        market = frame.filter(pl.col("symbol") == MARKET_TICKER).select(["minute", pl.col("_ret").alias("_mret")])
-        frame = frame.join(market, on="minute", how="left").sort(["symbol", "minute"])
-        latest = frame["minute"].max()
-        long = windowed_ols_latest(frame, "_mret", "_ret", WINDOWS)
-        beta = pivot_stat(long, "slope", "market_beta_{w}m", WINDOWS)
-        corr = pivot_stat(long, "corr", "market_corr_{w}m", WINDOWS)
-        r2 = pivot_stat(long, "r2", "_r2_{w}", WINDOWS)
-        ret_std = pivot_stat(rust_reductions(frame, "_ret", WINDOWS), "std", "_rstd_{w}", WINDOWS)
-        out = (
-            frame.filter(pl.col("minute") == latest).select("symbol")
-            .join(beta, on="symbol", how="left").join(corr, on="symbol", how="left")
-            .join(r2, on="symbol", how="left").join(ret_std, on="symbol", how="left")
-        )
-        out = out.with_columns(
-            [(pl.col(f"_rstd_{w}") * (1.0 - pl.col(f"_r2_{w}")).clip(0.0, 1.0).sqrt()).cast(pl.Float64).alias(f"idio_vol_{w}m") for w in WINDOWS]
-        ).with_columns(pl.lit(latest).alias("minute"))
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("market_beta", "market_corr", "idio_vol")]
-        return out.select(["symbol", "minute", *names])
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+        return {"_ret": (ret, ("std",), WINDOWS)}
+
+    def regressions(self) -> dict[str, tuple[pl.Expr, pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+        return {"mkt": (pl.col("_mret"), ret, ("slope", "corr", "r2"), WINDOWS)}
+
+    def stateful_regressors(self) -> dict[str, list[StatefulRegressor]]:
+        index_ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+        return {
+            "mkt": [StatefulRegressor(slot="x", kind="broadcast", increment=index_ret, broadcast_symbol=MARKET_TICKER)]
+        }
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
+        for w in WINDOWS:
+            feats[f"market_beta_{w}m"] = slope_("mkt", w)
+            feats[f"market_corr_{w}m"] = corr_("mkt", w)
+            feats[f"idio_vol_{w}m"] = std_("_ret", w) * (1.0 - r2_("mkt", w)).clip(0.0, 1.0).sqrt()
+        return feats

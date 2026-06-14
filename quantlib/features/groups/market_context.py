@@ -66,10 +66,26 @@ class MarketContextGroup(FeatureGroup):
         return self._assemble(self._own(ctx))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Each minute's market context depends only on that minute's own + index returns, so assemble
-        from ONLY the latest minute's rows (same code as compute)."""
-        own = self._own(ctx)
-        return self._assemble(own.filter(pl.col("minute") == own["minute"].max()))
+        """LATEST-MINUTE universe gather: each minute's market context depends only on THAT minute's own +
+        index trailing returns, so gather only the latest row's returns instead of lagging the whole buffer.
+        For each window the trailing return is ``close[T] / close[T-w] - 1`` per symbol — built by a single
+        minute-keyed self-join of the prior closes, NOT a per-minute rolling. Then broadcast the index returns
+        across the universe and derive relative/outperforming, exactly as ``_assemble`` (parity-guarded ==
+        ``compute().last`` by tests/test_fp_latest)."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        latest = frame["minute"].max()
+        closes = frame.select(["symbol", "minute", "close"])
+        latest_row = closes.filter(pl.col("minute") == latest).select(["symbol", pl.col("close")])
+        own = latest_row.with_columns(pl.lit(latest).alias("minute"))
+        for w in WINDOWS:
+            prior = closes.filter(pl.col("minute") == latest - pl.duration(minutes=w)).select(
+                ["symbol", pl.col("close").alias(f"_prior_{w}")]
+            )
+            own = own.join(prior, on="symbol", how="left")
+        own = own.with_columns(
+            [(pl.col("close") / pl.col(f"_prior_{w}") - 1.0).alias(f"_own_{w}") for w in WINDOWS]
+        )
+        return self._assemble(own)
 
     def _assemble(self, own: pl.DataFrame) -> pl.DataFrame:
         market = own.select("minute").unique().sort("minute")
