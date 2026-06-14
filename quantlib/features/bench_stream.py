@@ -76,10 +76,10 @@ def synth_daily(symbols: list[str], day: str, lookback: int = 260) -> pl.DataFra
     return pl.DataFrame(rows).with_columns(pl.col("date").cast(pl.Date))
 
 
-def _serve_mock(minutes: int, interval: float) -> None:
+def _serve_mock(minutes: int, interval: float, trades_per_min: int, quotes_per_min: int) -> None:
     async def serve() -> None:
-        async with websockets.serve(make_handler(minutes, interval), "127.0.0.1", PORT,
-                                    max_size=2**24, ping_interval=None):
+        async with websockets.serve(make_handler(minutes, interval, trades_per_min, quotes_per_min),
+                                    "127.0.0.1", PORT, max_size=2**24, ping_interval=None):
             await asyncio.Future()
 
     asyncio.run(serve())
@@ -87,9 +87,12 @@ def _serve_mock(minutes: int, interval: float) -> None:
 
 def _start_mock(minutes: int) -> mp.Process:
     """Run the mock in its OWN process — NOT a thread — so the parent stays single-threaded when
-    run_sharded_capture forks its workers (forking a process with a live thread can deadlock the children)."""
+    run_sharded_capture forks its workers (forking a process with a live thread can deadlock the children).
+    Trade/quote rates come from the env (MOCK_TRADES_PER_MIN / MOCK_QUOTES_PER_MIN; 0 = bars-only)."""
     interval = float(os.environ.get("MOCK_INTERVAL_SEC", "0"))
-    proc = mp.Process(target=_serve_mock, args=(minutes, interval), daemon=True)
+    trades_per_min = int(os.environ.get("MOCK_TRADES_PER_MIN", "0"))
+    quotes_per_min = int(os.environ.get("MOCK_QUOTES_PER_MIN", "0"))
+    proc = mp.Process(target=_serve_mock, args=(minutes, interval, trades_per_min, quotes_per_min), daemon=True)
     proc.start()
     return proc
 
