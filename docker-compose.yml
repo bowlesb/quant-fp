@@ -84,47 +84,6 @@ services:
       timescaledb:
         condition: service_healthy
 
-  experimenter:
-    build:
-      context: .
-      dockerfile: services/experimenter/Dockerfile
-    <<: *common
-    environment:
-      FEATURE_SET_VERSION: "v1.0.0"
-      FEATURE_CADENCE_MIN: "30"
-      EXP_HEAVY_AFTER_PT: "00:00"
-    volumes:
-      - ./experiments:/app/experiments
-      - ./docs:/app/docs
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-
-  model-server:
-    build:
-      context: .
-      dockerfile: services/model-server/Dockerfile
-    <<: *common
-    environment:
-      MODEL_HORIZON: "fwd_30m"
-      FEATURE_CADENCE_MIN: "30"
-    volumes:
-      - ./models:/models:ro
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-
-  feature-computer:
-    build:
-      context: .
-      dockerfile: services/feature-computer/Dockerfile
-    <<: *common
-    environment:
-      FEATURE_SYMBOLS: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,SPY,QQQ,JPM"
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-
   scheduler:
     build:
       context: .
@@ -146,21 +105,6 @@ services:
       FEATURE_CADENCE_MIN: "30"
     volumes:
       - ./models:/models
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-
-  backfiller:
-    build:
-      context: .
-      dockerfile: services/backfiller/Dockerfile
-    env_file: .env
-    profiles: ["tools"]          # run on demand: docker compose run --rm backfiller <cmd>
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
     depends_on:
       timescaledb:
         condition: service_healthy

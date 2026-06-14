@@ -68,7 +68,8 @@ def parity_test_ticks(start: datetime, end: datetime, symbols: list[str]) -> pl.
     return diff(live, backfill, tiers)
 
 
-def _print(report: pl.DataFrame, title: str) -> None:
+def _print(report: pl.DataFrame, title: str) -> bool:
+    """Print the report; return True if any feature/tier with sufficient data FAILED parity."""
     pl.Config.set_tbl_rows(100)
     print(f"=== {title} ===")
     print(report)
@@ -80,18 +81,20 @@ def _print(report: pl.DataFrame, title: str) -> None:
         print(f"\nFAILED (feature,tier,score,coverage): {failed.select('feature','tier','score','coverage').rows()}")
     else:
         print("\nALL features/tiers with sufficient data PASS.")
+    return bool(failed.height)
 
 
 def main() -> None:
     args = sys.argv[1:]
+    failed = False
     if args and args[0] == "stored":
         root, day = args[1], args[2]
-        _print(parity_stored(root, day), f"STORED live(stream) vs backfill — {day} (what we collected vs backfill)")
+        failed = _print(parity_stored(root, day), f"STORED live(stream) vs backfill — {day} (what we collected vs backfill)")
     elif args and args[0] == "ticks":
         day, start_hm, end_hm, syms = args[1], args[2], args[3], args[4].split(",")
         start = datetime.fromisoformat(f"{day}T{start_hm}:00+00:00")
         end = datetime.fromisoformat(f"{day}T{end_hm}:00+00:00")
-        _print(parity_test_ticks(start, end, syms), f"Layer-C tick parity {day} {start_hm}-{end_hm}Z {syms}")
+        failed = _print(parity_test_ticks(start, end, syms), f"Layer-C tick parity {day} {start_hm}-{end_hm}Z {syms}")
     elif args and args[0] == "coverage":
         day = args[1]
         report = coverage(load_minute_agg(day, "stream"), load_minute_agg(day, "backfill"))
@@ -99,9 +102,11 @@ def main() -> None:
         print(f"=== Missing-data coverage by ET hour — {day} (live stream vs settled backfill) ===")
         print(report)
     elif args:
-        _print(parity_test(args[0]), f"T+1 Settled-Day Parity {args[0]} (per-feature method)")
+        failed = _print(parity_test(args[0]), f"T+1 Settled-Day Parity {args[0]} (per-feature method)")
     else:
         raise SystemExit("usage: python -m quantlib.features.parity <day> | ticks <day> <HH:MM> <HH:MM> SYM,SYM")
+    if failed:
+        raise SystemExit(1)  # a divergence must fail loudly — a wrapping cron/certify gate depends on this
 
 
 if __name__ == "__main__":
