@@ -61,23 +61,34 @@ check-fresh:
 	scripts/assert_image_fresh.sh $(S)
 
 # --- Feature platform (FEATURE_PLATFORM.md) ---
-.PHONY: feature-catalog introspect parity test-fp
+.PHONY: dev-image feature-catalog introspect parity test-fp fp-bench fp-profile
+
+# Baked dev/test image — deps installed ONCE so we NEVER pip-install per run.
+# ALL feature-platform docker runs use `fp-dev`. Build/refresh it after a dependency change.
+dev-image:
+	docker build -t fp-dev -f docker/fp-dev.Dockerfile docker
 
 FP_RUN := docker run --rm -v "$$PWD":/app -w /app
 FP_DB := --network quant_default --env-file .env
 
 # Regenerate docs/FEATURES.md from the registry (drift-gated in CI)
 feature-catalog:
-	$(FP_RUN) python:3.12-slim sh -c "pip install -q polars && python -m quantlib.features.catalog docs/FEATURES.md"
+	$(FP_RUN) fp-dev python -m quantlib.features.catalog docs/FEATURES.md
 
 # T+1 Settled-Day Parity for a day:  make parity DAY=2026-06-12
 parity:
-	$(FP_RUN) $(FP_DB) python:3.12-slim sh -c "pip install -q polars 'psycopg[binary]' 'alpaca-py>=0.30,<1.0' && python -m quantlib.features.parity $(DAY)"
+	$(FP_RUN) $(FP_DB) fp-dev python -m quantlib.features.parity $(DAY)
 
 # Introspect a day's features:  make introspect DAY=2026-06-12 [SOURCE=backfill]
 introspect:
-	$(FP_RUN) $(FP_DB) python:3.12-slim sh -c "pip install -q polars 'psycopg[binary]' && python -m quantlib.features.audit $(DAY) $(SOURCE)"
+	$(FP_RUN) $(FP_DB) fp-dev python -m quantlib.features.audit $(DAY) $(SOURCE)
 
-# FP unit tests (registry / engine / introspection / store)
+# ALL FP unit tests (run before reporting done)
 test-fp:
-	$(FP_RUN) python:3.12-slim sh -c "pip install -q pytest polars && python -m pytest tests/test_fp_platform.py tests/test_fp_store.py -q"
+	$(FP_RUN) fp-dev python -m pytest tests/test_fp_platform.py tests/test_fp_store.py tests/test_fp_new_families.py tests/test_fp_sharding.py tests/test_fp_latest.py tests/test_fp_latency.py -q
+
+# Scale + per-group latency benches:  make fp-bench [N=10000] ;  make fp-profile [N=2000]
+fp-bench:
+	$(FP_RUN) fp-dev python -m quantlib.features.mem_bench $(or $(N),10000) 120 250 1000
+fp-profile:
+	$(FP_RUN) fp-dev python -m quantlib.features.profile $(or $(N),2000) 120 250 3
