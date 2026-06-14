@@ -24,6 +24,7 @@ from abc import abstractmethod
 
 import polars as pl
 
+from quantlib.features import _phase
 from quantlib.features.base import BatchContext, FeatureGroup
 from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_sums
 
@@ -250,7 +251,8 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
         for col in group._input_columns():
             if col not in input_cols:
                 input_cols.append(col)
-    frame = ctx.frame(reduce_input).select(input_cols).sort(["symbol", "minute"])
+    with _phase.phase("batch.sort"):
+        frame = ctx.frame(reduce_input).select(input_cols).sort(["symbol", "minute"])
     latest = frame["minute"].max()
 
     derived: list[pl.Expr] = []
@@ -268,7 +270,8 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
             derived += _ols_derived(ns, x_expr, y_expr)
             reg_plan.append((gi, name, stats, tuple(windows), ns))
             all_windows |= set(windows)
-    frame = frame.with_columns(derived)
+    with _phase.phase("batch.derive(value cols)"):
+        frame = frame.with_columns(derived)
 
     extra: list[pl.Expr] = []
     value_cols: list[str] = []
@@ -280,13 +283,15 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
         if "std" in stats:
             extra.append((pl.col(base) * pl.col(base)).alias(f"{base}__sq"))
             value_cols.append(f"{base}__sq")
-    frame = frame.with_columns(extra)
+    with _phase.phase("batch.derive(sq+presence)"):
+        frame = frame.with_columns(extra)
     for _, _, _, _, ns in reg_plan:  # the six paired sums per regression are plain value columns
         value_cols += [f"__rd_{ns}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
     long = rust_windowed_sums(frame, value_cols, tuple(sorted(all_windows)))
 
     results: dict[str, pl.DataFrame] = {}
-    for gi, group in enumerate(groups):
+    with _phase.phase("batch.assemble(pivot+join)"):
+      for gi, group in enumerate(groups):
         canon: list[pl.Expr] = []
         for pgi, name, stats, _, base in plan:
             if pgi == gi:

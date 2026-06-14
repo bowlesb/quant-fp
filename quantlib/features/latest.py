@@ -15,6 +15,8 @@ from collections.abc import Callable
 import polars as pl
 import quant_tick
 
+from quantlib.features import _phase
+
 
 def slice_aggregates(
     frame: pl.DataFrame,
@@ -88,23 +90,28 @@ def rust_windowed_sums(
     Returns a LONG frame (symbol, window, _n, <sum of each value_col under its own name>)."""
     latest = frame[by].max()
     t = int(latest.timestamp())
-    uniq = sorted(frame["symbol"].unique().to_list())
-    codes = pl.DataFrame({"symbol": uniq, "_c": list(range(len(uniq)))}, schema={"symbol": pl.String, "_c": pl.Int64})
-    prepared = (
-        frame.join(codes, on="symbol", how="left")
-        .with_columns([pl.col(by).dt.epoch("s").alias("_mi")] + [pl.col(c).fill_null(0.0) for c in value_cols])
-        .sort(["_c", "_mi"])
-    )
+    with _phase.phase("kernel.prep(code+sort)"):
+        uniq = sorted(frame["symbol"].unique().to_list())
+        codes = pl.DataFrame({"symbol": uniq, "_c": list(range(len(uniq)))}, schema={"symbol": pl.String, "_c": pl.Int64})
+        prepared = (
+            frame.join(codes, on="symbol", how="left")
+            .with_columns([pl.col(by).dt.epoch("s").alias("_mi")] + [pl.col(c).fill_null(0.0) for c in value_cols])
+            .sort(["_c", "_mi"])
+        )
     win_min = sorted(int(w) for w in windows)
-    sym, win, n, sums = quant_tick.windowed_sums(
-        prepared["_c"].to_numpy(), prepared["_mi"].to_numpy(),
-        [prepared[c].to_numpy() for c in value_cols], [w * 60 for w in win_min], t,
-    )
-    reverse = dict(enumerate(uniq))
-    data: dict[str, list] = {"symbol": [reverse[c] for c in sym], "window": [w // 60 for w in win], "_n": n}
-    for idx, col in enumerate(value_cols):
-        data[col] = sums[idx]
-    return pl.DataFrame(data)
+    with _phase.phase("kernel.marshal(to_numpy)"):
+        codes_np = prepared["_c"].to_numpy()
+        mins_np = prepared["_mi"].to_numpy()
+        vals_np = [prepared[c].to_numpy() for c in value_cols]
+    with _phase.phase("kernel.compute(rust)"):
+        sym, win, n, sums = quant_tick.windowed_sums(codes_np, mins_np, vals_np, [w * 60 for w in win_min], t)
+    with _phase.phase("kernel.rebuild(DataFrame)"):
+        reverse = dict(enumerate(uniq))
+        data: dict[str, list] = {"symbol": [reverse[c] for c in sym], "window": [w // 60 for w in win], "_n": n}
+        for idx, col in enumerate(value_cols):
+            data[col] = sums[idx]
+        out = pl.DataFrame(data)
+    return out
 
 
 def windowed_ols_latest(
