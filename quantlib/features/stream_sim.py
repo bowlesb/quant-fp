@@ -42,14 +42,20 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     incremental fast path as a ReductionGroup; market_context is the per-minute UNIVERSE GATHER (its own
     ``cross-sectional gather`` line). (Budget is 60000ms/minute, so the full flow is operationally safe for
     Monday — the 100ms bar is the aspirational fast-path target.)
-  * The DOMINANT phase is now the STATEFUL EMIT (~250ms p99), not the residual rest (~130ms): the per-symbol
-    Python fold of the 87 stateful features (price_levels' 14 extrema deques + price_returns' 20 lags per
-    symbol × ~625 symbols) is Python-loop-bound. The FAST-PATH floor is the EMIT itself — fast-path-only is
-    p99 ~114ms with reduction-emit ~67ms of it (vs tick-agg ~42 + fold ~23): the running sums are folded
-    cheaply, but assembling 305 reduction features (numpy canonical/OLS + polars wide-frame build) is the
-    floor. So the next levers are (a) a Rust extrema-fold / lag-gather kernel to take the stateful tier off
-    the Python loop, and (b) a Rust ASSEMBLE to take the reduction emit under ~100ms — emit, not compute,
-    is what keeps us over the bar.
+  * STATEFUL EMIT moved to Rust + a SHARED coded buffer: ~250ms p99 -> ~125ms p99 (p50 ~150ms -> ~93ms), so
+    the FULL flow is now ~305-334ms p99 (was ~440ms). The Rust kernels (quant_tick.rolling_extrema /
+    time_lag_gather) take the price_levels extrema and price_returns/candlestick lags off the per-symbol
+    Python deque/ring loop. CRUCIAL FINDING: the Python fold was NEVER the real cost (the kernel itself is
+    ~1-3ms); the cost is the per-minute WHOLE-BUFFER polars sort + frame assembly each stateful group did. The
+    big lever was building the symbol-coded, (symbol, minute)-sorted buffer ONCE per minute and sharing it
+    across all four stateful groups (one sort, not four) — ``stateful.coded_buffer`` passed to each
+    ``StatefulEngine.step``. The Rust gather then reads numpy off that shared buffer.
+  * The FAST-PATH floor is still the REDUCTION EMIT (~67ms p99): the running sums fold cheaply (tick-agg ~30 +
+    fold ~18), but assembling 305 reduction features (numpy canonical/OLS + the polars wide-frame build) is
+    the floor — fast-path-only is ~98-103ms p99. So the next lever is (a) a Rust ASSEMBLE to take the
+    reduction emit + wide-frame build under ~100ms, plus (b) the ~82 cheap batch features (calendar / sector /
+    multi_day, ~120ms p99) still on the batch ``compute_latest``. Stateful-emit is no longer the dominant
+    phase — reduction-emit and the residual rest now are.
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
@@ -84,7 +90,7 @@ from quantlib.features.declarative import ReductionGroup, emit_numpy
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _shard_snapshots, build_stream
 from quantlib.features.sharded_capture import INDEX_SYMBOLS, REDUCE_GROUPS, shard_of
-from quantlib.features.stateful import StatefulEngine, StatefulGroup
+from quantlib.features.stateful import StatefulEngine, StatefulGroup, coded_buffer
 from quantlib.features.tick_capture import enrich_bars_with_ticks
 
 # The non-reduction groups that still consume the raw per-minute trades tape (tick_runlength's Rust kernel).
@@ -260,13 +266,17 @@ def process_stream_minute(
     # The per-symbol STATEFUL groups (technical/candlestick) via the StatefulEngine fold path — seeded once,
     # then one-minute folds + emit (the recursive EMA / lag-ring kinds), instead of the batch compute_latest.
     stateful_emit_start = time.perf_counter()
+    # Build the symbol-coded, (symbol, minute)-sorted buffer ONCE and share it across every stateful group's
+    # Rust extrema/lag gather — the whole-buffer sort is the stateful-emit's real cost, so it is paid once,
+    # not once per group. (Valid because the stateful groups' ``prepare`` is identity over the bar columns.)
+    shared_coded = coded_buffer(frame, latest) if stateful_groups else None
     for group in stateful_groups:
         assert isinstance(group, StatefulGroup)
         engine_s = state.stateful_engines.get(group.name)
         if engine_s is None:
             engine_s = StatefulEngine(group)
             state.stateful_engines[group.name] = engine_s
-        out = engine_s.step(frame, ctx)
+        out = engine_s.step(frame, ctx, coded=shared_coded)
         outputs.append((group.name, group.version, out))
     state.stateful_emit_ms = (time.perf_counter() - stateful_emit_start) * 1000.0
     # The CROSS-SECTIONAL gather groups (market_context) — a per-minute universe gather (index broadcasts +

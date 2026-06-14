@@ -311,11 +311,170 @@ fn slice_derive_lags(
     Ok((out_sym, out_lags))
 }
 
+/// Per-(symbol, window) trailing rolling EXTREMA (max AND min) ending at the latest minute T — the
+/// rolling-extrema state KIND's fold moved into Rust so the per-symbol monotonic-deque loop in
+/// ``ExtremaState`` (pure Python, O(symbols) per minute) leaves the critical path. One backward pass per
+/// symbol snapshots each window's running max/min as the scan crosses its boundary (no per-window re-scan,
+/// no deque, no hashing) — fresh each minute, so NO running-accumulator drift (parity-safe).
+///
+/// Inputs are PARALLEL arrays sorted by (symbol, minute):
+///   symbol   — integer code per symbol (a contiguous block per symbol)
+///   minute   — epoch seconds (per-minute)
+///   value    — the column to take extrema of
+///   windows  — window sizes in SECONDS, strictly ASCENDING
+///   t        — the latest minute (epoch seconds); window w covers minutes in (t - w, t]
+/// Returns, one entry per (symbol, window) in (symbol, ascending-window) order:
+///   out_symbol, out_window, max, min
+/// A window with no PRESENT (non-NaN) bar reads NaN for both — exactly what ``rolling_max_by`` /
+/// ``rolling_min_by`` (and the ``ExtremaState`` empty-deque) produce. NaN input values are skipped (never
+/// enter the max/min), matching the Python fold's ``value == value`` present-bar guard, so the caller may
+/// pass NaN where a bar is absent (it is ignored) rather than pre-filtering.
+#[pyfunction]
+fn rolling_extrema(
+    symbol: PyReadonlyArray1<i64>,
+    minute: PyReadonlyArray1<i64>,
+    value: PyReadonlyArray1<f64>,
+    windows: Vec<i64>,
+    t: i64,
+) -> PyResult<(Vec<i64>, Vec<i64>, Vec<f64>, Vec<f64>)> {
+    let symbol = symbol.as_slice()?;
+    let minute = minute.as_slice()?;
+    let value = value.as_slice()?;
+    let n_rows = symbol.len();
+    let nw = windows.len();
+    let mut out_sym: Vec<i64> = Vec::new();
+    let mut out_win: Vec<i64> = Vec::new();
+    let mut out_max: Vec<f64> = Vec::new();
+    let mut out_min: Vec<f64> = Vec::new();
+
+    let mut i: usize = 0;
+    while i < n_rows {
+        let s = symbol[i];
+        let mut j = i;
+        while j < n_rows && symbol[j] == s {
+            j += 1;
+        }
+        let mut count = 0.0f64; // present (non-NaN) bars seen so far in the expanding window
+        let mut mn = f64::INFINITY;
+        let mut mx = f64::NEG_INFINITY;
+        let mut k: usize = 0;
+        // scan backward (increasing distance d = t - minute); snapshot window k when d >= windows[k]
+        let mut r = j;
+        while r > i {
+            r -= 1;
+            let d = t - minute[r];
+            while k < nw && d >= windows[k] {
+                out_sym.push(s);
+                out_win.push(windows[k]);
+                out_max.push(if count > 0.0 { mx } else { f64::NAN });
+                out_min.push(if count > 0.0 { mn } else { f64::NAN });
+                k += 1;
+            }
+            let v = value[r];
+            if v == v {
+                // present bar only (NaN absent-bar skipped, matching the Python fold)
+                count += 1.0;
+                if v < mn {
+                    mn = v;
+                }
+                if v > mx {
+                    mx = v;
+                }
+            }
+        }
+        while k < nw {
+            out_sym.push(s);
+            out_win.push(windows[k]);
+            out_max.push(if count > 0.0 { mx } else { f64::NAN });
+            out_min.push(if count > 0.0 { mn } else { f64::NAN });
+            k += 1;
+        }
+        i = j;
+    }
+    Ok((out_sym, out_win, out_max, out_min))
+}
+
+/// Per-(symbol, lag) TIME-based lag gather at the latest minute T — the lag/last-k state KIND's read moved
+/// into Rust so ``LastKState``'s per-symbol epoch-keyed ring leaves the Python critical path. For each
+/// requested lag L (minutes), returns each symbol's value as of minute (T − L·60), or NaN when that EXACT
+/// minute is absent for the symbol (the ``base.lagged`` self-join contract — time-based, correct on gappy
+/// grids, NOT positional like ``slice_derive_lags``).
+///
+/// Inputs are PARALLEL arrays sorted by (symbol, minute):
+///   symbol   — integer code per symbol (a contiguous block per symbol)
+///   minute   — epoch seconds (per-minute)
+///   values   — a list of columns (each len == n_rows) to lag
+///   lags     — the lag offsets in SECONDS (one per requested (column-independent) lag), any order
+///   t        — the latest minute (epoch seconds)
+/// Returns, one row per symbol in ASCENDING first-seen symbol-block order:
+///   out_symbol — the symbol code
+///   out_lags   — ``values.len() * lags.len()`` columns of length n_symbols; the value of column ``c`` at
+///                lag index ``li`` for symbol index ``si`` (block order) sits in
+///                ``out_lags[c * n_lags + li][si]``. A target minute not present for the symbol is NaN
+///                (the caller restores it to Polars null, matching the self-join).
+///
+/// Within each symbol block the scan walks backward from the latest row; because rows are minute-ascending
+/// and unique per minute, a simple pointer per lag finds (or misses) the exact target epoch in one pass.
+#[pyfunction]
+fn time_lag_gather(
+    symbol: PyReadonlyArray1<i64>,
+    minute: PyReadonlyArray1<i64>,
+    values: Vec<PyReadonlyArray1<f64>>,
+    lags: Vec<i64>,
+    t: i64,
+) -> PyResult<(Vec<i64>, Vec<Vec<f64>>)> {
+    let symbol = symbol.as_slice()?;
+    let minute = minute.as_slice()?;
+    let values: Vec<&[f64]> = values.iter().map(|v| v.as_slice().unwrap()).collect();
+    let n_rows = symbol.len();
+    let nc = values.len();
+    let nl = lags.len();
+    let mut out_sym: Vec<i64> = Vec::new();
+    let mut out_lags: Vec<Vec<f64>> = (0..nc * nl).map(|_| Vec::new()).collect();
+
+    let mut i: usize = 0;
+    while i < n_rows {
+        let s = symbol[i];
+        let mut j = i;
+        while j < n_rows && symbol[j] == s {
+            j += 1;
+        }
+        out_sym.push(s);
+        for li in 0..nl {
+            let target = t - lags[li];
+            // find the row in [i, j) whose minute == target (block is minute-ascending, unique per minute)
+            let mut found: Option<usize> = None;
+            let mut r = j;
+            while r > i {
+                r -= 1;
+                if minute[r] == target {
+                    found = Some(r);
+                    break;
+                }
+                if minute[r] < target {
+                    break; // gone past it (ascending block) — the exact minute is absent
+                }
+            }
+            for c in 0..nc {
+                let val = match found {
+                    Some(row) => values[c][row],
+                    None => f64::NAN,
+                };
+                out_lags[c * nl + li].push(val);
+            }
+        }
+        i = j;
+    }
+    Ok((out_sym, out_lags))
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
     m.add_function(wrap_pyfunction!(windowed_reduce, m)?)?;
     m.add_function(wrap_pyfunction!(windowed_sums, m)?)?;
     m.add_function(wrap_pyfunction!(slice_derive_lags, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_extrema, m)?)?;
+    m.add_function(wrap_pyfunction!(time_lag_gather, m)?)?;
     Ok(())
 }
