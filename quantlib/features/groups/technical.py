@@ -16,6 +16,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_sums
 from quantlib.features.registry import register
 
 SMA_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 50, 100, 200)
@@ -80,3 +81,43 @@ class TechnicalGroup(FeatureGroup):
             exprs.append((pl.col("close") / sma_w - 1.0).cast(pl.Float64).alias(f"sma_dist_{w}m"))
         names = ["rsi_14m", "macd_line", "macd_signal", "macd_hist", "bb_position_20m", "bb_width_20m"] + [f"sma_dist_{w}m" for w in SMA_WINDOWS]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: RSI and the Bollinger/SMA stats become aggregate-at-T windowed reductions on the
+        Rust kernels (RSI's avg-gain/avg-loss ratio = sum_gain/sum_loss, the per-window counts cancel); only
+        MACD keeps the sequential EWM (taken at T). Same formulas as compute(), parity-guarded."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
+        latest = frame["minute"].max()
+        diff = pl.col("close") - pl.col("_prev")
+        frame = frame.with_columns(
+            [
+                pl.when(diff > 0).then(diff).otherwise(0.0).alias("_gain"),
+                pl.when(diff < 0).then(-diff).otherwise(0.0).alias("_loss"),
+                pl.col("close").ewm_mean(span=12).over("symbol").alias("_ema12"),
+                pl.col("close").ewm_mean(span=26).over("symbol").alias("_ema26"),
+            ]
+        )
+        frame = frame.with_columns((pl.col("_ema12") - pl.col("_ema26")).alias("_macd_line"))
+        frame = frame.with_columns(pl.col("_macd_line").ewm_mean(span=9).over("symbol").alias("_macd_signal"))
+        rsi = rust_windowed_sums(frame, ["_gain", "_loss"], (14,)).select(
+            ["symbol", (100.0 - 100.0 / (1.0 + pl.col("_gain") / pl.col("_loss"))).cast(pl.Float64).alias("rsi_14m")]
+        )
+        red = rust_reductions(frame, "close", SMA_WINDOWS)  # 20 is in SMA_WINDOWS, so Bollinger reuses it
+        means = pivot_stat(red, "mean", "_sma_{w}", SMA_WINDOWS)
+        std20 = red.filter(pl.col("window") == 20).select(["symbol", pl.col("std").alias("_std20")])
+        base = frame.filter(pl.col("minute") == latest).select(
+            ["symbol", pl.col("close").alias("_cT"), "_macd_line", "_macd_signal"]
+        )
+        out = base.join(rsi, on="symbol", how="left").join(means, on="symbol", how="left").join(std20, on="symbol", how="left")
+        exprs = [
+            pl.col("_macd_line").cast(pl.Float64).alias("macd_line"),
+            pl.col("_macd_signal").cast(pl.Float64).alias("macd_signal"),
+            (pl.col("_macd_line") - pl.col("_macd_signal")).cast(pl.Float64).alias("macd_hist"),
+            ((pl.col("_cT") - pl.col("_sma_20")) / (2.0 * pl.col("_std20"))).cast(pl.Float64).alias("bb_position_20m"),
+            (4.0 * pl.col("_std20") / pl.col("_sma_20")).cast(pl.Float64).alias("bb_width_20m"),
+        ]
+        for w in SMA_WINDOWS:
+            exprs.append((pl.col("_cT") / pl.col(f"_sma_{w}") - 1.0).cast(pl.Float64).alias(f"sma_dist_{w}m"))
+        names = ["rsi_14m", "macd_line", "macd_signal", "macd_hist", "bb_position_20m", "bb_width_20m"] + [f"sma_dist_{w}m" for w in SMA_WINDOWS]
+        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
