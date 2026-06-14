@@ -28,12 +28,15 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     16 shards (~625/shard): tick-agg p50 16ms + fold p50 10ms + reduction-emit p50 35ms  =>  p99 = 82ms
     (< 100ms ✅). At 8 shards it is 118ms — more, smaller shards win for the light fast path (the opposite
     of the batch path, where fatter shards won). So the incremental fast path itself clears the 100ms bar.
-  * FULL flow (519 features) is ~910ms p99: the 250 NON-reduction features still run the batch rolling
-    ``compute_latest`` (market_context/liquidity/technical/market_beta/candlestick lead) — NOT on the
-    incremental path. They both dominate AND contend for cores, so in the full flow even the fast-path
-    components inflate (reduction-emit 35->55ms, fast-path total -> 120ms). The honest remaining gap to a
-    <100ms FULL flow is porting those 250 features to incremental forms. (Budget is 60000ms/minute, so
-    910ms is operationally safe for Monday — the 100ms bar is the aspirational fast-path target.)
+  * FULL flow (519 features) is ~777ms p99 (was ~910ms before technical+candlestick moved off batch): the
+    remaining 211 NON-reduction features (13 groups) still run the batch ``compute_latest`` and dominate
+    (non-reduction "rest" p50 467ms). technical+candlestick (26 features) now fold on the per-symbol
+    StatefulEngine (recursive EMA + lag-ring kinds) — a separate ``stateful emit`` line (p99 157ms at 10k,
+    of which technical's still-batched RSI/SMA windowed reductions are the bulk; the recursive MACD fold and
+    candlestick lag-ring are ~O(symbols)). The next distinct piece is the CROSS-SECTIONAL groups
+    (market_context 36 + market_beta 21) — a per-minute universe-wide gather (each symbol vs SPY/QQQ/IWM),
+    NOT per-symbol state, so a different engine phase. (Budget is 60000ms/minute, so 777ms is operationally
+    safe for Monday — the 100ms bar is the aspirational fast-path target.)
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
