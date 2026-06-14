@@ -18,7 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
-from quantlib.features.ols import centered_minutes, ols_window_exprs
+from quantlib.features.ols import centered_minutes, with_ols_columns
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
@@ -84,24 +84,33 @@ class PriceVolumeGroup(FeatureGroup):
             ]
         )
         frame = frame.with_columns(pl.col("_signed").cum_sum().over("symbol").alias("_obv"))
-        exprs = []
+        # Materialize each window's rolling sums ONCE (vol_w is shared by 4 ratios), and let
+        # with_ols_columns materialize the corr/obv sums once too — polars eager won't CSE them.
+        temp = []
         for w in WINDOWS:
             size = f"{w}m"
-            vol_w = pl.col("volume").rolling_sum_by("minute", window_size=size).over("symbol")
-            mean_vol = pl.col("volume").rolling_mean_by("minute", window_size=size).over("symbol")
-            cv_w = pl.col("_cv").rolling_sum_by("minute", window_size=size).over("symbol")
-            mfv_w = pl.col("_mfv").rolling_sum_by("minute", window_size=size).over("symbol")
-            up_w = pl.col("_up_vol").rolling_sum_by("minute", window_size=size).over("symbol")
-            dn_w = pl.col("_dn_vol").rolling_sum_by("minute", window_size=size).over("symbol")
-            corr = ols_window_exprs("_ret", "volume", size)["corr"]
-            obv_slope = ols_window_exprs("_t", "_obv", size)["slope"]
-            exprs.append((pl.col("close") / (cv_w / vol_w) - 1.0).cast(pl.Float64).alias(f"vwap_deviation_{w}m"))
-            exprs.append((up_w / vol_w).cast(pl.Float64).alias(f"up_volume_ratio_{w}m"))
-            exprs.append((dn_w / vol_w).cast(pl.Float64).alias(f"down_volume_ratio_{w}m"))
-            exprs.append(((up_w - dn_w) / vol_w).cast(pl.Float64).alias(f"volume_delta_{w}m"))
-            exprs.append((mfv_w / vol_w).cast(pl.Float64).alias(f"buying_pressure_{w}m"))
-            exprs.append(corr.cast(pl.Float64).alias(f"pv_correlation_{w}m"))
-            exprs.append((obv_slope / mean_vol).cast(pl.Float64).alias(f"obv_slope_{w}m"))
+            temp += [
+                pl.col("volume").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_volw_{w}"),
+                pl.col("volume").rolling_mean_by("minute", window_size=size).over("symbol").alias(f"_meanvol_{w}"),
+                pl.col("_cv").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_cvw_{w}"),
+                pl.col("_mfv").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_mfvw_{w}"),
+                pl.col("_up_vol").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_upw_{w}"),
+                pl.col("_dn_vol").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_dnw_{w}"),
+            ]
+        frame = frame.with_columns(temp)
+        for w in WINDOWS:
+            size = f"{w}m"
+            frame = with_ols_columns(frame, "_ret", "volume", size, {"corr": f"pv_correlation_{w}m"})
+            frame = with_ols_columns(frame, "_t", "_obv", size, {"slope": f"_obvslope_{w}"})
+        exprs = []
+        for w in WINDOWS:
+            vol_w = pl.col(f"_volw_{w}")
+            exprs.append((pl.col("close") / (pl.col(f"_cvw_{w}") / vol_w) - 1.0).cast(pl.Float64).alias(f"vwap_deviation_{w}m"))
+            exprs.append((pl.col(f"_upw_{w}") / vol_w).cast(pl.Float64).alias(f"up_volume_ratio_{w}m"))
+            exprs.append((pl.col(f"_dnw_{w}") / vol_w).cast(pl.Float64).alias(f"down_volume_ratio_{w}m"))
+            exprs.append(((pl.col(f"_upw_{w}") - pl.col(f"_dnw_{w}")) / vol_w).cast(pl.Float64).alias(f"volume_delta_{w}m"))
+            exprs.append((pl.col(f"_mfvw_{w}") / vol_w).cast(pl.Float64).alias(f"buying_pressure_{w}m"))
+            exprs.append((pl.col(f"_obvslope_{w}") / pl.col(f"_meanvol_{w}")).cast(pl.Float64).alias(f"obv_slope_{w}m"))
         names = [
             f"{stat}_{w}m"
             for w in WINDOWS
