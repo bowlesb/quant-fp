@@ -4,21 +4,18 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
-from quantlib.features.latest import pivot_stat, rust_reductions
+from quantlib.features.declarative import ReductionGroup, pt_, sum_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
 
 
 @register
-class TradeFlowGroup(FeatureGroup):
+class TradeFlowGroup(ReductionGroup):
     name = "trade_flow"
     version = "1.0.0"
     owner = "modeller"
@@ -72,41 +69,26 @@ class TradeFlowGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "n_trades", "signed_volume"])
-        frame = lagged(frame, "n_trades", 1, "_n_prev").sort(["symbol", "minute"])
-        exprs = [
-            pl.col("signed_volume").cast(pl.Float64).alias("signed_volume_1m"),
-            pl.col("n_trades").cast(pl.Float64).alias("trade_freq_1m"),
-            ((pl.col("n_trades") - pl.col("_n_prev")).cast(pl.Float64) / 60.0).alias("trade_rate_accel_1m"),
-        ]
-        for w in WINDOWS:
-            exprs.append(pl.col("signed_volume").rolling_sum_by("minute", window_size=f"{w}m").over("symbol").cast(pl.Float64).alias(f"signed_volume_{w}m"))
-            exprs.append(pl.col("n_trades").rolling_sum_by("minute", window_size=f"{w}m").over("symbol").cast(pl.Float64).alias(f"trade_freq_{w}m"))
-        names = ["signed_volume_1m", "trade_freq_1m", "trade_rate_accel_1m"] + [
-            f"{f}_{w}m" for w in WINDOWS for f in ("signed_volume", "trade_freq")
-        ]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        return {
+            "sv": (pl.col("signed_volume"), ("sum",), WINDOWS),
+            "nt": (pl.col("n_trades"), ("sum",), WINDOWS),
+        }
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """RUST-backed latest-minute form: the trailing-window SUMS computed by the Rust kernel
-        (quant_tick.windowed_reduce) instead of Polars rolling. Same numbers (parity-guarded), heavy
-        compute in Rust. The ONLY change from the Python form is `rust_reductions` in place of rolling."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "n_trades", "signed_volume"])
-        frame = lagged(frame, "n_trades", 1, "_n_prev").sort(["symbol", "minute"])
-        signed = pivot_stat(rust_reductions(frame, "signed_volume", WINDOWS), "sum", "signed_volume_{w}m", WINDOWS)
-        freq = pivot_stat(rust_reductions(frame, "n_trades", WINDOWS), "sum", "trade_freq_{w}m", WINDOWS)
-        latest = frame["minute"].max()
-        current = frame.filter(pl.col("minute") == latest).select(
-            [
-                "symbol",
-                pl.col("signed_volume").cast(pl.Float64).alias("signed_volume_1m"),
-                pl.col("n_trades").cast(pl.Float64).alias("trade_freq_1m"),
-                ((pl.col("n_trades") - pl.col("_n_prev")).cast(pl.Float64) / 60.0).alias("trade_rate_accel_1m"),
-            ]
-        )
-        out = current.join(signed, on="symbol", how="left").join(freq, on="symbol", how="left").with_columns(pl.lit(latest).alias("minute"))
-        names = ["signed_volume_1m", "trade_freq_1m", "trade_rate_accel_1m"] + [
-            f"{f}_{w}m" for w in WINDOWS for f in ("signed_volume", "trade_freq")
-        ]
-        return out.select(["symbol", "minute", *names])
+    def points(self) -> dict[str, pl.Expr]:
+        return {
+            "sv1": pl.col("signed_volume"),
+            "nt1": pl.col("n_trades"),
+            "accel": (pl.col("n_trades") - pl.col("n_trades").shift(1).over("symbol")) / 60.0,
+        }
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {
+            "signed_volume_1m": pt_("sv1"),
+            "trade_freq_1m": pt_("nt1"),
+            "trade_rate_accel_1m": pt_("accel"),
+        }
+        for w in WINDOWS:
+            feats[f"signed_volume_{w}m"] = sum_("sv", w)
+            feats[f"trade_freq_{w}m"] = sum_("nt", w)
+        return feats

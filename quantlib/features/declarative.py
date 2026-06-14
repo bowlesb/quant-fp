@@ -127,7 +127,9 @@ def _canonical(name: str, stats: tuple[str, ...], base: str) -> list[pl.Expr]:
     if "sum" in stats:
         out.append(pl.col(base).alias(f"__c_sum_{name}"))
     if "mean" in stats:
-        out.append((pl.col(base) / pl.col(f"{base}__p")).alias(f"__c_mean_{name}"))
+        count = pl.col(f"{base}__p")
+        # guard count==0 (an all-null window) -> null, matching rolling_mean / rust_reductions (not NaN)
+        out.append(pl.when(count > 0).then(pl.col(base) / count).otherwise(None).alias(f"__c_mean_{name}"))
     if "std" in stats:
         count, total, sumsq = pl.col(f"{base}__p"), pl.col(base), pl.col(f"{base}__sq")
         out.append(
