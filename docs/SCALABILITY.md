@@ -139,6 +139,42 @@ With latest-minute + sharding, today's 140s/10k-feat-minute target becomes secon
 for 10× features and 10× tickers before any language change. Every new feature passes through the
 profiler + CI latency gate, so the catalog stays fast by construction.
 
+## Independent audit verdict (2026-06-13, two passes)
+- **Substrate = aggregate-at-T, NOT incremental running sums.** Incremental reintroduces a SECOND
+  numeric path whose float accumulation drifts from the fresh backfill computation (catastrophic
+  cancellation on the `− value(T−w)` subtract for large-magnitude features) → blows the 1e-6 parity
+  tolerance intermittently and makes the cornerstone parity test unfalsifiable (failure = "wrong" or
+  "drifted"?). The 35ms incremental number is not worth converting parity from equality into a
+  drift-vs-bug guess. Aggregate-at-T recomputes fresh each minute → zero drift → decisive.
+- **The plateau fix (parity-safe, gets <100ms): collapse the ~12 per-window group_bys into ONE pass.**
+  Tag each buffer row with the windows it belongs to, then a single `group_by("symbol")` with
+  conditional aggregations — one hash-table build instead of 12. Plus **tiered cadence** (recompute
+  3–30m windows every minute, 60–240m windows every 5 min — per-feature-validated against 1e-6) and a
+  **dirty-set** (only recompute symbols that traded or had a window boundary cross — parity-neutral).
+- **Honesty on the numbers:** our benches are `min`-of-3 on a DENSE synthetic buffer = the most
+  optimistic case. The real budget is **p99 end-to-end on gappy real data** with DB writes + 10k
+  inferences + execution running. Named traps: `process_bars` `to_dicts()` on a 10k×300 buffer every
+  minute (GC stall — hold the buffer as a Polars frame, never to_dicts), the wide outer-join assembly
+  of ~28 group outputs, 32-way store write contention, session-open warmup (long windows must emit
+  null, not truncated-window values).
+- **Latent parity bug to fix regardless of speed:** pin the per-minute universe membership snapshot
+  for `cross_sectional_rank` (live vs backfill must rank the identical set), else every cross-sectional
+  feature is un-certifiable.
+- **Language: stay Python+Polars for the platform + authoring surface** (multi-agent ergonomics are
+  the product). Rust lives BELOW the FeatureGroup line as specific named kernels; agents never write
+  Rust. Two distinct Rust cases:
+  - *Minute-path OLS Polars-plugin* — pure latency optimization, **deferred behind p99 > 40ms**.
+  - *Layer-C per-tick kernel* — the ONE enabler worth building ahead of a latency trigger, because it
+    unlocks a feature CLASS that is genuinely Python-infeasible (per-tick path-dependent microstructure
+    + deterministic stateful online models — sequential per-event, can't vectorize). The architecture
+    already has the sockets (`parity_test_ticks`, tick loaders, Layer C, distributional parity). First
+    deliverable = ONE real parity-certified tick feature (e.g. signed-trade run-length / OFI-slope),
+    not a framework. **Gating dependency: a parity-grade raw-tape capture+storage feed at 10k scale
+    (tens of M events/min, order keys preserved) must exist first** — confirm before investing.
+  - Route other future classes AWAY from Rust: entropy/Hurst → Numba; kNN pattern-similarity → FAISS +
+    a point-in-time-frozen library snapshot (parity infra, not Rust); O(N²) pairwise → GPU/BLAS + a
+    curated pair-set. (kNN and pairwise have membership/PIT parity problems Rust doesn't solve.)
+
 ## Build order
 1. Live per-group timing + latency API + CI latency gate (make "timed" enforceable).
 2. Kernel/sort reuse on the 5 hot groups (cheap, byte-identical, immediate).
