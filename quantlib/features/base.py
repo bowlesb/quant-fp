@@ -52,12 +52,48 @@ class FeatureSpec:
 
     name: str
     description: str
-    dtype: str  # polars dtype name, e.g. "Float64"
+    dtype: str  # polars COMPUTE dtype, e.g. "Float64" (the math is always done in this width)
     valid_range: tuple[float | None, float | None] | None = None
     nan_policy: str = "none"  # "none" | "warmup" | "sparse"
     tolerance: float = 1e-6  # cell-level RELATIVE tolerance used by parity: |a-b| <= 1e-12 + tol*|b|
     layer: str = "A"  # data layer (PARITY_PLAYBOOK §2): "A" minute bars | "B" minute tick-agg | "C" sub-minute ticks
     parity_method: str = "tolerance"  # "tolerance" (cell rel-tol) | "distributional" (quantile match)
+    storage: str | None = None  # on-disk dtype, e.g. "Float32"|"UInt8"|"Int16"; None = derive (storage_dtype)
+
+
+# Integer-semantics features whose range/name don't match the flag rule — explicit smallest-int storage.
+_INT_STORAGE_OVERRIDES: dict[str, pl.DataType] = {
+    "day_of_week": pl.UInt8,  # 1-7
+    "week_of_month": pl.UInt8,  # 1-5
+    "minute_of_day_et": pl.UInt16,  # 0-1440
+    "minutes_since_open": pl.Int16,  # signed, -570..870
+}
+# Flag-style features: a true 0/1 indicator carries one of these name prefixes AND a [~0, ~1] range.
+_FLAG_NAME_PREFIXES: tuple[str, ...] = ("is_", "sector_is_", "pattern_", "above_", "outperforming_")
+
+
+def storage_dtype(spec: FeatureSpec) -> pl.DataType:
+    """The on-disk dtype for a feature — half (or less) the Float64 compute width.
+
+    A feature can DECLARE its storage dtype explicitly (``FeatureSpec(storage="UInt8")``) — the
+    standardized, self-documenting way. When it doesn't, we DERIVE a sensible default from the contract,
+    so the 519 existing declarations need no change and a new group only declares ``storage`` when the
+    default would be wrong. Every feature is computed in Float64 but NONE needs double precision on disk:
+    parity compares STORED-vs-STORED (both sides round identically, diff ~0) and ML trains on Float32. So:
+      • true 0/1 flags (flag-prefixed name + [~0,~1] range) -> UInt8 (polars-NULLABLE: holds the warmup/
+        sparse nulls these features legitimately emit, which a numpy uint8 could not);
+      • the four integer calendar features -> smallest signed/unsigned int that covers their range;
+      • everything else (the real-valued bulk) -> Float32.
+    """
+    if spec.storage is not None:
+        return getattr(pl, spec.storage)  # explicit declaration wins
+    if spec.name in _INT_STORAGE_OVERRIDES:
+        return _INT_STORAGE_OVERRIDES[spec.name]
+    low, high = spec.valid_range or (None, None)
+    is_binary_range = low is not None and high is not None and -0.01 <= low <= 0.0 and 1.0 <= high <= 1.01
+    if is_binary_range and spec.name.startswith(_FLAG_NAME_PREFIXES):
+        return pl.UInt8
+    return pl.Float32
 
 
 @dataclass

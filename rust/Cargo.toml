@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py312"] }
+numpy = "0.22"
 
 [profile.release]
 opt-level = 3

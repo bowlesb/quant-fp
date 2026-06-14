@@ -14,12 +14,16 @@ from __future__ import annotations
 import datetime as dt
 import os
 import shutil
+from functools import lru_cache
 from pathlib import Path
 
 import polars as pl
 
-from quantlib.features.base import KEY_COLUMNS
+from quantlib.features.base import KEY_COLUMNS, storage_dtype
 from quantlib.features.registry import REGISTRY
+
+LIVE_ZSTD_LEVEL = 1  # per-minute append writes: latency-sensitive, tiny files -> fast compression
+BATCH_ZSTD_LEVEL = 19  # backfill / compaction: written once, read for training -> max ratio (tight disk)
 
 SOURCES = ("backfill", "stream")  # priority order for source="auto" (backfill = truth, preferred)
 MODE_FILE = "_store_mode"  # "real" | "mock" — physically separates real and simulated data
@@ -27,6 +31,22 @@ MODE_FILE = "_store_mode"  # "real" | "mock" — physically separates real and s
 
 def _partition_dir(root: str | Path, group: str, version: str, source: str, day: str) -> Path:
     return Path(root) / f"group={group}" / f"v={version}" / f"source={source}" / f"date={day}"
+
+
+@lru_cache(maxsize=None)
+def _group_storage_dtypes(group: str) -> dict[str, pl.DataType]:
+    """Per-group {feature -> on-disk dtype} from the declared specs (Float32 / nullable UInt8 / small int)
+    — cached so the per-minute write path doesn't re-walk the registry every tick."""
+    return {spec.name: storage_dtype(spec) for group_obj, spec in REGISTRY.feature_specs() if group_obj.name == group}
+
+
+def _cast_to_storage(frame: pl.DataFrame, group: str) -> pl.DataFrame:
+    """Downcast a group's feature columns to their storage dtypes (~54% smaller than Float64). Key columns
+    are untouched. Computation stays Float64; only the persisted copy is narrowed (parity is stored-vs-
+    stored, so both sides round identically)."""
+    dtypes = _group_storage_dtypes(group)
+    casts = [pl.col(name).cast(dtype) for name, dtype in dtypes.items() if name in frame.columns]
+    return frame.with_columns(casts) if casts else frame
 
 
 def store_mode(root: str | Path) -> str | None:
@@ -50,24 +70,34 @@ def set_mode(root: str | Path, mode: str) -> None:
 
 def write_group(
     root: str | Path, group: str, version: str, source: str, day: str, frame: pl.DataFrame,
-    mode: str = "real", shard: int | None = None,
+    mode: str = "real", shard: int | None = None, minute: dt.datetime | None = None,
 ) -> Path:
     """Write one group's features for one day+source. Atomic + idempotent (rerun overwrites cleanly).
 
     ``shard`` enables CONCURRENT partition-disjoint writes: each capture worker passes its shard id and
-    writes its OWN file ``data-<shard>.parquet`` inside the partition, via a per-file temp + atomic
-    ``os.replace`` (POSIX-atomic, same dir) — so N workers writing the same (group, date) never clobber
-    or contend (Monday collect+save concurrency, requirement #6). ``shard=None`` writes the single
-    ``data.parquet`` (backfill / repair). Reads glob ``data*.parquet`` so both layouts read back as the
-    union. ``mode`` ('real'|'mock') is enforced per root so simulated data never lands in the real store.
+    writes its OWN file inside the partition, via a per-file temp + atomic ``os.replace`` (POSIX-atomic,
+    same dir) — so N workers writing the same (group, date) never clobber or contend (Monday collect+save
+    concurrency, requirement #6). ``shard=None`` writes the single ``data.parquet`` (backfill / repair).
+
+    ``minute`` switches the STREAMING write to APPEND mode: the file is named per-minute
+    (``data-<shard>-<epoch>.parquet``), so each minute writes ONLY that minute's rows — O(1) per tick, no
+    rewriting the day's accumulated history (which would be O(minutes²) I/O and fall over intraday). A
+    re-delivered minute overwrites its own file (same name → atomic replace), staying idempotent. Reads
+    glob ``data*.parquet`` so every per-minute file reads back as the union. ``mode`` ('real'|'mock') is
+    enforced per root so simulated data never lands in the real store.
     """
     set_mode(root, mode)
     target = _partition_dir(root, group, version, source, day)
     target.mkdir(parents=True, exist_ok=True)
-    name = "data.parquet" if shard is None else f"data-{shard}.parquet"
+    if minute is not None:
+        stamp = int(minute.timestamp())
+        name = f"data-{stamp}.parquet" if shard is None else f"data-{shard}-{stamp}.parquet"
+    else:
+        name = "data.parquet" if shard is None else f"data-{shard}.parquet"
     # temp name starts with '.tmp-' so it never matches the data*.parquet read glob, even mid-write.
     tmp = target / f".tmp-{name}.{os.getpid()}"
-    frame.write_parquet(tmp)
+    level = LIVE_ZSTD_LEVEL if minute is not None else BATCH_ZSTD_LEVEL
+    _cast_to_storage(frame, group).write_parquet(tmp, compression="zstd", compression_level=level)
     os.replace(tmp, target / name)  # atomic rename within the same dir; no whole-partition clobber
     return target / name
 
@@ -96,7 +126,12 @@ def _scan_source(
     files = list(Path(root).glob(f"group={group}/v={version}/source={source}/date=*/data*.parquet"))
     if not files:
         return pl.DataFrame()
-    frame = pl.scan_parquet(files).select([*KEY_COLUMNS, *feats])
+    # Features are stored narrowed (Float32 / nullable UInt8 / small int); widen back to Float64 on read so
+    # every consumer (parity diff, training export, API) sees the uniform compute dtype — the narrowing is a
+    # pure disk concern. (Without this, UInt8 flags would integer-underflow in the parity subtraction.)
+    frame = pl.scan_parquet(files).select(
+        [*KEY_COLUMNS, *[pl.col(name).cast(pl.Float64) for name in feats]]
+    )
     if symbols != "universe":
         frame = frame.filter(pl.col("symbol").is_in(symbols))
     return frame.filter((pl.col("minute") >= start) & (pl.col("minute") <= end)).collect()

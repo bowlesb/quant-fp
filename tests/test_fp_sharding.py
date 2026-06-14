@@ -33,7 +33,7 @@ def _bars_for_minute(i: int) -> list[dict]:
 def _single_process(n_minutes: int) -> dict[str, pl.DataFrame]:
     state = CaptureState()
     for i in range(n_minutes):
-        process_bars(state, _bars_for_minute(i), "x", "mock", "2026-06-12", WINDOW, write=False)
+        process_bars(state, _bars_for_minute(i), "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
     return state.accumulated
 
 
@@ -44,8 +44,8 @@ def _sharded(n_minutes: int) -> dict[str, pl.DataFrame]:
         bars = _bars_for_minute(i)
         for shard_id, shard_bars in enumerate(route_minute(bars, N_SHARDS)):
             if shard_bars:
-                process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW, write=False)
-        process_reduce(reduce_state, bars, "x", "mock", "2026-06-12", WINDOW, write=False)
+                process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
+        process_reduce(reduce_state, bars, "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
     merged: dict[str, pl.DataFrame] = {}
     for state in shard_states:
         for name, frame in state.accumulated.items():
@@ -112,5 +112,5 @@ def test_reduce_group_absent_from_shards() -> None:
     bars = _bars_for_minute(0)
     for shard_id, shard_bars in enumerate(route_minute(bars, N_SHARDS)):
         if shard_bars:
-            process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW, write=False)
+            process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
     assert all("cross_sectional_rank" not in state.accumulated for state in shard_states)

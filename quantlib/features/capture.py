@@ -61,6 +61,7 @@ def process_bars(
     only_groups: tuple[str, ...] | None = None,
     write: bool = True,
     shard: int | None = None,
+    accumulate: bool = False,
 ) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
     S, o, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
@@ -72,8 +73,10 @@ def process_bars(
     those groups self-select and serve live — the same frames the backfill/parity path provides.
 
     ``exclude_groups`` are computed elsewhere — in the sharded executor the cross-sectional reduce
-    groups (universe-wide rank) run in a gather phase, not per shard. ``write=False`` accumulates in
-    state without touching the store (used by tests and the gather phase)."""
+    groups (universe-wide rank) run in a gather phase, not per shard. ``write=False`` skips the store
+    (used by the gather phase). ``accumulate=True`` also keeps each group's outputs concatenated in
+    ``state.accumulated`` — the in-memory cross-minute record the sharding parity test inspects; it is
+    OFF in production because the durable record is the per-minute store files, not RAM."""
     for bar in bars:
         state.buffer.append(
             {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
@@ -93,11 +96,14 @@ def process_bars(
         group_start = time.perf_counter()
         out = group.compute_latest(ctx)  # live = aggregate-at-T (fast where overridden; parity-guarded)
         state.group_timings[group.name] = (time.perf_counter() - group_start) * 1000.0
-        prior = state.accumulated.get(group.name)
-        combined = out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
-        state.accumulated[group.name] = combined
+        if accumulate:
+            prior = state.accumulated.get(group.name)
+            state.accumulated[group.name] = (
+                out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
+            )
         if write:
-            store.write_group(root, group.name, group.version, "stream", target_day, combined, mode=mode, shard=shard)
+            # Append THIS minute only (minute-keyed file) — O(1) per tick, idempotent on re-delivery.
+            store.write_group(root, group.name, group.version, "stream", target_day, out, mode=mode, shard=shard, minute=latest)
     metrics.record_group_timings(state.group_timings)  # -> Prometheus histogram, graphed per-group in Grafana
     state.minutes += 1
 

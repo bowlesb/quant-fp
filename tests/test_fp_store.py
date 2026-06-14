@@ -44,7 +44,11 @@ def test_store_roundtrip(tmp_path: Path) -> None:
         .select(["symbol", "minute", "ret_5m"])
         .sort(["symbol", "minute"])
     )
-    assert got.equals(direct)
+    # Keys are exact; values round-trip through Float32 storage (intentional ~54% space narrowing), so
+    # compare within Float32 precision rather than bit-exact Float64.
+    assert got.select(["symbol", "minute"]).equals(direct.select(["symbol", "minute"]))
+    pair = got.join(direct.rename({"ret_5m": "_d"}), on=["symbol", "minute"])
+    assert pair.select(((pl.col("ret_5m") - pl.col("_d")).abs() <= 1e-6 + 1e-6 * pl.col("_d").abs()).all()).item()
 
 
 def test_store_idempotent_overwrite(tmp_path: Path) -> None:

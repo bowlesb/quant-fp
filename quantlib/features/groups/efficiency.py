@@ -18,7 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
-from quantlib.features.latest import slice_aggregates
+from quantlib.features.latest import pivot_stat, rust_windowed_sums
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120)
@@ -71,9 +71,10 @@ class EfficiencyGroup(FeatureGroup):
         for w in WINDOWS:
             frame = lagged(frame, "close", w, f"_lag{w}")
         frame = frame.sort(["symbol", "minute"]).with_columns((pl.col("close") - pl.col("_prev1")).abs().alias("_step"))
-        out, latest = slice_aggregates(frame, WINDOWS, lambda w: [pl.col("_step").sum().alias(f"_path{w}")])
+        latest = frame["minute"].max()
+        path = pivot_stat(rust_windowed_sums(frame, ["_step"], WINDOWS), "_step", "_path{w}", WINDOWS)
         base = frame.filter(pl.col("minute") == latest).select(["symbol", "close", *[f"_lag{w}" for w in WINDOWS]])
-        out = base.join(out, on="symbol", how="left")
+        out = base.join(path, on="symbol", how="left")
         exprs = []
         for w in WINDOWS:
             net = pl.col("close") - pl.col(f"_lag{w}")

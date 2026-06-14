@@ -60,7 +60,7 @@ def rust_reductions(frame: pl.DataFrame, value_col: str, windows: tuple[int, ...
     prepared = prepared.join(codes, on="symbol", how="left").sort(["_c", "_mi"])
     win_min = sorted(int(w) for w in windows)
     sym, win, n, total, sumsq, mn, mx = quant_tick.windowed_reduce(
-        prepared["_c"].to_list(), prepared["_mi"].to_list(), prepared[value_col].to_list(),
+        prepared["_c"].to_numpy(), prepared["_mi"].to_numpy(), prepared[value_col].to_numpy(),
         [w * 60 for w in win_min], t,
     )
     reverse = dict(enumerate(uniq))
@@ -97,8 +97,8 @@ def rust_windowed_sums(
     )
     win_min = sorted(int(w) for w in windows)
     sym, win, n, sums = quant_tick.windowed_sums(
-        prepared["_c"].to_list(), prepared["_mi"].to_list(),
-        [prepared[c].to_list() for c in value_cols], [w * 60 for w in win_min], t,
+        prepared["_c"].to_numpy(), prepared["_mi"].to_numpy(),
+        [prepared[c].to_numpy() for c in value_cols], [w * 60 for w in win_min], t,
     )
     reverse = dict(enumerate(uniq))
     data: dict[str, list] = {"symbol": [reverse[c] for c in sym], "window": [w // 60 for w in win], "_n": n}
@@ -144,6 +144,43 @@ def windowed_ols_latest(
             pl.when(n > 0).then(sy / n).otherwise(None).alias("mean_y"),
         ]
     ).select(["symbol", "window", "slope", "corr", "r2", "mean_y"])
+
+
+def windowed_corr_latest(
+    frame: pl.DataFrame, pairs: list[tuple[str, str]], windows: tuple[int, ...] | list[int], by: str = "minute"
+) -> pl.DataFrame:
+    """Aggregate-at-T Pearson correlation for MANY (x, y) pairs in ONE windowed_sums pass — for when a
+    group needs several correlations but none of the rest of the OLS (slope/r2). Each pair correlates only
+    rows where BOTH x and y are present (the same pairing rule as ``windowed_ols_latest``, so the numbers
+    match its ``corr`` exactly). Returns LONG (symbol, window, _corr0, _corr1, …) — pair i's correlation is
+    ``_corr{i}``. The caller pivots each into its named per-window feature columns."""
+    derived: dict[str, pl.Expr] = {}
+    for i, (x, y) in enumerate(pairs):
+        both = pl.col(x).is_not_null() & pl.col(y).is_not_null()
+        derived[f"_cb{i}"] = both.cast(pl.Float64)
+        derived[f"_cx{i}"] = pl.when(both).then(pl.col(x)).otherwise(0.0)
+        derived[f"_cy{i}"] = pl.when(both).then(pl.col(y)).otherwise(0.0)
+    prepared = frame.with_columns([expr.alias(name) for name, expr in derived.items()])
+    products: dict[str, pl.Expr] = {}
+    for i in range(len(pairs)):
+        products[f"_cxy{i}"] = pl.col(f"_cx{i}") * pl.col(f"_cy{i}")
+        products[f"_cxx{i}"] = pl.col(f"_cx{i}") * pl.col(f"_cx{i}")
+        products[f"_cyy{i}"] = pl.col(f"_cy{i}") * pl.col(f"_cy{i}")
+    prepared = prepared.with_columns([expr.alias(name) for name, expr in products.items()])
+    value_cols = [
+        col for i in range(len(pairs)) for col in (f"_cb{i}", f"_cx{i}", f"_cy{i}", f"_cxy{i}", f"_cxx{i}", f"_cyy{i}")
+    ]
+    long = rust_windowed_sums(prepared, value_cols, windows, by=by)
+    corr_exprs = []
+    for i in range(len(pairs)):
+        n, sx, sy = pl.col(f"_cb{i}"), pl.col(f"_cx{i}"), pl.col(f"_cy{i}")
+        sxy, sxx, syy = pl.col(f"_cxy{i}"), pl.col(f"_cxx{i}"), pl.col(f"_cyy{i}")
+        cov_n = n * sxy - sx * sy
+        denom_x = n * sxx - sx * sx
+        denom_y = n * syy - sy * sy
+        defined = (n >= 2.0) & (denom_x > 0.0) & (denom_y > 0.0)
+        corr_exprs.append(pl.when(defined).then(cov_n / (denom_x * denom_y).sqrt()).otherwise(None).alias(f"_corr{i}"))
+    return long.with_columns(corr_exprs).select(["symbol", "window", *[f"_corr{i}" for i in range(len(pairs))]])
 
 
 def pivot_stat(long: pl.DataFrame, stat: str, name_fmt: str, windows: tuple[int, ...] | list[int]) -> pl.DataFrame:

@@ -7,17 +7,41 @@ minute and flush a completed minute to the core when the next minute's bars star
 """
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import os
 import sys
+import time
+from pathlib import Path
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 
+import polars as pl
+
 from quantlib.features.backfill_bars import backfill_daily
 from quantlib.features.capture import DEFAULT_BUFFER_MINUTES, CaptureState, process_bars
 from quantlib.features.loaders import load_reference
-from quantlib.features.sharded_capture import process_reduce, route_minute, worker_main
+from quantlib.features.sharded_capture import INDEX_SYMBOLS, process_reduce, route_minute, shard_of, worker_main
+
+
+def _shard_snapshots(snapshots: dict | None, symbols: list[str], shard_id: int, n_shards: int) -> dict | None:
+    """Slice the reference/daily snapshots to just the symbols this shard owns (+ the replicated index
+    ETFs) — so a spawned worker is handed only its share, not the whole universe's daily history."""
+    if snapshots is None:
+        return None
+    shard_symbols = [s for s in symbols if shard_of(s, n_shards) == shard_id] + list(INDEX_SYMBOLS)
+    keep = set(shard_symbols)
+    return {name: frame.filter(pl.col("symbol").is_in(keep)) for name, frame in snapshots.items()}
+
+
+def _reader_bench_path(root: str) -> Path | None:
+    """Reader-side latency log (route+reduce) when FP_BENCH_LOG is set — benchmark/demo only."""
+    if not os.environ.get("FP_BENCH_LOG"):
+        return None
+    path = Path(root) / "_bench" / "reader.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def build_stream() -> StockDataStream:
@@ -58,39 +82,68 @@ def run_capture(symbols: list[str], root: str, mode: str, window: int = DEFAULT_
 
 def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is unit-tested in sharded_capture)
     symbols: list[str], root: str, mode: str, n_shards: int | None = None,
-    window: int = DEFAULT_BUFFER_MINUTES, day: str | None = None,
+    window: int = DEFAULT_BUFFER_MINUTES, day: str | None = None, max_minutes: int | None = None,
+    snapshots: dict | None = None,
 ) -> None:
     """Production scale-out: ONE reader owns the websocket and routes each completed minute to N
     persistent worker processes by hash(symbol); the reader runs the universe-wide reduce itself. Each
     worker computes the SAME group code on its shard (byte-identical to single-process — proven in
-    tests/test_fp_sharding.py), and writes only its own symbols (partition-disjoint, no DB contention)."""
+    tests/test_fp_sharding.py), and writes only its own symbols (partition-disjoint, no DB contention).
+
+    ``snapshots`` overrides the slowly-changing reference/daily frames (else they are loaded from the DB /
+    Alpaca) — used by the streaming benchmark to run fully standalone with synthetic snapshots."""
     n_shards = n_shards or max(1, (os.cpu_count() or 8) - 2)
-    snapshots = {"reference": load_reference()}
-    if day is not None:
-        snapshots["daily"] = backfill_daily(day, symbols)
-    queues = [mp.Queue() for _ in range(n_shards)]
+    if snapshots is None:
+        snapshots = {"reference": load_reference()}
+        if day is not None:
+            snapshots["daily"] = backfill_daily(day, symbols)
+    # SPAWN, not fork: the reader process has already initialized polars' rayon threadpool (building the
+    # reference/daily snapshots), and forking a process with a live threadpool deadlocks the child on its
+    # first parallel polars op. Spawned workers get a fresh interpreter + fresh threadpool — no inheritance.
+    ctx = mp.get_context("spawn")
+    queues = [ctx.Queue() for _ in range(n_shards)]
     workers = [
-        mp.Process(target=worker_main, args=(i, n_shards, queues[i], root, mode, window, day, snapshots), daemon=True)
+        ctx.Process(
+            target=worker_main,
+            args=(i, n_shards, queues[i], root, mode, window, day, _shard_snapshots(snapshots, symbols, i, n_shards)),
+            daemon=True,
+        )
         for i in range(n_shards)
     ]
     for worker in workers:
         worker.start()
 
     reduce_state = CaptureState()
-    pending: dict = {"minute": None, "bars": []}
+    pending: dict = {"minute": None, "bars": [], "done": 0}
     stream = build_stream()
 
+    bench_reader = _reader_bench_path(root)  # FP_BENCH_LOG: time the single-threaded reader (route+reduce)
+
     def dispatch(bars: list[dict]) -> None:
+        start = time.perf_counter()
         for shard_id, shard_bars in enumerate(route_minute(bars, n_shards)):
             if shard_bars:
                 queues[shard_id].put(shard_bars)  # map: per-shard workers
         process_reduce(reduce_state, bars, root, mode, day, window)  # gather: universe-wide rank
+        if bench_reader is not None:
+            with bench_reader.open("a") as handle:
+                handle.write(json.dumps({"minute": max(bar["t"] for bar in bars),
+                                         "ms": (time.perf_counter() - start) * 1000.0}) + "\n")
 
     async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
         minute = bar.timestamp.replace(second=0, microsecond=0)
         if pending["minute"] is not None and minute != pending["minute"] and pending["bars"]:
             dispatch(pending["bars"])
             pending["bars"] = []
+            pending["done"] += 1
+            if max_minutes is not None and pending["done"] >= max_minutes:
+                if os.environ.get("FP_BENCH_LOG"):
+                    print(f"[reader] {pending['done']} minutes dispatched; sending sentinels + stopping",
+                          file=sys.stderr, flush=True)
+                for queue in queues:
+                    queue.put(None)  # shutdown sentinel: workers drain their queue then exit
+                await stream.stop_ws()
+                return
         pending["minute"] = minute
         pending["bars"].append(
             {"S": bar.symbol, "o": float(bar.open), "c": float(bar.close), "h": float(bar.high),
@@ -99,6 +152,10 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
 
     stream.subscribe_bars(on_bar, *symbols)
     stream.run()
+    if os.environ.get("FP_BENCH_LOG"):
+        print("[reader] stream.run() returned; joining workers", file=sys.stderr, flush=True)
+    for worker in workers:
+        worker.join(timeout=300)  # bounded mode: let workers drain their queued minutes before exit
 
 
 def main() -> None:

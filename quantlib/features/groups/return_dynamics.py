@@ -18,7 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
-from quantlib.features.latest import pivot_stat, windowed_ols_latest
+from quantlib.features.latest import pivot_stat, windowed_corr_latest
 from quantlib.features.ols import with_ols_columns
 from quantlib.features.registry import register
 
@@ -99,8 +99,9 @@ class ReturnDynamicsGroup(FeatureGroup):
             ]
         )
         latest = frame["minute"].max()
-        ac1 = pivot_stat(windowed_ols_latest(frame, "_ret_lag1", "_ret", AUTOCORR_WINDOWS), "corr", "autocorr_1_{w}m", AUTOCORR_WINDOWS)
-        ac2 = pivot_stat(windowed_ols_latest(frame, "_ret_lag2", "_ret", AUTOCORR_WINDOWS), "corr", "autocorr_2_{w}m", AUTOCORR_WINDOWS)
+        corr = windowed_corr_latest(frame, [("_ret_lag1", "_ret"), ("_ret_lag2", "_ret")], AUTOCORR_WINDOWS)
+        ac1 = pivot_stat(corr.rename({"_corr0": "corr"}), "corr", "autocorr_1_{w}m", AUTOCORR_WINDOWS)
+        ac2 = pivot_stat(corr.rename({"_corr1": "corr"}), "corr", "autocorr_2_{w}m", AUTOCORR_WINDOWS)
         accel = frame.filter(pl.col("minute") == latest).select(
             ["symbol", *[((pl.col("close") / pl.col(f"_lag{w}") - 1.0) - (pl.col(f"_lag{w}") / pl.col(f"_lag{2 * w}") - 1.0)).cast(pl.Float64).alias(f"ret_accel_{w}m") for w in ACCEL_WINDOWS]]
         )

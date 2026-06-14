@@ -20,6 +20,11 @@ the worker queues, and runs the reduce. Workers are persistent (warmup paid once
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import sys
+import time
+from pathlib import Path
 
 from quantlib.features import metrics
 from quantlib.features.capture import CaptureState, process_bars
@@ -31,6 +36,15 @@ INDEX_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "IWM")
 WORKER_METRICS_BASE_PORT = 9201
 # Groups that depend on the WHOLE universe at a minute — run in the gather phase, not per shard.
 REDUCE_GROUPS: tuple[str, ...] = ("cross_sectional_rank",)
+
+
+def _bench_log_path(root: str, shard_id: int) -> Path | None:
+    """Per-shard latency log path when FP_BENCH_LOG is set (benchmark/demo only; off in production)."""
+    if not os.environ.get("FP_BENCH_LOG"):
+        return None
+    path = Path(root) / "_bench" / f"shard-{shard_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def shard_of(symbol: str, n_shards: int) -> int:
@@ -51,17 +65,20 @@ def route_minute(bars: list[dict], n_shards: int) -> list[list[dict]]:
 
 
 def process_shard(state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
-                  window: int, snapshots: dict | None = None, write: bool = True, shard: int | None = None) -> None:
-    """One shard's map step: the shared core, minus the universe-wide reduce groups. Writes its OWN
-    ``data-<shard>.parquet`` per partition (atomic, no clobber) so all shards write concurrently."""
-    process_bars(state, bars, root, mode, day, window, snapshots, exclude_groups=REDUCE_GROUPS, write=write, shard=shard)
+                  window: int, snapshots: dict | None = None, write: bool = True, shard: int | None = None,
+                  accumulate: bool = False) -> None:
+    """One shard's map step: the shared core, minus the universe-wide reduce groups. Each minute appends
+    its OWN per-minute file inside the partition (atomic, no clobber) so all shards write concurrently."""
+    process_bars(state, bars, root, mode, day, window, snapshots, exclude_groups=REDUCE_GROUPS,
+                 write=write, shard=shard, accumulate=accumulate)
 
 
 def process_reduce(reduce_state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
-                   window: int, write: bool = True) -> None:
+                   window: int, write: bool = True, accumulate: bool = False) -> None:
     """The gather step: compute the universe-wide reduce groups over ALL symbols once. The reader holds
     a minimal full-universe buffer (close+volume only) and runs ONLY the reduce groups on it."""
-    process_bars(reduce_state, bars, root, mode, day, window, only_groups=REDUCE_GROUPS, write=write)
+    process_bars(reduce_state, bars, root, mode, day, window, only_groups=REDUCE_GROUPS,
+                 write=write, accumulate=accumulate)
 
 
 def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, window: int,
@@ -70,8 +87,22 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
     routed to this shard), and run the map step. A ``None`` batch is the shutdown sentinel."""
     state = CaptureState()
     metrics.start_metrics_server(WORKER_METRICS_BASE_PORT + shard_id)  # /metrics for Prometheus/Grafana
+    bench_log = _bench_log_path(root, shard_id)  # set FP_BENCH_LOG=1 to record per-minute shard latency
+    if bench_log is not None:
+        print(f"[worker {shard_id}] up", file=sys.stderr, flush=True)
+    processed = 0
     while True:
         batch = queue.get()
         if batch is None:
+            if bench_log is not None:
+                print(f"[worker {shard_id}] exiting after {processed} minutes", file=sys.stderr, flush=True)
             return
+        processed += 1
+        start = time.perf_counter()
         process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id)
+        if bench_log is not None:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            record = {"shard": shard_id, "minute": max(bar["t"] for bar in batch),
+                      "ms": elapsed_ms, "groups": dict(state.group_timings)}
+            with bench_log.open("a") as handle:
+                handle.write(json.dumps(record) + "\n")

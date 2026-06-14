@@ -3,6 +3,7 @@
 //! one Python FeatureGroup, so parity holds by construction; a pure-Python reference pins the output
 //! (tests/test_fp_rust.py). The kernel is a single ordered pass — exactly the shape Polars can't do.
 
+use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 
 /// Per-(symbol, minute) tick run-length + signed-flow features.
@@ -95,12 +96,15 @@ fn tick_run_features(
 /// re-scan, no hashing) — fresh each minute, so NO running-accumulator drift (parity-safe).
 #[pyfunction]
 fn windowed_reduce(
-    symbol: Vec<i64>,
-    minute: Vec<i64>,
-    value: Vec<f64>,
+    symbol: PyReadonlyArray1<i64>,
+    minute: PyReadonlyArray1<i64>,
+    value: PyReadonlyArray1<f64>,
     windows: Vec<i64>,
     t: i64,
 ) -> PyResult<(Vec<i64>, Vec<i64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let symbol = symbol.as_slice()?;
+    let minute = minute.as_slice()?;
+    let value = value.as_slice()?;
     let n_rows = symbol.len();
     let nw = windows.len();
     let mut out_sym: Vec<i64> = Vec::new();
@@ -179,12 +183,15 @@ fn windowed_reduce(
 /// flattened in (symbol, ascending-window) order.
 #[pyfunction]
 fn windowed_sums(
-    symbol: Vec<i64>,
-    minute: Vec<i64>,
-    values: Vec<Vec<f64>>,
+    symbol: PyReadonlyArray1<i64>,
+    minute: PyReadonlyArray1<i64>,
+    values: Vec<PyReadonlyArray1<f64>>,
     windows: Vec<i64>,
     t: i64,
 ) -> PyResult<(Vec<i64>, Vec<i64>, Vec<f64>, Vec<Vec<f64>>)> {
+    let symbol = symbol.as_slice()?;
+    let minute = minute.as_slice()?;
+    let values: Vec<&[f64]> = values.iter().map(|v| v.as_slice().unwrap()).collect();
     let n_rows = symbol.len();
     let nw = windows.len();
     let nc = values.len();
