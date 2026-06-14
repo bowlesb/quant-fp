@@ -81,3 +81,23 @@ class CrossSectionalRankGroup(FeatureGroup):
         exprs.append(_percentile_over_minute("_dollar").cast(pl.Float64).alias("dollar_volume_rank_1m"))
         names = [f"return_rank_{w}m" for w in RETURN_WINDOWS] + ["volume_rank_1m", "dollar_volume_rank_1m"]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: compute trailing returns from the buffer, then rank ONLY at the latest minute
+        (not every minute). Same percentile + universe pin as compute(), parity-guarded."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "volume"])
+        for w in RETURN_WINDOWS:
+            frame = lagged(frame, "close", w, f"_lag{w}")
+        frame = frame.sort(["symbol", "minute"]).with_columns(
+            [(pl.col("close") / pl.col(f"_lag{w}") - 1.0).alias(f"_ret{w}") for w in RETURN_WINDOWS]
+            + [(pl.col("close") * pl.col("volume")).alias("_dollar")]
+        )
+        latest = frame["minute"].max()
+        base = frame.filter(pl.col("minute") == latest)
+        if "universe" in ctx.frames:
+            base = base.join(ctx.frames["universe"].select("symbol").unique(), on="symbol", how="inner")
+        exprs = [_percentile_over_minute(f"_ret{w}").cast(pl.Float64).alias(f"return_rank_{w}m") for w in RETURN_WINDOWS]
+        exprs.append(_percentile_over_minute("volume").cast(pl.Float64).alias("volume_rank_1m"))
+        exprs.append(_percentile_over_minute("_dollar").cast(pl.Float64).alias("dollar_volume_rank_1m"))
+        names = [f"return_rank_{w}m" for w in RETURN_WINDOWS] + ["volume_rank_1m", "dollar_volume_rank_1m"]
+        return base.with_columns(exprs).select(["symbol", "minute", *names])

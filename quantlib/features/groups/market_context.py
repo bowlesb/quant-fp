@@ -55,15 +55,23 @@ class MarketContextGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+    def _own(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
         for w in WINDOWS:
             frame = lagged(frame, "close", w, f"_lag{w}")
         frame = frame.sort(["symbol", "minute"])
-        own = frame.with_columns(
-            [(pl.col("close") / pl.col(f"_lag{w}") - 1.0).alias(f"_own_{w}") for w in WINDOWS]
-        )
+        return frame.with_columns([(pl.col("close") / pl.col(f"_lag{w}") - 1.0).alias(f"_own_{w}") for w in WINDOWS])
 
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        return self._assemble(self._own(ctx))
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Each minute's market context depends only on that minute's own + index returns, so assemble
+        from ONLY the latest minute's rows (same code as compute)."""
+        own = self._own(ctx)
+        return self._assemble(own.filter(pl.col("minute") == own["minute"].max()))
+
+    def _assemble(self, own: pl.DataFrame) -> pl.DataFrame:
         market = own.select("minute").unique().sort("minute")
         for prefix, ticker in INDICES.items():
             index_returns = own.filter(pl.col("symbol") == ticker).select(
