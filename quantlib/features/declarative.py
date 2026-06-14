@@ -289,9 +289,24 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
         value_cols += [f"__rd_{ns}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
     long = rust_windowed_sums(frame, value_cols, tuple(sorted(all_windows)))
 
-    results: dict[str, pl.DataFrame] = {}
     with _phase.phase("batch.assemble(pivot+join)"):
-      for gi, group in enumerate(groups):
+        return assemble_from_long(groups, long, frame.filter(pl.col("minute") == latest), latest, plan, reg_plan)
+
+
+def assemble_from_long(
+    groups: list[ReductionGroup],
+    long: pl.DataFrame,
+    latest_frame: pl.DataFrame,
+    latest: object,
+    plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+    reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+) -> dict[str, pl.DataFrame]:
+    """Build each group's feature frame from a LONG (symbol, window, <value-col sums>) frame + the latest
+    minute's rows (for points). SHARED by the live-batch path (``long`` from the Rust kernel) and the
+    incremental path (``long`` from the running-sum state) — so the canonical algebra and ``assemble()`` are
+    the SAME code in both; only the source of the sums differs. ``latest`` is the minute stamped on output."""
+    results: dict[str, pl.DataFrame] = {}
+    for gi, group in enumerate(groups):
         canon: list[pl.Expr] = []
         for pgi, name, stats, _, base in plan:
             if pgi == gi:
@@ -301,7 +316,7 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
                 sums = {key: pl.col(f"__rd_{ns}_{key}") for key in ("b", "x", "y", "xy", "xx", "yy")}
                 canon += [expr.alias(f"__c_{stat}_{name}") for stat, expr in _ols_stat_exprs(sums, stats).items()]
         glong = long.select(["symbol", "window", *canon])
-        wide = frame.filter(pl.col("minute") == latest).select(
+        wide = latest_frame.select(
             ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
         )
         for name, (_, stats, windows) in group.reduced().items():
