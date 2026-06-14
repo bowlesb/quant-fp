@@ -408,6 +408,21 @@ def test_prior_day_pivots_and_gap() -> None:
     assert row["dist_from_pivot_r2"] == pytest.approx(104.0 / (pivot + 10.0) - 1.0)  # R2 = P + (H-L)
 
 
+def test_multi_day_vwap() -> None:
+    # 7 daily bars; at the last date (D6=2026-06-11) the 5-day VWAP uses the prior 5 completed days
+    # (vwap=100 each -> vwap_5d=100), and the prior close (close[D5]) is 105 -> dist=0.05, above=1.
+    dates = [date(2026, 6, 5) + timedelta(days=i) for i in range(7)]
+    closes = [100.0, 100.0, 100.0, 100.0, 100.0, 105.0, 999.0]  # close[D5]=105 is the prior close at D6
+    daily = pl.DataFrame(
+        {"symbol": ["AAA"] * 7, "date": dates, "close": closes, "volume": [1000.0] * 7, "vwap": [100.0] * 7}
+    )
+    minute = pl.DataFrame({"symbol": ["AAA"], "minute": [datetime(2026, 6, 11, 14, 0, tzinfo=timezone.utc)]})
+    out = run_group(REGISTRY.get_group("multi_day_vwap"), BatchContext(frames={"daily": daily, "minute_agg": minute}))
+    row = out.row(0, named=True)
+    assert row["dist_from_vwap_5d"] == pytest.approx(0.05)
+    assert row["above_vwap_5d"] == 1.0
+
+
 # --- reference groups: sector one-hot + asset flags ---
 
 

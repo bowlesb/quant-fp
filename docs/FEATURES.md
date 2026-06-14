@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-506 features across 27 group(s).
+516 features across 28 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -201,6 +201,16 @@
 | `dist_from_20d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 20-day high (close[D-1]/max - 1), point-in-time; <= 0. |
 | `dist_from_250d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 250-day high (close[D-1]/max - 1), point-in-time; <= 0. |
 | `dist_from_60d_high` | multi_day_returns | multi_day | A | tolerance | Float64 | warmup | (-1.0, 0.01) | Prior close relative to its 60-day high (close[D-1]/max - 1), point-in-time; <= 0. |
+| `above_vwap_10d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when the prior close is above the 10-day volume-weighted average price, else 0.0. |
+| `above_vwap_120d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when the prior close is above the 120-day volume-weighted average price, else 0.0. |
+| `above_vwap_20d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when the prior close is above the 20-day volume-weighted average price, else 0.0. |
+| `above_vwap_5d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when the prior close is above the 5-day volume-weighted average price, else 0.0. |
+| `above_vwap_60d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-0.01, 1.01) | 1.0 when the prior close is above the 60-day volume-weighted average price, else 0.0. |
+| `dist_from_vwap_10d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 10-day volume-weighted average price (close/vwap_10d - 1), point-in-time. |
+| `dist_from_vwap_120d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 120-day volume-weighted average price (close/vwap_120d - 1), point-in-time. |
+| `dist_from_vwap_20d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 20-day volume-weighted average price (close/vwap_20d - 1), point-in-time. |
+| `dist_from_vwap_5d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 5-day volume-weighted average price (close/vwap_5d - 1), point-in-time. |
+| `dist_from_vwap_60d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 60-day volume-weighted average price (close/vwap_60d - 1), point-in-time. |
 | `garman_klass_vol_10m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 10 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
 | `garman_klass_vol_120m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 120 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
 | `garman_klass_vol_15m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 15 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |

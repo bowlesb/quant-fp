@@ -52,7 +52,8 @@ def main() -> None:
 
     daily = _grid(n_tickers, daily_days, "date", BASE, timedelta(days=1)).with_columns(
         [pl.col("date").dt.date()]  # backfill_daily yields pl.Date; match it so the date join keys line up
-        + [(100.0 + (pl.int_range(pl.len()) % 250) * 0.2).alias(c) for c in ("open", "high", "low", "close")]
+        + [(100.0 + (pl.int_range(pl.len()) % 250) * 0.2).alias(c) for c in ("open", "high", "low", "close", "vwap")]
+        + [(1e6 + (pl.int_range(pl.len()) % 500) * 1e3).alias("volume")]
     )
     print(f"+ daily cache    {n_tickers}x{daily_days} ({daily.height:,} rows): RSS {_rss_mb():.0f} MB")
 

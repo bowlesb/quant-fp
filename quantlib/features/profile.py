@@ -35,7 +35,9 @@ def build_frames(n_tickers: int, window_min: int, daily_days: int) -> dict[str, 
     )
     days = pl.DataFrame({"date": [BASE + timedelta(days=j) for j in range(daily_days)]})
     daily = symbols.join(days, how="cross").with_columns(
-        [pl.col("date").dt.date()] + [(100.0 + (pl.int_range(pl.len()) % 250) * 0.2).alias(c) for c in ("open", "high", "low", "close")]
+        [pl.col("date").dt.date()]
+        + [(100.0 + (pl.int_range(pl.len()) % 250) * 0.2).alias(c) for c in ("open", "high", "low", "close", "vwap")]
+        + [(1e6 + (pl.int_range(pl.len()) % 500) * 1e3).alias("volume")]
     )
     reference = symbols.with_columns(
         [pl.lit("Technology").alias("sector"), pl.lit(True).alias("shortable"),
