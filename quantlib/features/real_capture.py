@@ -97,6 +97,13 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
         snapshots = {"reference": load_reference()}
         if day is not None:
             snapshots["daily"] = backfill_daily(day, symbols)
+    # Pin each worker's polars to a slice of the cores. Without this every one of the N spawned workers
+    # defaults to a full all-core rayon pool, so N workers x C cores = N*C threads thrash C cores (measured:
+    # ~20x slower per shard). One thread per shard when n_shards ~= cores; the spawned children inherit this
+    # env at import. (The reader keeps its already-initialized default pool for the universe-wide reduce.)
+    threads_per_worker = max(1, (os.cpu_count() or n_shards) // n_shards)
+    os.environ["POLARS_MAX_THREADS"] = str(threads_per_worker)
+
     # SPAWN, not fork: the reader process has already initialized polars' rayon threadpool (building the
     # reference/daily snapshots), and forking a process with a live threadpool deadlocks the child on its
     # first parallel polars op. Spawned workers get a fresh interpreter + fresh threadpool — no inheritance.
