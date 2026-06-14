@@ -11,6 +11,7 @@ import asyncio
 import json
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime
 
 import polars as pl
@@ -19,6 +20,7 @@ import websockets
 from quantlib.features import metrics, store
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
+from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 
 BARS_SCHEMA = {
     "symbol": pl.String,
@@ -98,12 +100,31 @@ def process_bars(
     target_day = day or str(latest.date())
     frames = {"minute_agg": frame, **(snapshots or {})}
     ctx = BatchContext(frames=frames)
-    for group in runnable(frames):
-        if group.name in exclude_groups or (only_groups is not None and group.name not in only_groups):
-            continue
-        group_start = time.perf_counter()
-        out = group.compute_latest(ctx)  # live = aggregate-at-T (fast where overridden; parity-guarded)
-        state.group_timings[group.name] = (time.perf_counter() - group_start) * 1000.0
+    selected = [
+        group
+        for group in runnable(frames)
+        if group.name not in exclude_groups and (only_groups is None or group.name in only_groups)
+    ]
+    # Declarative reduction groups sharing an input run in ONE batched marshal+kernel pass (one symbol-code
+    # + numpy copy for all of them); every other group runs individually. Both yield (group, out, ms).
+    outputs: list[tuple] = []
+    batchable: dict[str, list] = defaultdict(list)
+    for group in selected:
+        if isinstance(group, ReductionGroup):
+            batchable[group.reduce_input].append(group)
+        else:
+            group_start = time.perf_counter()
+            out = group.compute_latest(ctx)  # live = aggregate-at-T (fast where overridden; parity-guarded)
+            outputs.append((group, out, (time.perf_counter() - group_start) * 1000.0))
+    for batch_groups in batchable.values():
+        batch_start = time.perf_counter()
+        batched = compute_reduction_batch(batch_groups, ctx)
+        per_ms = (time.perf_counter() - batch_start) * 1000.0 / len(batch_groups)
+        for group in batch_groups:
+            outputs.append((group, batched[group.name], per_ms))
+
+    for group, out, compute_ms in outputs:
+        state.group_timings[group.name] = compute_ms
         if accumulate:
             prior = state.accumulated.get(group.name)
             state.accumulated[group.name] = (
