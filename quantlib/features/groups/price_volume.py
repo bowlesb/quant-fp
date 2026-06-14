@@ -11,22 +11,18 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
-from quantlib.features.latest import pivot_stat, rust_windowed_sums, windowed_ols_latest
-from quantlib.features.ols import centered_minutes, with_ols_columns
+from quantlib.features.declarative import ReductionGroup, corr_, mean_, pt_, slope_, sum_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
 
 
 @register
-class PriceVolumeGroup(FeatureGroup):
+class PriceVolumeGroup(ReductionGroup):
     name = "price_volume"
     version = "1.1.0"
     owner = "modeller"
@@ -66,104 +62,42 @@ class PriceVolumeGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "high", "low", "close", "volume"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        frame = centered_minutes(frame, "_t")
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
         rng = pl.col("high") - pl.col("low")
         mfm = pl.when(rng > 0.0).then((2.0 * pl.col("close") - pl.col("high") - pl.col("low")) / rng).otherwise(0.0)
-        ret = pl.col("close") / pl.col("_prev") - 1.0
-        signed = pl.when(ret > 0.0).then(pl.col("volume")).when(ret < 0.0).then(-pl.col("volume")).otherwise(0.0)
-        frame = frame.with_columns(
-            [
-                ret.alias("_ret"),
-                (pl.col("close") * pl.col("volume")).alias("_cv"),
-                (mfm * pl.col("volume")).alias("_mfv"),
-                pl.when(ret > 0.0).then(pl.col("volume")).otherwise(0.0).alias("_up_vol"),
-                pl.when(ret < 0.0).then(pl.col("volume")).otherwise(0.0).alias("_dn_vol"),
-                signed.alias("_signed"),
-            ]
-        )
-        frame = frame.with_columns(pl.col("_signed").cum_sum().over("symbol").alias("_obv"))
-        # Materialize each window's rolling sums ONCE (vol_w is shared by 4 ratios), and let
-        # with_ols_columns materialize the corr/obv sums once too — polars eager won't CSE them.
-        temp = []
-        for w in WINDOWS:
-            size = f"{w}m"
-            temp += [
-                pl.col("volume").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_volw_{w}"),
-                pl.col("volume").rolling_mean_by("minute", window_size=size).over("symbol").alias(f"_meanvol_{w}"),
-                pl.col("_cv").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_cvw_{w}"),
-                pl.col("_mfv").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_mfvw_{w}"),
-                pl.col("_up_vol").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_upw_{w}"),
-                pl.col("_dn_vol").rolling_sum_by("minute", window_size=size).over("symbol").alias(f"_dnw_{w}"),
-            ]
-        frame = frame.with_columns(temp)
-        for w in WINDOWS:
-            size = f"{w}m"
-            frame = with_ols_columns(frame, "_ret", "volume", size, {"corr": f"pv_correlation_{w}m"})
-            frame = with_ols_columns(frame, "_t", "_obv", size, {"slope": f"_obvslope_{w}"})
-        exprs = []
-        for w in WINDOWS:
-            vol_w = pl.col(f"_volw_{w}")
-            exprs.append((pl.col("close") / (pl.col(f"_cvw_{w}") / vol_w) - 1.0).cast(pl.Float64).alias(f"vwap_deviation_{w}m"))
-            exprs.append((pl.col(f"_upw_{w}") / vol_w).cast(pl.Float64).alias(f"up_volume_ratio_{w}m"))
-            exprs.append((pl.col(f"_dnw_{w}") / vol_w).cast(pl.Float64).alias(f"down_volume_ratio_{w}m"))
-            exprs.append(((pl.col(f"_upw_{w}") - pl.col(f"_dnw_{w}")) / vol_w).cast(pl.Float64).alias(f"volume_delta_{w}m"))
-            exprs.append((pl.col(f"_mfvw_{w}") / vol_w).cast(pl.Float64).alias(f"buying_pressure_{w}m"))
-            exprs.append((pl.col(f"_obvslope_{w}") / pl.col(f"_meanvol_{w}")).cast(pl.Float64).alias(f"obv_slope_{w}m"))
-        names = [
-            f"{stat}_{w}m"
-            for w in WINDOWS
-            for stat in ("vwap_deviation", "up_volume_ratio", "down_volume_ratio", "volume_delta", "buying_pressure", "pv_correlation", "obv_slope")
-        ]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
-
-    def _prep_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "high", "low", "close", "volume"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        frame = centered_minutes(frame, "_t")
-        rng = pl.col("high") - pl.col("low")
-        mfm = pl.when(rng > 0.0).then((2.0 * pl.col("close") - pl.col("high") - pl.col("low")) / rng).otherwise(0.0)
-        ret = pl.col("close") / pl.col("_prev") - 1.0
-        signed = pl.when(ret > 0.0).then(pl.col("volume")).when(ret < 0.0).then(-pl.col("volume")).otherwise(0.0)
-        frame = frame.with_columns(
-            [
-                ret.alias("_ret"), (pl.col("close") * pl.col("volume")).alias("_cv"), (mfm * pl.col("volume")).alias("_mfv"),
-                pl.when(ret > 0.0).then(pl.col("volume")).otherwise(0.0).alias("_up_vol"),
-                pl.when(ret < 0.0).then(pl.col("volume")).otherwise(0.0).alias("_dn_vol"), signed.alias("_signed"),
-            ]
-        )
-        return frame.with_columns(pl.col("_signed").cum_sum().over("symbol").alias("_obv"))
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: the per-window volume sums become aggregate-at-T group_bys; pv-correlation and
-        obv-slope use the windowed-OLS-at-T helper. Same formulas as compute(), parity-guarded."""
-        frame = self._prep_latest(ctx)
-        latest = frame["minute"].max()
-        sums = rust_windowed_sums(frame, ["volume", "_cv", "_mfv", "_up_vol", "_dn_vol"], WINDOWS)
-        corr = windowed_ols_latest(frame, "_ret", "volume", WINDOWS).select(["symbol", "window", pl.col("corr").alias("_corr")])
-        obv = windowed_ols_latest(frame, "_t", "_obv", WINDOWS).select(["symbol", "window", pl.col("slope").alias("_obvslope")])
-        close_t = frame.filter(pl.col("minute") == latest).select(["symbol", pl.col("close").alias("_cT")])
-        long = (
-            sums.join(corr, on=["symbol", "window"], how="left")
-            .join(obv, on=["symbol", "window"], how="left").join(close_t, on="symbol", how="left")
-        )
         vol = pl.col("volume")
-        long = long.with_columns(
-            [
-                (pl.col("_cT") / (pl.col("_cv") / vol) - 1.0).alias("vwap_deviation"),
-                (pl.col("_up_vol") / vol).alias("up_volume_ratio"),
-                (pl.col("_dn_vol") / vol).alias("down_volume_ratio"),
-                ((pl.col("_up_vol") - pl.col("_dn_vol")) / vol).alias("volume_delta"),
-                (pl.col("_mfv") / vol).alias("buying_pressure"),
-                pl.col("_corr").alias("pv_correlation"),
-                (pl.col("_obvslope") / (vol / pl.col("_n"))).alias("obv_slope"),
-            ]
-        )
-        stats = ("vwap_deviation", "up_volume_ratio", "down_volume_ratio", "volume_delta", "buying_pressure", "pv_correlation", "obv_slope")
-        out = frame.filter(pl.col("minute") == latest).select("symbol")
-        for stat in stats:
-            out = out.join(pivot_stat(long, stat, stat + "_{w}m", WINDOWS), on="symbol", how="left")
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in stats]
-        return out.with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
+        return {
+            "vol": (vol, ("sum", "mean"), WINDOWS),  # sum feeds the 4 ratios; mean normalizes obv_slope
+            "cv": (pl.col("close") * vol, ("sum",), WINDOWS),
+            "mfv": (mfm * vol, ("sum",), WINDOWS),
+            "up": (pl.when(ret > 0.0).then(vol).otherwise(0.0), ("sum",), WINDOWS),
+            "dn": (pl.when(ret < 0.0).then(vol).otherwise(0.0), ("sum",), WINDOWS),
+        }
+
+    def regressions(self) -> dict[str, tuple[pl.Expr, pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+        signed = pl.when(ret > 0.0).then(pl.col("volume")).when(ret < 0.0).then(-pl.col("volume")).otherwise(0.0)
+        obv = signed.cum_sum().over("symbol")
+        epoch = pl.col("minute").dt.epoch("s").cast(pl.Float64)
+        centered_t = (epoch - epoch.min()) / 60.0  # frame-relative time regressor (OLS is origin-invariant)
+        return {
+            "pv": (ret, pl.col("volume"), ("corr",), WINDOWS),  # return-vs-volume correlation
+            "obv": (centered_t, obv, ("slope",), WINDOWS),  # on-balance-volume slope on time
+        }
+
+    def points(self) -> dict[str, pl.Expr]:
+        return {"cT": pl.col("close")}
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
+        for w in WINDOWS:
+            vol_w = sum_("vol", w)
+            feats[f"vwap_deviation_{w}m"] = pt_("cT") / (sum_("cv", w) / vol_w) - 1.0
+            feats[f"up_volume_ratio_{w}m"] = sum_("up", w) / vol_w
+            feats[f"down_volume_ratio_{w}m"] = sum_("dn", w) / vol_w
+            feats[f"volume_delta_{w}m"] = (sum_("up", w) - sum_("dn", w)) / vol_w
+            feats[f"buying_pressure_{w}m"] = sum_("mfv", w) / vol_w
+            feats[f"pv_correlation_{w}m"] = corr_("pv", w)
+            feats[f"obv_slope_{w}m"] = slope_("obv", w) / mean_("vol", w)
+        return feats
