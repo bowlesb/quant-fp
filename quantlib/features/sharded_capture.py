@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 
 from quantlib.features import metrics
@@ -47,8 +48,10 @@ def _bench_log_path(root: str, shard_id: int) -> Path | None:
     return path
 
 
+@lru_cache(maxsize=None)
 def shard_of(symbol: str, n_shards: int) -> int:
-    """Stable shard assignment, identical across processes (Python's hash() is per-process salted)."""
+    """Stable shard assignment, identical across processes (Python's hash() is per-process salted). Cached:
+    the symbol set is fixed, so after the first minute this is a dict lookup, not an md5 per bar per minute."""
     return int(hashlib.md5(symbol.encode()).hexdigest(), 16) % n_shards
 
 
