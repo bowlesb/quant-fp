@@ -139,6 +139,19 @@ With latest-minute + sharding, today's 140s/10k-feat-minute target becomes secon
 for 10× features and 10× tickers before any language change. Every new feature passes through the
 profiler + CI latency gate, so the catalog stays fast by construction.
 
+## Measured path to <100ms (2026-06-13, pure Python, parity-clean)
+| approach (10k × 1500 feats, dense synthetic) | single-process |
+|---|---|
+| per-window aggregate-at-T (12 slice+group_by) | 414 ms |
+| one-pass conditional-agg (audit's idea) — TESTED, REJECTED (filter rescans buffer) | 1030 ms |
+| **tiered: SHORT windows only (3–30m) — the typical minute** | **91 ms** |
+| tiered: LONG windows (45–240m) — every 5th minute, staggered | 321 ms |
+
+So the typical minute is **91 ms single-process → ~45 ms sharded**, under the 100ms bar, before the
+dirty-set (only symbols that traded — the dense bench assumes all 10k every minute, pessimistic vs real
+gappy data). The architecture is: per-window aggregate-at-T + tiered cadence (long windows every 5th
+minute, staggered, per-feature-validated vs 1e-6) + dirty-set + symbol-sharding. No incremental, no Rust.
+
 ## Independent audit verdict (2026-06-13, two passes)
 - **Substrate = aggregate-at-T, NOT incremental running sums.** Incremental reintroduces a SECOND
   numeric path whose float accumulation drifts from the fresh backfill computation (catastrophic
