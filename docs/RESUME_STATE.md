@@ -54,6 +54,17 @@ Optimal config measured: **10 shards × 3 polars threads** at 10k/32-cores.
   (every backfill feature) is unsupported → CPU fallback. Parity was fine (1e-16…1e-13). CPU path wins +
   stays readable. 3090 → reserve for model TRAINING. Details in `docs/FUSED_ENGINE.md`.
 
+## THE lever for <100ms: incremental windowed sums (the user's target)
+The design recomputes every feature over the full 60-min buffer every minute — O(buffer×features). Because
+the declarative engine routes EVERYTHING through windowed SUMS (mean/std/OLS all derived from sums) and sums
+are associative, a running aggregate (add the new minute, subtract the minute that aged out of each window)
+is BIT-EXACT reproducible by backfill — parity holds by construction. That turns per-minute work O(buffer)→
+O(features), the ~5–7× toward <100ms. Build: a stateful Rust kernel keeping per-(symbol,window) running sums
+across minutes (reconstructable from the buffer for crash recovery), feeding the same canonical columns the
+declarative groups already assemble from. This is the big focused next effort; finish the migrations first
+so the kernel covers all heavy groups. (Honest: 10k×519 over a 60-min buffer on 32 cores may floor at
+~100–200ms under concurrency overhead, not necessarily 100ms flat.)
+
 ## Exact next steps (in order)
 1. **Remaining reduction-shaped groups** (each parity-gated by `tests/test_fp_latest.py`): `liquidity`
    (mean/sum fit the engine, but roll-spread is an AUTOCOVARIance — needs a lag-product derived col or a
