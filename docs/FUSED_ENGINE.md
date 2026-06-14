@@ -84,11 +84,20 @@ loop fast AND speed production live. Three consequences for the design:
    the shared execution core both call — so an optimization (batched kernels, one marshal) is felt
    identically in a modeller's overnight backfill and in the Monday live loop. Build it once, both benefit.
 
-**GPU's natural home is exactly this path.** Backfill is the source of truth and a huge embarrassingly-
-parallel batch — ideal for the 3090 via `polars … .collect(engine="gpu")` (same code). And because backfill
-DEFINES truth, GPU-vs-CPU float drift only has to be checked one way: live (CPU, sharded) vs backfill
-(GPU) within the existing parity tolerance. So: **GPU-accelerated backfill for fast modeling iteration,
-CPU-sharded live for production, parity bridging them.** (Driver fix needed first — see GPU note.)
+**GPU — SPIKED AND RULED OUT for feature compute (2026-06-14).** Tested the polars GPU engine
+(`cudf-polars`, RTX 3090) on representative backfill ops at 1.17M and 3.9M rows. Result: GPU is SLOWER, and
+our core op is unsupported.
+- cross-sectional rank: GPU 6×/2.4× SLOWER than CPU (transfer+launch overhead dominates at these sizes;
+  multithreaded CPU polars wins on 1–4M-row batches);
+- cross-sectional agg: GPU ~1.7–2.5× slower;
+- **`rolling_*_by`** (the time-windowed rolling EVERY backfill feature is built on): **not implemented in
+  cudf-polars** → silent CPU fallback.
+- Parity was fine where GPU ran (max |CPU−GPU| 1e-16…1e-13, within tolerance) — so parity is NOT the
+  blocker; performance/support is.
+Conclusion: the CPU path (Rust single-pass kernels + sharding + this declarative engine) is both faster and
+readable; a GPU win would require rewriting features in cudf (the readability cost we're avoiding). The
+3090 is better spent on model TRAINING (large dense matmuls — actually GPU-ideal), not feature compute.
+`docker/fp-gpu.Dockerfile` is kept for that future training use.
 
 ## Expected payoff
 - **Live:** single-process per-shard compute ~300ms → ~100ms (one marshal instead of ~12), less memory
