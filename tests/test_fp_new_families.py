@@ -313,6 +313,20 @@ def test_calendar_events_triple_witching() -> None:
     assert plain["is_opex_day"] == 0.0 and plain["is_triple_witching"] == 0.0
 
 
+def test_cross_sectional_rank_universe_pin() -> None:
+    minute = BASE
+    rows = [{"symbol": s, "minute": minute, "close": 100.0, "volume": v}
+            for s, v in (("AAA", 100.0), ("BBB", 200.0), ("CCC", 300.0), ("DDD", 400.0))]
+    universe = pl.DataFrame({"symbol": ["AAA", "BBB", "CCC"]})  # DDD pinned OUT
+    out = run_group(
+        REGISTRY.get_group("cross_sectional_rank"),
+        BatchContext(frames={"minute_agg": pl.DataFrame(rows), "universe": universe}),
+    )
+    assert set(out["symbol"].to_list()) == {"AAA", "BBB", "CCC"}  # ranked only within the pinned universe
+    ranks = {r["symbol"]: r["volume_rank_1m"] for r in out.iter_rows(named=True)}
+    assert ranks["AAA"] == pytest.approx(0.0) and ranks["CCC"] == pytest.approx(1.0)  # DDD excluded, CCC is top
+
+
 def test_cross_sectional_rank_ordering() -> None:
     minute = BASE
     rows = [

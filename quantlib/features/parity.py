@@ -34,9 +34,11 @@ def parity_test(day: str, source_live: str = "stream", source_backfill: str = "b
         set(backfill_minute["symbol"].unique().to_list()) | set(live_minute["symbol"].unique().to_list())
     )
     daily = backfill_daily(day, symbols)
-    live = vectors({"minute_agg": live_minute, "reference": reference, "daily": daily})
-    backfill = vectors({"minute_agg": backfill_minute, "reference": reference, "daily": daily})
-    return diff(live, backfill, load_tiers(day))
+    tiers = load_tiers(day)
+    universe = tiers.select("symbol")  # pin cross-sectional rank to the day's fixed membership (gap #3)
+    live = vectors({"minute_agg": live_minute, "reference": reference, "daily": daily, "universe": universe})
+    backfill = vectors({"minute_agg": backfill_minute, "reference": reference, "daily": daily, "universe": universe})
+    return diff(live, backfill, tiers)
 
 
 def parity_test_ticks(start: datetime, end: datetime, symbols: list[str]) -> pl.DataFrame:

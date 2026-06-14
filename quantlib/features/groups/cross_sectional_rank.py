@@ -61,6 +61,14 @@ class CrossSectionalRankGroup(FeatureGroup):
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "volume"])
+        # PARITY PIN (gap #3): if a pinned universe snapshot is provided, rank ONLY within that fixed
+        # membership so live and backfill rank the IDENTICAL set (the rank of any symbol depends on the
+        # whole set). Without it, the ad-hoc "whoever printed this minute" set can differ across sources
+        # and shift everyone's percentile. The universe frame is the same per-day membership both paths
+        # load (loaders.load_universe), so the pin is deterministic.
+        if "universe" in ctx.frames:
+            members = ctx.frames["universe"].select("symbol").unique()
+            frame = frame.join(members, on="symbol", how="inner")
         for w in RETURN_WINDOWS:
             frame = lagged(frame, "close", w, f"_lag{w}")
         frame = frame.sort(["symbol", "minute"])
