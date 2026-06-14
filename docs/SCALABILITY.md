@@ -60,20 +60,25 @@ buffer waste on top.
 - **CI gate (to build):** a test that fails if any group exceeds a per-feature µs budget at a
   reference scale — enforces "timed and fast" as a merge condition.
 
-### 2. Process-parallelism — FIRST CLASS (the work-splitter)
+### 2. Process-parallelism — FIRST CLASS (BUILT: quantlib/features/sharded_capture.py)
 Partition by symbol across a persistent process pool (Edgar's model, adapted to our vectorized
-substrate): N worker processes, each owns `hash(symbol) % N` and runs the **identical** vectorized
-group code on **its shard's buffer** (single code path → parity preserved; a symbol's per-symbol
-features never depend on another symbol). Sizing: N ≈ cores, with `POLARS_MAX_THREADS` set so
-N × threads ≈ cores (no oversubscription). The ingestor already shards ticks this way; the feature
-computer mirrors it.
+substrate): N worker processes, each owns `hash(symbol) % N` (stable md5, process-salt-free) and runs
+the **identical** `process_bars` core on **its shard's buffer** (single code path → parity preserved).
+Sizing: N ≈ cores − 2 (`run_sharded_capture`), with `POLARS_MAX_THREADS` per worker so N × threads ≈
+cores. The reader (`real_capture.run_sharded_capture`) owns the single Alpaca websocket, batches a
+completed minute, routes it to the worker queues, and writes are partition-disjoint by symbol.
 
-**Cross-sectional features need a gather phase.** `cross_sectional_rank` (universe percentile) and
-the market/sector broadcasts depend on >1 symbol, so they break naive symbol-sharding. Two-stage:
-1. **Map:** each shard computes all per-symbol features for its symbols → writes its slice.
-2. **Reduce:** a small cross-sectional stage gathers the needed columns (returns/volume for ranks;
-   SPY/QQQ are tiny and broadcast to all shards cheaply) and computes ranks over the full minute.
-This keeps the expensive 99% embarrassingly parallel and isolates the cheap cross-sectional 1%.
+**Cross-sectional features handled in two ways (BUILT):**
+- **Index context** (market_context / market_beta need SPY/QQQ): `route_minute` REPLICATES the index
+  ETFs into every shard, so those groups compute correctly per shard.
+- **Universe-wide reduce** (`cross_sectional_rank`): EXCLUDED from shards (`REDUCE_GROUPS`) and run once
+  in a gather step over a full-universe buffer held by the reader.
+
+**Proven byte-identical** to single-process: `tests/test_fp_sharding.py` asserts per-symbol groups,
+index-replicated market context, and the reduce-phase rank all equal the single-process output (if
+sharding changed any value, backfill parity would silently break). Remaining: point the running
+capture service at `run_sharded_capture` (CLI flag `--sharded` exists) and measure real streaming
+latency + per-worker timing live.
 
 ### 3. Compute only what live needs — the latest-minute window
 Live needs minute T's value, not the whole buffer. Two complementary moves, both parity-preserving:

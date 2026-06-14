@@ -56,6 +56,9 @@ def process_bars(
     day: str | None,
     window: int,
     snapshots: dict[str, pl.DataFrame] | None = None,
+    exclude_groups: tuple[str, ...] = (),
+    only_groups: tuple[str, ...] | None = None,
+    write: bool = True,
 ) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
     S, o, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
@@ -64,7 +67,11 @@ def process_bars(
 
     ``snapshots`` are slowly-changing reference frames (e.g. ``reference`` for sector/flags, ``daily``
     for multi-day) loaded once and held by the caller, merged into the compute context each minute so
-    those groups self-select and serve live — the same frames the backfill/parity path provides."""
+    those groups self-select and serve live — the same frames the backfill/parity path provides.
+
+    ``exclude_groups`` are computed elsewhere — in the sharded executor the cross-sectional reduce
+    groups (universe-wide rank) run in a gather phase, not per shard. ``write=False`` accumulates in
+    state without touching the store (used by tests and the gather phase)."""
     for bar in bars:
         state.buffer.append(
             {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
@@ -79,11 +86,14 @@ def process_bars(
     frames = {"minute_agg": frame, **(snapshots or {})}
     ctx = BatchContext(frames=frames)
     for group in runnable(frames):
+        if group.name in exclude_groups or (only_groups is not None and group.name not in only_groups):
+            continue
         out = run_group(group, ctx, validate=False).filter(pl.col("minute") == latest)
         prior = state.accumulated.get(group.name)
         combined = out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
         state.accumulated[group.name] = combined
-        store.write_group(root, group.name, group.version, "stream", target_day, combined, mode=mode)
+        if write:
+            store.write_group(root, group.name, group.version, "stream", target_day, combined, mode=mode)
     state.minutes += 1
 
 
