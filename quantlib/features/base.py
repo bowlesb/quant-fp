@@ -91,7 +91,21 @@ class FeatureGroup(ABC):
     @abstractmethod
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         """Vectorized over all requested (symbol, minute) cells. Returns a frame keyed by
-        (symbol, minute) with exactly one column per declared feature."""
+        (symbol, minute) with exactly one column per declared feature. This is the BACKFILL form
+        (whole-history rolling) and the source of truth."""
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE form for the live path: emit only the most recent minute's row per symbol.
+
+        Default = ``compute()`` filtered to the last minute (always correct, but does the full rolling
+        work). Groups OVERRIDE this with a fast aggregate-at-T form (a windowed group_by → one row per
+        symbol, ~window× less work). Any override is guarded by the generic parity test
+        (tests/test_fp_latest.py): ``compute_latest`` MUST equal ``compute().filter(last minute)`` — so a
+        fast live form can never silently diverge from the backfill rolling form."""
+        out = self.compute(ctx)
+        if out.height == 0:
+            return out
+        return out.filter(pl.col("minute") == out["minute"].max())
 
     @property
     def feature_names(self) -> list[str]:

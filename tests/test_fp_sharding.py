@@ -52,10 +52,24 @@ def _sharded(n_minutes: int) -> dict[str, pl.DataFrame]:
 
 
 def _assert_same(single: pl.DataFrame, sharded: pl.DataFrame) -> None:
+    # Sharding must preserve values within the PARITY tolerance (1e-9), the same standard as
+    # live-vs-backfill — NOT bit-exactness: aggregate-at-T (group_by mean/std in compute_latest) is
+    # float-order-sensitive, and a shard's buffer orders rows differently than the single-process one.
     keys = ["symbol", "minute"]
     a = single.sort(keys)
     b = sharded.sort(keys).select(a.columns)
-    assert a.equals(b)
+    assert a.height == b.height
+    for feature in [c for c in a.columns if c not in keys]:
+        pair = a.select("symbol", "minute", feature).join(
+            b.select("symbol", "minute", pl.col(feature).alias("_b")), on=keys
+        )
+        bad = pair.filter(
+            ~(
+                (pl.col(feature).is_null() & pl.col("_b").is_null())
+                | ((pl.col(feature) - pl.col("_b")).abs() <= 1e-9 + 1e-9 * pl.col(feature).abs())
+            )
+        )
+        assert bad.height == 0, f"{feature}: sharded != single on {bad.height} cells"
 
 
 def test_sharded_per_symbol_groups_identical() -> None:

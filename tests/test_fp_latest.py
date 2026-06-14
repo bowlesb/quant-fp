@@ -13,9 +13,43 @@ from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
+import pytest
+
 from quantlib.features import BatchContext, REGISTRY
+from quantlib.features.compare import runnable
+from quantlib.features.profile import build_frames
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
+ALL_GROUPS = [group.name for group in REGISTRY.groups()]
+
+
+@pytest.mark.parametrize("group_name", ALL_GROUPS)
+def test_compute_latest_matches_rolling_for_every_group(group_name: str) -> None:
+    """The generic guard: for EVERY group, the live aggregate-at-T form (compute_latest) must equal the
+    backfill rolling form's last minute. Default groups pass trivially (compute_latest derives from
+    compute); a group that OVERRIDES compute_latest for speed is held to byte-equality here, so a fast
+    live path can never silently diverge from the certified backfill values."""
+    frames = build_frames(n_tickers=40, window_min=250, daily_days=60)  # > 240m windows, warm
+    if group_name not in {g.name for g in runnable(frames)}:
+        pytest.skip("group inputs not present in the standard test frames")
+    group = REGISTRY.get_group(group_name)
+    ctx = BatchContext(frames=frames)
+    rolling = group.compute(ctx)
+    latest = rolling["minute"].max()
+    expected = rolling.filter(pl.col("minute") == latest).sort("symbol")
+    actual = group.compute_latest(ctx).filter(pl.col("minute") == latest).sort("symbol").select(expected.columns)
+    assert actual.height == expected.height
+    for feature in [c for c in expected.columns if c not in ("symbol", "minute")]:
+        joined = expected.select("symbol", feature).join(
+            actual.select("symbol", pl.col(feature).alias("_a")), on="symbol"
+        )
+        bad = joined.filter(
+            ~(
+                (pl.col(feature).is_null() & pl.col("_a").is_null())
+                | ((pl.col(feature) - pl.col("_a")).abs() <= 1e-9 + 1e-9 * pl.col(feature).abs())
+            )
+        )
+        assert bad.height == 0, f"{group_name}.{feature}: compute_latest != compute().last on {bad.height}"
 
 
 def _buffer(symbols: tuple[str, ...], n: int) -> pl.DataFrame:

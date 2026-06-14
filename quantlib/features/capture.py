@@ -19,7 +19,6 @@ import websockets
 from quantlib.features import store
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
-from quantlib.features.engine import run_group
 
 BARS_SCHEMA = {
     "symbol": pl.String,
@@ -91,7 +90,7 @@ def process_bars(
         if group.name in exclude_groups or (only_groups is not None and group.name not in only_groups):
             continue
         group_start = time.perf_counter()
-        out = run_group(group, ctx, validate=False).filter(pl.col("minute") == latest)
+        out = group.compute_latest(ctx)  # live = aggregate-at-T (fast where overridden; parity-guarded)
         state.group_timings[group.name] = (time.perf_counter() - group_start) * 1000.0
         prior = state.accumulated.get(group.name)
         combined = out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
