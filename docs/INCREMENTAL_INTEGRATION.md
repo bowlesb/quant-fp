@@ -93,6 +93,25 @@ this path — unchanged, so iteration speed is unaffected.)
   within tolerance (guards #1), and that a re-seed restores bit-closeness.
 - **(have) `test_fp_latest`** — batch == backfill, unchanged. Together: backfill == batch == incremental.
 
+## STATUS (branch feature/incremental-engine)
+- **V1 BUILT + PARITY-VALIDATED.** `IncrementalEngine` (`incremental.py`) + shared `build_plan` /
+  `assemble_from_long` (the batch and incremental now run the SAME assemble code; only the sum-source
+  differs). `tests/test_fp_incremental_features` proves `step()` == `compute_latest()` cell-for-cell across a
+  minute stream for every declarative group. The test caught a real bug: **cumulative columns (OBV =
+  cum_sum) can't be slice-derived** — V1 derives the new minute over the whole buffer (correct).
+- **V1 speed: 91.6ms vs batch 127.8ms (1.40×)** at 1250×60. Modest, because the two big costs remain: the
+  whole-buffer derive (62ms) and the assemble pivot (37ms). The fold itself is 0.49ms.
+- **V2 (the actual <100ms-tiny win), two pieces:**
+  1. **Slice-derive** the cheap short-lag value columns (ret, products, power-sums) over a ~6-min slice, and
+     maintain the few **cumulative** columns (OBV) as running per-symbol state. Removes ~55ms of the derive.
+     Needs groups to flag cumulative regressors (or the engine to detect `cum_sum`).
+  2. **No-pivot assemble:** build the canonical WIDE columns directly from the numpy running sums (they're
+     already `[window, symbol, col]`), skipping `pivot_stat`. Removes ~30ms. (`assemble_from_long` stays for
+     the batch; the incremental path gets a wide-from-numpy variant sharing the same canonical algebra.)
+  Together → derive(small) + fold(0.49) + wide-construct + assemble-exprs ≈ low-tens-of-ms.
+- **REMAINING after V2:** wire into the worker behind `FP_INCREMENTAL` (seed on start/daily, step per
+  minute), the session-length drift test, and symbol-churn V2.
+
 ## Implementation steps (each independently committed + parity-gated, revertible on this branch)
 1. `IncrementalEngine`: holds the per-shard `WindowedSumState` + the union value-column plan built from the
    declarative groups; methods `seed(buffer)` and `step(new_minute_bars) -> {group: feature_frame}`.
