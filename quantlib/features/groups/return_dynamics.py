@@ -11,24 +11,21 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
-from quantlib.features.latest import pivot_stat, windowed_corr_latest
-from quantlib.features.ols import with_ols_columns
+from quantlib.features.declarative import ReductionGroup, corr_, pt_
 from quantlib.features.registry import register
 
 AUTOCORR_WINDOWS: tuple[int, ...] = (10, 15, 30, 60, 120)
 ACCEL_WINDOWS: tuple[int, ...] = (5, 10, 15, 30, 60)
+ACCEL_LAGS: tuple[int, ...] = tuple(sorted({w for w in ACCEL_WINDOWS} | {2 * w for w in ACCEL_WINDOWS}))
 DYN_TOL = 1e-4
 
 
 @register
-class ReturnDynamicsGroup(FeatureGroup):
+class ReturnDynamicsGroup(ReductionGroup):
     name = "return_dynamics"
     version = "1.0.0"
     owner = "modeller"
@@ -53,61 +50,33 @@ class ReturnDynamicsGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        # Each distinct close-lag is a self-join; compute each ONCE (dedup w/2w overlaps) and derive
-        # the return-lags from the close-lags instead of two more joins on _ret. _ret_lag1 at t is the
-        # return at t-1 = close[t-1]/close[t-2] - 1, etc — byte-identical to lagging _ret directly.
-        lags = sorted({1, 2, 3} | {w for w in ACCEL_WINDOWS} | {2 * w for w in ACCEL_WINDOWS})
-        for offset in lags:
-            frame = lagged(frame, "close", offset, f"_lag{offset}")
-        frame = frame.sort(["symbol", "minute"])
-        frame = frame.with_columns(
-            [
-                (pl.col("close") / pl.col("_lag1") - 1.0).alias("_ret"),
-                (pl.col("_lag1") / pl.col("_lag2") - 1.0).alias("_ret_lag1"),
-                (pl.col("_lag2") / pl.col("_lag3") - 1.0).alias("_ret_lag2"),
-            ]
-        )
-        for w in AUTOCORR_WINDOWS:
-            size = f"{w}m"
-            frame = with_ols_columns(frame, "_ret_lag1", "_ret", size, {"corr": f"autocorr_1_{w}m"})
-            frame = with_ols_columns(frame, "_ret_lag2", "_ret", size, {"corr": f"autocorr_2_{w}m"})
-        exprs = []
-        for w in ACCEL_WINDOWS:
-            recent = pl.col("close") / pl.col(f"_lag{w}") - 1.0
-            prior = pl.col(f"_lag{w}") / pl.col(f"_lag{2 * w}") - 1.0
-            exprs.append((recent - prior).cast(pl.Float64).alias(f"ret_accel_{w}m"))
-        names = (
-            [f"autocorr_{lag}_{w}m" for w in AUTOCORR_WINDOWS for lag in (1, 2)]
-            + [f"ret_accel_{w}m" for w in ACCEL_WINDOWS]
-        )
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        return {}  # no mean/std/sum reductions — only OLS (autocorrelation) and point lags
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: lag-1/2 autocorrelation via aggregate-at-T OLS; return acceleration via point
-        lookups of the lagged closes on the T row."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        lags = sorted({1, 2, 3} | {w for w in ACCEL_WINDOWS} | {2 * w for w in ACCEL_WINDOWS})
-        for offset in lags:
-            frame = lagged(frame, "close", offset, f"_lag{offset}")
-        frame = frame.sort(["symbol", "minute"]).with_columns(
-            [
-                (pl.col("close") / pl.col("_lag1") - 1.0).alias("_ret"),
-                (pl.col("_lag1") / pl.col("_lag2") - 1.0).alias("_ret_lag1"),
-                (pl.col("_lag2") / pl.col("_lag3") - 1.0).alias("_ret_lag2"),
-            ]
-        )
-        latest = frame["minute"].max()
-        corr = windowed_corr_latest(frame, [("_ret_lag1", "_ret"), ("_ret_lag2", "_ret")], AUTOCORR_WINDOWS)
-        ac1 = pivot_stat(corr.rename({"_corr0": "corr"}), "corr", "autocorr_1_{w}m", AUTOCORR_WINDOWS)
-        ac2 = pivot_stat(corr.rename({"_corr1": "corr"}), "corr", "autocorr_2_{w}m", AUTOCORR_WINDOWS)
-        accel = frame.filter(pl.col("minute") == latest).select(
-            ["symbol", *[((pl.col("close") / pl.col(f"_lag{w}") - 1.0) - (pl.col(f"_lag{w}") / pl.col(f"_lag{2 * w}") - 1.0)).cast(pl.Float64).alias(f"ret_accel_{w}m") for w in ACCEL_WINDOWS]]
-        )
-        out = accel.join(ac1, on="symbol", how="left").join(ac2, on="symbol", how="left").with_columns(pl.lit(latest).alias("minute"))
-        names = (
-            [f"autocorr_{lag}_{w}m" for w in AUTOCORR_WINDOWS for lag in (1, 2)]
-            + [f"ret_accel_{w}m" for w in ACCEL_WINDOWS]
-        )
-        return out.select(["symbol", "minute", *names])
+    def regressions(self) -> dict[str, tuple[pl.Expr, pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        close = pl.col("close")
+        # ret at t = close[t]/close[t-1]-1; ret_lag1 = ret at t-1 = close[t-1]/close[t-2]-1; etc.
+        ret = close / close.shift(1).over("symbol") - 1.0
+        ret_lag1 = close.shift(1).over("symbol") / close.shift(2).over("symbol") - 1.0
+        ret_lag2 = close.shift(2).over("symbol") / close.shift(3).over("symbol") - 1.0
+        return {
+            "ac1": (ret_lag1, ret, ("corr",), AUTOCORR_WINDOWS),
+            "ac2": (ret_lag2, ret, ("corr",), AUTOCORR_WINDOWS),
+        }
+
+    def points(self) -> dict[str, pl.Expr]:
+        pts: dict[str, pl.Expr] = {"c": pl.col("close")}
+        for lag in ACCEL_LAGS:
+            pts[f"l{lag}"] = pl.col("close").shift(lag).over("symbol")
+        return pts
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
+        for w in AUTOCORR_WINDOWS:
+            feats[f"autocorr_1_{w}m"] = corr_("ac1", w)
+            feats[f"autocorr_2_{w}m"] = corr_("ac2", w)
+        for w in ACCEL_WINDOWS:
+            recent = pt_("c") / pt_(f"l{w}") - 1.0
+            prior = pt_(f"l{w}") / pt_(f"l{2 * w}") - 1.0
+            feats[f"ret_accel_{w}m"] = recent - prior
+        return feats

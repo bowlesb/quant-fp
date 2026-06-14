@@ -49,7 +49,8 @@ def _assert_close(per: pl.DataFrame, bat: pl.DataFrame, label: str) -> None:
 
 def test_batched_equals_per_group() -> None:
     ctx = BatchContext(frames={"minute_agg": _minute_agg()})
-    volume, volatility = REGISTRY.get_group("volume"), REGISTRY.get_group("volatility")
-    batched = compute_reduction_batch([volume, volatility], ctx)
-    for group in (volume, volatility):
+    # mix reduction-only (volume, volatility) and OLS (return_dynamics) groups in one batch
+    groups = [REGISTRY.get_group(name) for name in ("volume", "volatility", "return_dynamics")]
+    batched = compute_reduction_batch(groups, ctx)
+    for group in groups:
         _assert_close(group.compute_latest(ctx), batched[group.name], group.name)
