@@ -12,14 +12,31 @@ Usage:
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import polars as pl
 
+from quantlib.features import store
 from quantlib.features.backfill_bars import backfill_daily
 from quantlib.features.backfill_ticks import load_trades_backfill
 from quantlib.features.compare import coverage, diff, vectors
 from quantlib.features.loaders import load_minute_agg, load_reference, load_tiers, load_trades_live
+from quantlib.features.registry import REGISTRY
+
+
+def parity_stored(root: str, day: str) -> pl.DataFrame:
+    """THE direct Monday-vs-backfill check: diff the features we ACTUALLY COLLECTED LIVE (store
+    source=stream, written by compute_latest during capture) against the features BACKFILL produced
+    (store source=backfill, written by compute during materialize). Unlike parity_test (which recomputes
+    both sides fresh from raw inputs via compute), this reads what we really wrote — so it catches BOTH
+    input divergence AND any compute_latest-vs-compute drift on real data, in one shot. This is the test
+    that earns the confidence to backfill further back: run it on the Monday overlap, expect ~100%."""
+    start = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), tzinfo=timezone.utc)
+    end = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), 23, 59, 59, tzinfo=timezone.utc)
+    names = REGISTRY.feature_names()
+    live = store.get_features(names, "universe", start, end, root, source="stream")
+    backfill = store.get_features(names, "universe", start, end, root, source="backfill")
+    return diff(live, backfill, load_tiers(day))
 
 
 def parity_test(day: str, source_live: str = "stream", source_backfill: str = "backfill") -> pl.DataFrame:
@@ -67,7 +84,10 @@ def _print(report: pl.DataFrame, title: str) -> None:
 
 def main() -> None:
     args = sys.argv[1:]
-    if args and args[0] == "ticks":
+    if args and args[0] == "stored":
+        root, day = args[1], args[2]
+        _print(parity_stored(root, day), f"STORED live(stream) vs backfill — {day} (what we collected vs backfill)")
+    elif args and args[0] == "ticks":
         day, start_hm, end_hm, syms = args[1], args[2], args[3], args[4].split(",")
         start = datetime.fromisoformat(f"{day}T{start_hm}:00+00:00")
         end = datetime.fromisoformat(f"{day}T{end_hm}:00+00:00")
