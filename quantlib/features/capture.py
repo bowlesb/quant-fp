@@ -43,7 +43,7 @@ class CaptureState:
     """Rolling buffer + accumulated per-group output. Shared across any connection adapter."""
 
     def __init__(self) -> None:
-        self.buffer: list[dict] = []
+        self.buffer: pl.DataFrame | None = None  # trailing-window bars, kept AS a frame (no per-minute round-trip)
         self.accumulated: dict[str, pl.DataFrame] = {}  # one DEDUPED frame per group
         self.minutes = 0
         self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
@@ -77,15 +77,23 @@ def process_bars(
     (used by the gather phase). ``accumulate=True`` also keeps each group's outputs concatenated in
     ``state.accumulated`` — the in-memory cross-minute record the sharding parity test inspects; it is
     OFF in production because the durable record is the per-minute store files, not RAM."""
-    for bar in bars:
-        state.buffer.append(
+    # Build ONLY the new minute's bars into a frame and concat onto the kept buffer — keeping the buffer
+    # as a DataFrame avoids round-tripping the whole trailing window through list[dict] every minute (at
+    # 10k symbols x window that round-trip dominated the reader/worker per-minute cost). concat([old,new])
+    # + unique(keep="last") preserves re-delivery dedup (the new copy of a minute wins).
+    new_frame = pl.DataFrame(
+        [
             {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
              "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"])}
-        )
-    frame = pl.DataFrame(state.buffer, schema=BARS_SCHEMA).unique(subset=["symbol", "minute"], keep="last")
+            for bar in bars
+        ],
+        schema=BARS_SCHEMA,
+    )
+    frame = new_frame if state.buffer is None else pl.concat([state.buffer, new_frame])
+    frame = frame.unique(subset=["symbol", "minute"], keep="last")
     recent = sorted(frame["minute"].unique())[-window:]
     frame = frame.filter(pl.col("minute").is_in(recent))
-    state.buffer = frame.to_dicts()  # bound memory to the trailing window (de-duped)
+    state.buffer = frame  # bound to the trailing window (de-duped), kept as a frame for the next minute
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
     frames = {"minute_agg": frame, **(snapshots or {})}
