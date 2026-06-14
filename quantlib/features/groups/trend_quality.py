@@ -14,14 +14,11 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
 )
-from quantlib.features.latest import pivot_stat, windowed_ols_latest
-from quantlib.features.ols import centered_minutes, with_ols_columns
+from quantlib.features.declarative import ReductionGroup, mean_, r2_, slope_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
@@ -29,7 +26,7 @@ TREND_TOL = 1e-4
 
 
 @register
-class TrendQualityGroup(FeatureGroup):
+class TrendQualityGroup(ReductionGroup):
     name = "trend_quality"
     version = "1.0.0"
     owner = "modeller"
@@ -53,39 +50,19 @@ class TrendQualityGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
-        frame = centered_minutes(frame, "_t")
-        for w in WINDOWS:
-            size = f"{w}m"
-            frame = with_ols_columns(frame, "_t", "close", size, {"slope": f"_rawslope_{w}", "r2": f"price_r2_{w}m"})
-        slope_exprs = []
-        for w in WINDOWS:
-            mean_close = pl.col("close").rolling_mean_by("minute", window_size=f"{w}m").over("symbol")
-            slope_exprs.append((pl.col(f"_rawslope_{w}") / mean_close).cast(pl.Float64).alias(f"price_slope_{w}m"))
-        frame = frame.with_columns(slope_exprs).drop([f"_rawslope_{w}" for w in WINDOWS])
-        strength = [
-            (pl.col(f"price_slope_{w}m") * pl.col(f"price_r2_{w}m")).cast(pl.Float64).alias(f"trend_strength_{w}m")
-            for w in WINDOWS
-        ]
-        frame = frame.with_columns(strength)
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("price_slope", "price_r2", "trend_strength")]
-        return frame.select(["symbol", "minute", *names])
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        return {"close": (pl.col("close"), ("mean",), WINDOWS)}  # mean close normalizes the slope
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: the windowed OLS at T via aggregate-at-T (windowed_ols_latest). price_slope =
-        slope / mean_close, trend_strength = price_slope * r2 — same as compute(), parity-guarded."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
-        frame = centered_minutes(frame, "_t")
-        latest = frame["minute"].max()
-        long = windowed_ols_latest(frame, "_t", "close", WINDOWS).with_columns(
-            (pl.col("slope") / pl.col("mean_y")).alias("_pslope")
-        )
-        slope = pivot_stat(long, "_pslope", "price_slope_{w}m", WINDOWS)
-        r2 = pivot_stat(long, "r2", "price_r2_{w}m", WINDOWS)
-        out = frame.filter(pl.col("minute") == latest).select("symbol").join(slope, on="symbol", how="left").join(r2, on="symbol", how="left")
-        out = out.with_columns(
-            [(pl.col(f"price_slope_{w}m") * pl.col(f"price_r2_{w}m")).cast(pl.Float64).alias(f"trend_strength_{w}m") for w in WINDOWS]
-        ).with_columns(pl.lit(latest).alias("minute"))
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("price_slope", "price_r2", "trend_strength")]
-        return out.select(["symbol", "minute", *names])
+    def regressions(self) -> dict[str, tuple[pl.Expr, pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        epoch = pl.col("minute").dt.epoch("s").cast(pl.Float64)
+        centered_t = (epoch - epoch.min()) / 60.0  # frame-relative time regressor (OLS is origin-invariant)
+        return {"trend": (centered_t, pl.col("close"), ("slope", "r2"), WINDOWS)}
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
+        for w in WINDOWS:
+            price_slope = slope_("trend", w) / mean_("close", w)
+            feats[f"price_slope_{w}m"] = price_slope
+            feats[f"price_r2_{w}m"] = r2_("trend", w)
+            feats[f"trend_strength_{w}m"] = price_slope * r2_("trend", w)
+        return feats

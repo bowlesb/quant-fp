@@ -4,20 +4,18 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
+from quantlib.features.declarative import ReductionGroup, mean_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
 
 
 @register
-class MomentumGroup(FeatureGroup):
+class MomentumGroup(ReductionGroup):
     name = "momentum"
     version = "1.0.0"
     owner = "modeller"
@@ -37,40 +35,16 @@ class MomentumGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        frame = frame.with_columns(
-            [
-                (pl.col("close") / pl.col("_prev") - 1.0).alias("_ret"),
-                ((pl.col("close") / pl.col("_prev") - 1.0) > 0.0).cast(pl.Float64).alias("_up"),
-            ]
-        )
-        exprs = []
-        for w in WINDOWS:
-            exprs.append(pl.col("_up").rolling_mean_by("minute", window_size=f"{w}m").over("symbol").cast(pl.Float64).alias(f"up_ratio_{w}m"))
-            exprs.append(pl.col("_ret").abs().rolling_mean_by("minute", window_size=f"{w}m").over("symbol").cast(pl.Float64).alias(f"mean_abs_ret_{w}m"))
-        names = [f"{f}_{w}m" for w in WINDOWS for f in ("up_ratio", "mean_abs_ret")]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+        return {
+            "up": ((ret > 0.0).cast(pl.Float64), ("mean",), WINDOWS),  # fraction of up minutes
+            "absret": (ret.abs(), ("mean",), WINDOWS),
+        }
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: one group_by per window over its slice (aggregate-at-T), instead of rolling
-        over the whole buffer. Per-minute up/return are precomputed once; parity-guarded by
-        tests/test_fp_latest.py (== compute().filter(T))."""
-        import datetime as dt
-
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        ret = pl.col("close") / pl.col("_prev") - 1.0
-        frame = frame.with_columns([(ret > 0.0).cast(pl.Float64).alias("_up"), ret.abs().alias("_absret")])
-        latest = frame["minute"].max()
-        result = frame.filter(pl.col("minute") == latest).select("symbol")
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
-            agg = (
-                frame.filter((pl.col("minute") > latest - dt.timedelta(minutes=w)) & (pl.col("minute") <= latest))
-                .group_by("symbol")
-                .agg([pl.col("_up").mean().alias(f"up_ratio_{w}m"), pl.col("_absret").mean().alias(f"mean_abs_ret_{w}m")])
-            )
-            result = result.join(agg, on="symbol", how="left")
-        names = [f"{f}_{w}m" for w in WINDOWS for f in ("up_ratio", "mean_abs_ret")]
-        return result.with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
+            feats[f"up_ratio_{w}m"] = mean_("up", w)
+            feats[f"mean_abs_ret_{w}m"] = mean_("absret", w)
+        return feats
