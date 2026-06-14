@@ -111,3 +111,22 @@ Decision: V2 stays ISOLATED (not merged) — per §4.5 it merges only when parit
 Next lever = numpy-native `emit` (the §STATE_ABSTRACTION `emit()` step): build canonical columns from
 running state, bypassing the assemble pivot. De-risk via a parity-gated prototype on the hottest group
 before any broad migration.
+
+**2026-06-14 — numpy-emit prototype verdict (branch `feature/incremental-emit` @ `7211bb4`).**
+PARITY-TRUE and CORRECTS the decomposition. `emit_numpy` builds every canonical column
+(mean/std/sum/slope/corr/r2/mean_y, incl. OBV cumulative) directly from the numpy running sums with
+character-identical algebra — proven **cell-IDENTICAL (tol=0.0)** vs the polars path and vs batch
+`compute_latest`; covers all 11 reduction groups with zero per-group rollout. Measured (1250×60,
+`--cpus=2`):
+| stage | polars | numpy-emit |
+|---|---|---|
+| assemble pivot | 26.1ms | 19.5ms (**−9.5ms / 33%**) |
+| full step | 84.8ms | 74.7ms (**−10ms**) |
+
+**Corrected bottleneck:** the slice-derive `over("symbol")` fold (`_derived_row`) is **~53ms** and
+dominates the step — NOT the pivot. **Driving assemble to 0 still leaves ~58ms (>50ms).** So:
+- numpy-emit is the wrong lever for <50ms ALONE — but it's a free, parity-true ~10ms win: **ship it**.
+- the **Rust slice-derive kernel** (replacing the ~53ms `over("symbol")` per-expression fold) is the
+  NECESSARY lever. Sequence to <50ms: land the Rust slice kernel first (cuts the fold), THEN numpy-emit
+  removes the pivot to clear 50ms comfortably. Both parity-gated; V2 + emit stay isolated until the
+  combined path proves <50ms at the certified 10k measurement.

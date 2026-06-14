@@ -46,6 +46,16 @@ explicitly. Matches and coverage-gaps are the bulk, so we store their *counts*, 
 
 ## 3. Schema
 
+> **Persistence (2026-06-14): the canonical record store is the Postgres/Timescale schema in
+> `db/init/07_feature_validation.sql`** — `feature_validation_day` (per feature/day/tier rollup),
+> `feature_trust` (the durable per-feature trust registration the training gate reads), and
+> `feature_validation_exception` (the rare diverging cells). The DB holds the small, relational,
+> QUERYABLE verification records (a dashboard / training export / operator queries them); the per-cell
+> comparison still runs over the parquet feature store. The parquet `validation_store.py` layers are a
+> compute/scratch convenience; the DB tables are the system of record. `validate.py` UPSERTs its result
+> into these tables (wiring is the bounded next step). The grain + status semantics below are mirrored
+> 1:1 by that DDL.
+
 ### Layer 1 — `validation_exception` (parquet, partitioned by `date=`)
 One row per cell that did NOT cleanly match. Expected to be small.
 
