@@ -8,11 +8,50 @@ from __future__ import annotations
 
 import polars as pl
 
-from quantlib.features.base import KEY_COLUMNS, BatchContext, FeatureGroup
+from quantlib.features.base import KEY_COLUMNS, BatchContext, FeatureGroup, FeatureSpec, storage_dtype
 from quantlib.features.engine import run_all
 from quantlib.features.registry import REGISTRY
 
 QUANTILES = (0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99)
+
+VERDICT_MATCH = "match"
+VERDICT_MISMATCH = "mismatch"
+VERDICT_EXTRA = "extra_live"  # live emitted a value, backfill did not — over-capture / busted minute
+VERDICT_MISSING = "missing_live"  # backfill has it, live did not — capture gap (incl. legitimate warmup)
+VERDICT_UNCOMPARED = "uncompared"  # both null — nothing to compare
+
+
+def match_predicate(spec: FeatureSpec, live_col: pl.Expr, back_col: pl.Expr) -> pl.Expr:
+    """The SINGLE 'these two cells agree' boolean — shared by ``diff`` and the validation ledger so the
+    two can never drift (the ledger exists to prove agreement; it must use the exact predicate the
+    parity report uses). Flag / integer-stored features must be EXACTLY equal — a 0/1 flag or a calendar
+    int is right or wrong, never "within tolerance". Real-valued features use numpy-isclose semantics:
+    a genuine RELATIVE tolerance with a tiny absolute floor (``|a-b| <= 1e-12 + tol*|b|``), pure-relative
+    so small-scale features (realized_vol ~1e-3) aren't masked by an absolute floor that fakes a pass."""
+    if storage_dtype(spec) in (pl.Float32, pl.Float64):
+        return (live_col - back_col).abs() <= 1e-12 + spec.tolerance * back_col.abs()
+    return live_col == back_col
+
+
+def cell_verdict(spec: FeatureSpec, feature: str, schema: pl.Schema) -> pl.Expr:
+    """Per-cell categorical verdict (match / mismatch / extra_live / missing_live / uncompared) for a
+    tolerance-method feature, as ONE expression over a frame joined ``<feature>`` (live) + ``<feature>_bk``
+    (backfill). Distributional features are NOT cell-verdicted — validate them at tier grain via
+    ``dist_score`` (cell-for-cell is meaningless for tick-order-sensitive features by design)."""
+    live_col, back_col = pl.col(feature), pl.col(f"{feature}_bk")
+    live_present, back_present = live_col.is_not_null(), back_col.is_not_null()
+    if schema[feature].is_float():
+        live_present = live_present & live_col.is_not_nan()
+    if schema[f"{feature}_bk"].is_float():
+        back_present = back_present & back_col.is_not_nan()
+    agree = match_predicate(spec, live_col, back_col)
+    return (
+        pl.when(live_present & back_present & agree).then(pl.lit(VERDICT_MATCH))
+        .when(live_present & back_present).then(pl.lit(VERDICT_MISMATCH))
+        .when(live_present).then(pl.lit(VERDICT_EXTRA))
+        .when(back_present).then(pl.lit(VERDICT_MISSING))
+        .otherwise(pl.lit(VERDICT_UNCOMPARED))
+    )
 # Below this a per-tier parity score is statistically meaningless (anti-gaming §6.4). 1000 is the
 # ad-hoc sanity floor; FP0/FP3 CERTIFICATION uses the far higher 50k/100k cell floors (FP_GOALS).
 MIN_PARITY_CELLS = 1000
@@ -86,8 +125,9 @@ def coverage(live: pl.DataFrame, backfill: pl.DataFrame) -> pl.DataFrame:
 
 def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.DataFrame:
     """Per-feature, per-tier parity, dispatched on each feature's declared parity_method."""
-    methods = {spec.name: spec.parity_method for _, spec in REGISTRY.feature_specs()}
-    tolerances = {spec.name: spec.tolerance for _, spec in REGISTRY.feature_specs()}
+    specs = {spec.name: spec for _, spec in REGISTRY.feature_specs()}
+    methods = {name: spec.parity_method for name, spec in specs.items()}
+    tolerances = {name: spec.tolerance for name, spec in specs.items()}
     feature_cols = [c for c in live.columns if c not in KEY_COLUMNS]
     joined = live.join(backfill, on=list(KEY_COLUMNS), how="full", suffix="_bk", coalesce=True).join(
         tiers, on="symbol", how="left"
@@ -110,10 +150,7 @@ def diff(live: pl.DataFrame, backfill: pl.DataFrame, tiers: pl.DataFrame) -> pl.
             if methods[feature] == "distributional":
                 score, raw_pass = dist_score(scope, feature, tolerances[feature])
             else:
-                # numpy-isclose semantics: genuine RELATIVE tolerance + a tiny absolute floor for
-                # zero-protection. (A blended tol*(1+|b|) silently becomes absolute for small-scale
-                # features like realized_vol ~1e-3 and would fake a pass — see LIFECYCLE_DEMOS.)
-                matched = both & ((live_col - back_col).abs() <= 1e-12 + tolerances[feature] * back_col.abs())
+                matched = both & match_predicate(specs[feature], live_col, back_col)
                 agree = int(scope.select(matched.sum()).item() or 0)
                 score = round(100.0 * agree / compared, 3) if compared else None
                 raw_pass = score >= 95.0 if score is not None else None
