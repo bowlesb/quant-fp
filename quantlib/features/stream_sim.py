@@ -68,10 +68,13 @@ from quantlib.features.declarative import ReductionGroup, emit_numpy
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _shard_snapshots, build_stream
 from quantlib.features.sharded_capture import INDEX_SYMBOLS, REDUCE_GROUPS, shard_of
+from quantlib.features.stateful import StatefulEngine, StatefulGroup
 from quantlib.features.tick_capture import enrich_bars_with_ticks
 
 # The non-reduction groups that still consume the raw per-minute trades tape (tick_runlength's Rust kernel).
 TRADES_GROUPS: tuple[str, ...] = ("tick_runlength",)
+# Per-symbol stateful groups now on the incremental fold path (StatefulEngine) instead of batch compute_latest.
+STATEFUL_GROUPS: tuple[str, ...] = ("technical", "candlestick")
 
 
 def _bucket_ticks_by_symbol_minute(
@@ -120,13 +123,15 @@ class StreamShardState:
         self.buffer: pl.DataFrame | None = None
         self.tick_states: dict[str, TickState] = {}
         self.engine: IncrementalEngine | None = None
+        self.stateful_engines: dict[str, StatefulEngine] = {}  # technical/candlestick on the per-symbol fold path
         self.minutes = 0
         # decomposed per-minute timings (ms) of the bet-relevant work
         self.tick_agg_ms = 0.0
         self.fold_ms = 0.0
         self.emit_ms = 0.0  # reduction emit_numpy + non-reduction compute_latest (the full per-minute emit)
         self.reduction_emit_ms = 0.0  # the INCREMENTAL fast path's emit (emit_numpy off the running sums)
-        self.other_emit_ms = 0.0  # the non-reduction groups' at-T compute_latest (calendar/sector/market/...)
+        self.stateful_emit_ms = 0.0  # technical/candlestick via StatefulEngine.step (the per-symbol fold path)
+        self.other_emit_ms = 0.0  # the remaining non-reduction groups' at-T compute_latest (calendar/sector/...)
         self.write_ms = 0.0
 
 
@@ -191,10 +196,10 @@ def process_stream_minute(
     # still run the batch rolling compute_latest, NOT the incremental path) so the fast path's intrinsic
     # 10k latency is measured without their cross-shard core contention. The full-flow run (toggle off) is
     # the honest end-to-end number; this run answers "does the incremental fast path alone hit <100ms".
-    other_groups = (
-        [] if os.environ.get("FP_SIM_FAST_PATH_ONLY")
-        else [g for g in selected if not isinstance(g, ReductionGroup)]
-    )
+    non_reduction = [g for g in selected if not isinstance(g, ReductionGroup)]
+    fast_path_only = bool(os.environ.get("FP_SIM_FAST_PATH_ONLY"))
+    stateful_groups = [] if fast_path_only else [g for g in non_reduction if g.name in STATEFUL_GROUPS]
+    other_groups = [] if fast_path_only else [g for g in non_reduction if g.name not in STATEFUL_GROUPS]
 
     # 2) FOLD: seed once, then fold the new minute's value matrix into the running sums (incremental path).
     fold_start = time.perf_counter()
@@ -221,7 +226,19 @@ def process_stream_minute(
     for group in reduction_groups:
         outputs.append((group.name, group.version, reduction_out[group.name]))
     state.reduction_emit_ms = (time.perf_counter() - reduction_emit_start) * 1000.0
-    # The non-reduction groups (calendar/sector/market-context/tick-runlength/...) at-T — NOT the
+    # The per-symbol STATEFUL groups (technical/candlestick) via the StatefulEngine fold path — seeded once,
+    # then one-minute folds + emit (the recursive EMA / lag-ring kinds), instead of the batch compute_latest.
+    stateful_emit_start = time.perf_counter()
+    for group in stateful_groups:
+        assert isinstance(group, StatefulGroup)
+        engine_s = state.stateful_engines.get(group.name)
+        if engine_s is None:
+            engine_s = StatefulEngine(group)
+            state.stateful_engines[group.name] = engine_s
+        out = engine_s.step(frame, ctx)
+        outputs.append((group.name, group.version, out))
+    state.stateful_emit_ms = (time.perf_counter() - stateful_emit_start) * 1000.0
+    # The remaining non-reduction groups (calendar/sector/market-context/tick-runlength/...) at-T — NOT the
     # incremental fast path; timed apart so the fast-path cost is visible against the full-flow cost.
     other_emit_start = time.perf_counter()
     trades_frame = _trades_frame(trades_by_symbol, minute_dt)
@@ -278,7 +295,8 @@ def stream_worker_main(  # pragma: no cover (process entry)
             record = {
                 "shard": shard_id, "minute": bars[0]["t"], "ms": compute_ms, "write_ms": state.write_ms,
                 "tick_agg_ms": state.tick_agg_ms, "fold_ms": state.fold_ms, "emit_ms": state.emit_ms,
-                "reduction_emit_ms": state.reduction_emit_ms, "other_emit_ms": state.other_emit_ms,
+                "reduction_emit_ms": state.reduction_emit_ms, "stateful_emit_ms": state.stateful_emit_ms,
+                "other_emit_ms": state.other_emit_ms,
                 "fast_path_ms": state.tick_agg_ms + state.fold_ms + state.reduction_emit_ms,
             }
             with bench_log.open("a") as handle:
@@ -406,6 +424,7 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     fold = critical("fold_ms") or [0.0]
     emit = critical("emit_ms") or [0.0]
     reduction_emit = critical("reduction_emit_ms") or [0.0]
+    stateful_emit = critical("stateful_emit_ms") or [0.0]
     other_emit = critical("other_emit_ms") or [0.0]
     fast_path = critical("fast_path_ms") or [0.0]
     writes = critical("write_ms") or [0.0]
@@ -423,7 +442,8 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     print(line("tick-agg", tick_agg))
     print(line("fold (incr update)", fold))
     print(line("reduction emit (269)", reduction_emit))
-    print(line("non-reduction (250)", other_emit))
+    print(line("stateful emit (tech+candle)", stateful_emit))
+    print(line("non-reduction (rest)", other_emit))
     print(line("[full emit]", emit))
     print("INCREMENTAL FAST PATH only (tick-agg + fold + reduction emit) — the 269 reduction features:")
     print(line("fast-path total", fast_path))

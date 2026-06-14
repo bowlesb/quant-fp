@@ -1,29 +1,31 @@
 """Candlestick-shape features from per-minute OHLC (family: CANDLESTICK, Layer A).
 
-Pure per-bar arithmetic on open/high/low/close, plus two-candle patterns that read the prior bar via
-the time-based ``lagged`` helper. Every value is a deterministic function of the same OHLC the live
-stream and the historical backfill both deliver, so parity holds by construction. Zero-range bars
-(high == low) are mapped to 0 ratios rather than NaN so the declared ranges stay clean.
+Pure per-bar arithmetic on open/high/low/close, plus two-candle patterns that read the PRIOR bar. The prior
+bar is the LAG / last-k state KIND (docs/STATE_ABSTRACTION.md): a per-symbol ring of recent OHLC keyed by
+minute-epoch, so ``_prev_open`` / ``_prev_close`` = the bar as of minute − 1 (null if that exact minute is
+absent — identical to ``base.lagged``). The live fast path folds one minute into the ring; the backfill
+reaches the same prior-bar columns with a TIME-based self-join. ``compute``/``compute_latest`` build the SAME
+state frame (OHLC + the two lag columns) and evaluate the SAME ``assemble`` — parity by construction, guarded
+by tests/test_fp_stateful.py. Zero-range bars (high == low) map to 0 ratios rather than NaN so the declared
+ranges stay clean.
 """
 from __future__ import annotations
 
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
 from quantlib.features.registry import register
+from quantlib.features.stateful import LagSpec, StatefulGroup
 
 RATIO_RANGE: tuple[float, float] = (-0.01, 1.01)
 
 
 @register
-class CandlestickGroup(FeatureGroup):
+class CandlestickGroup(StatefulGroup):
     name = "candlestick"
     version = "1.0.0"
     owner = "modeller"
@@ -57,11 +59,19 @@ class CandlestickGroup(FeatureGroup):
         ]
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "open", "high", "low", "close"])
-        frame = lagged(frame, "open", 1, "_prev_open")
-        frame = lagged(frame, "close", 1, "_prev_close").sort(["symbol", "minute"])
+    def prepare(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """At-T columns the state frame carries: the bar's OHLC (the ring buffer's lag sources are open/close)."""
+        return frame
 
+    def lag_specs(self) -> list[LagSpec]:
+        return [
+            LagSpec(alias="_prev_open", source="open", minutes=1),
+            LagSpec(alias="_prev_close", source="close", minutes=1),
+        ]
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        """Per-bar ratios/flags + the two-candle patterns from the OHLC columns and the prior bar's
+        ``_prev_open`` / ``_prev_close`` — the SAME expressions live and backfill."""
         rng = pl.col("high") - pl.col("low")
         positive = rng > 0.0
         abs_body = (pl.col("close") - pl.col("open")).abs()
@@ -76,25 +86,25 @@ class CandlestickGroup(FeatureGroup):
         curr_bull = pl.col("close") > pl.col("open")
         curr_bear = pl.col("close") < pl.col("open")
 
-        frame = frame.with_columns(
-            [
-                body_ratio.cast(pl.Float64).alias("body_ratio"),
-                upper_ratio.cast(pl.Float64).alias("upper_shadow_ratio"),
-                lower_ratio.cast(pl.Float64).alias("lower_shadow_ratio"),
-                curr_bull.cast(pl.Float64).alias("is_bullish"),
-            ]
-        )
-        frame = frame.with_columns(
-            [
-                (pl.col("body_ratio") < 0.1).cast(pl.Float64).alias("is_doji"),
-                ((pl.col("lower_shadow_ratio") > 0.6) & (pl.col("upper_shadow_ratio") < 0.1) & (pl.col("body_ratio") < 0.4)).cast(pl.Float64).alias("is_hammer"),
-                ((pl.col("upper_shadow_ratio") > 0.6) & (pl.col("lower_shadow_ratio") < 0.1) & (pl.col("body_ratio") < 0.4)).cast(pl.Float64).alias("is_shooting_star"),
-                (pl.col("body_ratio") > 0.9).cast(pl.Float64).alias("is_marubozu"),
-                (prev_bear & curr_bull & (pl.col("close") >= pl.col("_prev_open")) & (pl.col("open") <= pl.col("_prev_close"))).cast(pl.Float64).alias("pattern_engulfing_bullish"),
-                (prev_bull & curr_bear & (pl.col("open") >= pl.col("_prev_close")) & (pl.col("close") <= pl.col("_prev_open"))).cast(pl.Float64).alias("pattern_engulfing_bearish"),
-                (prev_bear & curr_bull & (body_top <= pl.col("_prev_open")) & (body_bottom >= pl.col("_prev_close"))).cast(pl.Float64).alias("pattern_harami_bullish"),
-                (prev_bull & curr_bear & (body_top <= pl.col("_prev_close")) & (body_bottom >= pl.col("_prev_open"))).cast(pl.Float64).alias("pattern_harami_bearish"),
-            ]
-        )
-        names = [spec.name for spec in self.declare()]
-        return frame.select(["symbol", "minute", *names])
+        return {
+            "body_ratio": body_ratio,
+            "upper_shadow_ratio": upper_ratio,
+            "lower_shadow_ratio": lower_ratio,
+            "is_bullish": curr_bull.cast(pl.Float64),
+            "is_doji": (body_ratio < 0.1).cast(pl.Float64),
+            "is_hammer": ((lower_ratio > 0.6) & (upper_ratio < 0.1) & (body_ratio < 0.4)).cast(pl.Float64),
+            "is_shooting_star": ((upper_ratio > 0.6) & (lower_ratio < 0.1) & (body_ratio < 0.4)).cast(pl.Float64),
+            "is_marubozu": (body_ratio > 0.9).cast(pl.Float64),
+            "pattern_engulfing_bullish": (
+                prev_bear & curr_bull & (pl.col("close") >= pl.col("_prev_open")) & (pl.col("open") <= pl.col("_prev_close"))
+            ).cast(pl.Float64),
+            "pattern_engulfing_bearish": (
+                prev_bull & curr_bear & (pl.col("open") >= pl.col("_prev_close")) & (pl.col("close") <= pl.col("_prev_open"))
+            ).cast(pl.Float64),
+            "pattern_harami_bullish": (
+                prev_bear & curr_bull & (body_top <= pl.col("_prev_open")) & (body_bottom >= pl.col("_prev_close"))
+            ).cast(pl.Float64),
+            "pattern_harami_bearish": (
+                prev_bull & curr_bear & (body_top <= pl.col("_prev_close")) & (body_bottom >= pl.col("_prev_open"))
+            ).cast(pl.Float64),
+        }
