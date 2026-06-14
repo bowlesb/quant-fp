@@ -82,3 +82,32 @@ A large architectural change is only allowed to land when it passes EVERY gate b
 - The validation ledger confirms the live path (V2) reproduces backfill on a real overlay day.
 
 Until all four hold, #1 is `in progress`, not done — and we say so.
+
+## 6. Results record (honest, dated)
+
+**2026-06-14 — Incremental V2 (slice-derive + stateful regressors), branch `feature/incremental-engine`
+@ `a8e63de`.** PARITY-TRUE (all incremental + batch parity tests pass, no tolerances loosened; OBV
+cumulative and time-axis OLS handled via a new `stateful_regressors` running-state API). NOT yet at
+target.
+
+Measured 1250×60 (per-shard production scale), `--cpus=2`, reproducible:
+| stage | V1 | V2 |
+|---|---|---|
+| fold (derive+update+running_long) | ~67ms | ~54ms (cpu-bound) / ~35ms unconstrained |
+| full step (fold + assemble) | ~97ms | **~80ms** |
+| shared `assemble_from_long` | ~26ms | ~26ms (unchanged; same code batch runs) |
+
+Decomposition verdict: the fold is no longer dominant. The remaining cost is (1) slice-derive
+`over("symbol")` per-expression overhead (~0.5ms × 43 exprs, fixed per-partition not per-row) and
+(2) the polars `assemble` pivot (~26ms). 10k runs as 8 parallel shards of ~1250, so per-shard ≈
+wall-clock; ~80ms is the production per-minute figure, not 8×.
+
+Caveats vs §2 criteria NOT yet satisfied: measured at `--cpus=2` not the full 32-core 8-shard layout;
+1250×60 not 10k steady-state with continuous trades+quotes; single-run not p50/p99; box runs other
+agents 24/7 so absolute ms vary. So this is a parity + relative-improvement result, NOT a certified
+production p99. The certified 10k steady-state measurement is still owed.
+
+Decision: V2 stays ISOLATED (not merged) — per §4.5 it merges only when parity AND <50ms both hold.
+Next lever = numpy-native `emit` (the §STATE_ABSTRACTION `emit()` step): build canonical columns from
+running state, bypassing the assemble pivot. De-risk via a parity-gated prototype on the hottest group
+before any broad migration.
