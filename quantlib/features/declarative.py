@@ -331,20 +331,18 @@ def assemble_from_long(
             if pgi == gi:
                 sums = {key: pl.col(f"__rd_{ns}_{key}") for key in ("b", "x", "y", "xy", "xx", "yy")}
                 canon += [expr.alias(f"__c_{stat}_{name}") for stat, expr in _ols_stat_exprs(sums, stats).items()]
-        glong = long.select(["symbol", "window", *canon])
+        # ONE pivot for ALL of this group's canonical columns (vs one pivot+join per stat) — the pivot
+        # names columns `<value>_<window>`, so `__c_<stat>_<name>` over window w -> `__c_<stat>_<name>_<w>`,
+        # which we rename to the `__<stat>_<name>_<w>` the accessors expect. Extra union-windows are dropped
+        # by the final feature select.
+        # `__c_z` keeps ≥2 value columns so polars always names pivoted columns `<value>_<window>` (with a
+        # single value it would drop the value name to just `<window>`).
+        glong = long.select(["symbol", "window", *canon, pl.lit(0.0).alias("__c_z")])
+        piv = glong.pivot(on="window", index="symbol")
+        piv = piv.rename({c: "__" + c[4:] for c in piv.columns if c.startswith("__c_") and not c.startswith("__c_z")})
         wide = latest_frame.select(
             ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
-        )
-        for name, (_, stats, windows) in group.reduced().items():
-            for stat in stats:
-                wide = wide.join(
-                    pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
-                )
-        for name, (_, _, stats, windows) in group.regressions().items():
-            for stat in stats:
-                wide = wide.join(
-                    pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
-                )
+        ).join(piv, on="symbol", how="left")
         feats = group.assemble()
         results[group.name] = (
             wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
