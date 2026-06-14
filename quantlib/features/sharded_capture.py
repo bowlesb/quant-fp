@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 from quantlib.features import metrics
-from quantlib.features.capture import CaptureState, process_bars
+from quantlib.features.capture import CaptureState, StoreWriter, process_bars
 
 # Index ETFs replicated to every shard so market-context/beta compute locally (tiny, ~3 symbols).
 INDEX_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "IWM")
@@ -86,6 +86,7 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
     """Persistent worker process entry: own ``shard_id``, drain the queue of minute bar-batches (already
     routed to this shard), and run the map step. A ``None`` batch is the shutdown sentinel."""
     state = CaptureState()
+    state.writer = StoreWriter()  # writes go async, off the per-minute compute path
     metrics.start_metrics_server(WORKER_METRICS_BASE_PORT + shard_id)  # /metrics for Prometheus/Grafana
     bench_log = _bench_log_path(root, shard_id)  # set FP_BENCH_LOG=1 to record per-minute shard latency
     if bench_log is not None:
@@ -94,6 +95,8 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
     while True:
         batch = queue.get()
         if batch is None:
+            state.writer.flush()  # drain pending writes before exit so nothing is lost
+            state.writer.stop()
             if bench_log is not None:
                 print(f"[worker {shard_id}] exiting after {processed} minutes", file=sys.stderr, flush=True)
             return

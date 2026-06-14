@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import sys
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -41,6 +43,41 @@ BARS_SCHEMA = {
 DEFAULT_BUFFER_MINUTES = 300
 
 
+class StoreWriter:
+    """Background parquet-writer thread — keeps disk writes OFF the per-minute compute critical path.
+
+    Each minute's compute submits its group frames here and returns immediately (so the compute→bet
+    decision never waits on disk); a single daemon thread drains the queue and calls store.write_group,
+    overlapping the writes with the NEXT minute's compute. Writes are still per-minute, atomic, and
+    idempotent (minute-keyed files). FIFO order preserves re-delivery semantics. ``flush()`` blocks until
+    the queue is drained (used at shutdown); ``stop()`` joins the thread."""
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            task = self._queue.get()
+            try:
+                if task is None:
+                    return
+                store.write_group(**task)
+            finally:
+                self._queue.task_done()
+
+    def submit(self, **kwargs: object) -> None:
+        self._queue.put(kwargs)
+
+    def flush(self) -> None:
+        self._queue.join()
+
+    def stop(self) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout=30)
+
+
 class CaptureState:
     """Rolling buffer + accumulated per-group output. Shared across any connection adapter."""
 
@@ -49,6 +86,7 @@ class CaptureState:
         self.accumulated: dict[str, pl.DataFrame] = {}  # one DEDUPED frame per group
         self.minutes = 0
         self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
+        self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
 
 
 def process_bars(
@@ -132,7 +170,15 @@ def process_bars(
             )
         if write:
             # Append THIS minute only (minute-keyed file) — O(1) per tick, idempotent on re-delivery.
-            store.write_group(root, group.name, group.version, "stream", target_day, out, mode=mode, shard=shard, minute=latest)
+            # Off the critical path when a StoreWriter is set (live workers): submit + move on to next minute.
+            write_kwargs = dict(
+                root=root, group=group.name, version=group.version, source="stream", day=target_day,
+                frame=out, mode=mode, shard=shard, minute=latest,
+            )
+            if state.writer is not None:
+                state.writer.submit(**write_kwargs)
+            else:
+                store.write_group(**write_kwargs)
     metrics.record_group_timings(state.group_timings)  # -> Prometheus histogram, graphed per-group in Grafana
     state.minutes += 1
 
