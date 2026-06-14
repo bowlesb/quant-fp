@@ -39,7 +39,7 @@ rebuild-all:
 # services EXCEPT executor — execution-risk owns the executor deploy via `make rebuild S=executor`
 # AFTER #19 review+bless (that one targeted restart folds in the #18 ex-date guard + #19). This way
 # the ingestor still restarts exactly once and we never deploy un-approved #19.
-BATCH_SERVICES := ingestor scheduler feature-computer model-server backfill-manager experimenter dashboard
+BATCH_SERVICES := ingestor scheduler backfill-manager dashboard
 rebuild-batch:
 	docker compose build --build-arg GIT_SHA=$(GIT_SHA) $(BATCH_SERVICES)
 	docker compose up -d $(BATCH_SERVICES)
@@ -48,7 +48,7 @@ rebuild-batch:
 
 # Run a one-shot tools-profile container through the BLOCKING freshness gate (task #11) — never run
 # stale code (the 4th near-miss was a 14h-stale trainer). Rebuilds-if-stale then runs; env passes
-# through. Usage: make run-tool S=backfiller A="fetch-corporate-actions"
+# through. Usage: make run-tool S=backfill-manager A="fetch-corporate-actions"
 run-tool:
 	scripts/run_tool.sh $(S) $(A)
 
