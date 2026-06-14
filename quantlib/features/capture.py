@@ -16,7 +16,7 @@ from datetime import datetime
 import polars as pl
 import websockets
 
-from quantlib.features import store
+from quantlib.features import metrics, store
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 
@@ -98,6 +98,7 @@ def process_bars(
         state.accumulated[group.name] = combined
         if write:
             store.write_group(root, group.name, group.version, "stream", target_day, combined, mode=mode, shard=shard)
+    metrics.record_group_timings(state.group_timings)  # -> Prometheus histogram, graphed per-group in Grafana
     state.minutes += 1
 
 

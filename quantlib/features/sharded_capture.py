@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import hashlib
 
+from quantlib.features import metrics
 from quantlib.features.capture import CaptureState, process_bars
 
 # Index ETFs replicated to every shard so market-context/beta compute locally (tiny, ~3 symbols).
 INDEX_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "IWM")
+# Each shard worker exposes /metrics here (Prometheus scrapes BASE + shard_id) — keep in sync with the
+# feature-capture job in config/prometheus/prometheus.yml.
+WORKER_METRICS_BASE_PORT = 9201
 # Groups that depend on the WHOLE universe at a minute — run in the gather phase, not per shard.
 REDUCE_GROUPS: tuple[str, ...] = ("cross_sectional_rank",)
 
@@ -65,6 +69,7 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
     """Persistent worker process entry: own ``shard_id``, drain the queue of minute bar-batches (already
     routed to this shard), and run the map step. A ``None`` batch is the shutdown sentinel."""
     state = CaptureState()
+    metrics.start_metrics_server(WORKER_METRICS_BASE_PORT + shard_id)  # /metrics for Prometheus/Grafana
     while True:
         batch = queue.get()
         if batch is None:

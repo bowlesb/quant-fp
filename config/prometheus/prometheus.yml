@@ -19,4 +19,18 @@ scrape_configs:
           - "ingestor:9102"
           - "ingestor:9103"
           - "ingestor:9104"
+  # Feature capture: each shard worker exposes feature_group_compute_seconds on
+  # WORKER_METRICS_BASE_PORT (9201) + shard_id. Keep the target count in sync with N shards.
+  - job_name: feature-capture
+    static_configs:
+      - targets:
+          - "feature-computer:9201"
+          - "feature-computer:9202"
+          - "feature-computer:9203"
+          - "feature-computer:9204"
+          - "feature-computer:9205"
+          - "feature-computer:9206"
+          - "feature-computer:9207"
+          - "feature-computer:9208"
+
   # status / executor scrape targets added as those services land.

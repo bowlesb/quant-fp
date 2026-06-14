@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir \
     pytest \
     numpy \
     websockets \
+    prometheus-client \
     'psycopg[binary]' \
     'alpaca-py>=0.30,<1.0'
 COPY --from=rustbuild /wheels/*.whl /tmp/
