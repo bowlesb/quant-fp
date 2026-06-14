@@ -56,7 +56,41 @@ Optimal config measured: **10 shards × 3 polars threads** at 10k/32-cores.
   (every backfill feature) is unsupported → CPU fallback. Parity was fine (1e-16…1e-13). CPU path wins +
   stays readable. 3090 → reserve for model TRAINING. Details in `docs/FUSED_ENGINE.md`.
 
-## THE lever for <100ms: incremental windowed sums (the user's target)
+## WHERE THE TIME ACTUALLY GOES (measured 2026-06-14, FP_PHASE_TIMING=1)
+Decomposed the declarative batch at 1250 tickers × 60m, 11 groups = 138ms: **only 14% (18.9ms) is raw
+Rust kernel compute. 86% is polars shuffling** — derive value columns **45%** (62ms), assemble pivot+join
+**27%** (37ms), kernel prep/rebuild 9%, marshal ~0%. So the <100ms strategy is NOT incremental state (the
+prior codebase re-scanned too and was fine) — it's **killing the shuffling**:
+1. **Move derivation into the kernel** (biggest, 45%): the OLS cross-products (x·y, x², y²) and power-sums
+   (r², r³, r⁴) are materialized as ~60 polars columns over 75k rows every minute. A kernel that takes the
+   RAW x/y columns and forms the products *inside* its single backward pass eliminates the 62ms derive AND
+   the rebuild. PARITY-SAFE: the kernel stays the shared primitive validated cell-for-cell vs the backfill
+   polars form — the optimization sits UNDER the parity boundary, not beside it (no bolt-on parity layer).
+2. **Collapse the assemble** (27%): one pivot (long→wide) for all of a group's canonical columns instead of
+   one pivot+join per (col, stat); or have the kernel return wide.
+Run the decomposition any time: instrument is gated by `FP_PHASE_TIMING=1` in `_phase.py`.
+
+## THE chosen design (owner's direction): pre-prep between minutes, minimal compute AT the mark
+"Set it up so work is pre-prepped, and the only time spent at the one-minute mark is the exact compute for
+that moment, fastest way possible." Concretely — a **stateful incremental accumulator** per worker:
+- Keep, in numpy, a **running per-(symbol, window, value-col) sum** + a rolling buffer of the **derived
+  values** (close-products, OLS x/y/xy, power-sums) for the trailing window. These ARE the pre-prepped
+  inputs (like the prior codebase's held arrays).
+- **At minute T (the only work on the critical path):** compute the NEW minute's derived values (N symbols
+  × ~40 cols — small), then for each window `running_sum[w] += derived[T] − derived[T−w]` (O(symbols ×
+  windows × cols) ≈ ~1M float ops ≈ a few ms), then assemble features from the running sums. No re-scan of
+  the 60-min buffer, no per-minute polars derive/pivot over 75k rows. That's the ~14%-is-real-compute gap
+  closed → targets the few-ms / <100ms regime.
+- **PARITY (sacred — the reason this platform exists):** the running sums are validated cell-for-cell vs
+  the recompute by the SAME parity test; this sits UNDER the parity boundary (not a bolt-on framework like
+  the old system). Incremental float sums drift, but per-trading-day the accumulation stays far inside
+  tolerance; bound it with a **daily resync** (rebuild the accumulator from the buffer at session start,
+  which also gives crash recovery). Backfill stays the polars rolling form (the truth); live becomes the
+  accumulator; the test proves they agree.
+- This is a substantial, careful stateful build — do it deliberately, parity-gated at each step. It is THE
+  lever from 617ms → the target.
+
+## (earlier framing) incremental windowed sums
 The design recomputes every feature over the full 60-min buffer every minute — O(buffer×features). Because
 the declarative engine routes EVERYTHING through windowed SUMS (mean/std/OLS all derived from sums) and sums
 are associative, a running aggregate (add the new minute, subtract the minute that aged out of each window)
