@@ -10,6 +10,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
+from quantlib.features.latest import slice_aggregates
 from quantlib.features.registry import register
 
 QUOTE_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120)
@@ -82,3 +83,30 @@ class QuoteSpreadGroup(FeatureGroup):
             f"{f}_{w}m" for w in QUOTE_WINDOWS for f in ("spread_bps", "quote_imbalance")
         ]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: trailing means per window via one slice+group_by each (aggregate-at-T)."""
+        frame = ctx.frame("minute_agg").select(
+            ["symbol", "minute", "mean_spread_bps", "quote_imbalance", "mean_bid_size", "mean_ask_size"]
+        ).sort(["symbol", "minute"])
+
+        def aggs(w: int) -> list[pl.Expr]:
+            return [
+                pl.col("mean_spread_bps").mean().cast(pl.Float64).alias(f"spread_bps_{w}m"),
+                pl.col("quote_imbalance").mean().cast(pl.Float64).alias(f"quote_imbalance_{w}m"),
+            ]
+
+        out, latest = slice_aggregates(frame, QUOTE_WINDOWS, aggs)
+        current = frame.filter(pl.col("minute") == latest).select(
+            [
+                "symbol",
+                pl.col("mean_spread_bps").cast(pl.Float64).alias("spread_bps_1m"),
+                pl.col("quote_imbalance").cast(pl.Float64).alias("quote_imbalance_1m"),
+                (pl.col("mean_bid_size") + pl.col("mean_ask_size")).cast(pl.Float64).alias("book_depth_1m"),
+            ]
+        )
+        out = current.join(out, on="symbol", how="left").with_columns(pl.lit(latest).alias("minute"))
+        names = ["spread_bps_1m", "quote_imbalance_1m", "book_depth_1m"] + [
+            f"{f}_{w}m" for w in QUOTE_WINDOWS for f in ("spread_bps", "quote_imbalance")
+        ]
+        return out.select(["symbol", "minute", *names])

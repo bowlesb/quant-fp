@@ -13,6 +13,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
+from quantlib.features.latest import slice_aggregates
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 30, 60, 120, 240)
@@ -72,3 +73,23 @@ class PriceLevelGroup(FeatureGroup):
             exprs.append((pl.col("close") / low_w - 1.0).cast(pl.Float64).alias(f"dist_from_low_{w}m"))
         names = [f"{f}_{w}m" for w in WINDOWS for f in ("position_in_range", "dist_from_high", "dist_from_low")]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: trailing high/low per window via one slice+group_by each (aggregate-at-T),
+        then derive the same position/distance from the current close. Parity-guarded."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "high", "low"]).sort(["symbol", "minute"])
+
+        def aggs(w: int) -> list[pl.Expr]:
+            return [pl.col("high").max().alias(f"_hi_{w}"), pl.col("low").min().alias(f"_lo_{w}")]
+
+        out, latest = slice_aggregates(frame, WINDOWS, aggs)
+        close = frame.filter(pl.col("minute") == latest).select(["symbol", pl.col("close").alias("_c")])
+        out = out.join(close, on="symbol", how="left")
+        exprs = []
+        for w in WINDOWS:
+            high_w, low_w, close_t = pl.col(f"_hi_{w}"), pl.col(f"_lo_{w}"), pl.col("_c")
+            exprs.append(((close_t - low_w) / (high_w - low_w)).cast(pl.Float64).alias(f"position_in_range_{w}m"))
+            exprs.append((close_t / high_w - 1.0).cast(pl.Float64).alias(f"dist_from_high_{w}m"))
+            exprs.append((close_t / low_w - 1.0).cast(pl.Float64).alias(f"dist_from_low_{w}m"))
+        names = [f"{f}_{w}m" for w in WINDOWS for f in ("position_in_range", "dist_from_high", "dist_from_low")]
+        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])

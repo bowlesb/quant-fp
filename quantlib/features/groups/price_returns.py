@@ -5,6 +5,8 @@ helper) so they are correct on gappy minute grids.
 """
 from __future__ import annotations
 
+import datetime as dt
+
 import polars as pl
 
 from quantlib.features.base import (
@@ -62,3 +64,23 @@ class PriceReturnGroup(FeatureGroup):
             exprs.append(ratio.log().cast(pl.Float64).alias(f"log_ret_{w}m"))
         names = [f"ret_{w}m" for w in WINDOWS] + [f"log_ret_{w}m" for w in WINDOWS]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: a return at T is a POINT lookup (close_T / close_{T-w}), not a window
+        reduction — so just join the close from each lag minute, no rolling over the buffer. Same
+        formula as compute(), parity-guarded."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        latest = frame["minute"].max()
+        out = frame.filter(pl.col("minute") == latest).select(["symbol", pl.col("close").alias("_cT")])
+        for w in WINDOWS:
+            lag = frame.filter(pl.col("minute") == latest - dt.timedelta(minutes=w)).select(
+                ["symbol", pl.col("close").alias(f"_c{w}")]
+            )
+            out = out.join(lag, on="symbol", how="left")
+        exprs = []
+        for w in WINDOWS:
+            ratio = pl.col("_cT") / pl.col(f"_c{w}")
+            exprs.append((ratio - 1.0).cast(pl.Float64).alias(f"ret_{w}m"))
+            exprs.append(ratio.log().cast(pl.Float64).alias(f"log_ret_{w}m"))
+        names = [f"ret_{w}m" for w in WINDOWS] + [f"log_ret_{w}m" for w in WINDOWS]
+        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
