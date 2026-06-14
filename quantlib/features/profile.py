@@ -46,23 +46,25 @@ def build_frames(n_tickers: int, window_min: int, daily_days: int) -> dict[str, 
     return {"minute_agg": intraday, "daily": daily, "reference": reference}
 
 
-def time_group(group: FeatureGroup, frames: dict[str, pl.DataFrame], reps: int = 3) -> float:
-    """Min wall-clock ms over ``reps`` runs (after a warmup) of one group's compute."""
+def time_group(group: FeatureGroup, frames: dict[str, pl.DataFrame], reps: int = 3, latest: bool = False) -> float:
+    """Min wall-clock ms over ``reps`` runs (after a warmup) of one group's compute. ``latest=True`` times
+    ``compute_latest`` — the LIVE path (what the per-minute budget actually pays) — instead of compute()."""
     ctx = BatchContext(frames=frames)
-    run_group(group, ctx, validate=False)  # warmup (JIT of the lazy plan, cache fill)
+    call = (lambda: group.compute_latest(ctx)) if latest else (lambda: run_group(group, ctx, validate=False))
+    call()  # warmup
     times = []
     for _ in range(reps):
         start = time.perf_counter()
-        run_group(group, ctx, validate=False)
+        call()
         times.append(time.perf_counter() - start)
     return min(times) * 1000.0
 
 
-def profile(frames: dict[str, pl.DataFrame], reps: int = 3) -> pl.DataFrame:
-    """Latency table for every runnable group, sorted slowest-first."""
+def profile(frames: dict[str, pl.DataFrame], reps: int = 3, latest: bool = False) -> pl.DataFrame:
+    """Latency table for every runnable group, sorted slowest-first. ``latest`` times the live path."""
     rows = []
     for group in runnable(frames):
-        ms = time_group(group, frames, reps)
+        ms = time_group(group, frames, reps, latest=latest)
         n_features = len(group.feature_names)
         rows.append(
             {"group": group.name, "type": group.type.value, "n_features": n_features,
@@ -72,16 +74,19 @@ def profile(frames: dict[str, pl.DataFrame], reps: int = 3) -> pl.DataFrame:
 
 
 def main() -> None:
-    n_tickers = int(sys.argv[1]) if len(sys.argv) > 1 else 2000
-    window_min = int(sys.argv[2]) if len(sys.argv) > 2 else 120
-    daily_days = int(sys.argv[3]) if len(sys.argv) > 3 else 250
-    reps = int(sys.argv[4]) if len(sys.argv) > 4 else 3
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    latest = "--latest" in sys.argv  # time compute_latest (live path) instead of compute() (backfill)
+    n_tickers = int(args[0]) if len(args) > 0 else 2000
+    window_min = int(args[1]) if len(args) > 1 else 120
+    daily_days = int(args[2]) if len(args) > 2 else 250
+    reps = int(args[3]) if len(args) > 3 else 5
     frames = build_frames(n_tickers, window_min, daily_days)
-    table = profile(frames, reps)
+    table = profile(frames, reps, latest=latest)
     total_ms = table["ms"].sum()
     total_feats = int(table["n_features"].sum())
     pl.Config.set_tbl_rows(100)
-    print(f"=== per-group latency @ {n_tickers} tickers x {window_min}m buffer ({reps} reps, min) ===")
+    path = "LIVE (compute_latest)" if latest else "BACKFILL (compute)"
+    print(f"=== {path} per-group latency @ {n_tickers} tickers x {window_min}m buffer ({reps} reps, min) ===")
     print(table)
     print(f"\nTOTAL: {total_feats} features across {table.height} groups in {total_ms:.0f} ms "
           f"({1000.0 * total_ms / total_feats:.1f} us/feature) at {n_tickers} tickers")

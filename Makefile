@@ -92,3 +92,6 @@ fp-bench:
 	$(FP_RUN) fp-dev python -m quantlib.features.mem_bench $(or $(N),10000) 120 250 1000
 fp-profile:
 	$(FP_RUN) fp-dev python -m quantlib.features.profile $(or $(N),2000) 120 250 3
+# LIVE-path per-group ranking at one-shard scale — the optimize loop: rank, fix the worst, re-run.
+fp-profile-latest:
+	$(FP_RUN) fp-dev python -m quantlib.features.profile $(or $(N),312) 245 250 5 --latest
