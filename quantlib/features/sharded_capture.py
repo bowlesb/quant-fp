@@ -47,9 +47,10 @@ def route_minute(bars: list[dict], n_shards: int) -> list[list[dict]]:
 
 
 def process_shard(state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
-                  window: int, snapshots: dict | None = None, write: bool = True) -> None:
-    """One shard's map step: the shared core, minus the universe-wide reduce groups."""
-    process_bars(state, bars, root, mode, day, window, snapshots, exclude_groups=REDUCE_GROUPS, write=write)
+                  window: int, snapshots: dict | None = None, write: bool = True, shard: int | None = None) -> None:
+    """One shard's map step: the shared core, minus the universe-wide reduce groups. Writes its OWN
+    ``data-<shard>.parquet`` per partition (atomic, no clobber) so all shards write concurrently."""
+    process_bars(state, bars, root, mode, day, window, snapshots, exclude_groups=REDUCE_GROUPS, write=write, shard=shard)
 
 
 def process_reduce(reduce_state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
@@ -68,4 +69,4 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         batch = queue.get()
         if batch is None:
             return
-        process_shard(state, batch, root, mode, day, window, snapshots)
+        process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id)

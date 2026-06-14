@@ -9,6 +9,9 @@ from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
+from pathlib import Path
+
+from quantlib.features import store
 from quantlib.features.capture import CaptureState, process_bars
 from quantlib.features.sharded_capture import REDUCE_GROUPS, process_reduce, process_shard, route_minute
 
@@ -89,6 +92,18 @@ def test_cross_sectional_rank_via_reduce_identical() -> None:
     single, sharded = _single_process(10), _sharded(10)
     assert REDUCE_GROUPS == ("cross_sectional_rank",)
     _assert_same(single["cross_sectional_rank"], sharded["cross_sectional_rank"])
+
+
+def test_store_concurrent_shard_writes_do_not_clobber(tmp_path: Path) -> None:
+    # the #6 concurrency fix: N shards write disjoint symbols to the SAME (group, date) partition;
+    # each writes its own data-<shard>.parquet, so the read returns the UNION (no last-writer-wins).
+    root = str(tmp_path / "store")
+    day = "2026-06-12"
+    for shard, symbol, ret in ((0, "AAA", 0.01), (1, "BBB", 0.02), (2, "CCC", 0.03)):
+        frame = pl.DataFrame({"symbol": [symbol], "minute": [BASE], "ret_1m": [ret]})
+        store.write_group(root, "price_returns", "1.0.0", "stream", day, frame, mode="mock", shard=shard)
+    df = store.get_features(["ret_1m"], "universe", BASE, BASE + timedelta(minutes=5), root, source="stream")
+    assert set(df["symbol"].to_list()) == {"AAA", "BBB", "CCC"}  # all 3 shards present, none clobbered
 
 
 def test_reduce_group_absent_from_shards() -> None:

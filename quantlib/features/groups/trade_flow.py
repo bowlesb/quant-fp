@@ -11,6 +11,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import pivot_stat, rust_reductions
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
@@ -86,3 +87,26 @@ class TradeFlowGroup(FeatureGroup):
             f"{f}_{w}m" for w in WINDOWS for f in ("signed_volume", "trade_freq")
         ]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """RUST-backed latest-minute form: the trailing-window SUMS computed by the Rust kernel
+        (quant_tick.windowed_reduce) instead of Polars rolling. Same numbers (parity-guarded), heavy
+        compute in Rust. The ONLY change from the Python form is `rust_reductions` in place of rolling."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "n_trades", "signed_volume"])
+        frame = lagged(frame, "n_trades", 1, "_n_prev").sort(["symbol", "minute"])
+        signed = pivot_stat(rust_reductions(frame, "signed_volume", WINDOWS), "sum", "signed_volume_{w}m", WINDOWS)
+        freq = pivot_stat(rust_reductions(frame, "n_trades", WINDOWS), "sum", "trade_freq_{w}m", WINDOWS)
+        latest = frame["minute"].max()
+        current = frame.filter(pl.col("minute") == latest).select(
+            [
+                "symbol",
+                pl.col("signed_volume").cast(pl.Float64).alias("signed_volume_1m"),
+                pl.col("n_trades").cast(pl.Float64).alias("trade_freq_1m"),
+                ((pl.col("n_trades") - pl.col("_n_prev")).cast(pl.Float64) / 60.0).alias("trade_rate_accel_1m"),
+            ]
+        )
+        out = current.join(signed, on="symbol", how="left").join(freq, on="symbol", how="left").with_columns(pl.lit(latest).alias("minute"))
+        names = ["signed_volume_1m", "trade_freq_1m", "trade_rate_accel_1m"] + [
+            f"{f}_{w}m" for w in WINDOWS for f in ("signed_volume", "trade_freq")
+        ]
+        return out.select(["symbol", "minute", *names])

@@ -60,6 +60,7 @@ def process_bars(
     exclude_groups: tuple[str, ...] = (),
     only_groups: tuple[str, ...] | None = None,
     write: bool = True,
+    shard: int | None = None,
 ) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
     S, o, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
@@ -96,7 +97,7 @@ def process_bars(
         combined = out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
         state.accumulated[group.name] = combined
         if write:
-            store.write_group(root, group.name, group.version, "stream", target_day, combined, mode=mode)
+            store.write_group(root, group.name, group.version, "stream", target_day, combined, mode=mode, shard=shard)
     state.minutes += 1
 
 

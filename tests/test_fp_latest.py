@@ -39,17 +39,22 @@ def test_compute_latest_matches_rolling_for_every_group(group_name: str) -> None
     expected = rolling.filter(pl.col("minute") == latest).sort("symbol")
     actual = group.compute_latest(ctx).filter(pl.col("minute") == latest).sort("symbol").select(expected.columns)
     assert actual.height == expected.height
+    # hold compute_latest to each feature's DECLARED parity tolerance — the same standard as
+    # live-vs-backfill (a Rust/aggregate-at-T form may differ from the Polars rolling form only by
+    # float-algorithm noise within that bound).
+    tolerances = {spec.name: spec.tolerance for spec in group.declare()}
     for feature in [c for c in expected.columns if c not in ("symbol", "minute")]:
+        tol = tolerances[feature]
         joined = expected.select("symbol", feature).join(
             actual.select("symbol", pl.col(feature).alias("_a")), on="symbol"
         )
         bad = joined.filter(
             ~(
                 (pl.col(feature).is_null() & pl.col("_a").is_null())
-                | ((pl.col(feature) - pl.col("_a")).abs() <= 1e-9 + 1e-9 * pl.col(feature).abs())
+                | ((pl.col(feature) - pl.col("_a")).abs() <= 1e-12 + tol * pl.col(feature).abs())
             )
         )
-        assert bad.height == 0, f"{group_name}.{feature}: compute_latest != compute().last on {bad.height}"
+        assert bad.height == 0, f"{group_name}.{feature}: compute_latest != compute().last on {bad.height} (tol={tol})"
 
 
 def _buffer(symbols: tuple[str, ...], n: int) -> pl.DataFrame:

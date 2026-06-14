@@ -12,6 +12,7 @@ unsettled recent window. Writes are atomic (write-temp-then-rename); reads are c
 from __future__ import annotations
 
 import datetime as dt
+import os
 import shutil
 from pathlib import Path
 
@@ -48,22 +49,27 @@ def set_mode(root: str | Path, mode: str) -> None:
 
 
 def write_group(
-    root: str | Path, group: str, version: str, source: str, day: str, frame: pl.DataFrame, mode: str = "real"
+    root: str | Path, group: str, version: str, source: str, day: str, frame: pl.DataFrame,
+    mode: str = "real", shard: int | None = None,
 ) -> Path:
     """Write one group's features for one day+source. Atomic + idempotent (rerun overwrites cleanly).
-    ``mode`` ('real'|'mock') is enforced per root so simulated data never lands in the real store."""
+
+    ``shard`` enables CONCURRENT partition-disjoint writes: each capture worker passes its shard id and
+    writes its OWN file ``data-<shard>.parquet`` inside the partition, via a per-file temp + atomic
+    ``os.replace`` (POSIX-atomic, same dir) — so N workers writing the same (group, date) never clobber
+    or contend (Monday collect+save concurrency, requirement #6). ``shard=None`` writes the single
+    ``data.parquet`` (backfill / repair). Reads glob ``data*.parquet`` so both layouts read back as the
+    union. ``mode`` ('real'|'mock') is enforced per root so simulated data never lands in the real store.
+    """
     set_mode(root, mode)
     target = _partition_dir(root, group, version, source, day)
-    # staging name must NOT match the `date=*` read glob, or a crashed write leaks into reads.
-    staging = target.parent / f".staging-{target.name}"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    frame.write_parquet(staging / "data.parquet")
-    if target.exists():
-        shutil.rmtree(target)
-    staging.rename(target)
-    return target
+    target.mkdir(parents=True, exist_ok=True)
+    name = "data.parquet" if shard is None else f"data-{shard}.parquet"
+    # temp name starts with '.tmp-' so it never matches the data*.parquet read glob, even mid-write.
+    tmp = target / f".tmp-{name}.{os.getpid()}"
+    frame.write_parquet(tmp)
+    os.replace(tmp, target / name)  # atomic rename within the same dir; no whole-partition clobber
+    return target / name
 
 
 def _resolve(name: str) -> tuple[str, str]:
@@ -87,7 +93,7 @@ def _scan_source(
     root: str | Path, group: str, version: str, source: str, feats: list[str],
     symbols: list[str] | str, start: dt.datetime, end: dt.datetime,
 ) -> pl.DataFrame:
-    files = list(Path(root).glob(f"group={group}/v={version}/source={source}/date=*/data.parquet"))
+    files = list(Path(root).glob(f"group={group}/v={version}/source={source}/date=*/data*.parquet"))
     if not files:
         return pl.DataFrame()
     frame = pl.scan_parquet(files).select([*KEY_COLUMNS, *feats])

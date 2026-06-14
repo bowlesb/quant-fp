@@ -79,8 +79,96 @@ fn tick_run_features(
     Ok((out_sym, out_min, out_max, out_cnt, out_sv))
 }
 
+/// Per-(symbol, window) windowed reductions ending at the latest minute T — the reusable kernel a
+/// reduction feature group calls instead of Polars rolling, to move its heavy compute into Rust.
+///
+/// Inputs are PARALLEL arrays sorted by (symbol, minute):
+///   symbol   — integer code per symbol
+///   minute   — epoch seconds (per-minute)
+///   value    — the column to reduce
+///   windows  — window sizes in SECONDS, strictly ASCENDING
+///   t        — the latest minute (epoch seconds); window w covers minutes in (t - w, t]
+/// Returns, one entry per (symbol, window) in (symbol, ascending-window) order:
+///   out_symbol, out_window, n, sum, sumsq, min, max
+/// The caller derives mean = sum/n, std(ddof=1) = sqrt((sumsq - sum*sum/n)/(n-1)), etc. A single
+/// backward pass per symbol snapshots each window as the scan crosses its boundary (no per-window
+/// re-scan, no hashing) — fresh each minute, so NO running-accumulator drift (parity-safe).
+#[pyfunction]
+fn windowed_reduce(
+    symbol: Vec<i64>,
+    minute: Vec<i64>,
+    value: Vec<f64>,
+    windows: Vec<i64>,
+    t: i64,
+) -> PyResult<(Vec<i64>, Vec<i64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let n_rows = symbol.len();
+    let nw = windows.len();
+    let mut out_sym: Vec<i64> = Vec::new();
+    let mut out_win: Vec<i64> = Vec::new();
+    let mut out_n: Vec<f64> = Vec::new();
+    let mut out_sum: Vec<f64> = Vec::new();
+    let mut out_sumsq: Vec<f64> = Vec::new();
+    let mut out_min: Vec<f64> = Vec::new();
+    let mut out_max: Vec<f64> = Vec::new();
+
+    let mut i: usize = 0;
+    while i < n_rows {
+        let s = symbol[i];
+        // block [i, j) for this symbol
+        let mut j = i;
+        while j < n_rows && symbol[j] == s {
+            j += 1;
+        }
+        let mut count = 0.0;
+        let mut sum = 0.0;
+        let mut sumsq = 0.0;
+        let mut mn = f64::INFINITY;
+        let mut mx = f64::NEG_INFINITY;
+        let mut k: usize = 0;
+        // scan backward (increasing distance d = t - minute); snapshot window k when d >= windows[k]
+        let mut r = j;
+        while r > i {
+            r -= 1;
+            let d = t - minute[r];
+            while k < nw && d >= windows[k] {
+                out_sym.push(s);
+                out_win.push(windows[k]);
+                out_n.push(count);
+                out_sum.push(sum);
+                out_sumsq.push(sumsq);
+                out_min.push(if count > 0.0 { mn } else { f64::NAN });
+                out_max.push(if count > 0.0 { mx } else { f64::NAN });
+                k += 1;
+            }
+            let v = value[r];
+            count += 1.0;
+            sum += v;
+            sumsq += v * v;
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        while k < nw {
+            out_sym.push(s);
+            out_win.push(windows[k]);
+            out_n.push(count);
+            out_sum.push(sum);
+            out_sumsq.push(sumsq);
+            out_min.push(if count > 0.0 { mn } else { f64::NAN });
+            out_max.push(if count > 0.0 { mx } else { f64::NAN });
+            k += 1;
+        }
+        i = j;
+    }
+    Ok((out_sym, out_win, out_n, out_sum, out_sumsq, out_min, out_max))
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
+    m.add_function(wrap_pyfunction!(windowed_reduce, m)?)?;
     Ok(())
 }

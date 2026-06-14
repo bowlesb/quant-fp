@@ -15,6 +15,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import pivot_stat, rust_reductions
 from quantlib.features.registry import register
 
 VOL_WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
@@ -87,3 +88,23 @@ class VolatilityGroup(FeatureGroup):
             )
         names = ["high_low_range_1m"] + [f"realized_vol_{w}m" for w in VOL_WINDOWS] + [f"parkinson_vol_{w}m" for w in RANGE_WINDOWS]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """RUST-backed latest-minute form: realized vol = std and Parkinson = sqrt(mean(_hl2)/4ln2),
+        both from the Rust windowed_reduce kernel. Parity-guarded to the Polars rolling form within the
+        feature's declared 0.02 tolerance (std float-algorithm noise)."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "high", "low", "close"])
+        frame = lagged(frame, "close", 1, "_cp").sort(["symbol", "minute"])
+        frame = frame.with_columns(
+            [(pl.col("close") / pl.col("_cp") - 1.0).alias("_ret"), (pl.col("high") / pl.col("low")).log().pow(2).alias("_hl2")]
+        )
+        realized = pivot_stat(rust_reductions(frame, "_ret", VOL_WINDOWS), "std", "realized_vol_{w}m", VOL_WINDOWS)
+        hl = rust_reductions(frame, "_hl2", RANGE_WINDOWS).with_columns((pl.col("mean") / FOUR_LN2).sqrt().alias("_pk"))
+        parkinson = pivot_stat(hl, "_pk", "parkinson_vol_{w}m", RANGE_WINDOWS)
+        latest = frame["minute"].max()
+        current = frame.filter(pl.col("minute") == latest).select(
+            ["symbol", ((pl.col("high") - pl.col("low")) / pl.col("close")).cast(pl.Float64).alias("high_low_range_1m")]
+        )
+        out = current.join(realized, on="symbol", how="left").join(parkinson, on="symbol", how="left").with_columns(pl.lit(latest).alias("minute"))
+        names = ["high_low_range_1m"] + [f"realized_vol_{w}m" for w in VOL_WINDOWS] + [f"parkinson_vol_{w}m" for w in RANGE_WINDOWS]
+        return out.select(["symbol", "minute", *names])
