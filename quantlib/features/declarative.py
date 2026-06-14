@@ -233,6 +233,49 @@ def _canonical(name: str, stats: tuple[str, ...], base: str) -> list[pl.Expr]:
     return out
 
 
+_PlanEntry = tuple[int, str, tuple[str, ...], tuple[int, ...], str]
+
+
+def build_plan(
+    groups: list[ReductionGroup],
+) -> tuple[list[pl.Expr], list[pl.Expr], list[str], list[_PlanEntry], list[_PlanEntry], tuple[int, ...]]:
+    """The union value-column plan for a set of declarative groups — SHARED by the batch and the incremental
+    engine so both sum EXACTLY the same columns. Returns:
+      derived  — exprs for the base reduced cols + the six OLS paired cols (namespaced per group),
+      extra    — exprs for the presence/square cols that mean/std need,
+      value_cols — the ordered names to sum (base, base__p, base__sq, OLS b/x/y/xy/xx/yy),
+      plan/reg_plan — per-group (gi, name, stats, windows, base|ns) for assemble_from_long,
+      windows  — the sorted union of all windows."""
+    derived: list[pl.Expr] = []
+    plan: list[_PlanEntry] = []
+    reg_plan: list[_PlanEntry] = []
+    all_windows: set[int] = set()
+    for gi, group in enumerate(groups):
+        for name, (expr, stats, windows) in group.reduced().items():
+            base = f"__b{gi}_{name}"
+            derived.append(expr.alias(base))
+            plan.append((gi, name, stats, tuple(windows), base))
+            all_windows |= set(windows)
+        for name, (x_expr, y_expr, stats, windows) in group.regressions().items():
+            ns = f"{gi}_{name}"  # namespace the regression's six paired columns per group
+            derived += _ols_derived(ns, x_expr, y_expr)
+            reg_plan.append((gi, name, stats, tuple(windows), ns))
+            all_windows |= set(windows)
+    extra: list[pl.Expr] = []
+    value_cols: list[str] = []
+    for _, _, stats, _, base in plan:
+        value_cols.append(base)
+        if "mean" in stats or "std" in stats:
+            extra.append(pl.col(base).is_not_null().cast(pl.Float64).alias(f"{base}__p"))
+            value_cols.append(f"{base}__p")
+        if "std" in stats:
+            extra.append((pl.col(base) * pl.col(base)).alias(f"{base}__sq"))
+            value_cols.append(f"{base}__sq")
+    for _, _, _, _, ns in reg_plan:
+        value_cols += [f"__rd_{ns}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
+    return derived, extra, value_cols, plan, reg_plan, tuple(sorted(all_windows))
+
+
 def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> dict[str, pl.DataFrame]:
     """Compute MANY declarative reduction groups in ONE shared marshal + kernel pass.
 
@@ -255,39 +298,12 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
         frame = ctx.frame(reduce_input).select(input_cols).sort(["symbol", "minute"])
     latest = frame["minute"].max()
 
-    derived: list[pl.Expr] = []
-    plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]] = []
-    reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]] = []  # (gi, name, stats, windows, ns)
-    all_windows: set[int] = set()
-    for gi, group in enumerate(groups):
-        for name, (expr, stats, windows) in group.reduced().items():
-            base = f"__b{gi}_{name}"
-            derived.append(expr.alias(base))
-            plan.append((gi, name, stats, tuple(windows), base))
-            all_windows |= set(windows)
-        for name, (x_expr, y_expr, stats, windows) in group.regressions().items():
-            ns = f"{gi}_{name}"  # namespace the regression's six paired columns per group
-            derived += _ols_derived(ns, x_expr, y_expr)
-            reg_plan.append((gi, name, stats, tuple(windows), ns))
-            all_windows |= set(windows)
+    derived, extra, value_cols, plan, reg_plan, windows = build_plan(groups)
     with _phase.phase("batch.derive(value cols)"):
         frame = frame.with_columns(derived)
-
-    extra: list[pl.Expr] = []
-    value_cols: list[str] = []
-    for _, _, stats, _, base in plan:
-        value_cols.append(base)
-        if "mean" in stats or "std" in stats:
-            extra.append(pl.col(base).is_not_null().cast(pl.Float64).alias(f"{base}__p"))
-            value_cols.append(f"{base}__p")
-        if "std" in stats:
-            extra.append((pl.col(base) * pl.col(base)).alias(f"{base}__sq"))
-            value_cols.append(f"{base}__sq")
     with _phase.phase("batch.derive(sq+presence)"):
         frame = frame.with_columns(extra)
-    for _, _, _, _, ns in reg_plan:  # the six paired sums per regression are plain value columns
-        value_cols += [f"__rd_{ns}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
-    long = rust_windowed_sums(frame, value_cols, tuple(sorted(all_windows)))
+    long = rust_windowed_sums(frame, value_cols, windows)
 
     with _phase.phase("batch.assemble(pivot+join)"):
         return assemble_from_long(groups, long, frame.filter(pl.col("minute") == latest), latest, plan, reg_plan)

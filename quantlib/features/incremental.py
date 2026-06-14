@@ -19,7 +19,13 @@ and go). The accumulator is value-column agnostic — the caller passes whatever
 """
 from __future__ import annotations
 
+import datetime as dt
+
 import numpy as np
+import polars as pl
+
+from quantlib.features.base import BatchContext
+from quantlib.features.declarative import ReductionGroup, assemble_from_long, build_plan
 
 
 class WindowedSumState:
@@ -63,3 +69,86 @@ class WindowedSumState:
     def sums(self, window: int) -> np.ndarray:
         """The current ``(n_symbols, n_cols)`` running sum for ``window`` (minutes)."""
         return self.running[self.windows.index(window)]
+
+
+class IncrementalEngine:
+    """The live incremental execution path for the declarative reduction groups. Holds a per-shard
+    ``WindowedSumState`` over the union of all groups' value columns (built by ``build_plan`` — the SAME
+    columns the batch sums), and at each minute derives ONLY the new minute's values, folds them in, and
+    assembles features from the running sums via ``assemble_from_long`` (the SAME core as the batch). So the
+    feature logic is identical to the batch/backfill paths; only the source of the sums differs.
+
+    Usage: ``seed(buffer_frame)`` once (replays the buffer to establish state + symbols), then ``step(frame)``
+    each minute (``frame`` = the trailing buffer including the new latest minute) -> {group: feature_frame}.
+    """
+
+    DERIVE_SLICE = 6  # minutes of history needed to derive a minute's value columns (max intra-value lag + slack)
+
+    def __init__(self, groups: list[ReductionGroup]) -> None:
+        self.groups = [g for g in groups if isinstance(g, ReductionGroup)]
+        self.derived, self.extra, self.value_cols, self.plan, self.reg_plan, self.windows = build_plan(self.groups)
+        self.reduce_input = self.groups[0].reduce_input if self.groups else "minute_agg"
+        input_cols: list[str] = []
+        for group in self.groups:
+            for col in group._input_columns():
+                if col not in input_cols:
+                    input_cols.append(col)
+        self.input_cols = input_cols
+        self.symbols: list[str] | None = None
+        self.state: WindowedSumState | None = None
+
+    def _derive(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Apply the union value-column derivation (same exprs the batch uses) to a frame."""
+        return (
+            frame.select(self.input_cols).sort(["symbol", "minute"]).with_columns(self.derived).with_columns(self.extra)
+        )
+
+    def _matrix_at(self, derived_frame: pl.DataFrame, minute: object) -> np.ndarray:
+        """The (n_symbols, n_value_cols) value matrix for ``minute``, symbol-aligned to ``self.symbols``
+        (nulls -> 0, matching the kernel). Asserts a fixed symbol set (V1)."""
+        rows = derived_frame.filter(pl.col("minute") == minute).sort("symbol")
+        if rows.height != len(self.symbols or []):
+            raise ValueError(f"incremental: symbol set changed ({rows.height} != {len(self.symbols or [])}); re-seed")
+        return rows.select(self.value_cols).fill_null(0.0).to_numpy()
+
+    def seed(self, buffer_frame: pl.DataFrame) -> None:
+        """Establish the symbol set and fold every buffered minute into fresh state (== the batch recompute
+        over the buffer; also the daily-resync / crash-recovery entry point)."""
+        self.symbols = sorted(buffer_frame["symbol"].unique().to_list())
+        self.state = WindowedSumState(self.symbols, self.windows, len(self.value_cols))
+        derived_frame = self._derive(buffer_frame)
+        for minute in sorted(derived_frame["minute"].unique()):
+            self.state.update(int(minute.timestamp()), self._matrix_at(derived_frame, minute))
+            self.state.trim()
+
+    def step(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
+        """Fold the new latest minute and assemble features from the running sums. ``frame`` is the trailing
+        buffer including the new minute. Seeds lazily on first call."""
+        latest = frame["minute"].max()
+        if self.state is None:
+            self.seed(frame)
+        else:
+            # V1 derives the new minute's value columns over the WHOLE buffer (same as the batch) — necessary
+            # for columns that depend on long history (e.g. OBV = cum_sum(signed), and the frame-relative
+            # centered-time origin), so the derived value matches the batch exactly. V2 optimization: derive
+            # the cheap short-lag columns over a small slice and maintain the few cumulative ones (OBV) as
+            # running per-symbol state — that removes the last O(buffer) cost from the minute mark.
+            derived_frame = self._derive(frame)
+            self.state.update(int(latest.timestamp()), self._matrix_at(derived_frame, latest))
+            self.state.trim()
+        long = self._running_long()
+        latest_frame = frame.filter(pl.col("minute") == latest)
+        return assemble_from_long(self.groups, long, latest_frame, latest, self.plan, self.reg_plan)
+
+    def _running_long(self) -> pl.DataFrame:
+        """The running sums as a LONG (symbol, window, <value-col sum>) frame — the exact shape
+        ``assemble_from_long`` expects, so the SAME assemble code runs as in the batch (NO pivot to build it)."""
+        running = self.state.running  # (n_windows, n_symbols, n_cols)
+        n_win, n_sym, _ = running.shape
+        data: dict[str, object] = {
+            "symbol": self.symbols * n_win,
+            "window": [w for w in self.windows for _ in range(n_sym)],
+        }
+        for col_index, col in enumerate(self.value_cols):
+            data[col] = running[:, :, col_index].reshape(-1)
+        return pl.DataFrame(data)
