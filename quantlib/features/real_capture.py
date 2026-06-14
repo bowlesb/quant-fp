@@ -92,7 +92,10 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
 
     ``snapshots`` overrides the slowly-changing reference/daily frames (else they are loaded from the DB /
     Alpaca) — used by the streaming benchmark to run fully standalone with synthetic snapshots."""
-    n_shards = n_shards or max(1, (os.cpu_count() or 8) - 2)
+    # ~3 cores per shard, not one-shard-per-core: with the all-32-threads oversubscription fixed, the
+    # per-minute critical path is lowest with FEWER, fatter, multi-threaded shards (less process-concurrency
+    # overhead + a busy reader). Measured at 10k/32-cores: 30 shards=1929ms, 16=1720ms, 10=1551ms, 6=2280ms.
+    n_shards = n_shards or max(1, (os.cpu_count() or 8) // 3)
     if snapshots is None:
         snapshots = {"reference": load_reference()}
         if day is not None:
