@@ -107,7 +107,10 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id)
         if bench_log is not None:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
+            # The bet-relevant latency is COMPUTE only; the write happens after the decision, so report it
+            # separately and subtract it from the critical-path "ms".
             record = {"shard": shard_id, "minute": max(bar["t"] for bar in batch),
-                      "ms": elapsed_ms, "groups": dict(state.group_timings)}
+                      "ms": elapsed_ms - state.last_write_ms, "write_ms": state.last_write_ms,
+                      "groups": dict(state.group_timings)}
             with bench_log.open("a") as handle:
                 handle.write(json.dumps(record) + "\n")

@@ -86,6 +86,7 @@ class CaptureState:
         self.accumulated: dict[str, pl.DataFrame] = {}  # one DEDUPED frame per group
         self.minutes = 0
         self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
+        self.last_write_ms = 0.0  # time spent WRITING last minute — excluded from the bet-relevant compute latency
         self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
 
 
@@ -161,6 +162,7 @@ def process_bars(
         for group in batch_groups:
             outputs.append((group, batched[group.name], per_ms))
 
+    write_start = time.perf_counter()
     for group, out, compute_ms in outputs:
         state.group_timings[group.name] = compute_ms
         if accumulate:
@@ -179,6 +181,7 @@ def process_bars(
                 state.writer.submit(**write_kwargs)
             else:
                 store.write_group(**write_kwargs)
+    state.last_write_ms = (time.perf_counter() - write_start) * 1000.0  # measured apart from compute
     metrics.record_group_timings(state.group_timings)  # -> Prometheus histogram, graphed per-group in Grafana
     state.minutes += 1
 

@@ -103,25 +103,30 @@ def _percentile(values: list[float], pct: float) -> float:
 def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     bench = Path(root) / "_bench"
     per_minute: dict[str, list[float]] = {}
+    write_per_minute: dict[str, list[float]] = {}
     for shard_file in sorted(bench.glob("shard-*.jsonl")):
         for line in shard_file.read_text().splitlines():
             record = json.loads(line)
-            per_minute.setdefault(record["minute"], []).append(record["ms"])
+            per_minute.setdefault(record["minute"], []).append(record["ms"])  # compute-only (bet-relevant)
+            write_per_minute.setdefault(record["minute"], []).append(record.get("write_ms", 0.0))
     minutes_sorted = sorted(per_minute)
     critical = [max(per_minute[minute]) for minute in minutes_sorted]  # slowest shard each minute
     warm = critical[warmup:] or critical  # measure on full-buffer minutes only
+    writes = [max(write_per_minute[minute]) for minute in minutes_sorted][warmup:] or [0.0]
     reader_file = bench / "reader.jsonl"
     reader = [json.loads(line)["ms"] for line in reader_file.read_text().splitlines()] if reader_file.exists() else []
     reader_warm = reader[warmup:] or reader
 
     print(f"\n=== STREAMING latency: {n_symbols} symbols, {n_shards} shards (~{n_symbols // n_shards}/shard), "
           f"{len(minutes_sorted)} minutes ({len(warm)} measured post-warmup) ===")
-    print(f"per-minute CRITICAL PATH (slowest shard): "
+    print(f"per-minute COMPUTE (slowest shard, the bet-relevant latency): "
           f"p50={statistics.median(warm):.0f}ms  p99={_percentile(warm, 99):.0f}ms  max={max(warm):.0f}ms")
+    print(f"write (deferred, AFTER the bet — not on the critical path): "
+          f"p50={statistics.median(writes):.0f}ms  p99={_percentile(writes, 99):.0f}ms")
     if reader_warm:
         print(f"reader (route+reduce, single-thread):  "
               f"p50={statistics.median(reader_warm):.0f}ms  p99={_percentile(reader_warm, 99):.0f}ms  max={max(reader_warm):.0f}ms")
-    print(f"=> the full {n_symbols}-ticker vector lands each minute in ~{_percentile(warm, 99):.0f}ms p99 "
+    print(f"=> the full {n_symbols}-ticker vector COMPUTES each minute in ~{_percentile(warm, 99):.0f}ms p99 "
           f"(budget 60000ms/minute)")
 
 
