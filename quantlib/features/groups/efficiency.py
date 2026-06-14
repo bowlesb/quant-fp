@@ -11,21 +11,18 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
-from quantlib.features.latest import pivot_stat, rust_windowed_sums
+from quantlib.features.declarative import ReductionGroup, pt_, sum_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120)
 
 
 @register
-class EfficiencyGroup(FeatureGroup):
+class EfficiencyGroup(ReductionGroup):
     name = "efficiency"
     version = "1.0.0"
     owner = "modeller"
@@ -45,41 +42,21 @@ class EfficiencyGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev1")
-        for w in WINDOWS:
-            frame = lagged(frame, "close", w, f"_lag{w}")
-        frame = frame.sort(["symbol", "minute"])
-        frame = frame.with_columns((pl.col("close") - pl.col("_prev1")).abs().alias("_step"))
-        exprs = []
-        for w in WINDOWS:
-            size = f"{w}m"
-            path = pl.col("_step").rolling_sum_by("minute", window_size=size).over("symbol")
-            net = pl.col("close") - pl.col(f"_lag{w}")
-            ratio = pl.when(path > 0.0).then(net / path).otherwise(None)
-            exprs.append(ratio.abs().cast(pl.Float64).alias(f"efficiency_ratio_{w}m"))
-            exprs.append(ratio.cast(pl.Float64).alias(f"directional_efficiency_{w}m"))
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("efficiency_ratio", "directional_efficiency")]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        step = (pl.col("close") - pl.col("close").shift(1).over("symbol")).abs()  # |minute-to-minute move|
+        return {"step": (step, ("sum",), WINDOWS)}
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: path = sum(|minute step|) per window (aggregate-at-T); net = close - close_{T-w}
-        (point lookup). Same ratio as compute()."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev1")
+    def points(self) -> dict[str, pl.Expr]:
+        pts: dict[str, pl.Expr] = {"c": pl.col("close")}
         for w in WINDOWS:
-            frame = lagged(frame, "close", w, f"_lag{w}")
-        frame = frame.sort(["symbol", "minute"]).with_columns((pl.col("close") - pl.col("_prev1")).abs().alias("_step"))
-        latest = frame["minute"].max()
-        path = pivot_stat(rust_windowed_sums(frame, ["_step"], WINDOWS), "_step", "_path{w}", WINDOWS)
-        base = frame.filter(pl.col("minute") == latest).select(["symbol", "close", *[f"_lag{w}" for w in WINDOWS]])
-        out = base.join(path, on="symbol", how="left")
-        exprs = []
+            pts[f"l{w}"] = pl.col("close").shift(w).over("symbol")
+        return pts
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
-            net = pl.col("close") - pl.col(f"_lag{w}")
-            ratio = pl.when(pl.col(f"_path{w}") > 0.0).then(net / pl.col(f"_path{w}")).otherwise(None)
-            exprs.append(ratio.abs().cast(pl.Float64).alias(f"efficiency_ratio_{w}m"))
-            exprs.append(ratio.cast(pl.Float64).alias(f"directional_efficiency_{w}m"))
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("efficiency_ratio", "directional_efficiency")]
-        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
+            path = sum_("step", w)
+            ratio = pl.when(path > 0.0).then((pt_("c") - pt_(f"l{w}")) / path).otherwise(None)
+            feats[f"efficiency_ratio_{w}m"] = ratio.abs()
+            feats[f"directional_efficiency_{w}m"] = ratio
+        return feats
