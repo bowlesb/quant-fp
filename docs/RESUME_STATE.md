@@ -44,9 +44,9 @@ Optimal config measured: **10 shards × 3 polars threads** at 10k/32-cores.
   `points()` + `assemble()` ONCE → engine generates `compute()` (rolling backfill) + `compute_latest()`
   (at-T live), and `compute_reduction_batch()` runs MANY groups in ONE shared marshal+kernel pass (wired
   into `process_bars`). OLS is just six paired windowed sums, so it folds into the same batch. **Migrated
-  (6): volume, volatility, ohlc_vol, trade_flow, quote_spread, return_dynamics (OLS).** Each parity-gated;
-  `tests/test_fp_declarative.py` proves batched==per-group for reduction+OLS. Speedup scales: 1.69× (2) →
-  2.33× (5) groups. **Async writes evaluated and REJECTED** (background-thread zstd contends: 10k sync
+  (9): volume, volatility, ohlc_vol, trade_flow, quote_spread, return_dynamics, price_volume (70 feats),
+  momentum, trend_quality.** Each parity-gated; `tests/test_fp_declarative.py` proves batched==per-group for
+  reduction+OLS. 10k per-shard p99 fell 902 (pre-declarative) → 815ms as groups migrated. **Async writes evaluated and REJECTED** (background-thread zstd contends: 10k sync
   884ms vs async 981ms p99); `StoreWriter` is opt-in (`FP_ASYNC_WRITE`), default sync. For the bet-latency
   decoupling, REORDER (compute→bet→write sync) when a bet step exists, don't use a contending thread.
 - **C — GPU: SPIKED AND RULED OUT for feature compute.** RTX 3090 works post-reboot; `fp-gpu` image built.
@@ -55,10 +55,10 @@ Optimal config measured: **10 shards × 3 polars threads** at 10k/32-cores.
   stays readable. 3090 → reserve for model TRAINING. Details in `docs/FUSED_ENGINE.md`.
 
 ## Exact next steps (in order)
-1. **Migrate the remaining reduction/OLS groups** (mechanical, each parity-gated by `tests/test_fp_latest.py`;
-   the engine already supports mean/std/sum + OLS): `price_volume` (sums + corr + obv-slope, 70 feats — the
-   biggest single win), `trend_quality` (R² + sums), `liquidity` (mean/sum + roll-spread autocovariance),
-   `price_returns`, `momentum`. Each joins the batch → bigger speedup.
+1. **Remaining reduction-shaped groups** (each parity-gated by `tests/test_fp_latest.py`): `liquidity`
+   (mean/sum fit the engine, but roll-spread is an AUTOCOVARIance — needs a lag-product derived col or a
+   small extension), `price_returns` (point-only: ret_w = close/close.shift(w) − 1 — migratable as all
+   `points()`, but it's already cheap so low priority). The other heavy reduction/OLS groups are DONE.
 2. **Two small engine extensions, then migrate their groups:**
    - **min/max** stat (rust_reductions already returns them; add `max_`/`min_` accessors + a windowed
      min/max kernel for the BATCH since windowed_sums can't do min/max) → `price_levels`.
