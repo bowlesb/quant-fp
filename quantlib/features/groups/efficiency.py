@@ -18,6 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import slice_aggregates
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120)
@@ -61,3 +62,23 @@ class EfficiencyGroup(FeatureGroup):
             exprs.append(ratio.cast(pl.Float64).alias(f"directional_efficiency_{w}m"))
         names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("efficiency_ratio", "directional_efficiency")]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: path = sum(|minute step|) per window (aggregate-at-T); net = close - close_{T-w}
+        (point lookup). Same ratio as compute()."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        frame = lagged(frame, "close", 1, "_prev1")
+        for w in WINDOWS:
+            frame = lagged(frame, "close", w, f"_lag{w}")
+        frame = frame.sort(["symbol", "minute"]).with_columns((pl.col("close") - pl.col("_prev1")).abs().alias("_step"))
+        out, latest = slice_aggregates(frame, WINDOWS, lambda w: [pl.col("_step").sum().alias(f"_path{w}")])
+        base = frame.filter(pl.col("minute") == latest).select(["symbol", "close", *[f"_lag{w}" for w in WINDOWS]])
+        out = base.join(out, on="symbol", how="left")
+        exprs = []
+        for w in WINDOWS:
+            net = pl.col("close") - pl.col(f"_lag{w}")
+            ratio = pl.when(pl.col(f"_path{w}") > 0.0).then(net / pl.col(f"_path{w}")).otherwise(None)
+            exprs.append(ratio.abs().cast(pl.Float64).alias(f"efficiency_ratio_{w}m"))
+            exprs.append(ratio.cast(pl.Float64).alias(f"directional_efficiency_{w}m"))
+        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("efficiency_ratio", "directional_efficiency")]
+        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])

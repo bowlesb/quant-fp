@@ -18,6 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import pivot_stat, rust_reductions, windowed_ols_latest
 from quantlib.features.ols import with_ols_columns
 from quantlib.features.registry import register
 
@@ -75,3 +76,27 @@ class MarketBetaGroup(FeatureGroup):
         frame = frame.with_columns(idio).drop(r2_cols)
         names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("market_beta", "market_corr", "idio_vol")]
         return frame.select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: rolling beta/corr vs SPY via aggregate-at-T OLS; idio = ret std * sqrt(1-r2)."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
+        frame = frame.with_columns((pl.col("close") / pl.col("_prev") - 1.0).alias("_ret"))
+        market = frame.filter(pl.col("symbol") == MARKET_TICKER).select(["minute", pl.col("_ret").alias("_mret")])
+        frame = frame.join(market, on="minute", how="left").sort(["symbol", "minute"])
+        latest = frame["minute"].max()
+        long = windowed_ols_latest(frame, "_mret", "_ret", WINDOWS)
+        beta = pivot_stat(long, "slope", "market_beta_{w}m", WINDOWS)
+        corr = pivot_stat(long, "corr", "market_corr_{w}m", WINDOWS)
+        r2 = pivot_stat(long, "r2", "_r2_{w}", WINDOWS)
+        ret_std = pivot_stat(rust_reductions(frame, "_ret", WINDOWS), "std", "_rstd_{w}", WINDOWS)
+        out = (
+            frame.filter(pl.col("minute") == latest).select("symbol")
+            .join(beta, on="symbol", how="left").join(corr, on="symbol", how="left")
+            .join(r2, on="symbol", how="left").join(ret_std, on="symbol", how="left")
+        )
+        out = out.with_columns(
+            [(pl.col(f"_rstd_{w}") * (1.0 - pl.col(f"_r2_{w}")).clip(0.0, 1.0).sqrt()).cast(pl.Float64).alias(f"idio_vol_{w}m") for w in WINDOWS]
+        ).with_columns(pl.lit(latest).alias("minute"))
+        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("market_beta", "market_corr", "idio_vol")]
+        return out.select(["symbol", "minute", *names])

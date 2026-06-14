@@ -79,6 +79,58 @@ def rust_reductions(frame: pl.DataFrame, value_col: str, windows: tuple[int, ...
     ).select(["symbol", "window", "sum", "mean", "std", "min", "max"])
 
 
+def windowed_ols_latest(
+    frame: pl.DataFrame, x: str, y: str, windows: tuple[int, ...] | list[int], by: str = "minute"
+) -> pl.DataFrame:
+    """Aggregate-at-T OLS of ``y`` on ``x`` per window: one slice+group_by per window computing the six
+    rolling sums, then the same slope/corr/r2/mean algebra as ``with_ols_columns`` — so the live OLS
+    matches the rolling backfill form (parity-guarded). Pairs only where BOTH x,y are present. Returns a
+    LONG frame (symbol, window, slope, corr, r2, mean_y). The group pivots what it needs."""
+    latest = frame[by].max()
+    both = pl.col(x).is_not_null() & pl.col(y).is_not_null()
+    prepared = frame.with_columns(
+        [
+            pl.when(both).then(pl.col(x)).otherwise(0.0).alias("_x"),
+            pl.when(both).then(pl.col(y)).otherwise(0.0).alias("_y"),
+            both.cast(pl.Float64).alias("_b"),
+        ]
+    )
+    parts = []
+    for w in windows:
+        low = latest - dt.timedelta(minutes=w)
+        agg = (
+            prepared.filter((pl.col(by) > low) & (pl.col(by) <= latest))
+            .group_by("symbol")
+            .agg(
+                [
+                    pl.col("_b").sum().alias("n"),
+                    pl.col("_x").sum().alias("sx"),
+                    pl.col("_y").sum().alias("sy"),
+                    (pl.col("_x") * pl.col("_y")).sum().alias("sxy"),
+                    (pl.col("_x") * pl.col("_x")).sum().alias("sxx"),
+                    (pl.col("_y") * pl.col("_y")).sum().alias("syy"),
+                ]
+            )
+            .with_columns(pl.lit(w, dtype=pl.Int64).alias("window"))
+        )
+        parts.append(agg)
+    long = pl.concat(parts)
+    n, sx, sy, sxy, sxx, syy = (pl.col(c) for c in ("n", "sx", "sy", "sxy", "sxx", "syy"))
+    denom_x = n * sxx - sx * sx
+    denom_y = n * syy - sy * sy
+    cov_n = n * sxy - sx * sy
+    defined = (n >= 2.0) & (denom_x > 0.0)
+    defined_corr = defined & (denom_y > 0.0)
+    return long.with_columns(
+        [
+            pl.when(defined).then(cov_n / denom_x).otherwise(None).alias("slope"),
+            pl.when(defined_corr).then(cov_n / (denom_x * denom_y).sqrt()).otherwise(None).alias("corr"),
+            pl.when(defined_corr).then((cov_n * cov_n) / (denom_x * denom_y)).otherwise(None).alias("r2"),
+            pl.when(n > 0).then(sy / n).otherwise(None).alias("mean_y"),
+        ]
+    ).select(["symbol", "window", "slope", "corr", "r2", "mean_y"])
+
+
 def pivot_stat(long: pl.DataFrame, stat: str, name_fmt: str, windows: tuple[int, ...] | list[int]) -> pl.DataFrame:
     """Pivot one statistic from rust_reductions' long frame into named per-window feature columns
     (``name_fmt`` e.g. "realized_vol_{w}m"), one row per symbol. ALWAYS returns the full expected column

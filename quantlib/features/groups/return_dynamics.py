@@ -18,6 +18,7 @@ from quantlib.features.base import (
     InputSpec,
     lagged,
 )
+from quantlib.features.latest import pivot_stat, windowed_ols_latest
 from quantlib.features.ols import with_ols_columns
 from quantlib.features.registry import register
 
@@ -82,3 +83,30 @@ class ReturnDynamicsGroup(FeatureGroup):
             + [f"ret_accel_{w}m" for w in ACCEL_WINDOWS]
         )
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: lag-1/2 autocorrelation via aggregate-at-T OLS; return acceleration via point
+        lookups of the lagged closes on the T row."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        lags = sorted({1, 2, 3} | {w for w in ACCEL_WINDOWS} | {2 * w for w in ACCEL_WINDOWS})
+        for offset in lags:
+            frame = lagged(frame, "close", offset, f"_lag{offset}")
+        frame = frame.sort(["symbol", "minute"]).with_columns(
+            [
+                (pl.col("close") / pl.col("_lag1") - 1.0).alias("_ret"),
+                (pl.col("_lag1") / pl.col("_lag2") - 1.0).alias("_ret_lag1"),
+                (pl.col("_lag2") / pl.col("_lag3") - 1.0).alias("_ret_lag2"),
+            ]
+        )
+        latest = frame["minute"].max()
+        ac1 = pivot_stat(windowed_ols_latest(frame, "_ret_lag1", "_ret", AUTOCORR_WINDOWS), "corr", "autocorr_1_{w}m", AUTOCORR_WINDOWS)
+        ac2 = pivot_stat(windowed_ols_latest(frame, "_ret_lag2", "_ret", AUTOCORR_WINDOWS), "corr", "autocorr_2_{w}m", AUTOCORR_WINDOWS)
+        accel = frame.filter(pl.col("minute") == latest).select(
+            ["symbol", *[((pl.col("close") / pl.col(f"_lag{w}") - 1.0) - (pl.col(f"_lag{w}") / pl.col(f"_lag{2 * w}") - 1.0)).cast(pl.Float64).alias(f"ret_accel_{w}m") for w in ACCEL_WINDOWS]]
+        )
+        out = accel.join(ac1, on="symbol", how="left").join(ac2, on="symbol", how="left").with_columns(pl.lit(latest).alias("minute"))
+        names = (
+            [f"autocorr_{lag}_{w}m" for w in AUTOCORR_WINDOWS for lag in (1, 2)]
+            + [f"ret_accel_{w}m" for w in ACCEL_WINDOWS]
+        )
+        return out.select(["symbol", "minute", *names])

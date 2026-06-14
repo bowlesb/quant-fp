@@ -20,6 +20,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
+from quantlib.features.latest import pivot_stat, windowed_ols_latest
 from quantlib.features.ols import centered_minutes, with_ols_columns
 from quantlib.features.registry import register
 
@@ -70,3 +71,21 @@ class TrendQualityGroup(FeatureGroup):
         frame = frame.with_columns(strength)
         names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("price_slope", "price_r2", "trend_strength")]
         return frame.select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: the windowed OLS at T via aggregate-at-T (windowed_ols_latest). price_slope =
+        slope / mean_close, trend_strength = price_slope * r2 — same as compute(), parity-guarded."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
+        frame = centered_minutes(frame, "_t")
+        latest = frame["minute"].max()
+        long = windowed_ols_latest(frame, "_t", "close", WINDOWS).with_columns(
+            (pl.col("slope") / pl.col("mean_y")).alias("_pslope")
+        )
+        slope = pivot_stat(long, "_pslope", "price_slope_{w}m", WINDOWS)
+        r2 = pivot_stat(long, "r2", "price_r2_{w}m", WINDOWS)
+        out = frame.filter(pl.col("minute") == latest).select("symbol").join(slope, on="symbol", how="left").join(r2, on="symbol", how="left")
+        out = out.with_columns(
+            [(pl.col(f"price_slope_{w}m") * pl.col(f"price_r2_{w}m")).cast(pl.Float64).alias(f"trend_strength_{w}m") for w in WINDOWS]
+        ).with_columns(pl.lit(latest).alias("minute"))
+        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("price_slope", "price_r2", "trend_strength")]
+        return out.select(["symbol", "minute", *names])
