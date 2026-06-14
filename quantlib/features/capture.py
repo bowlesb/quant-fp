@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from datetime import datetime
 
 import polars as pl
@@ -46,6 +47,7 @@ class CaptureState:
         self.buffer: list[dict] = []
         self.accumulated: dict[str, pl.DataFrame] = {}  # one DEDUPED frame per group
         self.minutes = 0
+        self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
 
 
 def process_bars(
@@ -88,7 +90,9 @@ def process_bars(
     for group in runnable(frames):
         if group.name in exclude_groups or (only_groups is not None and group.name not in only_groups):
             continue
+        group_start = time.perf_counter()
         out = run_group(group, ctx, validate=False).filter(pl.col("minute") == latest)
+        state.group_timings[group.name] = (time.perf_counter() - group_start) * 1000.0
         prior = state.accumulated.get(group.name)
         combined = out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
         state.accumulated[group.name] = combined
