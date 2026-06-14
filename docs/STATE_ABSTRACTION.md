@@ -66,11 +66,13 @@ identical across groups because it's engine-owned, not re-implemented per group.
 
 ## Honest status & roadmap
 
-- **Done & proven:** additive-window kind (`WindowedSumState`, parity-exact, 0.49ms fold). V2 (in
-  flight) makes its `emit()` read running sums directly — the reference implementation of this interface.
-- **Not yet generalized:** the interface above is not extracted; cumulative / extrema / lag / recursive
-  / tick-ring are still bespoke or on the slow path. Each needs its `fold`/`emit` + the
-  `fold==reseed` parity test.
+- **Done & proven:** additive-window kind (`WindowedSumState`, parity-exact, 0.49ms fold; V2 emits from
+  the running sums directly — the reference implementation of this interface); recursive-EMA + lag/last-k
+  kinds (`EMAState` / `LastKState` in `stateful.py`, used by technical/candlestick + price_returns); and the
+  ROLLING-EXTREMA kind (`ExtremaState`, a per-(symbol,window) monotonic deque, used by price_levels) — each
+  with its `fold==reseed` parity test in tests/test_fp_stateful.py + tests/test_fp_rest_kinds.py.
+- **Not yet generalized:** cumulative (OBV beyond the OLS-regressor case) and the tick-ring (Layer C) kinds
+  are still bespoke or on the slow path. Each needs its `fold`/`emit` + the `fold==reseed` parity test.
 - **Sequencing:** land V2 (additive emit-from-state) first — it crystallizes the interface against a
   working kind. THEN extract `FeatureState` from it and migrate the next-highest-value kind
   (cumulative, then extrema — the price-levels 240m hot path). Each migration is gated on its

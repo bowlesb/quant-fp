@@ -22,6 +22,7 @@ OBTAINED, never in how outputs are DERIVED. Guarded per group by tests/test_fp_s
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -57,6 +58,82 @@ class LagSpec:
     alias: str
     source: str
     minutes: int
+
+
+@dataclass(frozen=True)
+class ExtremaSpec:
+    """One rolling extremum the group needs: ``alias`` = ``max``/``min`` of ``source`` over the trailing
+    ``window`` minutes (window ``w`` covers minutes with epoch in ``(T − w·60, T]`` — a minute at exactly
+    ``T − w`` is excluded, matching ``rolling_max_by``/``rolling_min_by`` and the Rust ``windowed_reduce``).
+    ``op`` is ``"max"`` or ``"min"``."""
+
+    alias: str
+    source: str
+    window: int
+    op: str  # "max" | "min"
+
+
+class ExtremaState:
+    """Rolling-extrema KIND (docs/STATE_ABSTRACTION.md): a per-(symbol, spec) MONOTONIC DEQUE of recent
+    ``(minute_epoch, value)`` so the trailing max/min is read in O(1) amortized. For a ``max`` deque the
+    values are kept monotonically DECREASING front→back; folding a minute pops every back entry the new
+    value dominates (``v >= back.value``), then appends ``(epoch, v)``, then evicts the front while it has
+    left the window (``front.epoch <= T − w·60``). The current extremum is the FRONT value. ``min`` is the
+    mirror (monotonically increasing, pop on ``v <= back.value``). Nulls (NaN) are not pushed, so the
+    extremum is over PRESENT bars only — exactly what ``rolling_max_by``/``rolling_min_by`` compute (they
+    ignore nulls). An empty deque (warmup / all-null window) reads NaN.
+
+    PARITY (the kind invariant, tests/test_fp_rest_kinds.py): ``seed(H); fold(m)`` == ``seed(H + m)``,
+    cell-for-cell, and both == the Rust ``windowed_reduce`` min/max == polars ``rolling_*_by`` over the
+    present series."""
+
+    def __init__(self, symbols: list[str], specs: list[ExtremaSpec]) -> None:
+        self.symbols = list(symbols)
+        self.n = len(self.symbols)
+        self.specs = list(specs)
+        # one deque per (spec, symbol): deque[(epoch, value)], monotonic per the spec's op
+        self.deques: list[list[deque[tuple[int, float]]]] = [
+            [deque() for _ in range(self.n)] for _ in self.specs
+        ]
+        self._latest_epoch: int | None = None
+
+    def fold(self, minute_epoch: int, sources: dict[str, np.ndarray]) -> None:
+        """Advance every extremum one minute: push the new value (dominating back entries popped), then
+        evict entries that left each window. ``sources`` maps a spec's ``source`` to its ``(n_symbols,)``
+        value column at this minute (NaN where the bar is absent — not pushed)."""
+        epoch = int(minute_epoch)
+        self._latest_epoch = epoch
+        # Convert each source column to a Python list once (per-element numpy indexing dominates otherwise).
+        source_lists = {source: sources[source].tolist() for source in {spec.source for spec in self.specs}}
+        for si, spec in enumerate(self.specs):
+            values = source_lists[spec.source]
+            cutoff = epoch - spec.window * 60
+            is_max = spec.op == "max"
+            deques = self.deques[si]
+            for sym_i, value in enumerate(values):
+                dq = deques[sym_i]
+                if value == value:  # not NaN
+                    if is_max:
+                        while dq and dq[-1][1] <= value:
+                            dq.pop()
+                    else:
+                        while dq and dq[-1][1] >= value:
+                            dq.pop()
+                    dq.append((epoch, value))
+                if dq and dq[0][0] <= cutoff:
+                    while dq and dq[0][0] <= cutoff:
+                        dq.popleft()
+
+    def extremum(self, alias: str) -> np.ndarray:
+        """The trailing extremum for ``alias`` at the latest folded minute (NaN where the window is empty)."""
+        si = next(i for i, spec in enumerate(self.specs) if spec.alias == alias)
+        deques = self.deques[si]
+        out = np.full(self.n, np.nan, dtype=np.float64)
+        for sym_i in range(self.n):
+            dq = deques[sym_i]
+            if dq:
+                out[sym_i] = dq[0][1]
+        return out
 
 
 class EMAState:
@@ -146,12 +223,12 @@ class LastKState:
 
 class StatefulGroup(FeatureGroup):
     """Base for a per-symbol stateful (non-reduction) feature group. The group declares its state needs as
-    KINDS — recursive EMAs (``ema_specs``) and/or time-based lags (``lag_specs``) over a prepared per-minute
-    frame (``prepare``) — and writes ``assemble`` ONCE over a per-symbol STATE FRAME that carries, for the
-    latest minute: the prepared at-T columns, each EMA's value (its ``alias``), and each lag's value (its
-    ``alias``). ``compute`` (backfill, source of truth) and ``compute_latest`` (live) are GENERATED and build
-    that identical state frame two ways (rolling vs fold), so they cannot diverge — the parity the abstraction
-    exists to guarantee.
+    KINDS — recursive EMAs (``ema_specs``), time-based lags (``lag_specs``), and/or rolling extrema
+    (``extrema_specs``) over a prepared per-minute frame (``prepare``) — and writes ``assemble`` ONCE over a
+    per-symbol STATE FRAME that carries, for the latest minute: the prepared at-T columns, each EMA's value
+    (its ``alias``), each lag's value (its ``alias``), and each extremum's value (its ``alias``). ``compute``
+    (backfill, source of truth) and ``compute_latest`` (live) are GENERATED and build that identical state
+    frame two ways (rolling vs fold), so they cannot diverge — the parity the abstraction exists to guarantee.
 
     A group that ALSO needs windowed reductions (e.g. technical's RSI/Bollinger) overrides ``compute_latest``
     to join the reduction columns onto the state frame before ``assemble`` — those stay on the existing Rust
@@ -168,6 +245,10 @@ class StatefulGroup(FeatureGroup):
 
     def lag_specs(self) -> list[LagSpec]:
         """The time-based lags this group maintains. Default none."""
+        return []
+
+    def extrema_specs(self) -> list[ExtremaSpec]:
+        """The rolling max/min extrema this group maintains. Default none."""
         return []
 
     @abstractmethod
@@ -203,6 +284,18 @@ class StatefulGroup(FeatureGroup):
                 pl.col(spec.source).alias(spec.alias),
             )
             frame = frame.join(lag, on=["symbol", "minute"], how="left")
+        extrema_cols: list[pl.Expr] = []
+        for spec in self.extrema_specs():
+            base = pl.col(spec.source)
+            size = f"{spec.window}m"
+            rolling = (
+                base.rolling_max_by("minute", window_size=size)
+                if spec.op == "max"
+                else base.rolling_min_by("minute", window_size=size)
+            )
+            extrema_cols.append(rolling.over("symbol").alias(spec.alias))
+        if extrema_cols:
+            frame = frame.with_columns(extrema_cols)
         return frame, frame["minute"].max()
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
@@ -238,12 +331,15 @@ class StatefulEngine:
         self.group = group
         self.ema_specs = group.ema_specs()
         self.lag_specs = group.lag_specs()
+        self.extrema_specs = group.extrema_specs()
         # The plain EMA sources to read from the prepared row each minute (chained EMAs build from emitted EMAs).
         self.ema_root_sources = sorted({spec.source for spec in self.ema_specs if spec.source is not None})
         self.lag_sources = sorted({spec.source for spec in self.lag_specs})
+        self.extrema_sources = sorted({spec.source for spec in self.extrema_specs})
         self.symbols: list[str] | None = None
         self.ema_state: EMAState | None = None
         self.lag_state: LastKState | None = None
+        self.extrema_state: ExtremaState | None = None
 
     def _prepared_latest(self, frame: pl.DataFrame, minute: object) -> pl.DataFrame:
         """The group's prepared at-T columns for ``minute``, one row per symbol, symbol-sorted."""
@@ -251,8 +347,8 @@ class StatefulEngine:
         return prepared.filter(pl.col("minute") == minute).sort("symbol")
 
     def _source_columns(self, row: pl.DataFrame) -> dict[str, np.ndarray]:
-        """Symbol-aligned (n_symbols,) numpy columns for every EMA root source + lag source, NaN where null."""
-        needed = sorted(set(self.ema_root_sources) | set(self.lag_sources))
+        """Symbol-aligned (n_symbols,) numpy columns for every EMA root / lag / extrema source, NaN where null."""
+        needed = sorted(set(self.ema_root_sources) | set(self.lag_sources) | set(self.extrema_sources))
         out: dict[str, np.ndarray] = {}
         for source in needed:
             out[source] = row.select(pl.col(source).cast(pl.Float64)).to_numpy().reshape(-1)
@@ -266,6 +362,8 @@ class StatefulEngine:
             self.ema_state.fold(sources)
         if self.lag_state is not None:
             self.lag_state.fold(int(minute.timestamp()), sources)  # type: ignore[attr-defined]
+        if self.extrema_state is not None:
+            self.extrema_state.fold(int(minute.timestamp()), sources)  # type: ignore[attr-defined]
 
     def seed(self, buffer_frame: pl.DataFrame) -> None:
         """Establish the symbol set and fold every buffered minute into fresh state (== batch over the buffer;
@@ -273,6 +371,7 @@ class StatefulEngine:
         self.symbols = sorted(buffer_frame["symbol"].unique().to_list())
         self.ema_state = EMAState(self.symbols, self.ema_specs) if self.ema_specs else None
         self.lag_state = LastKState(self.symbols, self.lag_specs) if self.lag_specs else None
+        self.extrema_state = ExtremaState(self.symbols, self.extrema_specs) if self.extrema_specs else None
         for minute in sorted(buffer_frame["minute"].unique()):
             self._fold_minute(buffer_frame, minute)
 
@@ -287,6 +386,9 @@ class StatefulEngine:
         if self.lag_state is not None:
             for spec in self.lag_specs:
                 columns.append(pl.Series(spec.alias, self.lag_state.lag(spec.alias), dtype=pl.Float64))
+        if self.extrema_state is not None:
+            for spec in self.extrema_specs:
+                columns.append(pl.Series(spec.alias, self.extrema_state.extremum(spec.alias), dtype=pl.Float64))
         return row.with_columns(columns)
 
     def step(self, frame: pl.DataFrame, ctx: BatchContext | None = None) -> pl.DataFrame:

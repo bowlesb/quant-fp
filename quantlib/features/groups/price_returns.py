@@ -1,29 +1,31 @@
 """Price returns over many trailing minute windows (family: PRICE).
 
-Simple and log close-to-close returns, point-in-time, all sessions. Time-based lags (the lagged()
-helper) so they are correct on gappy minute grids.
+Simple and log close-to-close returns, point-in-time, all sessions. A return at T is a POINT lag — the
+close as of minute T − w — not a window reduction. So the group rides the LAG / last-k state KIND
+(docs/STATE_ABSTRACTION.md): a per-symbol ring of recent closes keyed by minute-epoch, with one
+``LagSpec`` per window (``_lag{w}`` = close as of T − w, null when that exact minute is absent —
+identical to ``base.lagged``, correct on gappy grids). The live fast path folds one minute into the ring
+and reads each lag in O(1); the backfill reaches the SAME lag columns with a TIME-based self-join. Both
+evaluate the SAME ``assemble`` (the ratio/log of close over each lag), so live and backfill are
+cell-for-cell identical — parity by construction, guarded by tests/test_fp_rest_kinds.py.
 """
 from __future__ import annotations
-
-import datetime as dt
 
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
 from quantlib.features.registry import register
+from quantlib.features.stateful import LagSpec, StatefulGroup
 
 WINDOWS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 40, 45, 60, 90, 120, 180)
 
 
 @register
-class PriceReturnGroup(FeatureGroup):
+class PriceReturnGroup(StatefulGroup):
     name = "price_returns"
     version = "1.0.0"
     owner = "modeller"
@@ -53,34 +55,17 @@ class PriceReturnGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        for w in WINDOWS:
-            frame = lagged(frame, "close", w, f"_lag{w}")
-        exprs = []
+    def prepare(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """At-T columns the state frame carries: close (the ring's lag source + the ratio numerator)."""
+        return frame
+
+    def lag_specs(self) -> list[LagSpec]:
+        return [LagSpec(alias=f"_lag{w}", source="close", minutes=w) for w in WINDOWS]
+
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
             ratio = pl.col("close") / pl.col(f"_lag{w}")
-            exprs.append((ratio - 1.0).cast(pl.Float64).alias(f"ret_{w}m"))
-            exprs.append(ratio.log().cast(pl.Float64).alias(f"log_ret_{w}m"))
-        names = [f"ret_{w}m" for w in WINDOWS] + [f"log_ret_{w}m" for w in WINDOWS]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: a return at T is a POINT lookup (close_T / close_{T-w}), not a window
-        reduction — so just join the close from each lag minute, no rolling over the buffer. Same
-        formula as compute(), parity-guarded."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        latest = frame["minute"].max()
-        out = frame.filter(pl.col("minute") == latest).select(["symbol", pl.col("close").alias("_cT")])
-        for w in WINDOWS:
-            lag = frame.filter(pl.col("minute") == latest - dt.timedelta(minutes=w)).select(
-                ["symbol", pl.col("close").alias(f"_c{w}")]
-            )
-            out = out.join(lag, on="symbol", how="left")
-        exprs = []
-        for w in WINDOWS:
-            ratio = pl.col("_cT") / pl.col(f"_c{w}")
-            exprs.append((ratio - 1.0).cast(pl.Float64).alias(f"ret_{w}m"))
-            exprs.append(ratio.log().cast(pl.Float64).alias(f"log_ret_{w}m"))
-        names = [f"ret_{w}m" for w in WINDOWS] + [f"log_ret_{w}m" for w in WINDOWS]
-        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
+            feats[f"ret_{w}m"] = ratio - 1.0
+            feats[f"log_ret_{w}m"] = ratio.log()
+        return feats

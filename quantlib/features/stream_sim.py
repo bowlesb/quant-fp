@@ -28,18 +28,28 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     16 shards (~625/shard): tick-agg p50 16ms + fold p50 10ms + reduction-emit p50 35ms  =>  p99 = 82ms
     (< 100ms ✅). At 8 shards it is 118ms — more, smaller shards win for the light fast path (the opposite
     of the batch path, where fatter shards won). So the incremental fast path itself clears the 100ms bar.
-  * FULL flow (519 features) is ~777ms p99 (was ~910ms before technical+candlestick moved off batch): the
-    remaining 211 NON-reduction features (13 groups) still run the batch ``compute_latest`` and dominate
-    (non-reduction "rest"). technical+candlestick (26 features) fold on the per-symbol StatefulEngine
-    (recursive EMA + lag-ring kinds) — a separate ``stateful emit`` line. The CROSS-SECTIONAL market groups
-    are now off the batch path too: ``market_beta`` (21 features) decomposes into market-relative windowed
-    reductions (the broadcast-regressor OLS: beta=slope, corr, idio_vol=std·sqrt(1-r2)) and rides the
-    incremental fast path as a ReductionGroup, while ``market_context`` (36 features) is a per-minute UNIVERSE
-    GATHER (index broadcasts + own-return point lags, O(universe) once) timed as its own ``cross-sectional
-    gather`` line. That leaves ~154 NON-reduction features (11 groups: liquidity / price_returns /
-    price_levels / distribution / efficiency / multi_day / ...) on the batch ``compute_latest`` — now the
-    dominant "rest". (Budget is 60000ms/minute, so the full flow is operationally safe for Monday — the 100ms
-    bar is the aspirational fast-path target.)
+  * FULL flow (519 features) is now ~434–448ms p99 (was ~523ms): three more portable groups have moved off
+    the batch ``compute_latest`` onto the fast path. ``liquidity`` (15 features) decomposes into
+    ADDITIVE-WINDOW reductions (amihud mean,
+    roll's autocovariance from four paired sums) + a windowed OLS (Kyle's lambda) and rides the incremental
+    fast path as a ReductionGroup — so the ReductionGroup tier is now 305 features. ``price_returns`` (40
+    features, the LAG / last-k kind: one LagSpec per window) and ``price_levels`` (21 features, the new
+    ROLLING-EXTREMA kind: a per-(symbol, window) monotonic deque for trailing max-high / min-low) fold on the
+    per-symbol StatefulEngine, joining technical+candlestick — so the stateful tier is now 87 features. That
+    leaves 82 NON-reduction features in 9 groups (asset_flags / calendar / calendar_events /
+    microstructure_burst / multi_day_returns / multi_day_vwap / prior_day / round_levels / sector) on the
+    batch ``compute_latest`` — the residual "rest" (down from ~154 in 11 groups). market_beta rides the
+    incremental fast path as a ReductionGroup; market_context is the per-minute UNIVERSE GATHER (its own
+    ``cross-sectional gather`` line). (Budget is 60000ms/minute, so the full flow is operationally safe for
+    Monday — the 100ms bar is the aspirational fast-path target.)
+  * The DOMINANT phase is now the STATEFUL EMIT (~250ms p99), not the residual rest (~130ms): the per-symbol
+    Python fold of the 87 stateful features (price_levels' 14 extrema deques + price_returns' 20 lags per
+    symbol × ~625 symbols) is Python-loop-bound. The FAST-PATH floor is the EMIT itself — fast-path-only is
+    p99 ~114ms with reduction-emit ~67ms of it (vs tick-agg ~42 + fold ~23): the running sums are folded
+    cheaply, but assembling 305 reduction features (numpy canonical/OLS + polars wide-frame build) is the
+    floor. So the next levers are (a) a Rust extrema-fold / lag-gather kernel to take the stateful tier off
+    the Python loop, and (b) a Rust ASSEMBLE to take the reduction emit under ~100ms — emit, not compute,
+    is what keeps us over the bar.
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
@@ -79,8 +89,11 @@ from quantlib.features.tick_capture import enrich_bars_with_ticks
 
 # The non-reduction groups that still consume the raw per-minute trades tape (tick_runlength's Rust kernel).
 TRADES_GROUPS: tuple[str, ...] = ("tick_runlength",)
-# Per-symbol stateful groups now on the incremental fold path (StatefulEngine) instead of batch compute_latest.
-STATEFUL_GROUPS: tuple[str, ...] = ("technical", "candlestick")
+# Per-symbol stateful groups now on the incremental fold path (StatefulEngine) instead of batch compute_latest:
+# technical/candlestick (recursive EMA + lag-ring kinds), price_returns (lag/last-k kind), price_levels
+# (rolling-extrema kind). liquidity is NOT here — it decomposes into additive-window reductions + an OLS
+# (Kyle's lambda) and rides the incremental fast path as a ReductionGroup.
+STATEFUL_GROUPS: tuple[str, ...] = ("technical", "candlestick", "price_returns", "price_levels")
 # CROSS-SECTIONAL gather groups: a per-minute UNIVERSE GATHER (index broadcasts + own-return point lags),
 # O(universe) once per minute — timed as its own phase, not the per-symbol "rest". market_beta is NOT here:
 # it decomposes into market-relative windowed reductions (the broadcast-regressor OLS) and rides the
@@ -467,12 +480,12 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     print("  decomposition:")
     print(line("tick-agg", tick_agg))
     print(line("fold (incr update)", fold))
-    print(line("reduction emit (290)", reduction_emit))
-    print(line("stateful emit (tech+candle)", stateful_emit))
+    print(line("reduction emit (305)", reduction_emit))
+    print(line("stateful emit (87 feats)", stateful_emit))
     print(line("cross-sectional gather", gather_emit))
-    print(line("non-reduction (rest)", other_emit))
+    print(line("non-reduction (rest, 82)", other_emit))
     print(line("[full emit]", emit))
-    print("INCREMENTAL FAST PATH only (tick-agg + fold + reduction emit) — the 269 reduction features:")
+    print("INCREMENTAL FAST PATH only (tick-agg + fold + reduction emit) — the 305 reduction features:")
     print(line("fast-path total", fast_path))
     print("write (deferred, AFTER the bet — NOT on the critical path):")
     print(line("write", writes))
