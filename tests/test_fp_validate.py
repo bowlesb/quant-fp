@@ -113,6 +113,33 @@ def test_recompute_trust_divergent_when_last_day_below_floor() -> None:
     assert trust["status"] == "divergent"  # a single broken day flips it loudly
 
 
+def _trust_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["good", "low_value", "low_cover", "still_validating", "diverged"],
+            "value_grade": ["A", "F", "A", "A", "A"],
+            "coverage_grade": ["A", "A", "F", "A", "A"],
+            "status": ["certified", "certified", "certified", "validating", "divergent"],
+        }
+    )
+
+
+def test_certified_features_gates_on_grade_and_status(tmp_path) -> None:
+    validation_store.write_trust(tmp_path, _trust_frame())
+    certified = validation_store.certified_features(tmp_path, min_value_grade="B", min_coverage_grade="B")
+    assert certified == {"good"}  # the others fail on value, coverage, status(validating), or status(divergent)
+
+
+def test_untrusted_among_flags_what_training_must_refuse(tmp_path) -> None:
+    validation_store.write_trust(tmp_path, _trust_frame())
+    requested = ["good", "diverged", "never_seen"]
+    assert validation_store.untrusted_among(requested, tmp_path) == {"diverged", "never_seen"}
+
+
+def test_certified_features_empty_when_unvalidated(tmp_path) -> None:
+    assert validation_store.certified_features(tmp_path) == set()  # nothing certified until validated
+
+
 def test_upsert_feature_day_is_idempotent(tmp_path) -> None:
     rows = pl.DataFrame([_feature_day("2026-06-10", 1000, 1000)]).select(FEATURE_DAY_COLS)
     validation_store.upsert_feature_day(tmp_path, rows)

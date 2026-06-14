@@ -91,3 +91,36 @@ def write_trust(root: str | Path, frame: pl.DataFrame) -> Path:
 def read_trust(root: str | Path) -> pl.DataFrame:
     path = Path(root) / FEATURE_TRUST / "data.parquet"
     return pl.read_parquet(path) if path.exists() else pl.DataFrame()
+
+
+# Grade ordering for the training gate: A is best, U (unvalidated) is worst.
+_GRADE_RANK: dict[str, int] = {"A": 4, "B": 3, "C": 2, "F": 1, "U": 0}
+
+
+def certified_features(
+    root: str | Path,
+    min_value_grade: str = "B",
+    min_coverage_grade: str = "B",
+    allowed_status: tuple[str, ...] = ("certified",),
+) -> set[str]:
+    """The set of feature names whose real-time collection is PROVEN to reproduce backfill well enough
+    to train on — status in ``allowed_status`` AND both grades at/above the floors. This is the gate a
+    training export intersects with so a model never trains on a feature production can't reproduce.
+    An empty/missing trust table yields the empty set (nothing is certified until validated)."""
+    trust = read_trust(root)
+    if trust.height == 0:
+        return set()
+    value_floor, coverage_floor = _GRADE_RANK[min_value_grade], _GRADE_RANK[min_coverage_grade]
+    rank = pl.col("value_grade").replace_strict(_GRADE_RANK, default=0)
+    coverage_rank = pl.col("coverage_grade").replace_strict(_GRADE_RANK, default=0)
+    keep = trust.filter(
+        pl.col("status").is_in(allowed_status) & (rank >= value_floor) & (coverage_rank >= coverage_floor)
+    )
+    return set(keep["feature"].to_list())
+
+
+def untrusted_among(
+    requested: list[str], root: str | Path, min_value_grade: str = "B", min_coverage_grade: str = "B"
+) -> set[str]:
+    """Of ``requested`` features, those NOT certified — what a training gate must refuse (or drop)."""
+    return set(requested) - certified_features(root, min_value_grade, min_coverage_grade)
