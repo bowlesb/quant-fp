@@ -47,6 +47,65 @@ def pt_(name: str) -> pl.Expr:
     return pl.col(f"__pt_{name}")
 
 
+# OLS (regression) accessors — used inside assemble() to reference a regression's canonical stat columns.
+OLS_STATS = ("slope", "corr", "r2", "mean_y")
+
+
+def slope_(name: str, w: int) -> pl.Expr:
+    return pl.col(f"__slope_{name}_{w}")
+
+
+def corr_(name: str, w: int) -> pl.Expr:
+    return pl.col(f"__corr_{name}_{w}")
+
+
+def r2_(name: str, w: int) -> pl.Expr:
+    return pl.col(f"__r2_{name}_{w}")
+
+
+def mean_y_(name: str, w: int) -> pl.Expr:
+    return pl.col(f"__mean_y_{name}_{w}")
+
+
+def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[str, pl.Expr]:
+    """OLS slope/corr/r2/mean_y of y-on-x from the six paired windowed sums (b=paired count, x, y, xy, xx,
+    yy). Identical algebra to ols.py — pairing handled by the caller (partner-null rows zeroed, excluded
+    from b). Undefined cells (n<2 or zero x-variance) are null."""
+    b, sx, sy, sxy, sxx, syy = (sums[key] for key in ("b", "x", "y", "xy", "xx", "yy"))
+    denom_x = b * sxx - sx * sx
+    denom_y = b * syy - sy * sy
+    cov_n = b * sxy - sx * sy
+    defined = (b >= 2.0) & (denom_x > 0.0)
+    defined_corr = defined & (denom_y > 0.0)
+    out: dict[str, pl.Expr] = {}
+    if "slope" in stats:
+        out["slope"] = pl.when(defined).then(cov_n / denom_x).otherwise(None)
+    if "corr" in stats:
+        out["corr"] = pl.when(defined_corr).then(cov_n / (denom_x * denom_y).sqrt()).otherwise(None)
+    if "r2" in stats:
+        out["r2"] = pl.when(defined_corr).then((cov_n * cov_n) / (denom_x * denom_y)).otherwise(None)
+    if "mean_y" in stats:
+        out["mean_y"] = pl.when(b > 0).then(sy / b).otherwise(None)
+    return out
+
+
+def _ols_derived(name: str, x_expr: pl.Expr, y_expr: pl.Expr) -> list[pl.Expr]:
+    """The six paired columns the engine sums for one regression: only rows where BOTH x and y are present
+    contribute (partner-null zeroed and dropped from the count), so a warmup/missing value never biases the
+    fit. Column names ``__rd_<name>_{b,x,y,xy,xx,yy}``."""
+    both = x_expr.is_not_null() & y_expr.is_not_null()
+    x_paired = pl.when(both).then(x_expr).otherwise(0.0)
+    y_paired = pl.when(both).then(y_expr).otherwise(0.0)
+    return [
+        both.cast(pl.Float64).alias(f"__rd_{name}_b"),
+        x_paired.alias(f"__rd_{name}_x"),
+        y_paired.alias(f"__rd_{name}_y"),
+        (x_paired * y_paired).alias(f"__rd_{name}_xy"),
+        (x_paired * x_paired).alias(f"__rd_{name}_xx"),
+        (y_paired * y_paired).alias(f"__rd_{name}_yy"),
+    ]
+
+
 class ReductionGroup(FeatureGroup):
     """Base for a windowed-reduction feature group. Set ``reduce_input`` and implement ``reduced()`` /
     ``points()`` / ``assemble()``; ``compute()`` and ``compute_latest()`` are generated."""
@@ -60,6 +119,12 @@ class ReductionGroup(FeatureGroup):
 
     def points(self) -> dict[str, pl.Expr]:
         """{name: expr_over_input} — at-T scalar columns referenced via pt_() in assemble(). Default none."""
+        return {}
+
+    def regressions(self) -> dict[str, tuple[pl.Expr, pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        """{name: (x_expr, y_expr, stats, windows)} — windowed OLS of y on x; stats ⊆ slope/corr/r2/mean_y,
+        referenced via slope_/corr_/r2_/mean_y_ in assemble(). Default none. (For a TIME regressor, pass a
+        small frame-relative x like ``(minute.epoch - minute.epoch.min())`` — OLS is origin-invariant.)"""
         return {}
 
     @abstractmethod
@@ -78,8 +143,12 @@ class ReductionGroup(FeatureGroup):
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         """Generated BACKFILL form: rolling_*_by over every minute (source of truth)."""
         frame = ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
-        reduced = self.reduced()
+        reduced, regressions = self.reduced(), self.regressions()
         frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
+        if regressions:
+            frame = frame.with_columns(
+                [col for name, (x, y, _, _) in regressions.items() for col in _ols_derived(name, x, y)]
+            )
         mats: list[pl.Expr] = []
         for name, (_, stats, windows) in reduced.items():
             source = pl.col(f"__d_{name}")
@@ -91,6 +160,15 @@ class ReductionGroup(FeatureGroup):
                     mats.append(source.rolling_std_by("minute", window_size=size).over("symbol").alias(f"__std_{name}_{w}"))
                 if "sum" in stats:
                     mats.append(source.rolling_sum_by("minute", window_size=size).over("symbol").alias(f"__sum_{name}_{w}"))
+        for name, (_, _, stats, windows) in regressions.items():
+            for w in windows:
+                size = f"{w}m"
+                sums = {
+                    key: pl.col(f"__rd_{name}_{key}").rolling_sum_by("minute", window_size=size).over("symbol")
+                    for key in ("b", "x", "y", "xy", "xx", "yy")
+                }
+                for stat, expr in _ols_stat_exprs(sums, stats).items():
+                    mats.append(expr.alias(f"__{stat}_{name}_{w}"))
         frame = frame.with_columns([expr.alias(f"__pt_{name}") for name, expr in self.points().items()])
         frame = frame.with_columns(mats)
         feats = self.assemble()
@@ -101,8 +179,12 @@ class ReductionGroup(FeatureGroup):
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
         """Generated LIVE form: aggregate-at-T via the Rust reduction kernel, one row per symbol."""
         frame = ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
-        reduced = self.reduced()
+        reduced, regressions = self.reduced(), self.regressions()
         frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
+        if regressions:
+            frame = frame.with_columns(
+                [col for name, (x, y, _, _) in regressions.items() for col in _ols_derived(name, x, y)]
+            )
         latest = frame["minute"].max()
         wide = frame.filter(pl.col("minute") == latest).select(
             ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in self.points().items()]]
@@ -111,6 +193,15 @@ class ReductionGroup(FeatureGroup):
             long = rust_reductions(frame, f"__d_{name}", windows)
             for stat in stats:
                 wide = wide.join(pivot_stat(long, stat, f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left")
+        for name, (_, _, stats, windows) in regressions.items():
+            value_cols = [f"__rd_{name}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
+            long = rust_windowed_sums(frame, value_cols, windows)
+            sums = {key: pl.col(f"__rd_{name}_{key}") for key in ("b", "x", "y", "xy", "xx", "yy")}
+            glong = long.with_columns([expr.alias(f"__c_{stat}_{name}") for stat, expr in _ols_stat_exprs(sums, stats).items()])
+            for stat in stats:
+                wide = wide.join(
+                    pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
+                )
         feats = self.assemble()
         return (
             wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
@@ -164,12 +255,18 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
 
     derived: list[pl.Expr] = []
     plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]] = []
+    reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]] = []  # (gi, name, stats, windows, ns)
     all_windows: set[int] = set()
     for gi, group in enumerate(groups):
         for name, (expr, stats, windows) in group.reduced().items():
             base = f"__b{gi}_{name}"
             derived.append(expr.alias(base))
             plan.append((gi, name, stats, tuple(windows), base))
+            all_windows |= set(windows)
+        for name, (x_expr, y_expr, stats, windows) in group.regressions().items():
+            ns = f"{gi}_{name}"  # namespace the regression's six paired columns per group
+            derived += _ols_derived(ns, x_expr, y_expr)
+            reg_plan.append((gi, name, stats, tuple(windows), ns))
             all_windows |= set(windows)
     frame = frame.with_columns(derived)
 
@@ -184,6 +281,8 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
             extra.append((pl.col(base) * pl.col(base)).alias(f"{base}__sq"))
             value_cols.append(f"{base}__sq")
     frame = frame.with_columns(extra)
+    for _, _, _, _, ns in reg_plan:  # the six paired sums per regression are plain value columns
+        value_cols += [f"__rd_{ns}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
     long = rust_windowed_sums(frame, value_cols, tuple(sorted(all_windows)))
 
     results: dict[str, pl.DataFrame] = {}
@@ -192,11 +291,20 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
         for pgi, name, stats, _, base in plan:
             if pgi == gi:
                 canon += _canonical(name, stats, base)
+        for pgi, name, stats, _, ns in reg_plan:
+            if pgi == gi:
+                sums = {key: pl.col(f"__rd_{ns}_{key}") for key in ("b", "x", "y", "xy", "xx", "yy")}
+                canon += [expr.alias(f"__c_{stat}_{name}") for stat, expr in _ols_stat_exprs(sums, stats).items()]
         glong = long.select(["symbol", "window", *canon])
         wide = frame.filter(pl.col("minute") == latest).select(
             ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
         )
         for name, (_, stats, windows) in group.reduced().items():
+            for stat in stats:
+                wide = wide.join(
+                    pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
+                )
+        for name, (_, _, stats, windows) in group.regressions().items():
             for stat in stats:
                 wide = wide.join(
                     pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
