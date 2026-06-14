@@ -130,3 +130,24 @@ dominates the step — NOT the pivot. **Driving assemble to 0 still leaves ~58ms
   NECESSARY lever. Sequence to <50ms: land the Rust slice kernel first (cuts the fold), THEN numpy-emit
   removes the pivot to clear 50ms comfortably. Both parity-gated; V2 + emit stay isolated until the
   combined path proves <50ms at the certified 10k measurement.
+
+**2026-06-14 — Rust slice-derive kernel (branch `feature/incremental-rust` @ `0986601`). CLEARS <50ms.**
+PARITY-TRUE: the kernel output == polars `_derived_row` cell-for-cell (tol=0 on finite cells, null==null),
+proven across warmup (lag-1/2/3 null) AND a deliberately-introduced missing-prior-bar hole; no tolerances
+loosened. Root-caused: the entire ~53ms was a `close.shift(k).over("symbol")` re-partitioning the
+1250-symbol slice — the ONLY grouped op in the derive (verified by serializing every expr). The kernel
+does one ordered pass emitting lag-1..k per symbol; a `lag_specs` guard raises loudly if a future group
+adds a different `over("symbol")` op (can't silently break parity).
+| stage | before | after |
+|---|---|---|
+| slice-derive | 53.9ms | **2.5ms (~20×)** |
+| full step (Rust derive + numpy-emit) | 84.8ms | **~23ms** |
+
+10k/8-shard: per-shard step ~23ms, shards parallel → ~23ms wall-clock for 10k — clears <50ms with wide
+headroom, far inside the <100ms bar and the ≤300ms acceptance. The fold/emit (~20ms) is now the larger
+share; a Rust assemble is the next lever IF a sub-15ms step is ever wanted (not needed for the bar).
+
+**Convergence (in flight, branch `feature/streaming-sim`):** merge the fast path + the full-flow mock +
+the tick-aggregation consumer; wire the incremental engine + `tick_capture` into the capture loop; run
+the 10k sim on continuous trades+quotes+bars; measure p50/p99. The compute step is proven ~23ms; this
+measures it IN the real flow (tick-agg + fold + emit + ingestion) to certify the <100ms bar end-to-end.
