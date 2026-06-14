@@ -25,7 +25,7 @@ from abc import abstractmethod
 import polars as pl
 
 from quantlib.features.base import BatchContext, FeatureGroup
-from quantlib.features.latest import pivot_stat, rust_reductions
+from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_sums
 
 # Agg accessors — used inside assemble() to reference the canonical aggregate columns the engine builds.
 STATS = ("mean", "std", "sum")
@@ -117,3 +117,92 @@ class ReductionGroup(FeatureGroup):
             .with_columns(pl.lit(latest).alias("minute"))
             .select(["symbol", "minute", *self._feature_names()])
         )
+
+
+def _canonical(name: str, stats: tuple[str, ...], base: str) -> list[pl.Expr]:
+    """Per-window canonical stat columns for one reduced column, derived from its batched windowed sums in
+    the long frame: mean = sum/count, std(ddof=1) = sqrt((sumsq - sum^2/count)/(count-1)). ``base`` is the
+    sum-of-value column, ``base__p`` the sum-of-presence (non-null count), ``base__sq`` the sum-of-squares."""
+    out = []
+    if "sum" in stats:
+        out.append(pl.col(base).alias(f"__c_sum_{name}"))
+    if "mean" in stats:
+        out.append((pl.col(base) / pl.col(f"{base}__p")).alias(f"__c_mean_{name}"))
+    if "std" in stats:
+        count, total, sumsq = pl.col(f"{base}__p"), pl.col(base), pl.col(f"{base}__sq")
+        out.append(
+            pl.when(count > 1)
+            .then(((sumsq - total * total / count) / (count - 1)).sqrt())
+            .otherwise(None)
+            .alias(f"__c_std_{name}")
+        )
+    return out
+
+
+def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> dict[str, pl.DataFrame]:
+    """Compute MANY declarative reduction groups in ONE shared marshal + kernel pass.
+
+    Groups sharing a ``reduce_input`` have their derived columns concatenated into one frame; a SINGLE
+    ``rust_windowed_sums`` (over every derived column + its square + a presence flag, across the union of
+    all windows) replaces one kernel call per group — so the buffer is symbol-coded, sorted, and copied to
+    numpy ONCE instead of N times (that per-group marshaling is the live-path floor). Each group then
+    assembles from its own slice of the shared sums. Returns {group_name: feature_frame}; each is identical
+    within tolerance to that group's own ``compute_latest`` (the generic parity test still guards each)."""
+    groups = [g for g in groups if isinstance(g, ReductionGroup)]
+    if not groups:
+        return {}
+    reduce_input = groups[0].reduce_input
+    input_cols: list[str] = []
+    for group in groups:
+        for col in group._input_columns():
+            if col not in input_cols:
+                input_cols.append(col)
+    frame = ctx.frame(reduce_input).select(input_cols).sort(["symbol", "minute"])
+    latest = frame["minute"].max()
+
+    derived: list[pl.Expr] = []
+    plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]] = []
+    all_windows: set[int] = set()
+    for gi, group in enumerate(groups):
+        for name, (expr, stats, windows) in group.reduced().items():
+            base = f"__b{gi}_{name}"
+            derived.append(expr.alias(base))
+            plan.append((gi, name, stats, tuple(windows), base))
+            all_windows |= set(windows)
+    frame = frame.with_columns(derived)
+
+    extra: list[pl.Expr] = []
+    value_cols: list[str] = []
+    for _, _, stats, _, base in plan:
+        value_cols.append(base)
+        if "mean" in stats or "std" in stats:
+            extra.append(pl.col(base).is_not_null().cast(pl.Float64).alias(f"{base}__p"))
+            value_cols.append(f"{base}__p")
+        if "std" in stats:
+            extra.append((pl.col(base) * pl.col(base)).alias(f"{base}__sq"))
+            value_cols.append(f"{base}__sq")
+    frame = frame.with_columns(extra)
+    long = rust_windowed_sums(frame, value_cols, tuple(sorted(all_windows)))
+
+    results: dict[str, pl.DataFrame] = {}
+    for gi, group in enumerate(groups):
+        canon: list[pl.Expr] = []
+        for pgi, name, stats, _, base in plan:
+            if pgi == gi:
+                canon += _canonical(name, stats, base)
+        glong = long.select(["symbol", "window", *canon])
+        wide = frame.filter(pl.col("minute") == latest).select(
+            ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
+        )
+        for name, (_, stats, windows) in group.reduced().items():
+            for stat in stats:
+                wide = wide.join(
+                    pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
+                )
+        feats = group.assemble()
+        results[group.name] = (
+            wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
+            .with_columns(pl.lit(latest).alias("minute"))
+            .select(["symbol", "minute", *group._feature_names()])
+        )
+    return results
