@@ -87,8 +87,15 @@ that moment, fastest way possible." Concretely — a **stateful incremental accu
   tolerance; bound it with a **daily resync** (rebuild the accumulator from the buffer at session start,
   which also gives crash recovery). Backfill stays the polars rolling form (the truth); live becomes the
   accumulator; the test proves they agree.
-- This is a substantial, careful stateful build — do it deliberately, parity-gated at each step. It is THE
-  lever from 617ms → the target.
+- **STATUS: the accumulator is BUILT and PROVEN** (`quantlib/features/incremental.py`,
+  `tests/test_fp_incremental.py`): `WindowedSumState` matches `quant_tick.windowed_sums` cell-for-cell, and
+  measured **0.49ms/minute** at a shard's scale (1250×40 cols×10 windows) vs the 138ms recompute (~280×).
+  So the uncertain part (is incremental parity-safe AND fast?) is RESOLVED.
+- **REMAINING = integration** (engineering, de-risked): wire `WindowedSumState` into the live worker so the
+  minute mark only (a) derives the NEW minute's ~40 value columns (one minute, not 75k rows), (b) folds it
+  in (0.49ms), (c) assembles features from the running sums. Plus: seed/resync from the buffer at session
+  start (drift bound + crash recovery), handle gaps (the expire loop already does — it's time-based) and
+  symbols entering/leaving (index management), and keep the non-declarative groups. Backfill unchanged.
 
 ## (earlier framing) incremental windowed sums
 The design recomputes every feature over the full 60-min buffer every minute — O(buffer×features). Because
