@@ -39,6 +39,7 @@ from quantlib.features.compare import (
 )
 from quantlib.features.loaders import load_tiers
 from quantlib.features.registry import REGISTRY
+from quantlib.features.session import rth_mask
 
 # Trust grade thresholds on the value-match rate (fraction of compared cells that agree).
 GRADE_THRESHOLDS: tuple[tuple[str, float], ...] = (("A", 0.9999), ("B", 0.999), ("C", 0.99))
@@ -267,6 +268,7 @@ def validate(feature_root: str, day: str, val_root: str, allow_today: bool = Fal
             live.join(backfill, on=list(KEY_COLUMNS), how="full", suffix="_bk", coalesce=True)
             .join(tiers, on="symbol", how="left")
             .with_columns(pl.col("tier").fill_null(3))
+            .filter(rth_mask(pl.col("minute")))  # bet/validate only during RTH — warmup stays out of the grade
         )
         tol_feats = [f for f in feats if specs[f].parity_method != "distributional"]
         dist_feats = [f for f in feats if specs[f].parity_method == "distributional"]

@@ -16,9 +16,7 @@ from quantlib.features.base import (
     InputSpec,
 )
 from quantlib.features.registry import register
-
-OPEN_MINUTE = 570  # 09:30 ET
-CLOSE_MINUTE = 960  # 16:00 ET
+from quantlib.features.session import CLOSE_MINUTE, OPEN_MINUTE
 
 
 @register
