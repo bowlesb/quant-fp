@@ -21,6 +21,7 @@ arbitrary polars — this is the fast lane for the common windowed-reduction sha
 from __future__ import annotations
 
 from abc import abstractmethod
+from dataclasses import dataclass
 
 import polars as pl
 
@@ -90,6 +91,28 @@ def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[st
     return out
 
 
+@dataclass(frozen=True)
+class StatefulRegressor:
+    """Declares that a regression's ``slot`` (``"x"`` or ``"y"``) is NOT a short-lag column the incremental
+    engine can slice-derive, but a value that depends on long history, so the engine must maintain it as
+    running per-symbol state. Two kinds (the only two that occur):
+
+    - ``kind="time"``: a frame-relative time axis ``(epoch_minutes - origin)``. Slice-derive can't reproduce
+      a frame-relative origin, so the engine substitutes a FIXED origin (its seed minute). OLS is
+      origin-invariant, so slope/r2/corr are identical to the batch's per-frame-centered axis within tol.
+    - ``kind="cumulative"``: a running total ``v[T] = v[T-1] + increment[T]`` (e.g. OBV = cum_sum(signed)).
+      The group provides ``increment`` (a short-lag expr the engine evaluates per minute) and the engine keeps
+      the running per-symbol total. The centered-time *partner* slot may also be ``"time"``.
+
+    Backfill / live-batch ignore this entirely — they evaluate the group's own ``regressions()`` exprs
+    directly. It only tells the incremental engine HOW to source that regressor from running state instead of
+    re-deriving over the buffer."""
+
+    slot: str  # "x" or "y"
+    kind: str  # "time" or "cumulative"
+    increment: pl.Expr | None = None  # required iff kind == "cumulative"
+
+
 def _ols_derived(name: str, x_expr: pl.Expr, y_expr: pl.Expr) -> list[pl.Expr]:
     """The six paired columns the engine sums for one regression: only rows where BOTH x and y are present
     contribute (partner-null zeroed and dropped from the count), so a warmup/missing value never biases the
@@ -126,6 +149,13 @@ class ReductionGroup(FeatureGroup):
         """{name: (x_expr, y_expr, stats, windows)} — windowed OLS of y on x; stats ⊆ slope/corr/r2/mean_y,
         referenced via slope_/corr_/r2_/mean_y_ in assemble(). Default none. (For a TIME regressor, pass a
         small frame-relative x like ``(minute.epoch - minute.epoch.min())`` — OLS is origin-invariant.)"""
+        return {}
+
+    def stateful_regressors(self) -> dict[str, list[StatefulRegressor]]:
+        """{regression_name: [StatefulRegressor, ...]} — declares which regressor slots the INCREMENTAL engine
+        must source from running per-symbol state (a frame-relative time axis, or a cumulative like OBV)
+        instead of slice-deriving. ONLY the incremental path reads this; backfill/live-batch evaluate the
+        ``regressions()`` exprs directly and are unaffected. Default none (all regressors are short-lag)."""
         return {}
 
     @abstractmethod

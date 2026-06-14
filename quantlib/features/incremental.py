@@ -14,18 +14,26 @@ tests/test_fp_incremental.py). Incremental float sums drift slowly; bound it by 
 each session (``seed``), which also gives crash recovery. Backfill stays the polars rolling form (truth);
 live uses this; the parity test proves they agree.
 
-POC scope: a fixed, symbol-aligned value matrix per minute (the production form will index symbols that come
-and go). The accumulator is value-column agnostic — the caller passes whatever derived columns it needs.
+V1 derived each new minute's value columns over the WHOLE trailing buffer (correct, but O(buffer) — the last
+big cost at the minute mark). V2 (this module) SLICE-DERIVES: the cheap short-lag columns (returns, products,
+power sums, presence/square) only need the last few bars, so they're derived over a ~6-minute slice; the few
+columns that depend on long history — a frame-relative OLS time axis and a cumulative regressor (OBV) — are
+maintained as running per-symbol engine state (``stateful_regressors()``). Both produce the IDENTICAL value
+matrix the batch would, so the running sums (and therefore every feature) stay parity-true by construction.
 """
 from __future__ import annotations
-
-import datetime as dt
 
 import numpy as np
 import polars as pl
 
-from quantlib.features.base import BatchContext
-from quantlib.features.declarative import ReductionGroup, assemble_from_long, build_plan
+from quantlib.features.declarative import (
+    ReductionGroup,
+    StatefulRegressor,
+    assemble_from_long,
+    build_plan,
+)
+
+_OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
 
 
 class WindowedSumState:
@@ -78,15 +86,22 @@ class IncrementalEngine:
     assembles features from the running sums via ``assemble_from_long`` (the SAME core as the batch). So the
     feature logic is identical to the batch/backfill paths; only the source of the sums differs.
 
+    V2 slice-derive: the new minute's short-lag value columns are derived over a ~6-minute slice (not the
+    whole buffer); the long-history regressor columns (a frame-relative OLS time axis, a cumulative OBV) are
+    declared via ``stateful_regressors()`` and maintained as running per-symbol engine state. The produced
+    value matrix is identical to the whole-buffer derive, so parity holds (guarded by
+    tests/test_fp_incremental_features.py).
+
     Usage: ``seed(buffer_frame)`` once (replays the buffer to establish state + symbols), then ``step(frame)``
     each minute (``frame`` = the trailing buffer including the new latest minute) -> {group: feature_frame}.
     """
 
-    DERIVE_SLICE = 6  # minutes of history needed to derive a minute's value columns (max intra-value lag + slack)
+    DERIVE_SLICE = 6  # minutes of history needed to slice-derive a minute's short-lag value columns (max lag + slack)
 
     def __init__(self, groups: list[ReductionGroup]) -> None:
         self.groups = [g for g in groups if isinstance(g, ReductionGroup)]
         self.derived, self.extra, self.value_cols, self.plan, self.reg_plan, self.windows = build_plan(self.groups)
+        self.col_index = {col: i for i, col in enumerate(self.value_cols)}
         self.reduce_input = self.groups[0].reduce_input if self.groups else "minute_agg"
         input_cols: list[str] = []
         for group in self.groups:
@@ -94,31 +109,163 @@ class IncrementalEngine:
                 if col not in input_cols:
                     input_cols.append(col)
         self.input_cols = input_cols
+
+        # Split the union derive into SLICE-SAFE exprs (the default — derived over a small slice) and the
+        # STATEFUL regressions (their 6 OLS paired columns are rebuilt from running per-symbol x/y state).
+        self.stateful_specs = self._collect_stateful_specs()  # ns -> {slot: StatefulRegressor}
+        self.stateful_ns = set(self.stateful_specs)
+        self.reg_x_expr, self.reg_y_expr = self._collect_regression_exprs()  # ns -> base x/y expr
+        self.safe_derived = self._slice_safe_derived()
+        # value columns that slice-derive produces directly (everything except stateful regressions' paired cols)
+        stateful_cols = {f"__rd_{ns}_{key}" for ns in self.stateful_ns for key in _OLS_KEYS}
+        self.safe_value_cols = [col for col in self.value_cols if col not in stateful_cols]
+
+        # The extra per-minute columns the stateful regressions need, derived in the SAME slice pass as the
+        # safe value cols (one derive, one row-T read — no per-regressor re-sort): cumulative increments
+        # (__inc_<ns>) and the base values of a stateful regression's NON-stateful partner slot (__reg{x,y}_<ns>).
+        self.stateful_aux: list[pl.Expr] = []
+        self.inc_col: dict[str, str] = {}  # ns -> increment col name
+        self.regx_col: dict[str, str] = {}  # ns -> non-stateful x base col name
+        self.regy_col: dict[str, str] = {}
+        for ns, slots in self.stateful_specs.items():
+            for slot, slot_spec in slots.items():
+                if slot_spec.kind == "cumulative":
+                    assert slot_spec.increment is not None
+                    name = f"__inc_{ns}"
+                    self.stateful_aux.append(slot_spec.increment.alias(name))
+                    self.inc_col[ns] = name
+            if "x" not in slots:
+                name = f"__regx_{ns}"
+                self.stateful_aux.append(self.reg_x_expr[ns].alias(name))
+                self.regx_col[ns] = name
+            if "y" not in slots:
+                name = f"__regy_{ns}"
+                self.stateful_aux.append(self.reg_y_expr[ns].alias(name))
+                self.regy_col[ns] = name
+        self.aux_cols = [expr.meta.output_name() for expr in self.stateful_aux]
+
         self.symbols: list[str] | None = None
         self.state: WindowedSumState | None = None
+        self.ref_epoch: int | None = None  # fixed origin for "time" regressors (OLS is origin-invariant)
+        self.obv_running: dict[str, np.ndarray] = {}  # ns -> (n_symbols,) running cumulative for "cumulative" slots
 
-    def _derive(self, frame: pl.DataFrame) -> pl.DataFrame:
-        """Apply the union value-column derivation (same exprs the batch uses) to a frame."""
+    def _collect_stateful_specs(self) -> dict[str, dict[str, StatefulRegressor]]:
+        specs: dict[str, dict[str, StatefulRegressor]] = {}
+        for gi, group in enumerate(self.groups):
+            declared = group.stateful_regressors()
+            for reg_name, slots in declared.items():
+                ns = f"{gi}_{reg_name}"
+                specs[ns] = {spec.slot: spec for spec in slots}
+        return specs
+
+    def _collect_regression_exprs(self) -> tuple[dict[str, pl.Expr], dict[str, pl.Expr]]:
+        x_exprs: dict[str, pl.Expr] = {}
+        y_exprs: dict[str, pl.Expr] = {}
+        for gi, group in enumerate(self.groups):
+            for reg_name, (x_expr, y_expr, _, _) in group.regressions().items():
+                ns = f"{gi}_{reg_name}"
+                x_exprs[ns], y_exprs[ns] = x_expr, y_expr
+        return x_exprs, y_exprs
+
+    def _slice_safe_derived(self) -> list[pl.Expr]:
+        """The union derive exprs MINUS the OLS paired columns of stateful regressions (those are rebuilt from
+        running state). A stateful regression's paired columns are named ``__rd_<ns>_<key>``; everything else
+        (reduced bases, non-stateful regressions' paired columns) is short-lag and slice-safe."""
+        skip = {f"__rd_{ns}_{key}" for ns in self.stateful_ns for key in _OLS_KEYS}
+        return [expr for expr in self.derived if expr.meta.output_name() not in skip]
+
+    def _derived_row(self, frame: pl.DataFrame, minute: object) -> pl.DataFrame:
+        """ONE lazy slice pass: derive the safe value cols + presence/square + the stateful regressions' aux
+        cols (cumulative increments, non-stateful partner-slot bases), then return the single row per symbol at
+        ``minute`` (sorted by symbol). Lazy so polars fuses the 40+ windowed exprs into one optimized plan."""
         return (
-            frame.select(self.input_cols).sort(["symbol", "minute"]).with_columns(self.derived).with_columns(self.extra)
+            frame.lazy()
+            .select(self.input_cols)
+            .sort(["symbol", "minute"])
+            .with_columns([*self.safe_derived, *self.stateful_aux])
+            .with_columns(self.extra)
+            .filter(pl.col("minute") == minute)
+            .sort("symbol")
+            .collect()
         )
 
-    def _matrix_at(self, derived_frame: pl.DataFrame, minute: object) -> np.ndarray:
-        """The (n_symbols, n_value_cols) value matrix for ``minute``, symbol-aligned to ``self.symbols``
-        (nulls -> 0, matching the kernel). Asserts a fixed symbol set (V1)."""
-        rows = derived_frame.filter(pl.col("minute") == minute).sort("symbol")
-        if rows.height != len(self.symbols or []):
-            raise ValueError(f"incremental: symbol set changed ({rows.height} != {len(self.symbols or [])}); re-seed")
-        return rows.select(self.value_cols).fill_null(0.0).to_numpy()
+    def _stateful_matrix(self, row: pl.DataFrame, minute: object) -> dict[int, np.ndarray]:
+        """Rebuild the 6 OLS paired columns (b, x, y, xy, xx, yy) for every stateful regression at ``minute``
+        from running x/y state (sourced from the already-derived ``row``) — pairing under nulls exactly as
+        ``_ols_derived`` does. Returns {value_col_index: (n_symbols,) column}. Advances the running cumulatives."""
+        out: dict[int, np.ndarray] = {}
+        n_sym = len(self.symbols or [])
+        assert self.ref_epoch is not None
+        minute_epoch = int(minute.timestamp())  # type: ignore[attr-defined]
+        time_x = np.full(n_sym, (minute_epoch - self.ref_epoch) / 60.0, dtype=np.float64)
+        for ns, slots in self.stateful_specs.items():
+            x = time_x if slots.get("x") and slots["x"].kind == "time" else self._aux_value(row, self.regx_col[ns])
+            if "y" in slots and slots["y"].kind == "cumulative":
+                inc = row.select(self.inc_col[ns]).fill_null(0.0).to_numpy().reshape(-1)
+                running = self.obv_running.setdefault(ns, np.zeros(n_sym, dtype=np.float64))
+                running += inc
+                y = running.copy()
+            elif "y" in slots and slots["y"].kind == "time":
+                y = time_x
+            else:
+                y = self._aux_value(row, self.regy_col[ns])
+            both = np.isfinite(x) & np.isfinite(y)
+            x_paired = np.where(both, x, 0.0)
+            y_paired = np.where(both, y, 0.0)
+            paired = {
+                "b": both.astype(np.float64),
+                "x": x_paired,
+                "y": y_paired,
+                "xy": x_paired * y_paired,
+                "xx": x_paired * x_paired,
+                "yy": y_paired * y_paired,
+            }
+            for key, column in paired.items():
+                out[self.col_index[f"__rd_{ns}_{key}"]] = column
+        return out
+
+    def _aux_value(self, row: pl.DataFrame, col: str) -> np.ndarray:
+        """A non-stateful regressor base value at the row, kept as NaN where null so pairing drops it."""
+        return row.select(col).to_numpy().reshape(-1).astype(np.float64)
+
+    def _matrix_at(self, frame: pl.DataFrame, minute: object, *, slice_derive: bool) -> np.ndarray:
+        """The (n_symbols, n_value_cols) value matrix for ``minute``, symbol-aligned to ``self.symbols`` (nulls
+        -> 0, matching the kernel). ``slice_derive`` derives short-lag columns over a small trailing slice and
+        rebuilds stateful regression columns from running state; otherwise (seed) it derives over ``frame`` as
+        given. Asserts a fixed symbol set (V1)."""
+        source = frame
+        if slice_derive:
+            cutoff = minute - pl.duration(minutes=self.DERIVE_SLICE)  # type: ignore[operator]
+            source = frame.filter(pl.col("minute") > cutoff)
+        row = self._derived_row(source, minute)
+        n_sym = len(self.symbols or [])
+        if row.height != n_sym:
+            raise ValueError(f"incremental: symbol set changed ({row.height} != {n_sym}); re-seed")
+        matrix = np.zeros((n_sym, len(self.value_cols)), dtype=np.float64)
+        safe = row.select(self.safe_value_cols).fill_null(0.0).to_numpy()
+        for safe_i, col in enumerate(self.safe_value_cols):
+            matrix[:, self.col_index[col]] = safe[:, safe_i]
+        for col_index, column in self._stateful_matrix(row, minute).items():
+            matrix[:, col_index] = column
+        return matrix
+
+    def _seed_stateful(self, buffer_frame: pl.DataFrame) -> None:
+        """Initialise the running per-symbol state the stateful regressors need before folding the buffer:
+        the FIXED time origin (the buffer's earliest minute) and the OBV running totals reset to zero
+        (re-accumulated as the seed folds each minute)."""
+        self.ref_epoch = int(buffer_frame.select(pl.col("minute").dt.epoch("s").min()).item())
+        self.obv_running = {}
 
     def seed(self, buffer_frame: pl.DataFrame) -> None:
-        """Establish the symbol set and fold every buffered minute into fresh state (== the batch recompute
-        over the buffer; also the daily-resync / crash-recovery entry point)."""
+        """Establish the symbol set + fixed origins and fold every buffered minute into fresh state (== the
+        batch recompute over the buffer; also the daily-resync / crash-recovery entry point). Folds minute by
+        minute through the SAME slice-derive + stateful path used live, so the running OBV/time state is built
+        exactly as it will be advanced — no separate seeding code to drift from the live path."""
         self.symbols = sorted(buffer_frame["symbol"].unique().to_list())
         self.state = WindowedSumState(self.symbols, self.windows, len(self.value_cols))
-        derived_frame = self._derive(buffer_frame)
-        for minute in sorted(derived_frame["minute"].unique()):
-            self.state.update(int(minute.timestamp()), self._matrix_at(derived_frame, minute))
+        self._seed_stateful(buffer_frame)
+        for minute in sorted(buffer_frame["minute"].unique()):
+            self.state.update(int(minute.timestamp()), self._matrix_at(buffer_frame, minute, slice_derive=True))
             self.state.trim()
 
     def step(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
@@ -128,13 +275,7 @@ class IncrementalEngine:
         if self.state is None:
             self.seed(frame)
         else:
-            # V1 derives the new minute's value columns over the WHOLE buffer (same as the batch) — necessary
-            # for columns that depend on long history (e.g. OBV = cum_sum(signed), and the frame-relative
-            # centered-time origin), so the derived value matches the batch exactly. V2 optimization: derive
-            # the cheap short-lag columns over a small slice and maintain the few cumulative ones (OBV) as
-            # running per-symbol state — that removes the last O(buffer) cost from the minute mark.
-            derived_frame = self._derive(frame)
-            self.state.update(int(latest.timestamp()), self._matrix_at(derived_frame, latest))
+            self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
             self.state.trim()
         long = self._running_long()
         latest_frame = frame.filter(pl.col("minute") == latest)
@@ -143,10 +284,11 @@ class IncrementalEngine:
     def _running_long(self) -> pl.DataFrame:
         """The running sums as a LONG (symbol, window, <value-col sum>) frame — the exact shape
         ``assemble_from_long`` expects, so the SAME assemble code runs as in the batch (NO pivot to build it)."""
+        assert self.state is not None
         running = self.state.running  # (n_windows, n_symbols, n_cols)
         n_win, n_sym, _ = running.shape
         data: dict[str, object] = {
-            "symbol": self.symbols * n_win,
+            "symbol": (self.symbols or []) * n_win,
             "window": [w for w in self.windows for _ in range(n_sym)],
         }
         for col_index, col in enumerate(self.value_cols):

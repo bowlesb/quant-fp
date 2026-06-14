@@ -18,7 +18,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
-from quantlib.features.declarative import ReductionGroup, mean_, r2_, slope_
+from quantlib.features.declarative import ReductionGroup, StatefulRegressor, mean_, r2_, slope_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
@@ -57,6 +57,9 @@ class TrendQualityGroup(ReductionGroup):
         epoch = pl.col("minute").dt.epoch("s").cast(pl.Float64)
         centered_t = (epoch - epoch.min()) / 60.0  # frame-relative time regressor (OLS is origin-invariant)
         return {"trend": (centered_t, pl.col("close"), ("slope", "r2"), WINDOWS)}
+
+    def stateful_regressors(self) -> dict[str, list[StatefulRegressor]]:
+        return {"trend": [StatefulRegressor(slot="x", kind="time")]}
 
     def assemble(self) -> dict[str, pl.Expr]:
         feats: dict[str, pl.Expr] = {}

@@ -15,7 +15,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
-from quantlib.features.declarative import ReductionGroup, corr_, mean_, pt_, slope_, sum_
+from quantlib.features.declarative import ReductionGroup, StatefulRegressor, corr_, mean_, pt_, slope_, sum_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
@@ -84,6 +84,16 @@ class PriceVolumeGroup(ReductionGroup):
         return {
             "pv": (ret, pl.col("volume"), ("corr",), WINDOWS),  # return-vs-volume correlation
             "obv": (centered_t, obv, ("slope",), WINDOWS),  # on-balance-volume slope on time
+        }
+
+    def stateful_regressors(self) -> dict[str, list[StatefulRegressor]]:
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+        signed = pl.when(ret > 0.0).then(pl.col("volume")).when(ret < 0.0).then(-pl.col("volume")).otherwise(0.0)
+        return {
+            "obv": [
+                StatefulRegressor(slot="x", kind="time"),
+                StatefulRegressor(slot="y", kind="cumulative", increment=signed),
+            ]
         }
 
     def points(self) -> dict[str, pl.Expr]:

@@ -104,18 +104,30 @@ this path — unchanged, so iteration speed is unaffected.)
 - **One-pivot assemble DONE** (helps both paths): `assemble_from_long` now does a single multi-value pivot
   per group instead of one pivot+join per stat. (Watch: a single-value pivot drops the value name → a dummy
   const keeps ≥2 values.)
-- **V2 (the actual <100ms-tiny win), two pieces:**
-  1. **Slice-derive — THE remaining win (~55ms).** Derive the cheap short-lag columns (ret, products,
-     power-sums) over a ~6-min slice (correct — they only need a few prior bars), and handle the few
-     **cumulative** columns specially. Design decision (the tricky part the OBV test surfaced): a regression
-     whose x/y is a running total (OBV = `cum_sum(signed)`) can't be slice-derived; the group declares its
-     **increment** (e.g. `signed`) and the engine maintains a running per-symbol cumulative
-     (`obv[T] = obv[T-1] + signed[T]`), using it as the regressor. Proposed API: an optional
-     `cumulative()` -> `{regression_name: (which='x'|'y', increment_expr)}`; only `price_volume.obv` uses it
-     today. The centered-time origin is fine on a slice (OLS is origin-invariant). Validate: the slice-derived
-     new-minute matrix == the whole-buffer-derived row (a test), plus the existing feature-parity test.
-  2. (optional) further-collapse the assemble onto the numpy running sums directly. The one-pivot already
-     captured most of the assemble cost; revisit only if it's still hot after slice-derive.
+- **V2 (slice-derive) — BUILT + PARITY-VALIDATED.** `step()` now slice-derives: the short-lag value columns
+  (ret, products, power-sums, presence/square) are derived over a ~6-minute slice in ONE lazy polars pass,
+  and the long-history regressor columns are maintained as running per-symbol engine state, declared via
+  `ReductionGroup.stateful_regressors()` (default empty — backfill/live-batch ignore it). Two kinds:
+  - `kind="time"`: a frame-relative OLS time axis. Slice-derive can't reproduce a frame-relative origin, so
+    the engine substitutes a FIXED seed origin (OLS is origin-invariant → same slope/r2/corr within tol).
+    Used by `trend_quality.trend` and `price_volume.obv` (x slot).
+  - `kind="cumulative"`: a running total `v[T]=v[T-1]+increment[T]` (OBV). The group declares the short-lag
+    `increment` (`signed`); the engine keeps the running per-symbol total. Used by `price_volume.obv` (y slot).
+  The engine rebuilds the 6 OLS paired columns (b,x,y,xy,xx,yy) for these regressions from the running x/y
+  with the SAME pairing-under-nulls as `_ols_derived`, so the value matrix is identical to the whole-buffer
+  derive. Guarded by `test_slice_derive_matches_whole_buffer` (matrix == V1 whole-buffer derive, cell-for-cell)
+  + the existing feature-parity test (`step()` == `compute_latest()`).
+- **V2 measured (1250×60, 2 CPUs, reproducible):** fold (slice-derive + state.update + running_long) dropped
+  from V1's ~67ms to **~54ms CPU-bound / ~35ms unconstrained**; full step (fold + shared assemble) 97ms (V1)
+  → **80ms (V2)**. The fold's remaining cost is the 43 `over("symbol")` slice-derive expressions (≈0.5ms each,
+  fixed per-expr partition overhead on 1250 groups, not row count — the slice is only ~7.5k rows). The shared
+  `assemble_from_long` (pivot + feature exprs, ~26ms CPU-bound) is now co-dominant; it is the SAME code the
+  batch runs, so it is not an incremental-specific cost. A combined single-pivot-across-all-groups was
+  prototyped and was SLOWER (one big pivot > 11 small ones), so the per-group pivot stays.
+- **Not yet <50ms full-step.** Two remaining levers, both out of the V2 fold's scope: (a) cut the
+  `over("symbol")` per-expression overhead in slice-derive (share the common `ret` once, or a Rust slice
+  kernel), (b) collapse the assemble onto the numpy running sums directly (would reimplement each group's
+  `assemble()` outside polars — large + parity-risky; `assemble_from_long` is deliberately left unchanged).
 - **REMAINING after V2:** wire into the worker behind `FP_INCREMENTAL` (seed on start/daily, step per
   minute), the session-length drift test, and symbol-churn V2.
 

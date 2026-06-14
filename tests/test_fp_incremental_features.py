@@ -63,3 +63,27 @@ def test_incremental_step_matches_batch() -> None:
             ctx = BatchContext(frames={"minute_agg": buffer})
             for group in groups:
                 _assert_close(group.compute_latest(ctx), inc[group.name], f"min{ti}:{group.name}")
+
+
+def test_slice_derive_matches_whole_buffer() -> None:
+    """V2 slice-derive guard: the (n_symbols, n_value_cols) matrix the engine builds for the latest minute —
+    short-lag columns over a small slice + stateful regressors (OBV cumulative, time axis) from running state —
+    equals the whole-buffer derive (its V1 source of truth), cell-for-cell, at every minute past warmup. This
+    pins the slice-derive optimization to the value level (independent of the assemble that follows)."""
+    stream = _stream(n_sym=6, n_min=64)
+    minutes = sorted(stream["minute"].unique())
+    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
+    engine = IncrementalEngine(groups)
+    engine.symbols = sorted(stream["symbol"].unique().to_list())
+    engine._seed_stateful(stream)
+
+    for minute in minutes:
+        buffer = stream.filter(pl.col("minute") <= minute)
+        # whole-buffer derive of the slice-safe columns (V1 path) — the reference for the short-lag columns
+        whole = engine._derived_row(buffer, minute)
+        whole_safe = whole.select(engine.safe_value_cols).fill_null(0.0).to_numpy()
+        sliced = engine._matrix_at(buffer, minute, slice_derive=True)
+        for safe_i, col in enumerate(engine.safe_value_cols):
+            ref = whole_safe[:, safe_i]
+            got = sliced[:, engine.col_index[col]]
+            assert np.allclose(ref, got, rtol=1e-9, atol=1e-9), f"{minute} {col}: slice != whole-buffer derive"
