@@ -12,14 +12,11 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    lagged,
 )
-from quantlib.features.latest import slice_aggregates
+from quantlib.features.declarative import ReductionGroup, sum_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (10, 15, 30, 60, 120)
@@ -27,7 +24,7 @@ DIST_TOL = 1e-4
 
 
 @register
-class DistributionGroup(FeatureGroup):
+class DistributionGroup(ReductionGroup):
     name = "distribution"
     version = "1.0.0"
     owner = "modeller"
@@ -55,86 +52,32 @@ class DistributionGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        ret = pl.col("close") / pl.col("_prev") - 1.0
+    def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
+        ret = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
         present = ret.is_not_null()
-        r = pl.when(present).then(ret).otherwise(0.0)
-        frame = frame.with_columns(
-            [
-                present.cast(pl.Float64).alias("_p"),
-                r.alias("_r1"),
-                (r * r).alias("_r2"),
-                (r * r * r).alias("_r3"),
-                (r * r * r * r).alias("_r4"),
-                pl.when(ret < 0.0).then(ret * ret).otherwise(0.0).alias("_dn2"),
-                pl.when(ret > 0.0).then(ret * ret).otherwise(0.0).alias("_up2"),
-            ]
-        )
-        # Materialize the rolling power sums ONCE per window (each feeds skew/kurt/semivars) — polars
-        # eager won't CSE them, so deriving the four outputs from shared columns avoids recompute.
-        temp = []
-        for w in WINDOWS:
-            size = f"{w}m"
-            for src in ("_p", "_r1", "_r2", "_r3", "_r4", "_dn2", "_up2"):
-                temp.append(pl.col(src).rolling_sum_by("minute", window_size=size).over("symbol").alias(f"{src}s_{w}"))
-        frame = frame.with_columns(temp)
-        exprs = []
-        for w in WINDOWS:
-            n = pl.col(f"_ps_{w}")
-            s1 = pl.col(f"_r1s_{w}")
-            s2 = pl.col(f"_r2s_{w}")
-            s3 = pl.col(f"_r3s_{w}")
-            s4 = pl.col(f"_r4s_{w}")
-            dn2 = pl.col(f"_dn2s_{w}")
-            up2 = pl.col(f"_up2s_{w}")
-            mean = s1 / n
-            m2 = s2 / n - mean * mean
-            m3 = s3 / n - 3.0 * mean * (s2 / n) + 2.0 * mean * mean * mean
-            m4 = s4 / n - 4.0 * mean * (s3 / n) + 6.0 * mean * mean * (s2 / n) - 3.0 * mean * mean * mean * mean
-            defined = (n >= 3.0) & (m2 > 1e-16)
-            skew = pl.when(defined).then(m3 / m2.pow(1.5)).otherwise(None).cast(pl.Float64)
-            kurt = pl.when(defined).then(m4 / (m2 * m2) - 3.0).otherwise(None).cast(pl.Float64)
-            dvol = pl.when(n >= 2.0).then((dn2 / n).sqrt()).otherwise(None).cast(pl.Float64)
-            uvol = pl.when(n >= 2.0).then((up2 / n).sqrt()).otherwise(None).cast(pl.Float64)
-            exprs.append(skew.alias(f"ret_skew_{w}m"))
-            exprs.append(kurt.alias(f"ret_kurt_{w}m"))
-            exprs.append(dvol.alias(f"downside_vol_{w}m"))
-            exprs.append(uvol.alias(f"upside_vol_{w}m"))
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("ret_skew", "ret_kurt", "downside_vol", "upside_vol")]
-        return frame.with_columns(exprs).select(["symbol", "minute", *names])
+        r = pl.when(present).then(ret).otherwise(0.0)  # warmup-null return -> 0 (excluded from the count)
+        return {
+            "p": (present.cast(pl.Float64), ("sum",), WINDOWS),  # count of present returns
+            "r1": (r, ("sum",), WINDOWS),
+            "r2": (r * r, ("sum",), WINDOWS),
+            "r3": (r * r * r, ("sum",), WINDOWS),
+            "r4": (r * r * r * r, ("sum",), WINDOWS),
+            "dn2": (pl.when(ret < 0.0).then(ret * ret).otherwise(0.0), ("sum",), WINDOWS),
+            "up2": (pl.when(ret > 0.0).then(ret * ret).otherwise(0.0), ("sum",), WINDOWS),
+        }
 
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE: the rolling power sums become per-window group_by sums (aggregate-at-T); the
-        moment -> skew/kurt/semivar algebra is identical to compute(), parity-guarded."""
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
-        ret = pl.col("close") / pl.col("_prev") - 1.0
-        present = ret.is_not_null()
-        r = pl.when(present).then(ret).otherwise(0.0)
-        frame = frame.with_columns(
-            [
-                present.cast(pl.Float64).alias("_p"), r.alias("_r1"), (r * r).alias("_r2"),
-                (r * r * r).alias("_r3"), (r * r * r * r).alias("_r4"),
-                pl.when(ret < 0.0).then(ret * ret).otherwise(0.0).alias("_dn2"),
-                pl.when(ret > 0.0).then(ret * ret).otherwise(0.0).alias("_up2"),
-            ]
-        )
-        cols = ("_p", "_r1", "_r2", "_r3", "_r4", "_dn2", "_up2")
-        out, latest = slice_aggregates(frame, WINDOWS, lambda w: [pl.col(c).sum().alias(f"{c}_{w}") for c in cols])
-        exprs = []
+    def assemble(self) -> dict[str, pl.Expr]:
+        feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
-            n, s1, s2, s3, s4 = (pl.col(f"{c}_{w}") for c in ("_p", "_r1", "_r2", "_r3", "_r4"))
-            dn2, up2 = pl.col(f"_dn2_{w}"), pl.col(f"_up2_{w}")
+            n = sum_("p", w)
+            s1, s2, s3, s4 = sum_("r1", w), sum_("r2", w), sum_("r3", w), sum_("r4", w)
             mean = s1 / n
             m2 = s2 / n - mean * mean
             m3 = s3 / n - 3.0 * mean * (s2 / n) + 2.0 * mean * mean * mean
             m4 = s4 / n - 4.0 * mean * (s3 / n) + 6.0 * mean * mean * (s2 / n) - 3.0 * mean * mean * mean * mean
             defined = (n >= 3.0) & (m2 > 1e-16)
-            exprs.append(pl.when(defined).then(m3 / m2.pow(1.5)).otherwise(None).cast(pl.Float64).alias(f"ret_skew_{w}m"))
-            exprs.append(pl.when(defined).then(m4 / (m2 * m2) - 3.0).otherwise(None).cast(pl.Float64).alias(f"ret_kurt_{w}m"))
-            exprs.append(pl.when(n >= 2.0).then((dn2 / n).sqrt()).otherwise(None).cast(pl.Float64).alias(f"downside_vol_{w}m"))
-            exprs.append(pl.when(n >= 2.0).then((up2 / n).sqrt()).otherwise(None).cast(pl.Float64).alias(f"upside_vol_{w}m"))
-        names = [f"{stat}_{w}m" for w in WINDOWS for stat in ("ret_skew", "ret_kurt", "downside_vol", "upside_vol")]
-        return out.with_columns(exprs).with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])
+            feats[f"ret_skew_{w}m"] = pl.when(defined).then(m3 / m2.pow(1.5)).otherwise(None)
+            feats[f"ret_kurt_{w}m"] = pl.when(defined).then(m4 / (m2 * m2) - 3.0).otherwise(None)
+            feats[f"downside_vol_{w}m"] = pl.when(n >= 2.0).then((sum_("dn2", w) / n).sqrt()).otherwise(None)
+            feats[f"upside_vol_{w}m"] = pl.when(n >= 2.0).then((sum_("up2", w) / n).sqrt()).otherwise(None)
+        return feats
