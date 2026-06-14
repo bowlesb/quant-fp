@@ -44,9 +44,11 @@ Optimal config measured: **10 shards × 3 polars threads** at 10k/32-cores.
   `points()` + `assemble()` ONCE → engine generates `compute()` (rolling backfill) + `compute_latest()`
   (at-T live), and `compute_reduction_batch()` runs MANY groups in ONE shared marshal+kernel pass (wired
   into `process_bars`). OLS is just six paired windowed sums, so it folds into the same batch. **Migrated
-  (9): volume, volatility, ohlc_vol, trade_flow, quote_spread, return_dynamics, price_volume (70 feats),
-  momentum, trend_quality.** Each parity-gated; `tests/test_fp_declarative.py` proves batched==per-group for
-  reduction+OLS. 10k per-shard p99 fell 902 (pre-declarative) → 815ms as groups migrated. **Async writes evaluated and REJECTED** (background-thread zstd contends: 10k sync
+  (11): volume, volatility, ohlc_vol, trade_flow, quote_spread, return_dynamics, price_volume (70 feats),
+  momentum, trend_quality, efficiency, distribution (skew/kurt from power sums — no extension).** Each
+  parity-gated. 10k COMPUTE-only p99 (writes excluded) fell 902 (pre-declarative) → ~660ms as groups
+  migrated. Remaining reduction-shaped: liquidity (autocovariance), price_levels (min/max), market_beta
+  (SPY-join), price_returns (point-only, cheap). **Async writes evaluated and REJECTED** (background-thread zstd contends: 10k sync
   884ms vs async 981ms p99); `StoreWriter` is opt-in (`FP_ASYNC_WRITE`), default sync. For the bet-latency
   decoupling, REORDER (compute→bet→write sync) when a bet step exists, don't use a contending thread.
 - **C — GPU: SPIKED AND RULED OUT for feature compute.** RTX 3090 works post-reboot; `fp-gpu` image built.
