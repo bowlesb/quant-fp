@@ -28,6 +28,7 @@ from quantlib.features.groups import (  # noqa: F401
     round_levels,
     sector,
     technical,
+    tick_runlength,
     trade_flow,
     trend_quality,
     volatility,

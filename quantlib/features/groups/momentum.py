@@ -52,3 +52,25 @@ class MomentumGroup(FeatureGroup):
             exprs.append(pl.col("_ret").abs().rolling_mean_by("minute", window_size=f"{w}m").over("symbol").cast(pl.Float64).alias(f"mean_abs_ret_{w}m"))
         names = [f"{f}_{w}m" for w in WINDOWS for f in ("up_ratio", "mean_abs_ret")]
         return frame.with_columns(exprs).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LATEST-MINUTE: one group_by per window over its slice (aggregate-at-T), instead of rolling
+        over the whole buffer. Per-minute up/return are precomputed once; parity-guarded by
+        tests/test_fp_latest.py (== compute().filter(T))."""
+        import datetime as dt
+
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        frame = lagged(frame, "close", 1, "_prev").sort(["symbol", "minute"])
+        ret = pl.col("close") / pl.col("_prev") - 1.0
+        frame = frame.with_columns([(ret > 0.0).cast(pl.Float64).alias("_up"), ret.abs().alias("_absret")])
+        latest = frame["minute"].max()
+        result = frame.filter(pl.col("minute") == latest).select("symbol")
+        for w in WINDOWS:
+            agg = (
+                frame.filter((pl.col("minute") > latest - dt.timedelta(minutes=w)) & (pl.col("minute") <= latest))
+                .group_by("symbol")
+                .agg([pl.col("_up").mean().alias(f"up_ratio_{w}m"), pl.col("_absret").mean().alias(f"mean_abs_ret_{w}m")])
+            )
+            result = result.join(agg, on="symbol", how="left")
+        names = [f"{f}_{w}m" for w in WINDOWS for f in ("up_ratio", "mean_abs_ret")]
+        return result.with_columns(pl.lit(latest).alias("minute")).select(["symbol", "minute", *names])

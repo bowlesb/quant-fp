@@ -66,7 +66,7 @@ check-fresh:
 # Baked dev/test image — deps installed ONCE so we NEVER pip-install per run.
 # ALL feature-platform docker runs use `fp-dev`. Build/refresh it after a dependency change.
 dev-image:
-	docker build -t fp-dev -f docker/fp-dev.Dockerfile docker
+	docker build -t fp-dev -f docker/fp-dev.Dockerfile .
 
 FP_RUN := docker run --rm -v "$$PWD":/app -w /app
 FP_DB := --network quant_default --env-file .env

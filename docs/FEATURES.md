@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-516 features across 28 group(s).
+519 features across 29 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -429,6 +429,9 @@
 | `sma_dist_30m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 30-minute simple moving average (close/sma - 1). |
 | `sma_dist_50m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 50-minute simple moving average (close/sma - 1). |
 | `sma_dist_5m` | technical | technical | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Close relative to its trailing 5-minute simple moving average (close/sma - 1). |
+| `max_signed_run_1m` | tick_runlength | microstructure | C | tolerance | Float64 | none | (0.0, 10000000.0) | Longest run of consecutive same-direction (tick-rule) trades within the minute — a sequential per-tick burst measure from the raw tape. |
+| `signed_run_count_1m` | tick_runlength | microstructure | C | tolerance | Float64 | none | (0.0, 10000000.0) | Number of distinct same-direction tick runs within the minute (how often trade direction flips). |
+| `tick_signed_volume_1m` | tick_runlength | microstructure | C | tolerance | Float64 | none | None | Sum of tick-rule-signed trade size within the minute (per-tick signed volume from the raw tape). |
 | `signed_volume_10m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 10 minutes (net buy/sell pressure). |
 | `signed_volume_120m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 120 minutes (net buy/sell pressure). |
 | `signed_volume_15m` | trade_flow | trade_flow | B | tolerance | Float64 | warmup | None | Sum of signed share volume over the trailing 15 minutes (net buy/sell pressure). |
