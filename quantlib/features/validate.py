@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 import polars as pl
 
-from quantlib.features import store, validation_store
+from quantlib.features import store, validation_db, validation_store
 from quantlib.features.base import KEY_COLUMNS
 from quantlib.features.compare import (
     VERDICT_EXTRA,
@@ -291,11 +291,13 @@ def validate(feature_root: str, day: str, val_root: str, allow_today: bool = Fal
     if cell_blocks:
         validation_store.write_cell(val_root, day, pl.concat(cell_blocks))
     non_empty_exc = [block for block in exception_blocks if block.height]
-    if non_empty_exc:
-        validation_store.write_exceptions(val_root, day, pl.concat(non_empty_exc))
-    validation_store.upsert_feature_day(val_root, feature_day)
+    exceptions = pl.concat(non_empty_exc) if non_empty_exc else pl.DataFrame()
+    if exceptions.height:
+        validation_store.write_exceptions(val_root, day, exceptions)
+    validation_store.upsert_feature_day(val_root, feature_day)  # parquet: cross-day accumulation source
     trust = recompute_trust(validation_store.read_feature_day(val_root))
     validation_store.write_trust(val_root, trust)
+    validation_db.write_validation(feature_day, trust, exceptions, day)  # Postgres: canonical record store
     return trust
 
 

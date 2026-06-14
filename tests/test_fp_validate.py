@@ -11,10 +11,11 @@ import datetime as dt
 import polars as pl
 import pytest
 
-from quantlib.features import validation_store
+from quantlib.features import validation_db, validation_store
 from quantlib.features.base import FeatureSpec
 from quantlib.features.validate import (
     _cell_rollup,
+    _exceptions,
     _feature_day_tolerance,
     _long_verdicts,
     assert_settled,
@@ -138,6 +139,30 @@ def test_untrusted_among_flags_what_training_must_refuse(tmp_path) -> None:
 
 def test_certified_features_empty_when_unvalidated(tmp_path) -> None:
     assert validation_store.certified_features(tmp_path) == set()  # nothing certified until validated
+
+
+def test_db_rows_day_adds_all_tier_and_orders_columns() -> None:
+    long = _long_verdicts(_joined(), ["ret_5m"], SPECS)
+    feature_day = _feature_day_tolerance(_cell_rollup(long), VERSION_OF, NAN_POLICY_OF, "2026-06-12")
+    rows = validation_db._rows_day(feature_day)
+    assert len(rows) == 1
+    # column order: feature, version, day, tier(=0), method, n_compared, n_match, ...
+    assert rows[0][:6] == ("ret_5m", "v1.0.0", "2026-06-12", 0, "tolerance", 2)
+
+
+def test_db_rows_exceptions_map_minute_to_ts() -> None:
+    long = _long_verdicts(_joined(), ["ret_5m"], SPECS)
+    exceptions = _exceptions(long, "2026-06-12")
+    rows = validation_db._rows_exceptions(exceptions)
+    # A (mismatch) and B (extra_live) -> 2 exception rows; ts is the cell minute, in column 3.
+    assert len(rows) == 2
+    assert all(row[2] in (M0, M1) for row in rows)
+
+
+def test_db_rows_empty_frames_yield_no_rows() -> None:
+    assert validation_db._rows_day(pl.DataFrame()) == []
+    assert validation_db._rows_trust(pl.DataFrame()) == []
+    assert validation_db._rows_exceptions(pl.DataFrame()) == []
 
 
 def test_upsert_feature_day_is_idempotent(tmp_path) -> None:
