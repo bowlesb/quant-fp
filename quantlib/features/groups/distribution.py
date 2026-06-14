@@ -71,16 +71,23 @@ class DistributionGroup(FeatureGroup):
                 pl.when(ret > 0.0).then(ret * ret).otherwise(0.0).alias("_up2"),
             ]
         )
-        exprs = []
+        # Materialize the rolling power sums ONCE per window (each feeds skew/kurt/semivars) — polars
+        # eager won't CSE them, so deriving the four outputs from shared columns avoids recompute.
+        temp = []
         for w in WINDOWS:
             size = f"{w}m"
-            n = pl.col("_p").rolling_sum_by("minute", window_size=size).over("symbol")
-            s1 = pl.col("_r1").rolling_sum_by("minute", window_size=size).over("symbol")
-            s2 = pl.col("_r2").rolling_sum_by("minute", window_size=size).over("symbol")
-            s3 = pl.col("_r3").rolling_sum_by("minute", window_size=size).over("symbol")
-            s4 = pl.col("_r4").rolling_sum_by("minute", window_size=size).over("symbol")
-            dn2 = pl.col("_dn2").rolling_sum_by("minute", window_size=size).over("symbol")
-            up2 = pl.col("_up2").rolling_sum_by("minute", window_size=size).over("symbol")
+            for src in ("_p", "_r1", "_r2", "_r3", "_r4", "_dn2", "_up2"):
+                temp.append(pl.col(src).rolling_sum_by("minute", window_size=size).over("symbol").alias(f"{src}s_{w}"))
+        frame = frame.with_columns(temp)
+        exprs = []
+        for w in WINDOWS:
+            n = pl.col(f"_ps_{w}")
+            s1 = pl.col(f"_r1s_{w}")
+            s2 = pl.col(f"_r2s_{w}")
+            s3 = pl.col(f"_r3s_{w}")
+            s4 = pl.col(f"_r4s_{w}")
+            dn2 = pl.col(f"_dn2s_{w}")
+            up2 = pl.col(f"_up2s_{w}")
             mean = s1 / n
             m2 = s2 / n - mean * mean
             m3 = s3 / n - 3.0 * mean * (s2 / n) + 2.0 * mean * mean * mean
