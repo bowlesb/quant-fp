@@ -166,7 +166,30 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     fatter shards traded against per-shard compute. (Fast-path 305-feature p50 stays ~75ms; its p99 ~107-114ms
     on this more-contended machine state is unchanged-code machine contention, not a regression from this fold.)
 
+  * IPC BYTES ROUTING (FP_IPC_MSGPACK, the reader->shard transit — NOT feature compute). The single-threaded
+    reader routes each completed minute's ~110k bar/trade/quote dicts to the 32 shard queues; OFF, mp.Queue
+    PICKLES each shard's dict-list in the reader's feeder threads (the measured ~120ms transit — confirmed
+    here at p50 ~133ms / p99 ~162ms, route+put). ON, the reader instead msgpack-PACKS each shard's slice to
+    ONE bytes blob (mp.Queue then only memcpy-pickles the bytes — near-free) and each WORKER msgpack-UNPACKS
+    its OWN slice in parallel across the 32 cores. PARITY-NEUTRAL: msgpack roundtrips the flat str/int/float
+    dicts byte-identically, so process_stream_minute receives the SAME dicts either way — feature values are
+    unchanged (tests/test_fp_stream_sim.py::test_msgpack_transport_roundtrips_routed_batches_byte_identically).
+    MEASURED (10k, 32 shards, paced mock MOCK_INTERVAL_SEC=1.5, 5t+5q/sym/min, this machine, 20 post-warmup
+    minutes, back-to-back A/B): reader route+put p50 132.7ms -> 111.1ms (~22ms reclaimed) / p99 161.8ms ->
+    132.7ms (~29ms reclaimed); the worker pays +6.6ms p50 / +8.0ms p99 of decode but IN PARALLEL across the 32
+    shards, so the net wall-time off the reader bottleneck is ~22ms p50 / ~29ms p99. The p99 TAIL compressed
+    across the whole flow (moving deserialization off the reader's GIL-bound feeder threads removes cross-
+    process stalls): FULL-flow p99 219ms -> 162ms, and the FAST PATH (305 reduction feats) p99 110ms -> 91ms —
+    now UNDER 100ms (PASS). FULL-flow p50 is ~unchanged (132ms, expected — the transit overlaps the workers'
+    per-minute compute under pacing, so it is not on the serial critical path at p50; the win shows in the
+    transit cost itself and the contention-driven p99 tail). RESIDUAL reader-side cost: the route_stream_minute
+    partition iterates all ~110k dicts single-threaded AND the msgpack pack is still single-threaded in the
+    reader (~111ms p50) — packing is faster than pickle but the reader's per-object iteration is the floor.
+    Crossing below that needs partitioning WITHOUT a full per-object pass (a columnar/Rust split) or moving the
+    pack off the reader thread — a larger change than this transport swap.
+
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
+        FP_IPC_MSGPACK=1 selects the bytes transport (A/B vs the default pickle path).
 """
 from __future__ import annotations
 
@@ -180,6 +203,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import msgpack
 import polars as pl
 
 from quantlib.aggregates import QuoteTick, TickState, TradeTick, bucket_minute
@@ -193,7 +217,7 @@ from quantlib.features.bench_stream import (
     synth_reference,
     synth_symbols,
 )
-from quantlib.features.capture import BARS_SCHEMA, DEFAULT_BUFFER_MINUTES
+from quantlib.features.capture import BARS_SCHEMA, DEFAULT_BUFFER_MINUTES, MinuteRing
 from quantlib.features.compare import runnable
 from quantlib.features.consolidated import (
     DAILY_BROADCAST_GROUPS,
@@ -209,7 +233,7 @@ from quantlib.features.declarative import (
     emit_rust_unified,
 )
 from quantlib.features.incremental import IncrementalEngine
-from quantlib.features.real_capture import _shard_snapshots, build_stream
+from quantlib.features.real_capture import _reader_bench_path, _shard_snapshots, build_stream
 from quantlib.features.sharded_capture import INDEX_SYMBOLS, REDUCE_GROUPS, shard_of
 from quantlib.features.stateful import (
     StatefulEngine,
@@ -232,6 +256,15 @@ STATEFUL_GROUPS: tuple[str, ...] = ("technical", "candlestick", "price_returns",
 # incremental fast path as a ReductionGroup. cross_sectional_rank stays a separate full-universe reduce
 # (REDUCE_GROUPS) run by the reader, excluded here.
 GATHER_GROUPS: tuple[str, ...] = ("market_context",)
+
+# IPC transport flag (A/B). Default OFF = the original path: the reader hands each shard's
+# (bars, trades, quotes) tuple-of-dicts to mp.Queue, which PICKLES ~100k dicts across 32 queues in the
+# single reader's feeder threads (the measured ~120ms reader->shard transit). With FP_IPC_MSGPACK=1 the
+# reader instead msgpack-PACKS each shard's batch to a single bytes blob (mp.Queue then only memcpy-pickles
+# the bytes — near-free) and each worker msgpack-UNPACKS its OWN slice in parallel across the 32 cores.
+# PARITY-NEUTRAL: msgpack roundtrips the flat str/int/float dicts byte-identically, so process_stream_minute
+# receives the SAME dicts either way — only the transport differs, feature values are unchanged.
+_USE_IPC_MSGPACK = bool(os.environ.get("FP_IPC_MSGPACK"))
 
 
 def _bucket_ticks_by_symbol_minute(
@@ -277,7 +310,7 @@ class StreamShardState:
 
     def __init__(self, window: int) -> None:
         self.window = window
-        self.buffer: pl.DataFrame | None = None
+        self.ring: MinuteRing | None = None  # trailing enriched-minute frames as a ring (O(new) append)
         self.tick_states: dict[str, TickState] = {}
         self.engine: IncrementalEngine | None = None
         self.stateful_engines: dict[str, StatefulEngine] = {}  # technical/candlestick on the per-symbol fold path
@@ -291,6 +324,12 @@ class StreamShardState:
         self.gather_emit_ms = 0.0  # the cross-sectional UNIVERSE GATHER (market_context) — O(universe) at-T
         self.other_emit_ms = 0.0  # the remaining non-reduction groups' at-T compute_latest (calendar/sector/...)
         self.write_ms = 0.0
+
+    @property
+    def buffer(self) -> pl.DataFrame | None:
+        """The materialized trailing-window frame (the ring's per-minute slots concatenated), or None
+        before the first minute — the same frame the old ``state.buffer`` field held."""
+        return None if self.ring is None else self.ring.materialize()
 
 
 def _enriched_minute_frame(enriched: list[dict]) -> pl.DataFrame:
@@ -337,11 +376,12 @@ def process_stream_minute(
     trades_by_symbol, quotes_by_symbol = _bucket_ticks_by_symbol_minute(trades, quotes, minute_epoch)
     enriched = enrich_bars_with_ticks(bars, trades_by_symbol, quotes_by_symbol, state.tick_states)
     new_frame = _enriched_minute_frame(enriched)
-    frame = new_frame if state.buffer is None else pl.concat([state.buffer, new_frame])
-    frame = frame.unique(subset=["symbol", "minute"], keep="last")
-    recent = sorted(frame["minute"].unique())[-state.window :]
-    frame = frame.filter(pl.col("minute").is_in(recent))
-    state.buffer = frame
+    # Append this enriched minute into the trailing ring (O(new), not an O(full-buffer) concat+unique+filter
+    # rescan). The materialized frame is the SAME (symbol, minute) row set the old path produced.
+    if state.ring is None:
+        state.ring = MinuteRing(maxlen=state.window)
+    state.ring.push(new_frame)
+    frame = state.ring.materialize()
     state.tick_agg_ms = (time.perf_counter() - tick_start) * 1000.0
 
     latest = frame["minute"].max()
@@ -382,7 +422,12 @@ def process_stream_minute(
         state.engine.seed(frame)  # replays the buffer -> establishes symbols + running sums + stateful state
     else:
         assert state.engine.state is not None
-        state.engine.state.update(int(latest.timestamp()), state.engine._matrix_at(frame, latest, slice_derive=True))
+        # The fold's slice-derive reads only the last DERIVE_SLICE minutes — hand it just those slots from
+        # the ring (concat of a few frames) instead of the whole buffer. _matrix_at's own time-based filter
+        # (minute > latest - DERIVE_SLICE) makes this byte-identical: the last DERIVE_SLICE+1 present-minute
+        # slots always cover that window, and any extra older slot is dropped by the same filter.
+        fold_slice = state.ring.last_minutes(IncrementalEngine.DERIVE_SLICE + 1)
+        state.engine.state.update(int(latest.timestamp()), state.engine._matrix_at(fold_slice, latest, slice_derive=True))
         state.engine.state.trim()
     state.fold_ms = (time.perf_counter() - fold_start) * 1000.0
 
@@ -391,7 +436,7 @@ def process_stream_minute(
     outputs: list[tuple[str, str, pl.DataFrame]] = []
     engine = state.engine
     assert engine.state is not None
-    latest_frame = frame.filter(pl.col("minute") == latest)
+    latest_frame = state.ring.last_minutes(1)  # the ring's newest slot == frame.filter(minute == latest)
     reduction_emit_start = time.perf_counter()
     if _USE_RUST_ASSEMBLE:
         # UNIFIED single-pass emit: assemble EVERY reduction group's features in ONE shared wide-frame pass
@@ -496,7 +541,17 @@ def stream_worker_main(  # pragma: no cover (process entry)
             if bench_log is not None:
                 print(f"[stream-worker {shard_id}] exiting after {processed} minutes", file=sys.stderr, flush=True)
             return
-        bars, trades, quotes = batch
+        # FP_IPC_MSGPACK: the reader sent this shard's slice as a single msgpack bytes blob; decode it HERE,
+        # in parallel across the 32 worker processes, instead of the reader pickling 32 dict-lists serially.
+        # Measured apart (ipc_decode_ms) — it is the worker-side half of the transit, and it is NOT
+        # feature compute, so it is excluded from the per-minute "ms" the same way the write is.
+        ipc_decode_ms = 0.0
+        if isinstance(batch, (bytes, bytearray)):
+            decode_start = time.perf_counter()
+            bars, trades, quotes = msgpack.unpackb(batch)
+            ipc_decode_ms = (time.perf_counter() - decode_start) * 1000.0
+        else:
+            bars, trades, quotes = batch
         processed += 1
         compute_start = time.perf_counter()
         process_stream_minute(state, bars, trades, quotes, root, mode, day, snapshots, shard=shard_id)
@@ -504,6 +559,7 @@ def stream_worker_main(  # pragma: no cover (process entry)
         if bench_log is not None:
             record = {
                 "shard": shard_id, "minute": bars[0]["t"], "ms": compute_ms, "write_ms": state.write_ms,
+                "ipc_decode_ms": ipc_decode_ms,
                 "tick_agg_ms": state.tick_agg_ms, "fold_ms": state.fold_ms, "emit_ms": state.emit_ms,
                 "reduction_emit_ms": state.reduction_emit_ms, "stateful_emit_ms": state.stateful_emit_ms,
                 "gather_emit_ms": state.gather_emit_ms, "other_emit_ms": state.other_emit_ms,
@@ -560,13 +616,27 @@ def run_streaming_sim(  # pragma: no cover (live multiprocess loop)
 
     stream = build_stream()
     pending: dict = {"minute": None, "bars": [], "trades": [], "quotes": [], "done": 0}
+    reader_bench = _reader_bench_path(root)  # records the reader-side route+IPC-put transit per minute
 
     def dispatch() -> None:
-        for shard_id, shard_batch in enumerate(
-            route_stream_minute(pending["bars"], pending["trades"], pending["quotes"], n_shards)
-        ):
-            if shard_batch[0]:
+        # The reader-side half of the reader->shard transit: partition the minute by shard, then hand each
+        # shard its slice across mp.Queue. OFF: queue.put pickles the dict-list (serial, in the reader).
+        # ON (FP_IPC_MSGPACK): the reader msgpack-PACKS each slice to bytes (faster than pickle, and the
+        # subsequent queue.put only memcpy-pickles the bytes), and the WORKER unpacks in parallel.
+        route_start = time.perf_counter()
+        routed = route_stream_minute(pending["bars"], pending["trades"], pending["quotes"], n_shards)
+        for shard_id, shard_batch in enumerate(routed):
+            if not shard_batch[0]:
+                continue
+            if _USE_IPC_MSGPACK:
+                queues[shard_id].put(msgpack.packb(shard_batch))
+            else:
                 queues[shard_id].put(shard_batch)
+        if reader_bench is not None:
+            transport = "msgpack-bytes" if _USE_IPC_MSGPACK else "pickle-dicts"
+            with reader_bench.open("a") as handle:
+                handle.write(json.dumps({"minute": pending["minute"].isoformat(), "transport": transport,
+                                         "route_put_ms": (time.perf_counter() - route_start) * 1000.0}) + "\n")
 
     async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
         minute = bar.timestamp.replace(second=0, microsecond=0)
@@ -629,7 +699,11 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     def critical(metric: str) -> list[float]:
         return [max(rec[metric] for rec in by_minute[minute]) for minute in minutes_sorted][warmup:]
 
+    def critical_opt(metric: str) -> list[float]:
+        return [max(rec.get(metric, 0.0) for rec in by_minute[minute]) for minute in minutes_sorted][warmup:]
+
     compute = critical("ms") or [0.0]
+    ipc_decode = critical_opt("ipc_decode_ms") or [0.0]
     tick_agg = critical("tick_agg_ms") or [0.0]
     fold = critical("fold_ms") or [0.0]
     emit = critical("emit_ms") or [0.0]
@@ -661,6 +735,14 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     print(line("fast-path total", fast_path))
     print("write (deferred, AFTER the bet — NOT on the critical path):")
     print(line("write", writes))
+    print("reader->shard TRANSIT (NOT feature compute — the IPC-routing cost this branch targets):")
+    reader_file = bench / "reader.jsonl"
+    if reader_file.exists():
+        reader_records = [json.loads(text) for text in reader_file.read_text().splitlines()]
+        route_put = [rec["route_put_ms"] for rec in reader_records][warmup:] or [0.0]
+        transport = reader_records[-1]["transport"] if reader_records else "?"
+        print(line(f"reader route+put [{transport}]", route_put))
+    print(line("worker msgpack-decode", ipc_decode))
     p99_full = _percentile(compute, 99)
     p99_fast = _percentile(fast_path, 99)
     print(f"\n=> FULL-flow p99 per-minute compute  = {p99_full:7.0f}ms  (bar: < 100ms)  "

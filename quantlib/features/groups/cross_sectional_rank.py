@@ -59,6 +59,10 @@ class CrossSectionalRankGroup(FeatureGroup):
         )
         return specs
 
+    def reduce_buffer_minutes(self) -> int | None:
+        """The longest trailing return window is the deepest history a latest-minute rank reads."""
+        return max(RETURN_WINDOWS)
+
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close", "volume"])
         # PARITY PIN (gap #3): if a pinned universe snapshot is provided, rank ONLY within that fixed

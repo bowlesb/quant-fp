@@ -199,6 +199,17 @@ class ReductionGroup(FeatureGroup):
                 return list(spec.columns)
         raise KeyError(f"{self.name}: reduce_input '{self.reduce_input}' not in inputs")
 
+    def reduce_buffer_minutes(self) -> int | None:
+        """Derived from this group's DECLARED reduced/regression windows — the longest window is the
+        deepest trailing context its latest-minute reduction reads. ``None`` only if it declares no
+        windows (then the caller keeps the full buffer)."""
+        windows: list[int] = []
+        for _, _, group_windows in self.reduced().values():
+            windows.extend(group_windows)
+        for _, _, _, group_windows in self.regressions().values():
+            windows.extend(group_windows)
+        return max(windows) if windows else None
+
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         """Generated BACKFILL form: rolling_*_by over every minute (source of truth)."""
         frame = self.prepare(ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"]))
