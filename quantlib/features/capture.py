@@ -25,6 +25,7 @@ from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 from quantlib.features.incremental import IncrementalEngine
+from quantlib.features.tick_capture import TICK_COLUMNS
 
 BARS_SCHEMA = {
     "symbol": pl.String,
@@ -35,6 +36,13 @@ BARS_SCHEMA = {
     "low": pl.Float64,
     "volume": pl.Float64,
 }
+
+# When the reader has enriched a minute's bars with aggregated tick columns (n_trades, signed_volume,
+# mean_spread_bps, ...), those columns must reach the ``minute_agg`` frame so the trade_flow / quote_spread
+# / liquidity groups self-select (``runnable``) and serve them live — exactly as the backfill loader's
+# ``minute_agg`` carries them (parity). They are Float64 like the loader's columns; symbols with no ticks
+# this minute get null (honest "not collected"), not a fabricated zero.
+TICK_SCHEMA = {column: pl.Float64 for column in TICK_COLUMNS}
 
 # The trailing buffer MUST exceed the largest declared feature window plus the deepest intra-feature
 # lag. Below that, the buffer's leading-edge minutes lack the lookback/lag context the settled
@@ -230,6 +238,29 @@ class CaptureState:
         return None if self.ring is None else self.ring.materialize()
 
 
+def _bars_to_frame(bars: list[dict]) -> pl.DataFrame:
+    """Build the ``minute_agg`` frame for a minute's bars (the OHLCV schema, plus the aggregated tick
+    columns when the reader enriched them). When ANY bar carries the tick columns, every row gets them
+    (null where a symbol had no ticks this minute) so the schema is stable across minutes (the ring
+    concats slots) and the trade_flow / quote_spread / liquidity groups self-select. A pure-bars minute
+    (no tick subscription) keeps the 7-column OHLCV schema, unchanged."""
+    has_ticks = any(column in bar for bar in bars for column in TICK_COLUMNS)
+    if has_ticks:
+        rows = [
+            {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
+             "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"]),
+             **{column: bar[column] if column in bar else None for column in TICK_COLUMNS}}
+            for bar in bars
+        ]
+        return pl.DataFrame(rows, schema={**BARS_SCHEMA, **TICK_SCHEMA})
+    rows = [
+        {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
+         "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"])}
+        for bar in bars
+    ]
+    return pl.DataFrame(rows, schema=BARS_SCHEMA)
+
+
 def process_bars(
     state: CaptureState,
     bars: list[dict],
@@ -269,14 +300,7 @@ def process_bars(
     # Append THIS minute's rows into the trailing ring (O(new), not an O(full-buffer) rescan). The ring
     # keeps one frame per minute, overwrites a re-delivered minute (keep-last), and evicts past its depth,
     # so the materialized frame is the SAME (symbol, minute) row set the old concat+unique+filter produced.
-    new_frame = pl.DataFrame(
-        [
-            {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
-             "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"])}
-            for bar in bars
-        ],
-        schema=BARS_SCHEMA,
-    )
+    new_frame = _bars_to_frame(bars)
     if state.ring is None:
         depth = buffer_minutes if buffer_minutes is not None else window
         state.ring = MinuteRing(maxlen=depth, columns=project_columns)
