@@ -95,6 +95,26 @@ services:
       timescaledb:
         condition: service_healthy
 
+  edgar:
+    # Phase 1 EDGAR alt-data: poll the SEC current-filings Atom feed (~5s), dedupe by accession,
+    # map CIK->ticker, and UPSERT into `filings` capturing available_at = the dissemination instant
+    # (the look-ahead-safe point-in-time field — see docs/EDGAR_INGESTION.md). COLLECTION ONLY.
+    build:
+      context: .
+      dockerfile: services/edgar/Dockerfile
+    <<: *common
+    environment:
+      EDGAR_MODE: "stream"
+      EDGAR_POLL_SECONDS: "5"
+      EDGAR_SEC_MAX_RPS: "4.0"
+      # SEC blocks requests without a real User-Agent; override in .env with a contact address.
+      SEC_USER_AGENT: "${SEC_USER_AGENT:-quant-fp research ben.bowles@gmail.com}"
+      # Empty/"*" collects ALL form types (breadth-first); set a comma list to restrict.
+      EDGAR_FORMS: "*"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   trainer:
     build:
       context: .
