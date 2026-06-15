@@ -82,6 +82,33 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     join) ~tied with the STATEFUL EMIT (~43ms p99); the rest phase is no longer a top lever. 519 full-flow is
     NOT yet under 100ms (~135ms p99) — the floor is the two remaining emit tiers, both polars frame/expr
     bound, not arithmetic.
+  * STATEFUL-EMIT CONSOLIDATE (quantlib.features.stateful.emit_stateful + technical's coded reduction). The
+    four stateful groups built their own per-symbol state frame + assemble per minute; emit_stateful folds
+    every engine's state off the ONE shared coded buffer and runs ALL groups' assemble in one pass, sliced per
+    group (byte-identical, tests/test_fp_stateful_emit.py). CRUCIAL FINDING (isolated 625-sym micro-profile):
+    the consolidated assemble pass was ~0ms — UNLIKE the cheap tier, the stateful-emit cost was NOT the
+    per-group assemble. It was technical's per-minute RSI/SMA reduction RECOMPUTE (its own prep sort + a
+    lagged() self-join + two kernel calls each re-sorting/re-marshaling the whole buffer, ~68ms) plus a
+    redundant whole-buffer sort to read technical's at-T row (~25ms, EMA-only groups skipped the shared coded
+    buffer). Both now reuse the ONE coded buffer: technical.reduction_columns_from_coded derives gain/loss from
+    the time-based prior close (gappy-safe) + ONE windowed_sums pass (68ms -> 5ms), and _state_row reads the
+    at-T row off the already-sorted coded frame for ALL stateful groups (25ms -> ~0ms). Isolated stateful tier
+    ~75ms -> ~35ms p50; byte-identical to the certified reduction_columns on dense AND gappy streams.
+  * CLEAN UNCONTENDED MEASUREMENT (10k, flood, 5 trades+5 quotes/sym/min, this machine, only-heavy-job,
+    median of 3 runs, steady-state post-warmup). At 32 shards (~312/shard — more, smaller shards win, the box
+    is 32 cores so this minimizes per-shard work without oversubscribing): FULL-flow p50 ~125ms / p99 ~177ms;
+    decomposition tick-agg ~21ms / fold ~12ms / reduction-emit ~43ms / STATEFUL-emit ~44ms / rest ~18ms /
+    gather ~9ms (p50). The FAST PATH (tick-agg+fold+reduction-emit, 305 reduction feats) clears the bar:
+    ~95-98ms p99 (PASS). At 16 shards (~625/shard) the same flow is ~160ms p50 / ~230ms p99 — fatter shards
+    lose for this light-per-symbol flow. VERDICT: the full 519-feature flow does NOT clear <100ms at 10k even
+    uncontended — the realistic floor is ~120-125ms p50, set by the SUM of the per-minute phases (they run
+    sequentially per shard), with NO single dominant tier anymore: reduction-emit (~43ms) and stateful-emit
+    (~44ms) are tied, both POLARS per-group assemble-eval + wide-frame ingest/join bound (the canonical/kernel
+    arithmetic is ~1-3ms — proven repeatedly), on top of an irreducible tick-agg (~21ms, the parity-true tick
+    aggregation + buffer concat/unique) + fold (~12ms). Getting all 519 under 100ms would require collapsing
+    the two emit tiers' per-group polars passes into a single numpy-native wide emit (bypassing the per-group
+    assemble() expression eval), or moving technical's reductions fully onto the incremental running-sum tier
+    — both larger changes than this scheduling consolidation. The fast-path 305-feature flow IS under 100ms.
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
