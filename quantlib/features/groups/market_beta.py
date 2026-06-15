@@ -40,6 +40,9 @@ from quantlib.features.registry import register
 WINDOWS: tuple[int, ...] = (10, 15, 30, 45, 60, 90, 120)
 MARKET_TICKER = "SPY"
 BETA_TOL = 1e-4
+# |beta| beyond the declared valid range is a degenerate near-zero-variance OLS fit (thin/after-hours
+# windows where SPY barely moves: cov/tiny-denom explodes). Null it rather than ship a non-physical beta.
+BETA_MAX = 15.0
 
 
 @register
@@ -96,7 +99,8 @@ class MarketBetaGroup(ReductionGroup):
     def assemble(self) -> dict[str, pl.Expr]:
         feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
-            feats[f"market_beta_{w}m"] = slope_("mkt", w)
+            beta = slope_("mkt", w)
+            feats[f"market_beta_{w}m"] = pl.when(beta.abs() <= BETA_MAX).then(beta).otherwise(None)
             feats[f"market_corr_{w}m"] = corr_("mkt", w)
             feats[f"idio_vol_{w}m"] = std_("_ret", w) * (1.0 - r2_("mkt", w)).clip(0.0, 1.0).sqrt()
         return feats
