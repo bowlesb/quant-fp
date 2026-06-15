@@ -19,8 +19,14 @@ from dataclasses import dataclass
 _ETF_NAME_RE = re.compile(
     r"\b(ETF|ETN|ProShares|Direxion|iShares|SPDR|Invesco|VanEck|Global X|WisdomTree|"
     r"GraniteShares|Roundhill|iPath|Grayscale|Wise Origin|"
-    r"Ultra(Pro|Short)?|[1-3]X|Leveraged|Inverse|Bull|Bear|VIX|Index Fund|"
+    r"UltraPro|Ultra[- ]?Short|[1-3]X|Leveraged|Inverse|VIX|Index Fund|Income Fund|"
     r"Exchange[- ]Traded)\b",
+    re.IGNORECASE,
+)
+# Leveraged/inverse ETP "Bull"/"Bear" only when paired with a daily-leverage multiplier (e.g.
+# "Bull 3X", "Bear 1X"), so operating companies like "Build-A-Bear Workshop" are NOT screened out.
+_BULL_BEAR_LEVERAGE_RE = re.compile(
+    r"\b(Bull|Bear)\b[^.]*?\b[1-3]X\b|\b[1-3]X\b[^.]*?\b(Bull|Bear)\b",
     re.IGNORECASE,
 )
 # Commodity/crypto pools and physical trusts (USO/UNG/FBTC/PSLV-style) carry none of the tokens
@@ -36,7 +42,9 @@ _COMMODITY_POOL_RE = re.compile(
 def is_etf_like(name: str | None) -> bool:
     """True if the asset name looks like an ETF/ETN/leveraged/commodity-pool product."""
     return bool(name) and bool(
-        _ETF_NAME_RE.search(name) or _COMMODITY_POOL_RE.search(name)
+        _ETF_NAME_RE.search(name)
+        or _COMMODITY_POOL_RE.search(name)
+        or _BULL_BEAR_LEVERAGE_RE.search(name)
     )
 
 
