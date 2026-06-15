@@ -44,6 +44,11 @@ DAILY_BROADCAST_GROUPS: tuple[str, ...] = (
     "prior_day",
 )
 
+# Merged per-(symbol, date) daily frame, cached on the daily-snapshot identity. The daily snapshot is
+# fixed for the whole trading day, so merging the three groups' daily frames is done ONCE per session,
+# not per minute — the per-minute cost is then a single broadcast-join of the latest minute against it.
+_MERGED_DAILY_CACHE: tuple[int, frozenset[str], pl.DataFrame, dict[str, list[str]]] | None = None
+
 
 def emit_point_in_time(
     groups: list[FeatureGroup], ctx: BatchContext
@@ -94,40 +99,60 @@ def emit_daily_broadcast(
     are then applied on that single joined frame. The result is sliced back per group, byte-identical to
     each group's ``compute_latest``."""
     by_name = {group.name: group for group in groups}
+    merged, broadcast_names = _merged_daily(by_name, ctx)
+
     minute_agg = ctx.frame("minute_agg")
     latest = minute_agg["minute"].max()
     minutes = minute_agg.filter(pl.col("minute") == latest).select(["symbol", "minute", "close"]).with_columns(
         pl.col("minute").dt.date().alias("date")
     )
-
-    merged: pl.DataFrame | None = None
-    broadcast_names: dict[str, list[str]] = {}
-    prior_group: PriorDayGroup | None = None
-
-    returns_group = by_name.get("multi_day_returns")
-    if isinstance(returns_group, MultiDayReturnGroup):
-        daily, names = returns_group._daily(ctx)
-        broadcast_names["multi_day_returns"] = names
-        merged = daily if merged is None else merged.join(daily, on=["symbol", "date"], how="full", coalesce=True)
-    vwap_group = by_name.get("multi_day_vwap")
-    if isinstance(vwap_group, MultiDayVwapGroup):
-        daily, names = vwap_group._daily(ctx)
-        broadcast_names["multi_day_vwap"] = names
-        merged = daily if merged is None else merged.join(daily, on=["symbol", "date"], how="full", coalesce=True)
-    pd_group = by_name.get("prior_day")
-    if isinstance(pd_group, PriorDayGroup):
-        prior_group = pd_group
-        levels = pd_group._daily_levels(ctx)
-        merged = levels if merged is None else merged.join(levels, on=["symbol", "date"], how="full", coalesce=True)
-
-    assert merged is not None
     joined = minutes.join(merged, on=["symbol", "date"], how="left")
 
     outputs: dict[str, pl.DataFrame] = {}
     for name in ("multi_day_returns", "multi_day_vwap"):
         if name in broadcast_names:
             outputs[name] = joined.select(["symbol", "minute", *broadcast_names[name]])
-    if prior_group is not None:
+    if "prior_day" in by_name:
+        prior_group = by_name["prior_day"]
+        assert isinstance(prior_group, PriorDayGroup)
         names = prior_group.feature_names
         outputs["prior_day"] = joined.with_columns(prior_group.exprs()).select(["symbol", "minute", *names])
     return outputs
+
+
+def _merged_daily(
+    by_name: dict[str, FeatureGroup], ctx: BatchContext
+) -> tuple[pl.DataFrame, dict[str, list[str]]]:
+    """The three daily-broadcast groups' per-(symbol, date) daily frames merged into ONE frame on
+    (symbol, date), cached on the daily-snapshot identity (fixed all day). All three derive from the
+    SAME ``daily`` source frame, so they carry identical (symbol, date) keys — a left join from the
+    first frame is therefore complete (and far cheaper than a full outer merge over the whole daily
+    history every minute). Returns the merged frame and, for the pure-broadcast groups, their column
+    names; prior_day's columns are the raw level columns its ``exprs()`` consumes (applied per minute)."""
+    global _MERGED_DAILY_CACHE
+    source = ctx.frame("daily")
+    present = frozenset(name for name in DAILY_BROADCAST_GROUPS if name in by_name)
+    cached = _MERGED_DAILY_CACHE
+    if cached is not None and cached[0] == id(source) and cached[1] == present:
+        return cached[2], cached[3]
+
+    merged: pl.DataFrame | None = None
+    broadcast_names: dict[str, list[str]] = {}
+    returns_group = by_name.get("multi_day_returns")
+    if isinstance(returns_group, MultiDayReturnGroup):
+        daily, names = returns_group._daily(ctx)
+        broadcast_names["multi_day_returns"] = names
+        merged = daily if merged is None else merged.join(daily, on=["symbol", "date"], how="left")
+    vwap_group = by_name.get("multi_day_vwap")
+    if isinstance(vwap_group, MultiDayVwapGroup):
+        daily, names = vwap_group._daily(ctx)
+        broadcast_names["multi_day_vwap"] = names
+        merged = daily if merged is None else merged.join(daily, on=["symbol", "date"], how="left")
+    pd_group = by_name.get("prior_day")
+    if isinstance(pd_group, PriorDayGroup):
+        levels = pd_group._daily_levels(ctx)
+        merged = levels if merged is None else merged.join(levels, on=["symbol", "date"], how="left")
+
+    assert merged is not None
+    _MERGED_DAILY_CACHE = (id(source), present, merged, broadcast_names)
+    return merged, broadcast_names
