@@ -95,6 +95,12 @@ from quantlib.features.bench_stream import (
 )
 from quantlib.features.capture import BARS_SCHEMA, DEFAULT_BUFFER_MINUTES
 from quantlib.features.compare import runnable
+from quantlib.features.consolidated import (
+    DAILY_BROADCAST_GROUPS,
+    POINT_IN_TIME_GROUPS,
+    emit_daily_broadcast,
+    emit_point_in_time,
+)
 from quantlib.features.declarative import _USE_RUST_ASSEMBLE, ReductionGroup, emit_numpy, emit_rust
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _shard_snapshots, build_stream
@@ -241,10 +247,21 @@ def process_stream_minute(
     fast_path_only = bool(os.environ.get("FP_SIM_FAST_PATH_ONLY"))
     stateful_groups = [] if fast_path_only else [g for g in non_reduction if g.name in STATEFUL_GROUPS]
     gather_groups = [] if fast_path_only else [g for g in non_reduction if g.name in GATHER_GROUPS]
+    # CONSOLIDATED families: the point-in-time groups (one shared minute-frame pass) and the
+    # daily-broadcast groups (one broadcast-join), pulled off the per-group compute_latest loop.
+    pit_groups = [] if fast_path_only else [g for g in non_reduction if g.name in POINT_IN_TIME_GROUPS]
+    daily_groups = [] if fast_path_only else [g for g in non_reduction if g.name in DAILY_BROADCAST_GROUPS]
+    consolidated_names = set(POINT_IN_TIME_GROUPS) | set(DAILY_BROADCAST_GROUPS)
     other_groups = (
         []
         if fast_path_only
-        else [g for g in non_reduction if g.name not in STATEFUL_GROUPS and g.name not in GATHER_GROUPS]
+        else [
+            g
+            for g in non_reduction
+            if g.name not in STATEFUL_GROUPS
+            and g.name not in GATHER_GROUPS
+            and g.name not in consolidated_names
+        ]
     )
 
     # 2) FOLD: seed once, then fold the new minute's value matrix into the running sums (incremental path).
@@ -300,9 +317,18 @@ def process_stream_minute(
         out = group.compute_latest(ctx)
         outputs.append((group.name, group.version, out))
     state.gather_emit_ms = (time.perf_counter() - gather_emit_start) * 1000.0
-    # The remaining non-reduction groups (calendar/sector/tick-runlength/...) at-T — NOT the incremental fast
-    # path; timed apart so the fast-path cost is visible against the full-flow cost.
+    # The remaining non-reduction groups (tick-runlength/microstructure-burst/...) at-T — NOT the
+    # incremental fast path; timed apart so the fast-path cost is visible against the full-flow cost.
+    # The point-in-time + daily-broadcast families are consolidated into one shared pass each (instead
+    # of one frame-build per group), since their per-group polars frame-build was the residual "rest" cost.
     other_emit_start = time.perf_counter()
+    consolidated_versions = {g.name: g.version for g in (*pit_groups, *daily_groups)}
+    if pit_groups:
+        for name, out in emit_point_in_time(pit_groups, ctx).items():
+            outputs.append((name, consolidated_versions[name], out))
+    if daily_groups:
+        for name, out in emit_daily_broadcast(daily_groups, ctx).items():
+            outputs.append((name, consolidated_versions[name], out))
     trades_frame = _trades_frame(trades_by_symbol, minute_dt)
     for group in other_groups:
         group_frames = dict(frames)

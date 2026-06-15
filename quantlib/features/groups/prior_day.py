@@ -89,11 +89,9 @@ class PriorDayGroup(FeatureGroup):
         self._daily_cache = (id(source), result)
         return result
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        minutes = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).with_columns(
-            pl.col("minute").dt.date().alias("date")
-        )
-        joined = minutes.join(self._daily_levels(ctx), on=["symbol", "date"], how="left")
+    def exprs(self) -> list[pl.Expr]:
+        """The close-relative feature expressions over the joined prior-day level columns (post daily
+        broadcast join). Shared by compute() and the consolidated daily-broadcast emit."""
         exprs = [
             pl.col("_gap_open").cast(pl.Float64).alias("gap_open"),
             (pl.col("close") / pl.col("_prev_high") - 1.0).cast(pl.Float64).alias("dist_from_prior_high"),
@@ -103,8 +101,15 @@ class PriorDayGroup(FeatureGroup):
         ]
         for pivot_name in PIVOTS:
             exprs.append((pl.col("close") / pl.col(f"_{pivot_name}") - 1.0).cast(pl.Float64).alias(f"dist_from_pivot_{pivot_name}"))
+        return exprs
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        minutes = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).with_columns(
+            pl.col("minute").dt.date().alias("date")
+        )
+        joined = minutes.join(self._daily_levels(ctx), on=["symbol", "date"], how="left")
         names = [spec.name for spec in self.declare()]
-        return joined.with_columns(exprs).select(["symbol", "minute", *names])
+        return joined.with_columns(self.exprs()).select(["symbol", "minute", *names])
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
         """Same code as compute(), run on a minute_agg restricted to the latest minute — the daily

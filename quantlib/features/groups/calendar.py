@@ -63,19 +63,22 @@ class CalendarGroup(FeatureGroup):
             ),
         ]
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+    def exprs(self) -> list[pl.Expr]:
+        """The feature column expressions, shared by compute() and the consolidated point-in-time
+        emit so both build byte-identical columns from the same (symbol, minute) frame."""
         et = pl.col("minute").dt.convert_time_zone("America/New_York")
         # cast to Int32 BEFORE *60 — dt.hour() is Int8 and 10*60 overflows it (600 -> 88).
         minute_of_day = et.dt.hour().cast(pl.Int32) * 60 + et.dt.minute().cast(pl.Int32)
-        return ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(
-            [
-                minute_of_day.cast(pl.Float64).alias("minute_of_day_et"),
-                et.dt.weekday().cast(pl.Float64).alias("day_of_week"),
-                (minute_of_day - OPEN_MINUTE).cast(pl.Float64).alias("minutes_since_open"),
-                ((minute_of_day >= OPEN_MINUTE) & (minute_of_day < CLOSE_MINUTE)).cast(pl.Float64).alias(
-                    "is_regular_session"
-                ),
-            ]
-        ).select(
+        return [
+            minute_of_day.cast(pl.Float64).alias("minute_of_day_et"),
+            et.dt.weekday().cast(pl.Float64).alias("day_of_week"),
+            (minute_of_day - OPEN_MINUTE).cast(pl.Float64).alias("minutes_since_open"),
+            ((minute_of_day >= OPEN_MINUTE) & (minute_of_day < CLOSE_MINUTE)).cast(pl.Float64).alias(
+                "is_regular_session"
+            ),
+        ]
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        return ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(self.exprs()).select(
             ["symbol", "minute", "minute_of_day_et", "day_of_week", "minutes_since_open", "is_regular_session"]
         )

@@ -1,0 +1,133 @@
+"""Consolidated per-minute emit for the batch "rest" groups (a SCHEDULING change, not a math change).
+
+Each batch group's ``compute_latest`` builds its OWN polars frame per minute (filter to the latest
+minute, select the key/value columns, run its expressions) — for ~30 groups that per-group frame-build
++ join dominates the full-flow latency, not the arithmetic. These two emitters pay that overhead ONCE
+per minute for a family of groups that share an index, then slice the wide result back into the
+per-group output frames. The math is byte-identical by construction: each group exposes its column
+expressions (``exprs()``) and the consolidated pass applies the SAME expressions on a shared frame.
+
+  * POINT-IN-TIME groups (calendar / calendar_events / sector / asset_flags / round_levels) are pure
+    functions of the minute (or a static per-symbol reference attribute). They share the latest
+    minute's ``(symbol, minute, close)`` index plus a single ``reference`` join, computed once.
+  * DAILY-BROADCAST groups (multi_day_returns / multi_day_vwap / prior_day) each read a per-symbol
+    daily-cache value (fixed intraday) and broadcast it across the minute. The three per-(symbol, date)
+    daily frames are merged and the latest minute is broadcast-JOINED to them ONCE, not three times.
+
+Both emitters return ``{group_name: frame}`` keyed by (symbol, minute) — the exact shape the per-group
+``compute_latest`` returns, so the caller writes them identically.
+"""
+from __future__ import annotations
+
+import polars as pl
+
+from quantlib.features.base import BatchContext, FeatureGroup
+from quantlib.features.groups.asset_flags import AssetFlagsGroup
+from quantlib.features.groups.calendar import CalendarGroup
+from quantlib.features.groups.calendar_events import CalendarEventsGroup
+from quantlib.features.groups.multi_day import MultiDayReturnGroup
+from quantlib.features.groups.multi_day_vwap import MultiDayVwapGroup
+from quantlib.features.groups.prior_day import PriorDayGroup
+from quantlib.features.groups.round_levels import RoundLevelsGroup
+from quantlib.features.groups.sector import SectorOneHotGroup
+
+POINT_IN_TIME_GROUPS: tuple[str, ...] = (
+    "calendar",
+    "calendar_events",
+    "sector",
+    "asset_flags",
+    "round_levels",
+)
+DAILY_BROADCAST_GROUPS: tuple[str, ...] = (
+    "multi_day_returns",
+    "multi_day_vwap",
+    "prior_day",
+)
+
+
+def emit_point_in_time(
+    groups: list[FeatureGroup], ctx: BatchContext
+) -> dict[str, pl.DataFrame]:
+    """Compute the point-in-time groups in ONE shared pass over the latest minute's (symbol, minute,
+    close) index (+ a single reference join), then slice the wide frame into per-group output frames.
+
+    ``groups`` is the subset of ``POINT_IN_TIME_GROUPS`` that are runnable this minute (inputs present);
+    any group not present is simply not emitted. The shared frame carries every column the groups'
+    expressions read: ``close`` (round_levels), the normalized ``_norm`` sector column (sector), and the
+    raw asset flag columns (asset_flags). calendar / calendar_events read only ``minute``."""
+    by_name = {group.name: group for group in groups}
+    minute_agg = ctx.frame("minute_agg")
+    latest = minute_agg["minute"].max()
+    shared = minute_agg.filter(pl.col("minute") == latest).select(["symbol", "minute", "close"])
+
+    sector_group = by_name.get("sector")
+    if isinstance(sector_group, SectorOneHotGroup):
+        shared = shared.join(sector_group.reference_norm(ctx), on="symbol", how="left")
+    flags_group = by_name.get("asset_flags")
+    if isinstance(flags_group, AssetFlagsGroup):
+        shared = shared.join(flags_group.reference_flags(ctx), on="symbol", how="left")
+
+    all_exprs: list[pl.Expr] = []
+    for group in groups:
+        assert isinstance(
+            group, (CalendarGroup, CalendarEventsGroup, SectorOneHotGroup, AssetFlagsGroup, RoundLevelsGroup)
+        )
+        all_exprs.extend(group.exprs())
+    wide = shared.with_columns(all_exprs)
+
+    outputs: dict[str, pl.DataFrame] = {}
+    for group in groups:
+        names = group.feature_names
+        outputs[group.name] = wide.select(["symbol", "minute", *names])
+    return outputs
+
+
+def emit_daily_broadcast(
+    groups: list[FeatureGroup], ctx: BatchContext
+) -> dict[str, pl.DataFrame]:
+    """Compute the daily-broadcast groups with ONE broadcast-join per minute instead of three.
+
+    Each group's per-(symbol, date) daily frame is fixed intraday (cached on the daily-snapshot
+    identity), so the only per-minute work is the broadcast of those daily values onto the latest
+    minute's rows. The three daily frames are merged on (symbol, date) and the latest minute is joined
+    to the merged frame ONCE; prior_day's close-relative distances (which depend on the minute's close)
+    are then applied on that single joined frame. The result is sliced back per group, byte-identical to
+    each group's ``compute_latest``."""
+    by_name = {group.name: group for group in groups}
+    minute_agg = ctx.frame("minute_agg")
+    latest = minute_agg["minute"].max()
+    minutes = minute_agg.filter(pl.col("minute") == latest).select(["symbol", "minute", "close"]).with_columns(
+        pl.col("minute").dt.date().alias("date")
+    )
+
+    merged: pl.DataFrame | None = None
+    broadcast_names: dict[str, list[str]] = {}
+    prior_group: PriorDayGroup | None = None
+
+    returns_group = by_name.get("multi_day_returns")
+    if isinstance(returns_group, MultiDayReturnGroup):
+        daily, names = returns_group._daily(ctx)
+        broadcast_names["multi_day_returns"] = names
+        merged = daily if merged is None else merged.join(daily, on=["symbol", "date"], how="full", coalesce=True)
+    vwap_group = by_name.get("multi_day_vwap")
+    if isinstance(vwap_group, MultiDayVwapGroup):
+        daily, names = vwap_group._daily(ctx)
+        broadcast_names["multi_day_vwap"] = names
+        merged = daily if merged is None else merged.join(daily, on=["symbol", "date"], how="full", coalesce=True)
+    pd_group = by_name.get("prior_day")
+    if isinstance(pd_group, PriorDayGroup):
+        prior_group = pd_group
+        levels = pd_group._daily_levels(ctx)
+        merged = levels if merged is None else merged.join(levels, on=["symbol", "date"], how="full", coalesce=True)
+
+    assert merged is not None
+    joined = minutes.join(merged, on=["symbol", "date"], how="left")
+
+    outputs: dict[str, pl.DataFrame] = {}
+    for name in ("multi_day_returns", "multi_day_vwap"):
+        if name in broadcast_names:
+            outputs[name] = joined.select(["symbol", "minute", *broadcast_names[name]])
+    if prior_group is not None:
+        names = prior_group.feature_names
+        outputs["prior_day"] = joined.with_columns(prior_group.exprs()).select(["symbol", "minute", *names])
+    return outputs

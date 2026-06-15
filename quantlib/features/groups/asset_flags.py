@@ -51,11 +51,18 @@ class AssetFlagsGroup(FeatureGroup):
             for feature, _ in FLAGS
         ]
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+    def reference_flags(self, ctx: BatchContext) -> pl.DataFrame:
+        """The per-symbol reference frame restricted to the raw flag columns the expressions read.
+        Shared by compute() and the consolidated point-in-time emit."""
         cols = [column for _, column in FLAGS]
-        reference = ctx.frame("reference").select(["symbol", *cols])
+        return ctx.frame("reference").select(["symbol", *cols])
+
+    def exprs(self) -> list[pl.Expr]:
+        """The flag-cast feature expressions over the joined raw flag columns (post reference join)."""
+        return [pl.col(column).cast(pl.Float64).alias(feature) for feature, column in FLAGS]
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
         minutes = ctx.frame("minute_agg").select(["symbol", "minute"])
-        joined = minutes.join(reference, on="symbol", how="left")
-        exprs = [pl.col(column).cast(pl.Float64).alias(feature) for feature, column in FLAGS]
+        joined = minutes.join(self.reference_flags(ctx), on="symbol", how="left")
         names = [feature for feature, _ in FLAGS]
-        return joined.with_columns(exprs).select(["symbol", "minute", *names])
+        return joined.with_columns(self.exprs()).select(["symbol", "minute", *names])

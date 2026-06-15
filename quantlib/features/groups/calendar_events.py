@@ -46,23 +46,25 @@ class CalendarEventsGroup(FeatureGroup):
                         dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="none", layer="A"),
         ]
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+    def exprs(self) -> list[pl.Expr]:
+        """The feature column expressions, shared by compute() and the consolidated point-in-time emit."""
         et = pl.col("minute").dt.convert_time_zone("America/New_York")
         day = et.dt.day().cast(pl.Int32)
         month = et.dt.month().cast(pl.Int32)
         is_friday = et.dt.weekday() == 5
         is_opex = is_friday & (day >= 15) & (day <= 21)
-        return ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(
-            [
-                (day.cast(pl.Float64) / 31.0).alias("day_of_month_norm"),
-                (((day - 1) // 7) + 1).cast(pl.Float64).alias("week_of_month"),
-                is_opex.cast(pl.Float64).alias("is_opex_day"),
-                (is_opex & month.is_in(QUARTER_END_MONTHS)).cast(pl.Float64).alias("is_triple_witching"),
-                month.is_in(QUARTER_END_MONTHS).cast(pl.Float64).alias("is_quarter_end_month"),
-                (day <= 7).cast(pl.Float64).alias("is_first_week"),
-                (day >= 22).cast(pl.Float64).alias("is_last_week"),
-            ]
-        ).select(
+        return [
+            (day.cast(pl.Float64) / 31.0).alias("day_of_month_norm"),
+            (((day - 1) // 7) + 1).cast(pl.Float64).alias("week_of_month"),
+            is_opex.cast(pl.Float64).alias("is_opex_day"),
+            (is_opex & month.is_in(QUARTER_END_MONTHS)).cast(pl.Float64).alias("is_triple_witching"),
+            month.is_in(QUARTER_END_MONTHS).cast(pl.Float64).alias("is_quarter_end_month"),
+            (day <= 7).cast(pl.Float64).alias("is_first_week"),
+            (day >= 22).cast(pl.Float64).alias("is_last_week"),
+        ]
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        return ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(self.exprs()).select(
             ["symbol", "minute", "day_of_month_norm", "week_of_month", "is_opex_day", "is_triple_witching",
              "is_quarter_end_month", "is_first_week", "is_last_week"]
         )

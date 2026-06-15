@@ -58,12 +58,15 @@ class SectorOneHotGroup(FeatureGroup):
         )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        reference = ctx.frame("reference").select(["symbol", "sector"]).with_columns(
+    def reference_norm(self, ctx: BatchContext) -> pl.DataFrame:
+        """The per-symbol reference frame with the normalized ``_norm`` sector column the feature
+        expressions read. Shared by compute() and the consolidated point-in-time emit."""
+        return ctx.frame("reference").select(["symbol", "sector"]).with_columns(
             pl.col("sector").str.to_lowercase().str.replace_all(" ", "_").alias("_norm")
         )
-        minutes = ctx.frame("minute_agg").select(["symbol", "minute"])
-        joined = minutes.join(reference, on="symbol", how="left")
+
+    def exprs(self) -> list[pl.Expr]:
+        """The one-hot feature expressions over the joined ``_norm`` column (post reference join)."""
         exprs = [
             (pl.col("_norm") == sector).fill_null(False).cast(pl.Float64).alias(f"sector_is_{sector}")
             for sector in SECTORS
@@ -71,5 +74,10 @@ class SectorOneHotGroup(FeatureGroup):
         exprs.append(
             pl.when(pl.col("_norm").is_in(SECTORS)).then(0.0).otherwise(1.0).cast(pl.Float64).alias("sector_is_unknown")
         )
+        return exprs
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        minutes = ctx.frame("minute_agg").select(["symbol", "minute"])
+        joined = minutes.join(self.reference_norm(ctx), on="symbol", how="left")
         names = [spec.name for spec in self.declare()]
-        return joined.with_columns(exprs).select(["symbol", "minute", *names])
+        return joined.with_columns(self.exprs()).select(["symbol", "minute", *names])

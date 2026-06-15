@@ -38,17 +38,22 @@ class RoundLevelsGroup(FeatureGroup):
                         dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="none", layer="A"),
         ]
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+    def exprs(self) -> list[pl.Expr]:
+        """The feature column expressions (functions of ``close``), shared by compute() and the
+        consolidated point-in-time emit."""
         close = pl.col("close")
         frac_dollar = close - close.floor()
         dist_dollar = pl.min_horizontal(frac_dollar, 1.0 - frac_dollar)
         half = close * 2.0
         frac_half = (half - half.floor()) / 2.0
         dist_half = pl.min_horizontal(frac_half, 0.5 - frac_half)
-        return ctx.frame("minute_agg").select(["symbol", "minute", "close"]).with_columns(
-            [
-                dist_dollar.cast(pl.Float64).alias("dist_to_round_dollar"),
-                dist_half.cast(pl.Float64).alias("dist_to_half_dollar"),
-                (dist_dollar < NEAR_DOLLAR_THRESHOLD).cast(pl.Float64).alias("is_at_round_dollar"),
-            ]
-        ).select(["symbol", "minute", "dist_to_round_dollar", "dist_to_half_dollar", "is_at_round_dollar"])
+        return [
+            dist_dollar.cast(pl.Float64).alias("dist_to_round_dollar"),
+            dist_half.cast(pl.Float64).alias("dist_to_half_dollar"),
+            (dist_dollar < NEAR_DOLLAR_THRESHOLD).cast(pl.Float64).alias("is_at_round_dollar"),
+        ]
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        return ctx.frame("minute_agg").select(["symbol", "minute", "close"]).with_columns(self.exprs()).select(
+            ["symbol", "minute", "dist_to_round_dollar", "dist_to_half_dollar", "is_at_round_dollar"]
+        )
