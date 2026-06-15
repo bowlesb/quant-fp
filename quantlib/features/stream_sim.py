@@ -109,6 +109,31 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     the two emit tiers' per-group polars passes into a single numpy-native wide emit (bypassing the per-group
     assemble() expression eval), or moving technical's reductions fully onto the incremental running-sum tier
     — both larger changes than this scheduling consolidation. The fast-path 305-feature flow IS under 100ms.
+  * UNIFIED REDUCTION EMIT (declarative.emit_rust_unified, wired via IncrementalEngine.step_rust_unified). The
+    reduction tier's emit_rust ran the ONE assemble_canonical kernel then built a SEPARATE polars frame +
+    assemble() pass per reduction group (~13 per-group frame-builds + joins/minute — the reduction-emit floor;
+    the canonical algebra is ~1-3ms). emit_rust_unified ingests the kernel's FULL contiguous canonical block in
+    ONE pl.from_numpy (every canonical column name is unique across the 13 groups — verified), joins the UNION
+    of all groups' __pt_ point columns (deduped by name; colliding point names carry IDENTICAL exprs — verified),
+    evaluates ALL groups' assemble() exprs in ONE with_columns, and slices each group's features back out — the
+    same scheduling lever the cheap-tier (consolidated.py) and stateful-tier (emit_stateful) already applied.
+    BYTE-IDENTICAL (tol 0) to per-group emit_rust / polars step / batch compute_latest for ALL 13 reduction
+    groups (tests/test_fp_unified_emit.py). MEASURED (10k, 32 shards, flood, this machine, only-heavy-job, median
+    of 3, warmup 120 so the buffer is realistic): reduction-emit p50 ~43ms -> ~30ms (~13ms / ~30% off that
+    phase), and FULL-flow p50 ~125ms -> ~116ms (p99 ~177ms -> ~183ms, noise). VERDICT: still NOT <100ms for all
+    519 — the STATEFUL EMIT (~47ms p50) is now the single dominant phase. A standalone micro-profile (312 sym,
+    deep buffer) decomposes that ~47ms NOT into per-group assemble (already consolidated, ~0ms) but into
+    fold_and_state: technical ~33ms (its per-minute RSI/Bollinger/SMA windowed-reduction RECOMPUTE) + price_levels
+    ~19ms + candlestick ~15ms + price_returns ~13ms (the Rust extrema/lag gathers + EMA folds) + the shared
+    coded-buffer sort ~9ms. So the unified-assemble lever is EXHAUSTED for the stateful tier — its cost is the
+    state-frame BUILD, not the assemble eval. The honest realistic floor with this sharded-polars architecture is
+    ~tick-agg (~23ms, parity-true tick agg + buffer concat/unique) + fold (~12ms) + reduction-emit (~30ms, now
+    near its single-pass minimum) + stateful-emit (~44ms, dominated by technical's reduction recompute) + rest
+    (~19ms) + gather (~10ms) ≈ 115ms p50, all phases sequential per shard. Crossing <100ms for ALL 519 needs a
+    FUNDAMENTALLY different stateful path — move technical's RSI/Bollinger/SMA reductions onto the incremental
+    running-sum tier (so they fold like the reduction groups instead of recomputing each minute) and/or a fully
+    numpy/Rust state-frame assembly that bypasses the per-engine polars state-row build — NOT another scheduling
+    consolidation. The fast-path 305-feature reduction flow remains under 100ms (~94ms p99).
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
