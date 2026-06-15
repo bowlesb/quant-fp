@@ -42,6 +42,13 @@ from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
 
 
+class SymbolSetExpanded(Exception):
+    """Raised when a minute carries a symbol OUTSIDE the engine's fixed session index (a genuinely new
+    ticker). The caller re-seeds the engine from the current buffer — the same parity-safe daily-resync
+    path — which rebuilds the index to include it. Absent symbols (a SUBSET of the index) are handled
+    inline (zero contribution); only an EXPANSION of the set needs a re-seed."""
+
+
 class WindowedSumState:
     """Running per-(window, symbol, col) sums, updated one minute at a time. ``values`` passed to ``update``
     is an ``(n_symbols, n_cols)`` float matrix (nulls already filled to 0), symbol-aligned to ``symbols``."""
@@ -229,10 +236,17 @@ class IncrementalEngine:
         lag_row = rust_slice_derive(frame, self.input_cols, self.lag_columns, minute)
         return lag_row.with_columns([*self.rust_safe_derived, *self.rust_stateful_aux]).with_columns(self.rust_extra)
 
-    def _stateful_matrix(self, row: pl.DataFrame, minute: object) -> dict[int, np.ndarray]:
+    def _stateful_matrix(self, row: pl.DataFrame, minute: object, present: np.ndarray) -> dict[int, np.ndarray]:
         """Rebuild the 6 OLS paired columns (b, x, y, xy, xx, yy) for every stateful regression at ``minute``
         from running x/y state (sourced from the already-derived ``row``) — pairing under nulls exactly as
-        ``_ols_derived`` does. Returns {value_col_index: (n_symbols,) column}. Advances the running cumulatives."""
+        ``_ols_derived`` does. Returns {value_col_index: (n_symbols,) column}. Advances the running cumulatives.
+
+        ``present`` is the (n_symbols,) bool mask of which index symbols delivered a bar this minute. A symbol
+        absent this minute has NO row in the batch (so it contributes nothing to the OLS sums at ``minute``);
+        we enforce that here by forcing ``b=0`` for absent symbols (``both &= present``). This matters for the
+        cumulative (OBV) slot whose ``y`` is a running float that stays finite even when the symbol is absent —
+        without the mask its pair would be wrongly counted. The cumulative still does NOT advance for absent
+        symbols (their increment is ``fill_null(0)``), matching the batch cumsum over present rows."""
         out: dict[int, np.ndarray] = {}
         n_sym = len(self.symbols or [])
         assert self.ref_epoch is not None
@@ -256,7 +270,7 @@ class IncrementalEngine:
                 y = self._broadcast_value(row, ns, n_sym)
             else:
                 y = self._aux_value(row, self.regy_col[ns])
-            both = np.isfinite(x) & np.isfinite(y)
+            both = np.isfinite(x) & np.isfinite(y) & present
             x_paired = np.where(both, x, 0.0)
             y_paired = np.where(both, y, 0.0)
             paired = {
@@ -300,15 +314,36 @@ class IncrementalEngine:
             source = frame.filter(pl.col("minute") > cutoff)
         row = self._derived_row_rust(source, minute) if self.rust_slice else self._derived_row(source, minute)
         n_sym = len(self.symbols or [])
-        if row.height != n_sym:
-            raise ValueError(f"incremental: symbol set changed ({row.height} != {n_sym}); re-seed")
+        # Live capture delivers only the minute's ACTIVE symbols — a fluctuating SUBSET of the fixed session
+        # index. Align the present rows to the full index: absent symbols contribute 0 to every windowed sum
+        # (exactly as a missing bar does in the batch — no row, no contribution) and are masked out of the OLS
+        # pairing (present=False -> b=0). A symbol present but OUTSIDE the index is genuinely new -> re-seed.
+        row, present = self._reindex_to_index(row)
         matrix = np.zeros((n_sym, len(self.value_cols)), dtype=np.float64)
         safe = row.select(self.safe_value_cols).fill_null(0.0).to_numpy()
         for safe_i, col in enumerate(self.safe_value_cols):
             matrix[:, self.col_index[col]] = safe[:, safe_i]
-        for col_index, column in self._stateful_matrix(row, minute).items():
+        for col_index, column in self._stateful_matrix(row, minute, present).items():
             matrix[:, col_index] = column
         return matrix
+
+    def _reindex_to_index(self, row: pl.DataFrame) -> tuple[pl.DataFrame, np.ndarray]:
+        """Align a present-symbols-only derived ``row`` to the fixed session index (``self.symbols``, sorted).
+        Returns (full-height row in index order with nulls for absent symbols, present-mask). Fast-paths the
+        fully-present case (every index symbol delivered) to avoid a join. Raises ``SymbolSetExpanded`` if the
+        minute carries a symbol outside the index — the caller re-seeds (the parity-safe resync path)."""
+        symbols = self.symbols or []
+        if row.height == len(symbols):  # fully-present (the fixed-set case): row is already the index, sorted
+            ordered = row.sort("symbol")
+            if ordered["symbol"].to_list() == symbols:
+                return ordered, np.ones(len(symbols), dtype=bool)
+        extra = set(row["symbol"].to_list()) - set(symbols)
+        if extra:
+            raise SymbolSetExpanded(sorted(extra)[:5])
+        index_df = pl.DataFrame({"symbol": symbols}, schema={"symbol": row.schema["symbol"]})
+        aligned = index_df.join(row.with_columns(pl.lit(True).alias("__present")), on="symbol", how="left")
+        present = aligned["__present"].fill_null(False).to_numpy().astype(bool)
+        return aligned.drop("__present"), present
 
     def _seed_stateful(self, buffer_frame: pl.DataFrame) -> None:
         """Initialise the running per-symbol state the stateful regressors need before folding the buffer:
@@ -317,27 +352,40 @@ class IncrementalEngine:
         self.ref_epoch = int(buffer_frame.select(pl.col("minute").dt.epoch("s").min()).item())
         self.obv_running = {}
 
-    def seed(self, buffer_frame: pl.DataFrame) -> None:
-        """Establish the symbol set + fixed origins and fold every buffered minute into fresh state (== the
+    def seed(self, buffer_frame: pl.DataFrame, symbols: list[str] | None = None, *, slice_derive: bool = True) -> None:
+        """Establish the symbol index + fixed origins and fold every buffered minute into fresh state (== the
         batch recompute over the buffer; also the daily-resync / crash-recovery entry point). Folds minute by
         minute through the SAME slice-derive + stateful path used live, so the running OBV/time state is built
-        exactly as it will be advanced — no separate seeding code to drift from the live path."""
-        self.symbols = sorted(buffer_frame["symbol"].unique().to_list())
+        exactly as it will be advanced — no separate seeding code to drift from the live path.
+
+        ``symbols`` pins the index to a FIXED session set (e.g. the shard's full universe) — a stable superset
+        of any single minute's active symbols, so intraday membership churn folds in as absent (zero) rows
+        instead of forcing a re-seed. When None, the index is the symbols seen in ``buffer_frame`` (the prior
+        behaviour). ``slice_derive`` controls whether per-minute value columns are derived over a small trailing
+        slice (fast; assumes active symbols are dense within ``DERIVE_SLICE``) or the whole buffer (gap-safe)."""
+        index = symbols if symbols is not None else buffer_frame["symbol"].unique().to_list()
+        self.symbols = sorted(index)
         self.state = WindowedSumState(self.symbols, self.windows, len(self.value_cols))
         self._seed_stateful(buffer_frame)
         for minute in sorted(buffer_frame["minute"].unique()):
-            self.state.update(int(minute.timestamp()), self._matrix_at(buffer_frame, minute, slice_derive=True))
+            self.state.update(int(minute.timestamp()), self._matrix_at(buffer_frame, minute, slice_derive=slice_derive))
             self.state.trim()
 
-    def step(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    def step(self, frame: pl.DataFrame, *, slice_derive: bool = True) -> dict[str, pl.DataFrame]:
         """Fold the new latest minute and assemble features from the running sums. ``frame`` is the trailing
-        buffer including the new minute. Seeds lazily on first call."""
+        buffer including the new minute. Seeds lazily on first call. A ``SymbolSetExpanded`` (a genuinely new
+        ticker appeared) triggers a re-seed from ``frame`` — the parity-safe resync — and a retry, so live
+        membership growth never breaks the run. ``slice_derive=False`` derives over the whole buffer (gap-safe,
+        O(buffer)); the default fast slice assumes active symbols are dense within ``DERIVE_SLICE`` minutes."""
         latest = frame["minute"].max()
         if self.state is None:
-            self.seed(frame)
+            self.seed(frame, slice_derive=slice_derive)
         else:
-            self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
-            self.state.trim()
+            try:
+                self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=slice_derive))
+                self.state.trim()
+            except SymbolSetExpanded:
+                self.seed(frame, slice_derive=slice_derive)  # rebuild the index to include the new ticker(s)
         long = self._running_long()
         latest_frame = frame.filter(pl.col("minute") == latest)
         return assemble_from_long(self.groups, long, latest_frame, latest, self.plan, self.reg_plan)
