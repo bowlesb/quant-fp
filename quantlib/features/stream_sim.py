@@ -217,7 +217,7 @@ from quantlib.features.bench_stream import (
     synth_reference,
     synth_symbols,
 )
-from quantlib.features.capture import BARS_SCHEMA, DEFAULT_BUFFER_MINUTES
+from quantlib.features.capture import BARS_SCHEMA, DEFAULT_BUFFER_MINUTES, MinuteRing
 from quantlib.features.compare import runnable
 from quantlib.features.consolidated import (
     DAILY_BROADCAST_GROUPS,
@@ -310,7 +310,7 @@ class StreamShardState:
 
     def __init__(self, window: int) -> None:
         self.window = window
-        self.buffer: pl.DataFrame | None = None
+        self.ring: MinuteRing | None = None  # trailing enriched-minute frames as a ring (O(new) append)
         self.tick_states: dict[str, TickState] = {}
         self.engine: IncrementalEngine | None = None
         self.stateful_engines: dict[str, StatefulEngine] = {}  # technical/candlestick on the per-symbol fold path
@@ -324,6 +324,12 @@ class StreamShardState:
         self.gather_emit_ms = 0.0  # the cross-sectional UNIVERSE GATHER (market_context) — O(universe) at-T
         self.other_emit_ms = 0.0  # the remaining non-reduction groups' at-T compute_latest (calendar/sector/...)
         self.write_ms = 0.0
+
+    @property
+    def buffer(self) -> pl.DataFrame | None:
+        """The materialized trailing-window frame (the ring's per-minute slots concatenated), or None
+        before the first minute — the same frame the old ``state.buffer`` field held."""
+        return None if self.ring is None else self.ring.materialize()
 
 
 def _enriched_minute_frame(enriched: list[dict]) -> pl.DataFrame:
@@ -370,11 +376,12 @@ def process_stream_minute(
     trades_by_symbol, quotes_by_symbol = _bucket_ticks_by_symbol_minute(trades, quotes, minute_epoch)
     enriched = enrich_bars_with_ticks(bars, trades_by_symbol, quotes_by_symbol, state.tick_states)
     new_frame = _enriched_minute_frame(enriched)
-    frame = new_frame if state.buffer is None else pl.concat([state.buffer, new_frame])
-    frame = frame.unique(subset=["symbol", "minute"], keep="last")
-    recent = sorted(frame["minute"].unique())[-state.window :]
-    frame = frame.filter(pl.col("minute").is_in(recent))
-    state.buffer = frame
+    # Append this enriched minute into the trailing ring (O(new), not an O(full-buffer) concat+unique+filter
+    # rescan). The materialized frame is the SAME (symbol, minute) row set the old path produced.
+    if state.ring is None:
+        state.ring = MinuteRing(maxlen=state.window)
+    state.ring.push(new_frame)
+    frame = state.ring.materialize()
     state.tick_agg_ms = (time.perf_counter() - tick_start) * 1000.0
 
     latest = frame["minute"].max()
@@ -415,7 +422,12 @@ def process_stream_minute(
         state.engine.seed(frame)  # replays the buffer -> establishes symbols + running sums + stateful state
     else:
         assert state.engine.state is not None
-        state.engine.state.update(int(latest.timestamp()), state.engine._matrix_at(frame, latest, slice_derive=True))
+        # The fold's slice-derive reads only the last DERIVE_SLICE minutes — hand it just those slots from
+        # the ring (concat of a few frames) instead of the whole buffer. _matrix_at's own time-based filter
+        # (minute > latest - DERIVE_SLICE) makes this byte-identical: the last DERIVE_SLICE+1 present-minute
+        # slots always cover that window, and any extra older slot is dropped by the same filter.
+        fold_slice = state.ring.last_minutes(IncrementalEngine.DERIVE_SLICE + 1)
+        state.engine.state.update(int(latest.timestamp()), state.engine._matrix_at(fold_slice, latest, slice_derive=True))
         state.engine.state.trim()
     state.fold_ms = (time.perf_counter() - fold_start) * 1000.0
 
@@ -424,7 +436,7 @@ def process_stream_minute(
     outputs: list[tuple[str, str, pl.DataFrame]] = []
     engine = state.engine
     assert engine.state is not None
-    latest_frame = frame.filter(pl.col("minute") == latest)
+    latest_frame = state.ring.last_minutes(1)  # the ring's newest slot == frame.filter(minute == latest)
     reduction_emit_start = time.perf_counter()
     if _USE_RUST_ASSEMBLE:
         # UNIFIED single-pass emit: assemble EVERY reduction group's features in ONE shared wide-frame pass

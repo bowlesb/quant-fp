@@ -147,6 +147,15 @@ class FeatureGroup(ABC):
     def feature_names(self) -> list[str]:
         return [spec.name for spec in self.declare()]
 
+    def reduce_buffer_minutes(self) -> int | None:
+        """The deepest trailing-window (in minutes) this group needs to compute its latest minute
+        correctly off a trimmed buffer, or ``None`` when unknown (caller must then keep the full
+        buffer). DECLARED, not hardcoded by callers — the reader's reduce path uses the max of these
+        over the reduce groups to bound its minimal close+volume buffer. Default ``None`` (full buffer)
+        is safe for any group that hasn't declared its depth; groups with a known longest window
+        override it (``ReductionGroup`` derives it from its declared windows)."""
+        return None
+
 
 def lagged(frame: pl.DataFrame, value: str, minutes: int, alias: str) -> pl.DataFrame:
     """Attach ``alias`` = ``value`` as of (minute − ``minutes``), via a TIME-BASED self-join per

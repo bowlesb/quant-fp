@@ -13,7 +13,7 @@ import queue
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 
 import polars as pl
@@ -41,6 +41,45 @@ BARS_SCHEMA = {
 # price_levels' 240m; 300 leaves headroom. (The separate latest-minute compute mode removes the
 # per-minute cost of recomputing this whole buffer at 10k-ticker scale.)
 DEFAULT_BUFFER_MINUTES = 300
+
+
+class MinuteRing:
+    """Append-only ring of per-minute frames, keyed by minute, capped at ``maxlen`` minutes.
+
+    Replaces the per-minute ``concat(whole buffer) -> unique -> sort(minutes) -> filter(recent)``
+    rescan (O(full buffer) every minute to append ~one minute's rows) with an O(new-minute) push:
+    one slot per distinct minute, oldest evicted past ``maxlen``, a RE-DELIVERED minute OVERWRITES its
+    slot (== ``unique(subset=[symbol,minute], keep="last")`` when each batch is one minute, which the
+    reader, the mock feed, and stream_sim all guarantee). ``materialize()`` concats the live slots —
+    the SAME (symbol, minute) row set the old path produced, so every consumer (which all
+    ``sort([symbol, minute])`` internally) is byte-identical. ``last_n(n)`` / ``last_minutes(...)`` concat
+    only the requested tail slots — O(new data), not O(90k-row scan)."""
+
+    def __init__(self, maxlen: int, columns: tuple[str, ...] | None = None) -> None:
+        self.maxlen = maxlen
+        self.columns = columns  # project each minute to this subset (reduce path: close+volume only)
+        self._slots: OrderedDict[datetime, pl.DataFrame] = OrderedDict()
+
+    def push(self, new_frame: pl.DataFrame) -> None:
+        """Add a minute's rows (one or more minutes). Each distinct minute OVERWRITES its slot (keep-last
+        re-delivery), then the oldest minutes beyond ``maxlen`` are evicted."""
+        if self.columns is not None:
+            new_frame = new_frame.select(self.columns)
+        for minute, group in new_frame.group_by("minute", maintain_order=True):
+            key = minute[0] if isinstance(minute, tuple) else minute
+            self._slots[key] = group  # last delivery of this minute wins, mirroring unique(keep="last")
+            self._slots.move_to_end(key)
+        while len(self._slots) > self.maxlen:
+            self._slots.popitem(last=False)  # evict the oldest minute slot
+
+    def materialize(self) -> pl.DataFrame:
+        """The trailing-window frame: concat the live per-minute slots in minute order."""
+        return pl.concat(list(self._slots.values()))
+
+    def last_minutes(self, n: int) -> pl.DataFrame:
+        """Concat only the last ``n`` minute slots (the short trailing slice consumers need)."""
+        slots = list(self._slots.values())
+        return pl.concat(slots[-n:])
 
 
 class StoreWriter:
@@ -82,12 +121,18 @@ class CaptureState:
     """Rolling buffer + accumulated per-group output. Shared across any connection adapter."""
 
     def __init__(self) -> None:
-        self.buffer: pl.DataFrame | None = None  # trailing-window bars, kept AS a frame (no per-minute round-trip)
+        self.ring: MinuteRing | None = None  # trailing-window bars as a ring of per-minute frames (O(new) append)
         self.accumulated: dict[str, pl.DataFrame] = {}  # one DEDUPED frame per group
         self.minutes = 0
         self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
         self.last_write_ms = 0.0  # time spent WRITING last minute — excluded from the bet-relevant compute latency
         self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
+
+    @property
+    def buffer(self) -> pl.DataFrame | None:
+        """The materialized trailing-window frame (the ring's per-minute slots concatenated), or None
+        before the first minute."""
+        return None if self.ring is None else self.ring.materialize()
 
 
 def process_bars(
@@ -103,6 +148,8 @@ def process_bars(
     write: bool = True,
     shard: int | None = None,
     accumulate: bool = False,
+    project_columns: tuple[str, ...] | None = None,
+    buffer_minutes: int | None = None,
 ) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
     S, o, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
@@ -117,11 +164,16 @@ def process_bars(
     groups (universe-wide rank) run in a gather phase, not per shard. ``write=False`` skips the store
     (used by the gather phase). ``accumulate=True`` also keeps each group's outputs concatenated in
     ``state.accumulated`` — the in-memory cross-minute record the sharding parity test inspects; it is
-    OFF in production because the durable record is the per-minute store files, not RAM."""
-    # Build ONLY the new minute's bars into a frame and concat onto the kept buffer — keeping the buffer
-    # as a DataFrame avoids round-tripping the whole trailing window through list[dict] every minute (at
-    # 10k symbols x window that round-trip dominated the reader/worker per-minute cost). concat([old,new])
-    # + unique(keep="last") preserves re-delivery dedup (the new copy of a minute wins).
+    OFF in production because the durable record is the per-minute store files, not RAM.
+
+    ``project_columns`` keeps the ring projected to a SUBSET of the bar columns (the reader's reduce
+    path needs only symbol/minute/close/volume, never the full 7-column frame). ``buffer_minutes`` caps
+    the ring depth below ``window`` (the reduce groups' longest window + slack, not the full 300m). Both
+    are PARITY-NEUTRAL where used: the dropped columns/older minutes are never read by the groups that
+    run there. Default (None/None) = the full 7-column ``window``-deep ring (the map path)."""
+    # Append THIS minute's rows into the trailing ring (O(new), not an O(full-buffer) rescan). The ring
+    # keeps one frame per minute, overwrites a re-delivered minute (keep-last), and evicts past its depth,
+    # so the materialized frame is the SAME (symbol, minute) row set the old concat+unique+filter produced.
     new_frame = pl.DataFrame(
         [
             {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
@@ -130,11 +182,11 @@ def process_bars(
         ],
         schema=BARS_SCHEMA,
     )
-    frame = new_frame if state.buffer is None else pl.concat([state.buffer, new_frame])
-    frame = frame.unique(subset=["symbol", "minute"], keep="last")
-    recent = sorted(frame["minute"].unique())[-window:]
-    frame = frame.filter(pl.col("minute").is_in(recent))
-    state.buffer = frame  # bound to the trailing window (de-duped), kept as a frame for the next minute
+    if state.ring is None:
+        depth = buffer_minutes if buffer_minutes is not None else window
+        state.ring = MinuteRing(maxlen=depth, columns=project_columns)
+    state.ring.push(new_frame)
+    frame = state.ring.materialize()
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
     frames = {"minute_agg": frame, **(snapshots or {})}
