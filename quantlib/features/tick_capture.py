@@ -9,6 +9,10 @@ backfill by construction (not a separate live-only path).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import polars as pl
+
 from quantlib.aggregates import (
     QuoteTick,
     TickState,
@@ -16,6 +20,13 @@ from quantlib.aggregates import (
     aggregate_quotes,
     aggregate_trades,
 )
+
+# The raw per-trade frame the tick_runlength / microstructure_burst groups consume (InputSpec name="trades").
+# SAME schema + column order the backfill loader produces (loaders.TICK_SCHEMA) — the one tick shape both
+# the live worker and the historical backfill feed those groups, so Layer-C parity holds by construction.
+TRADES_SCHEMA: dict[str, pl.PolarsDataType] = {
+    "symbol": pl.String, "ts": pl.Datetime("us", "UTC"), "price": pl.Float64, "size": pl.Float64,
+}
 
 # The minute_agg columns the trade_flow + quote_spread groups consume from the tick flow.
 TICK_COLUMNS: tuple[str, ...] = (
@@ -37,6 +48,24 @@ def aggregate_symbol_minute(trades: list[TradeTick], quotes: list[QuoteTick], st
         "mean_bid_size": quote_agg.mean_bid_size,
         "mean_ask_size": quote_agg.mean_ask_size,
     }
+
+
+def trades_frame(trades_by_symbol: dict[str, list[TradeTick]]) -> pl.DataFrame:
+    """Build the raw ``trades`` frame (symbol, ts, price, size) for ONE minute's bucketed trades — the
+    InputSpec the ``tick_runlength`` / ``microstructure_burst`` groups declare. ``ts`` is reconstructed
+    as a UTC datetime from each tick's epoch seconds; the schema + column order match the backfill loader
+    (``loaders.TICK_SCHEMA``) so the SAME group code runs on live and backfill (Layer-C parity). An empty
+    minute (no subscribed trades) yields an empty, correctly-typed frame — the groups return no rows for
+    it, which is the honest 'no trades this minute', not a fabricated zero."""
+    rows = [
+        {"symbol": symbol, "ts": datetime.fromtimestamp(tick.ts_epoch, tz=timezone.utc),
+         "price": tick.price, "size": tick.size}
+        for symbol, ticks in trades_by_symbol.items()
+        for tick in ticks
+    ]
+    if not rows:
+        return pl.DataFrame(schema=TRADES_SCHEMA)
+    return pl.DataFrame(rows, schema=TRADES_SCHEMA)
 
 
 def enrich_bars_with_ticks(

@@ -27,26 +27,28 @@ from quantlib.features.capture import (
     warm_start_enabled,
     warm_start_ring,
 )
-from quantlib.aggregates import QuoteTick, TickState, TradeTick
 from quantlib.features import metrics
 from quantlib.features.loaders import load_reference
-from quantlib.features.tick_capture import enrich_bars_with_ticks
 from quantlib.features.sharded_capture import (
     INDEX_SYMBOLS,
     process_reduce,
     reduce_buffer_columns,
     reduce_buffer_minutes,
     route_minute,
+    route_ticks,
     shard_of,
     worker_main,
 )
 
 
-# Trades+quotes for the FULL ~11k universe is a firehose the single reader cannot yet absorb (quotes
-# especially) — so by default we subscribe ticks for a small liquid canary set (env FP_TICK_SYMBOLS can
-# override with a comma list, or "all" for the whole universe once the reader can take it). These light up
-# the trade_flow / quote_spread / liquidity groups via the parity-true tick aggregation; the rest stay
-# honest-null (we don't fabricate all-zero tick features for symbols we didn't subscribe).
+# Tick AGGREGATION (the expensive part — per-symbol sign classification, spread/imbalance stats, the raw
+# trades frame) now runs on the SHARD WORKER that owns each symbol, not inline on the single reader, so the
+# firehose is distributed across the worker pool. The reader's residual per-tick cost is one hash + append
+# to forward each raw tick to its shard's queue. The default is still a liquid canary set (a conservative
+# rollout floor); ops scale toward the full universe with FP_TICK_SYMBOLS (a comma list, or "all"). The
+# subscribed symbols light up trade_flow / quote_spread / liquidity (minute_agg tick columns) AND
+# tick_runlength / microstructure_burst (the raw trades frame); the rest stay honest-null (we don't
+# fabricate all-zero tick features for symbols we didn't subscribe).
 DEFAULT_TICK_SYMBOLS: tuple[str, ...] = (
     "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "GOOG", "AMD",
     "NFLX", "JPM", "BAC", "XOM", "INTC", "F", "PLTR", "COIN", "AAPU", "SOXL", "TQQQ", "DIA",
@@ -188,13 +190,14 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     # arrival       = time.time() of the minute's FIRST bar (end-to-end / delivery-inclusive anchor).
     # last_arrival  = time.time() of the minute's LAST bar (pure-compute anchor; max over the minute).
     # symbol_arrivals = per-symbol time.time() of that symbol's bar (drill-down: which tickers are slow).
-    pending: dict = {"minute": None, "bars": [], "done": 0, "arrival": 0.0,
+    pending: dict = {"minute": None, "bars": [], "trades": [], "quotes": [], "done": 0, "arrival": 0.0,
                      "last_arrival": 0.0, "symbol_arrivals": {}}
-    # Tick (trade+quote) aggregation state. tick_states is threaded per-symbol across minutes so the
-    # live trade-sign classification == a batch pass (parity at the tick layer). trade_buf/quote_buf
-    # bucket raw ticks by minute until that minute's bars are dispatched.
+    # The reader NO LONGER aggregates ticks — it forwards each shard its RAW trades/quotes and the WORKER
+    # aggregates its own shard's ticks (threaded TickState per worker). This distributes the tick firehose
+    # across the workers instead of the single reader buffering+aggregating all of it inline, so it scales
+    # past the old reader-side cap. trade_buf/quote_buf bucket raw tick DICTS by minute until that minute's
+    # bars are dispatched (then routed by hash(symbol), same as the bars).
     tick_syms = set(tick_symbols(symbols))
-    tick_states: dict[str, TickState] = {}
     trade_buf: dict = {}
     quote_buf: dict = {}
     stream = build_stream()
@@ -204,28 +207,27 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     def dispatch(bars: list[dict], first_arrival: float, last_arrival: float,
                  symbol_arrivals: dict[str, float], minute) -> None:  # type: ignore[no-untyped-def]
         start = time.perf_counter()
-        if tick_syms:
-            # Enrich ONLY the subscribed symbols' bars with their minute's aggregated tick columns
-            # (n_trades, signed_volume, mean_spread_bps, ...); unsubscribed symbols keep no tick columns
-            # (-> null in the frame, honest "not collected", not a fabricated zero). Drop stale buckets.
-            trades_by_symbol = trade_buf.pop(minute, {})
-            quotes_by_symbol = quote_buf.pop(minute, {})
-            for stale in [m for m in trade_buf if m < minute]:
-                del trade_buf[stale]
-            for stale in [m for m in quote_buf if m < minute]:
-                del quote_buf[stale]
-            tick_bars = [bar for bar in bars if bar["S"] in tick_syms]
-            if tick_bars:
-                enriched = {bar["S"]: bar for bar in
-                            enrich_bars_with_ticks(tick_bars, trades_by_symbol, quotes_by_symbol, tick_states)}
-                bars = [enriched.get(bar["S"], bar) for bar in bars]
+        # Pull THIS minute's raw tick dicts and drop stale buckets; the reader forwards them un-aggregated.
+        minute_trades = trade_buf.pop(minute, [])
+        minute_quotes = quote_buf.pop(minute, [])
+        for stale in [m for m in trade_buf if m < minute]:
+            del trade_buf[stale]
+        for stale in [m for m in quote_buf if m < minute]:
+            del quote_buf[stale]
+        # Route ticks by hash(symbol) % n_shards — the SAME routing as the bars — so each symbol's ticks
+        # land on the worker that owns its bars (index ETFs replicated to every shard, mirroring the bars).
+        routed_trades = route_ticks(minute_trades, n_shards) if minute_trades else None
+        routed_quotes = route_ticks(minute_quotes, n_shards) if minute_quotes else None
         for shard_id, shard_bars in enumerate(route_minute(bars, n_shards)):
             if shard_bars:
-                # (first_arrival, last_arrival, symbol_arrivals, minute, bars) — the worker records the two
-                # latency metrics off these wall-clock stamps (time.time(), comparable across the
-                # reader/worker processes; perf_counter is not) and writes the per-symbol drill-down rows.
+                # (first_arrival, last_arrival, symbol_arrivals, minute, bars, trades, quotes) — the worker
+                # aggregates the ticks locally + records the latency metrics off these wall-clock stamps
+                # (time.time(), comparable across the reader/worker processes; perf_counter is not).
                 shard_symbol_arrivals = {bar["S"]: symbol_arrivals[bar["S"]] for bar in shard_bars}
-                queues[shard_id].put((first_arrival, last_arrival, shard_symbol_arrivals, minute, shard_bars))
+                shard_trades = routed_trades[shard_id] if routed_trades is not None else []
+                shard_quotes = routed_quotes[shard_id] if routed_quotes is not None else []
+                queues[shard_id].put((first_arrival, last_arrival, shard_symbol_arrivals, minute,
+                                      shard_bars, shard_trades, shard_quotes))
         # gather: universe-wide reduces (cross_sectional_rank + breadth) over ALL symbols. Pass the reader's
         # FULL snapshots (reference/daily) so breadth's sector + multi-day horizons see the whole universe.
         process_reduce(reduce_state, bars, root, mode, day, window, snapshots=snapshots)
@@ -270,16 +272,19 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     async def on_trade(trade) -> None:  # type: ignore[no-untyped-def]
         metrics.TRADES_INGESTED.inc()
         minute = trade.timestamp.replace(second=0, microsecond=0)
-        trade_buf.setdefault(minute, {}).setdefault(trade.symbol, []).append(
-            TradeTick(trade.timestamp.timestamp(), float(trade.price), float(trade.size))
+        # Buffer the RAW trade dict (the reader forwards it un-aggregated; the worker aggregates per shard).
+        trade_buf.setdefault(minute, []).append(
+            {"S": trade.symbol, "p": float(trade.price), "s": float(trade.size),
+             "ts_epoch": trade.timestamp.timestamp()}
         )
 
     async def on_quote(quote) -> None:  # type: ignore[no-untyped-def]
         metrics.QUOTES_INGESTED.inc()
         minute = quote.timestamp.replace(second=0, microsecond=0)
-        quote_buf.setdefault(minute, {}).setdefault(quote.symbol, []).append(
-            QuoteTick(quote.timestamp.timestamp(), float(quote.bid_price), float(quote.ask_price),
-                      float(quote.bid_size), float(quote.ask_size))
+        quote_buf.setdefault(minute, []).append(
+            {"S": quote.symbol, "bp": float(quote.bid_price), "ap": float(quote.ask_price),
+             "bs": float(quote.bid_size), "as": float(quote.ask_size),
+             "ts_epoch": quote.timestamp.timestamp()}
         )
 
     # The reader exposes its own /metrics (ingestion counters) — workers own 9201..9208, reader owns 9200.
