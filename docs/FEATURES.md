@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-519 features across 29 group(s).
+528 features across 30 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -415,6 +415,15 @@
 | `sector_is_technology` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is technology, else 0.0 (one-hot, broadcast across the day). |
 | `sector_is_unknown` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol has no mapped sector (unlisted in the sector map or FMP could not classify it), else 0.0. |
 | `sector_is_utilities` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is utilities, else 0.0 (one-hot, broadcast across the day). |
+| `fib_retracement` | swing | trend_quality | A | tolerance | Float64 | warmup | (-10.0, 10.0) | Where the close sits within the PRIOR completed leg's range (the 0/0.382/0.5/0.618/1 read), measured from the prior leg's end back toward its start; null until a leg completes. |
+| `minutes_since_pivot` | swing | trend_quality | A | tolerance | Float64 | warmup | (0.0, 1000000.0) | Minutes since the last CONFIRMED swing pivot (the current provisional leg's age); null before the first pivot. |
+| `n_alternations` | swing | trend_quality | A | tolerance | Float64 | none | (0.0, 10000000.0) | Count of swing direction flips over the kept pivot ring (each confirmed pivot is one alternation; tight alternation = chop). |
+| `n_pivots_today` | swing | trend_quality | A | tolerance | Float64 | none | (0.0, 100000.0) | Count of confirmed swing pivots so far on the current session day (resets at the day boundary). |
+| `swing_dir` | swing | trend_quality | A | tolerance | Float64 | none | (-1.0, 1.0) | Current swing leg direction: +1 in a (provisional) up-leg, -1 in a down-leg, 0 before any direction is established. |
+| `swing_len_pct` | swing | trend_quality | A | tolerance | Float64 | none | (-10.0, 10.0) | Current swing leg size as a signed fractional return from the leg's start price to the current close. |
+| `swing_persistence` | swing | trend_quality | A | tolerance | Float64 | none | (-100.0, 100.0) | Net signed leg progression over the last K legs: sum of signed leg returns plus the current provisional leg (same-signed legs accumulate, chop cancels toward 0). |
+| `swing_steepness` | swing | trend_quality | A | tolerance | Float64 | none | (-1.0, 1.0) | Slope of the current swing leg as a per-minute fractional return ((close-leg_start)/leg_start divided by minutes since leg start); 0 at a leg start. |
+| `trend_resolved` | swing | trend_quality | A | tolerance | Float64 | none | (0.0, 1.0) | 1.0 when, after tight alternation, the current swing leg exceeds the recent legs in BOTH length AND steepness AND its direction persists; else 0.0 (a clean directional resolution). |
 | `bb_position_20m` | technical | technical | A | tolerance | Float64 | warmup | None | Position of close within its 20-minute Bollinger band: (close - sma) / (2*std). |
 | `bb_width_20m` | technical | technical | A | tolerance | Float64 | warmup | (0.0, None) | Bollinger band width over 20 minutes: 4*std / sma (relative band width). |
 | `macd_hist` | technical | technical | A | tolerance | Float64 | warmup | None | MACD histogram: MACD line minus the MACD signal line. |

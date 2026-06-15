@@ -102,7 +102,15 @@ fn windowed_reduce(
     value: PyReadonlyArray1<f64>,
     windows: Vec<i64>,
     t: i64,
-) -> PyResult<(Vec<i64>, Vec<i64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+) -> PyResult<(
+    Vec<i64>,
+    Vec<i64>,
+    Vec<f64>,
+    Vec<f64>,
+    Vec<f64>,
+    Vec<f64>,
+    Vec<f64>,
+)> {
     let symbol = symbol.as_slice()?;
     let minute = minute.as_slice()?;
     let value = value.as_slice()?;
@@ -168,7 +176,9 @@ fn windowed_reduce(
         }
         i = j;
     }
-    Ok((out_sym, out_win, out_n, out_sum, out_sumsq, out_min, out_max))
+    Ok((
+        out_sym, out_win, out_n, out_sum, out_sumsq, out_min, out_max,
+    ))
 }
 
 /// Generic single-pass windowed SUMS of MANY columns at once — the kernel every reduction feature
@@ -605,6 +615,317 @@ fn assemble_canonical<'py>(
     Ok(out.into_pyarray_bound(py))
 }
 
+/// POINT-IN-TIME SWING / ZIGZAG structure fold — a per-symbol O(1)-per-bar state machine that models the
+/// up-down-up-down ("Fibonacci-style") swing structure of the close series and flags when it resolves into a
+/// clean directional move. The ENTIRE reason this kernel exists is the look-ahead property: a standard ZigZag
+/// REPAINTS (it confirms a pivot using FUTURE bars), so it cannot be used point-in-time. THIS fold confirms a
+/// pivot ONLY once the theta-reversal has actually occurred by the current bar — it never reads a bar after the
+/// row it emits. So the value emitted at minute T over a buffer ending at T is identical whether or not bars
+/// after T exist (fold == reseed, live == backfill), which is the platform's parity invariant by construction.
+///
+/// A ZigZag filter ignores moves smaller than ``theta`` (a fractional return, e.g. 0.005 = 0.5%) and marks
+/// PIVOTS (confirmed local extrema) where price reverses by >= theta from the running leg extreme. Between
+/// pivots price runs one direction (a LEG). The current leg is PROVISIONAL: its extreme can still extend, so
+/// the most recent pivot is the last CONFIRMED one, never the current running extreme.
+///
+/// Inputs are PARALLEL arrays sorted by (symbol, minute):
+///   symbol     — integer code per symbol (a contiguous block per symbol)
+///   minute     — epoch seconds (per-minute)
+///   close      — the per-minute close
+///   theta      — the reversal threshold as a fractional return (e.g. 0.005)
+///   day_secs   — the seconds-of-day epoch boundary so ``n_pivots_today`` resets at the session date change
+///                (a pivot's day = minute / 86400; counters reset when the row's day differs from the prior)
+///   ring_k     — max confirmed pivots kept per symbol for the persistence / alternation reads (bounded ring)
+/// Returns ONE ROW PER INPUT (symbol, minute) — the point-in-time fold value at THAT minute, in input order:
+///   swing_dir         — +1 in a (provisional) up-leg, -1 in a down-leg, 0 before any direction is established
+///   swing_steepness   — slope of the current leg as a per-minute fractional return:
+///                        (close − leg_start_price)/leg_start_price / minutes_since_leg_start (0 at the start)
+///   swing_len_pct     — current leg size as a signed fractional return from the leg start to ``close``
+///   minutes_since_pivot — minutes since the last CONFIRMED pivot (since leg start), NaN before the first pivot
+///   n_pivots_today    — count of confirmed pivots so far on the row's session day
+///   n_alternations    — count of direction flips (each confirmed pivot is one alternation) over the kept ring
+///   swing_persistence — net signed leg progression over the last ``ring_k`` legs: sum of signed leg returns
+///                        (a clean trend has same-signed legs accumulating; chop cancels toward 0)
+///   fib_retracement   — where ``close`` sits within the PRIOR completed leg's price range (the 0/0.382/0.5/
+///                        0.618/1 read), measured from the prior leg's END back toward its START; NaN until a
+///                        leg has completed (no prior leg yet)
+///   trend_resolved    — 1.0 when, after tight alternation, the CURRENT leg exceeds the recent legs in BOTH
+///                        length AND steepness AND its direction persists; else 0.0
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn swing_fold(
+    symbol: PyReadonlyArray1<i64>,
+    minute: PyReadonlyArray1<i64>,
+    close: PyReadonlyArray1<f64>,
+    theta: f64,
+    day_secs: i64,
+    ring_k: usize,
+) -> PyResult<(
+    Vec<f64>, // swing_dir
+    Vec<f64>, // swing_steepness
+    Vec<f64>, // swing_len_pct
+    Vec<f64>, // minutes_since_pivot
+    Vec<f64>, // n_pivots_today
+    Vec<f64>, // n_alternations
+    Vec<f64>, // swing_persistence
+    Vec<f64>, // fib_retracement
+    Vec<f64>, // trend_resolved
+)> {
+    let symbol = symbol.as_slice()?;
+    let minute = minute.as_slice()?;
+    let close = close.as_slice()?;
+    let n_rows = symbol.len();
+
+    let mut out_dir: Vec<f64> = vec![0.0; n_rows];
+    let mut out_steep: Vec<f64> = vec![0.0; n_rows];
+    let mut out_len: Vec<f64> = vec![0.0; n_rows];
+    let mut out_msp: Vec<f64> = vec![f64::NAN; n_rows];
+    let mut out_npt: Vec<f64> = vec![0.0; n_rows];
+    let mut out_nalt: Vec<f64> = vec![0.0; n_rows];
+    let mut out_pers: Vec<f64> = vec![0.0; n_rows];
+    let mut out_fib: Vec<f64> = vec![f64::NAN; n_rows];
+    let mut out_resolved: Vec<f64> = vec![0.0; n_rows];
+
+    let mut i: usize = 0;
+    while i < n_rows {
+        let s = symbol[i];
+        let mut j = i;
+        while j < n_rows && symbol[j] == s {
+            j += 1;
+        }
+        // Per-symbol fold state (reset at each symbol block).
+        let mut dir: i64 = 0; // 0 undirected, +1 up-leg, -1 down-leg
+        let mut leg_start_price = f64::NAN;
+        let mut leg_start_min: i64 = 0;
+        let mut extreme = f64::NAN; // provisional running extreme of the current leg
+        let mut extreme_min: i64 = 0;
+        // undirected bootstrap: track BOTH a running high and low from the first bar; the first reversal of
+        // theta from EITHER establishes the direction (and that extreme is the first confirmed pivot).
+        let mut hi = f64::NAN;
+        let mut hi_min: i64 = 0;
+        let mut lo = f64::NAN;
+        let mut lo_min: i64 = 0;
+        // last COMPLETED leg geometry (for fib_retracement): the start & end price of the prior leg.
+        let mut prev_leg_start = f64::NAN;
+        let mut prev_leg_end = f64::NAN;
+        let mut have_prev_leg = false;
+        let mut n_pivots_today: f64 = 0.0;
+        let mut cur_day: i64 = i64::MIN;
+        // bounded ring of recent CONFIRMED leg signed returns (the per-leg net move), for persistence + the
+        // trend-resolved length/steepness comparison.
+        let mut leg_returns: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
+        let mut leg_steeps: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
+        let mut n_alternations: f64 = 0.0;
+
+        let mut r = i;
+        while r < j {
+            let c = close[r];
+            let m = minute[r];
+            let day = m.div_euclid(day_secs);
+            if day != cur_day {
+                cur_day = day;
+                n_pivots_today = 0.0;
+            }
+
+            if leg_start_price.is_nan() {
+                // first bar of the block: seed everything, no direction yet.
+                leg_start_price = c;
+                leg_start_min = m;
+                extreme = c;
+                extreme_min = m;
+                hi = c;
+                hi_min = m;
+                lo = c;
+                lo_min = m;
+            } else if dir == 0 {
+                if c > hi {
+                    hi = c;
+                    hi_min = m;
+                }
+                if c < lo {
+                    lo = c;
+                    lo_min = m;
+                }
+                let down_rev = if hi > 0.0 { (hi - c) / hi } else { 0.0 };
+                let up_rev = if lo > 0.0 { (c - lo) / lo } else { 0.0 };
+                // pick the reversal that fired with the LARGER magnitude (deterministic if both cross).
+                if down_rev >= theta && down_rev >= up_rev {
+                    // we were rising; confirm a HIGH pivot at hi, flip to a down-leg starting from hi.
+                    confirm_pivot(
+                        hi,
+                        leg_start_price,
+                        hi_min - leg_start_min,
+                        &mut prev_leg_start,
+                        &mut prev_leg_end,
+                        &mut have_prev_leg,
+                        &mut leg_returns,
+                        &mut leg_steeps,
+                        ring_k,
+                    );
+                    n_pivots_today += 1.0;
+                    n_alternations += 1.0;
+                    dir = -1;
+                    leg_start_price = hi;
+                    leg_start_min = hi_min;
+                    extreme = c;
+                    extreme_min = m;
+                } else if up_rev >= theta {
+                    confirm_pivot(
+                        lo,
+                        leg_start_price,
+                        lo_min - leg_start_min,
+                        &mut prev_leg_start,
+                        &mut prev_leg_end,
+                        &mut have_prev_leg,
+                        &mut leg_returns,
+                        &mut leg_steeps,
+                        ring_k,
+                    );
+                    n_pivots_today += 1.0;
+                    n_alternations += 1.0;
+                    dir = 1;
+                    leg_start_price = lo;
+                    leg_start_min = lo_min;
+                    extreme = c;
+                    extreme_min = m;
+                }
+            } else if dir == 1 {
+                if c >= extreme {
+                    extreme = c;
+                    extreme_min = m;
+                } else if extreme > 0.0 && (extreme - c) / extreme >= theta {
+                    confirm_pivot(
+                        extreme,
+                        leg_start_price,
+                        extreme_min - leg_start_min,
+                        &mut prev_leg_start,
+                        &mut prev_leg_end,
+                        &mut have_prev_leg,
+                        &mut leg_returns,
+                        &mut leg_steeps,
+                        ring_k,
+                    );
+                    n_pivots_today += 1.0;
+                    n_alternations += 1.0;
+                    dir = -1;
+                    leg_start_price = extreme;
+                    leg_start_min = extreme_min;
+                    extreme = c;
+                    extreme_min = m;
+                }
+            } else {
+                // dir == -1 (down-leg): mirror.
+                if c <= extreme {
+                    extreme = c;
+                    extreme_min = m;
+                } else if extreme > 0.0 && (c - extreme) / extreme >= theta {
+                    confirm_pivot(
+                        extreme,
+                        leg_start_price,
+                        extreme_min - leg_start_min,
+                        &mut prev_leg_start,
+                        &mut prev_leg_end,
+                        &mut have_prev_leg,
+                        &mut leg_returns,
+                        &mut leg_steeps,
+                        ring_k,
+                    );
+                    n_pivots_today += 1.0;
+                    n_alternations += 1.0;
+                    dir = 1;
+                    leg_start_price = extreme;
+                    leg_start_min = extreme_min;
+                    extreme = c;
+                    extreme_min = m;
+                }
+            }
+
+            // ---- emit the point-in-time features for THIS row from the (already-updated) state ----
+            out_dir[r] = dir as f64;
+            let len_pct = if leg_start_price > 0.0 {
+                (c - leg_start_price) / leg_start_price
+            } else {
+                0.0
+            };
+            out_len[r] = len_pct;
+            let mins = ((m - leg_start_min) / 60) as f64;
+            out_steep[r] = if mins > 0.0 { len_pct / mins } else { 0.0 };
+            // minutes_since_pivot is defined only once a pivot has been confirmed (dir != 0).
+            out_msp[r] = if dir != 0 { mins } else { f64::NAN };
+            out_npt[r] = n_pivots_today;
+            out_nalt[r] = n_alternations;
+            out_pers[r] = leg_returns.iter().sum::<f64>() + len_pct;
+            // fib_retracement: where c sits within the PRIOR completed leg's [end..start] range. 0 at the
+            // prior leg's END (the last confirmed pivot), 1 back at its START. NaN until a leg completes.
+            if have_prev_leg && (prev_leg_start - prev_leg_end).abs() > 0.0 {
+                out_fib[r] = (c - prev_leg_end) / (prev_leg_start - prev_leg_end);
+            }
+            // trend_resolved: after tight alternation (>= 2 prior legs in the ring), the CURRENT leg exceeds
+            // the recent legs' median length AND steepness, AND its direction persists (sign of len matches dir).
+            if leg_returns.len() >= 2 && dir != 0 {
+                let cur_abs_len = len_pct.abs();
+                let cur_abs_steep = out_steep[r].abs();
+                let max_prior_len = leg_returns.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+                let max_prior_steep = leg_steeps.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+                let persists = (len_pct > 0.0 && dir == 1) || (len_pct < 0.0 && dir == -1);
+                if persists && cur_abs_len > max_prior_len && cur_abs_steep > max_prior_steep {
+                    out_resolved[r] = 1.0;
+                }
+            }
+            r += 1;
+        }
+        i = j;
+    }
+    Ok((
+        out_dir,
+        out_steep,
+        out_len,
+        out_msp,
+        out_npt,
+        out_nalt,
+        out_pers,
+        out_fib,
+        out_resolved,
+    ))
+}
+
+/// Push a freshly CONFIRMED pivot: record the just-completed leg's geometry (start price -> pivot price) for
+/// the fib read and the bounded persistence/steepness rings. The signed leg return is
+/// (pivot − leg_start)/leg_start; the per-minute steepness is that return over the leg's minute span (the
+/// SAME basis as the live ``swing_steepness`` so the trend-resolved length/steepness comparison is apples-to-
+/// apples). ``leg_span_secs`` is the leg's (pivot_min − leg_start_min) in seconds.
+#[allow(clippy::too_many_arguments)]
+fn confirm_pivot(
+    pivot_price: f64,
+    leg_start_price: f64,
+    leg_span_secs: i64,
+    prev_leg_start: &mut f64,
+    prev_leg_end: &mut f64,
+    have_prev_leg: &mut bool,
+    leg_returns: &mut std::collections::VecDeque<f64>,
+    leg_steeps: &mut std::collections::VecDeque<f64>,
+    ring_k: usize,
+) {
+    let signed_ret = if leg_start_price > 0.0 {
+        (pivot_price - leg_start_price) / leg_start_price
+    } else {
+        0.0
+    };
+    let mins = (leg_span_secs / 60) as f64;
+    let steep = if mins > 0.0 { signed_ret / mins } else { 0.0 };
+    *prev_leg_start = leg_start_price;
+    *prev_leg_end = pivot_price;
+    *have_prev_leg = true;
+    leg_returns.push_back(signed_ret);
+    leg_steeps.push_back(steep);
+    while leg_returns.len() > ring_k {
+        leg_returns.pop_front();
+    }
+    while leg_steeps.len() > ring_k {
+        leg_steeps.pop_front();
+    }
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
@@ -614,5 +935,6 @@ fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rolling_extrema, m)?)?;
     m.add_function(wrap_pyfunction!(time_lag_gather, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_canonical, m)?)?;
+    m.add_function(wrap_pyfunction!(swing_fold, m)?)?;
     Ok(())
 }
