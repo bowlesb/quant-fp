@@ -2,7 +2,9 @@ AUTONOMOUS MAINTAINER+BUILDER LOOP — quant-fp live feature platform. The owner
 
 Working dir: /home/ben/quant-fp. Deployed trunk = integration/converged (bind-mounted into the feature-computer container at /app). Creds are in .env — NEVER print secret values. Use /tmp for scratch. Follow CLAUDE.md coding rules exactly.
 
-ORIENT FIRST (you start with fresh context each run): read docs/RESUME_STATE.md, then docs/AUTONOMOUS_BACKLOG.md and docs/MAINTENANCE_PROTOCOL.md.
+LANE DISCIPLINE (a dedicated data-quality AUDIT loop runs concurrently): YOUR lane = the incremental engine, capture, store, infra, and items 1-2-3 (incl. the systemic data-quality fixes in backlog P1.0: points() NaN, restart warm-start, store dedup — these are engine/store, so they are YOURS). The audit loop owns per-feature-group local data-quality fixes. Work on a feature branch off integration/converged; if a git merge conflicts, rebase and retry (the audit loop may have moved trunk). NOTE the SEQUENCING RULE in docs/DATA_QUALITY_LEDGER.md: do not redeploy capture for feature fixes until the warm-start fix lands — then one clean restart + recollect.
+
+ORIENT FIRST (you start with fresh context each run): read docs/RESUME_STATE.md, then docs/AUTONOMOUS_BACKLOG.md, docs/DATA_QUALITY_LEDGER.md, and docs/MAINTENANCE_PROTOCOL.md.
 
 Then do BOTH of the following, in order:
 
