@@ -23,4 +23,9 @@ scrape_configs:
           - "feature-computer:9207"
           - "feature-computer:9208"
 
+  # Reader process: ingestion counters (feature_bars/trades/quotes_ingested_total) on :9200.
+  - job_name: feature-reader
+    static_configs:
+      - targets: ["feature-computer:9200"]
+
   # status / executor scrape targets added as those services land.

@@ -1,0 +1,53 @@
+{
+  "uid": "ingestion-rate",
+  "title": "Ingestion frequency (bars / trades / quotes)",
+  "tags": ["ingestion", "capture"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Messages ingested per second (rate over 1m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max", "mean"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "rate(feature_bars_ingested_total[1m])", "legendFormat": "bars/s" },
+        { "refId": "B", "expr": "rate(feature_trades_ingested_total[1m])", "legendFormat": "trades/s" },
+        { "refId": "C", "expr": "rate(feature_quotes_ingested_total[1m])", "legendFormat": "quotes/s" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Current ingestion rate",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 11 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "expr": "rate(feature_bars_ingested_total[1m])", "legendFormat": "bars/s" },
+        { "refId": "B", "expr": "rate(feature_trades_ingested_total[1m])", "legendFormat": "trades/s" },
+        { "refId": "C", "expr": "rate(feature_quotes_ingested_total[1m])", "legendFormat": "quotes/s" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cumulative messages ingested today",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 0 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "feature_bars_ingested_total", "legendFormat": "bars total" },
+        { "refId": "B", "expr": "feature_trades_ingested_total", "legendFormat": "trades total" },
+        { "refId": "C", "expr": "feature_quotes_ingested_total", "legendFormat": "quotes total" }
+      ]
+    }
+  ]
+}
