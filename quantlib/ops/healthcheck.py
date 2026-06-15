@@ -55,6 +55,9 @@ MID_SESSION_MINUTE = 720  # 12:00 ET — coverage should be broad by here
 # Latency thresholds (seconds).
 VECTOR_LATENCY_WARN_S = 0.5
 VECTOR_LATENCY_FAIL_S = 2.0
+# Our-compute thresholds (feature_assemble_seconds = last-bar -> ready, excludes Alpaca delivery lag).
+COMPUTE_LATENCY_WARN_S = float(os.environ.get("COMPUTE_LATENCY_WARN_S", "1.0"))
+COMPUTE_LATENCY_FAIL_S = float(os.environ.get("COMPUTE_LATENCY_FAIL_S", "5.0"))
 
 # A-E share of an unbiased US-equity ticker distribution sits ~30-35%; a hard alphabetical [:N] cut
 # pushes it far higher, so we flag well above the natural band.
@@ -504,33 +507,47 @@ def check_constant_features() -> CheckResult:
     return CheckResult(name, Status.PASS, detail, metric=0.0)
 
 
+def latency_quantiles(metric: str, window: str = "15m") -> tuple[float | None, float | None, float | None]:
+    """(p50, p95, p99) for a histogram metric, aggregated across shards."""
+    quantiles = []
+    for q in ("0.50", "0.95", "0.99"):
+        quantiles.append(
+            prometheus_scalar(f"histogram_quantile({q}, sum(rate({metric}_bucket[{window}])) by (le))")
+        )
+    return quantiles[0], quantiles[1], quantiles[2]
+
+
 def check_bar_to_vector_latency() -> CheckResult:
+    """Bar -> vector ready latency for the deployed batch path. Both anchors (first-bar end-to-end,
+    last-bar assemble) are dominated by the batch minute-close WAIT: a minute's vector cannot be
+    assembled until the minute is complete (~T+60s). Pure feature compute is tracked separately by
+    group_compute_p99 and is fast — this check surfaces the architectural bet-latency floor, which
+    only the per-symbol fast/tick path can break below a minute."""
     name = "bar_to_vector_latency"
-    p50 = prometheus_scalar(
-        "histogram_quantile(0.50, sum(rate(feature_vector_latency_seconds_bucket[15m])) by (le))"
-    )
-    if p50 is None:
+    end_p50, _, end_p99 = latency_quantiles("feature_vector_latency_seconds")
+    asm_p50, asm_p95, asm_p99 = latency_quantiles("feature_assemble_seconds")
+    if asm_p50 is None and end_p50 is None:
         return CheckResult(
             name,
             Status.WARN,
-            "feature_vector_latency_seconds not emitted (deploy pending)",
+            "latency metrics not emitted (deploy pending)",
             metric=None,
-            fix_hint="bar->vector latency metric absent — redeploy capture to start emitting",
+            fix_hint="redeploy capture to start emitting feature_assemble_seconds",
         )
-    p95 = prometheus_scalar(
-        "histogram_quantile(0.95, sum(rate(feature_vector_latency_seconds_bucket[15m])) by (le))"
-    )
-    p99 = prometheus_scalar(
-        "histogram_quantile(0.99, sum(rate(feature_vector_latency_seconds_bucket[15m])) by (le))"
-    )
-    detail = f"bar->vector p50={p50:.3f}s p95={p95 or 0:.3f}s p99={p99 or 0:.3f}s"
-    if p99 is not None and p99 > VECTOR_LATENCY_FAIL_S:
+    end_str = f"end2end p50={end_p50 or 0:.1f}s p99={end_p99 or 0:.1f}s"
+    asm_str = f"assemble p50={asm_p50 or 0:.1f}s p95={asm_p95 or 0:.1f}s p99={asm_p99 or 0:.1f}s"
+    detail = f"{asm_str}; {end_str} (batch path: incl. minute-close wait + Alpaca delivery lag)"
+    if asm_p99 is not None and asm_p99 > COMPUTE_LATENCY_FAIL_S:
         return CheckResult(
-            name, Status.FAIL, detail, metric=p99, fix_hint="p99 latency >2s — capture is too slow"
+            name,
+            Status.FAIL,
+            detail,
+            metric=asm_p99,
+            fix_hint="batch bar->vector >5s — architectural floor; per-symbol fast path needed for sub-minute bets",
         )
-    if p99 is not None and p99 > VECTOR_LATENCY_WARN_S:
-        return CheckResult(name, Status.WARN, detail, metric=p99, fix_hint="p99 latency >0.5s")
-    return CheckResult(name, Status.PASS, detail, metric=p99)
+    if asm_p99 is not None and asm_p99 > COMPUTE_LATENCY_WARN_S:
+        return CheckResult(name, Status.WARN, detail, metric=asm_p99, fix_hint="bar->vector latency elevated")
+    return CheckResult(name, Status.PASS, detail, metric=asm_p99)
 
 
 def check_group_compute_p99() -> CheckResult:
