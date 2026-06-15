@@ -39,10 +39,32 @@ BARS_SCHEMA = {
 # The trailing buffer MUST exceed the largest declared feature window plus the deepest intra-feature
 # lag. Below that, the buffer's leading-edge minutes lack the lookback/lag context the settled
 # backfill has (e.g. their one-minute return is null live but defined in backfill), so the longest-
-# window features diverge live-vs-backfill — a parity break. Our longest minute window today is
-# price_levels' 240m; 300 leaves headroom. (The separate latest-minute compute mode removes the
-# per-minute cost of recomputing this whole buffer at 10k-ticker scale.)
-DEFAULT_BUFFER_MINUTES = 300
+# window features diverge live-vs-backfill — a parity break.
+#
+# Two depth regimes coexist among the groups:
+#   - WINDOWED groups (the vast majority) look back a fixed N minutes — the deepest is price_levels'
+#     240m, so any buffer >~270m gives them full backfill-equivalent context. momentum_run needs only
+#     60m, etc. For these the buffer depth above their window is pure recompute tax, not correctness.
+#   - SESSION-CUMULATIVE groups reset at the UTC day boundary and fold the WHOLE session — swing's
+#     ``n_pivots_today``/``minutes_since_pivot`` (rust kernel resets at ``minute // 86400``). Backfill
+#     folds the entire collected day, so to keep live==backfill the live buffer must reach the first
+#     collected bar of the UTC day. Collection starts at premarket open ~08:00 UTC (4:00 ET); at the
+#     16:00 ET close (20:00 UTC) that is ~720 minutes back. A 300m buffer truncated swing late-session
+#     (n_pivots_today decreased intraday, minutes_since_pivot pinned at 299) — the CRITICAL-2 non-restart
+#     facet (docs/DATA_QUALITY_LEDGER.md). 410m (the originally-floated bump) is INSUFFICIENT — measured.
+#
+# So the buffer is sized to the cumulative groups' need: full premarket-inclusive UTC session (~720m)
+# + 30m slack. Cost (measured `profile 1250 720 --latest`): per-group-summed live recompute ~15.6s at
+# 1250 tickers/shard (deployed BATCHED path is lower — reduction groups share one marshal), vs the 60s
+# minute budget — comfortable. The reduce (universe-wide) ring is capped INDEPENDENTLY by
+# ``sharded_capture.reduce_buffer_minutes`` (cross_sectional_rank's declared window + slack), so this
+# bump only deepens the per-shard MAP ring where swing lives; the reduce path stays small.
+#
+# FOLLOW-UP (queued, backlog P1.0 CRITICAL-2): this global depth taxes WINDOWED groups (esp. momentum_run,
+# the dominant term, which needs 60m) with recompute they don't use. Eliminate via per-group buffer-depth
+# slicing before compute_latest, or a stateful swing accumulator (its kernel is already an O(1)/bar state
+# machine — retain the fold across minutes, parity-gated like WindowedSumState). Neither blocks this fix.
+DEFAULT_BUFFER_MINUTES = 750
 
 # Sacred parity tolerance (CLAUDE.md ~1e-6 rel). The self-check measures live incremental-vs-batch
 # divergence as a MULTIPLE of this tolerance and records a BREACH when it exceeds benign float drift.

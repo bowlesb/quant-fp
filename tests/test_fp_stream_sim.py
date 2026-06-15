@@ -20,7 +20,7 @@ import polars as pl
 from quantlib.features.base import BatchContext
 from quantlib.features.bench_stream import SESSION_DAY, synth_daily, synth_reference
 from quantlib.features.compare import runnable
-from quantlib.features.declarative import ReductionGroup, emit_numpy
+from quantlib.features.declarative import ReductionGroup, emit_numpy, resolve_points
 from quantlib.features.stream_sim import (
     StreamShardState,
     process_stream_minute,
@@ -91,7 +91,10 @@ def test_incremental_reduction_matches_batch_on_enriched_buffer() -> None:
     assert engine.state is not None
     reduction_out = emit_numpy(
         engine.groups, engine.state.running, engine.symbols or [], engine.windows, engine.col_index,
-        buffer.filter(pl.col("minute") == latest), latest, engine.plan, engine.reg_plan,
+        # The latest-minute frame must carry the precomputed ``__pt_<name>`` point columns resolved over the
+        # WHOLE buffer (gap-safe lag), exactly as the deployed ``compute_reduction_batch`` and the live
+        # ``process_stream_minute`` feed emit — a raw single-minute slice has null lag-points (CRITICAL-1).
+        resolve_points(engine.groups, buffer, latest), latest, engine.plan, engine.reg_plan,
     )
     for group in runnable(frames):
         if not isinstance(group, ReductionGroup):
