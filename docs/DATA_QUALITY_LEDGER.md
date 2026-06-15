@@ -61,7 +61,7 @@ code fixes, land the warm-start fix, then do ONE clean restart + recollect conta
 | price_levels | BLOCKED-ON-SYSTEMIC | CRITICAL-2 120m/240m collapse post-open re-seed; algebra correct | wave3 |
 | prior_day | BLOCKED-ON-SYSTEMIC | HIGH-DAILYLOAD anchor NaN until ~10:58 ET for 26% of names; math clean | wave3 |
 | residual_analysis | FIXED-CODE | dropped 12 dead-constant features (mean_abs≡0, symmetric≡1) — landed+parity-tested this cycle. residual_std clean (0 Inf, 0 OOR, no blow-up — guard works). Residual: P0-UNIVERSE (funds inherited). Recompute on restart | wave4 |
-| swing | BLOCKED-ON-SYSTEMIC | CRITICAL-2 buffer<session collapses zigzag (n_pivots_today decreases intraday, minutes_since_pivot pins at 299); + queued LOCAL fib clamp (`fib_retracement`→3101 vs ±10, `rust/src/lib.rs:860-861`) batched with the dev-image rebuild + restart | wave3 |
+| swing | BLOCKED-ON-SYSTEMIC | CRITICAL-2 buffer<session collapses zigzag (n_pivots_today decreases intraday, minutes_since_pivot pins at 299). **LOCAL fib guard LANDED (FIXED-CODE):** `fib_retracement` degenerate micro-leg reads (LIVE up to **450**, 1261 rows/~3.9% beyond ±10) now null in `swing_fold_frame` (single live==backfill fold path; no rust rebuild needed) — `FIB_MAX_ABS=10.0` guard + mirrored in the pure-Python parity reference + a triggering-path test; 6 swing parity tests green. Ships on the batched clean restart (the rust:860 denominator-floor is now optional — superseded by the parity-safe output guard). Recompute swing after restart | wave3 / wave5 |
 | trade_flow | PENDING-STREAM | needs trades streaming | - |
 | quote_spread | PENDING-STREAM | needs quotes streaming | - |
 | tick_runlength | PENDING-STREAM | needs trades streaming | - |
