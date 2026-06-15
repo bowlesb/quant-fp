@@ -1,8 +1,10 @@
 # PR Workflow — evidence-based changes, reviewed before merge
 
-Every code change reaches the trunk through a reviewed PR with **proof**. The reviewer (the lead agent or
-the owner) merges; the author never self-merges to the deployed line. This exists because un-reviewed,
-un-evidenced "I fixed it" changes repeatedly turned out broken in production.
+Every code change reaches the trunk through a PR with **proof**. The LEAD agent reviews and **merges
+autonomously** based on the evidence — the **owner does NOT approve merges**; PRs exist as a durable,
+browsable RECORD (an audit trail the owner can skim any time), NOT an approval gate. The author (a
+subagent) never self-merges. This exists because un-reviewed, un-evidenced "I fixed it" changes
+repeatedly turned out broken in production — the evidence, not a human gate, is what guards the trunk.
 
 ## THE EVIDENCE RULE (non-negotiable — a PR without this is rejected unread)
 A PR is **not** a description of a fix. It is **proof**, with real command output:
