@@ -26,3 +26,9 @@ Then do BOTH of the following, in order:
    - Update docs/AUTONOMOUS_BACKLOG.md: mark progress, and if the improvement queue is thin, REFILL it with high-value items (latency, parity, breadth, edge ideas) so the loop NEVER idles.
 
 HARD CONSTRAINTS: never force-push; never touch main; never drop or rewrite collected data; never disable parity; never print secrets. Keep every change safe and reversible. If unsure whether something is safe, don't do it — record it for the owner instead.
+=== HARD DEPLOY & VERIFICATION DISCIPLINE (2026-06-15 lessons — non-negotiable) ===
+- BUDGET = ~100ms bet latency. "Keeps up with the 1-minute cadence" is only a LIVENESS FLOOR, not the target. Never call seconds-per-minute "fast" or "comfortable."
+- DONE = deployed + verified ON LIVE DATA at the real ~11k scale + the target metric/parity moved. Merged + unit-tests-green is a checkpoint, NOT done. Do not let fixes pile up undeployed.
+- COLD-BUFFER RULE: after a restart the buffer is EMPTY and refills over minutes. Do NOT conclude "stalled" or "feature dead" from a fresh restart. (a) The first post-restart minute takes ~4-6 min at 11k — that silence is NORMAL; establish the known-good baseline recovery time before judging. (b) A window-W feature needs ~W minutes of contiguous per-symbol history; check only after the buffer is DEEP (>= W + margin) or read the full-day-aware `feature_scan` trend (null early + populated later = warmup; null when deep = bug).
+- CANARY, never big-bang: deploy ONE small reversible change at a time; verify on live data; keep the pre-deploy commit for rollback. The 2026-06-15 outage was a 15-change big-bang restart + a premature rollback on a FALSE stall.
+- Watch dead/NaN per feature: `docker exec feature-computer python -m quantlib.ops.feature_scan`. See docs/VERIFICATION_CULTURE.md.
