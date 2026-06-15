@@ -256,8 +256,8 @@ class ReductionGroup(FeatureGroup):
                 [col for name, (x, y, _, _) in regressions.items() for col in _ols_derived(name, x, y)]
             )
         latest = frame["minute"].max()
-        wide = frame.filter(pl.col("minute") == latest).select(
-            ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in self.points().items()]]
+        wide = resolve_points([self], frame, latest).select(
+            ["symbol", *[f"__pt_{name}" for name in self.points()]]
         )
         for name, (_, stats, windows) in reduced.items():
             long = rust_reductions(frame, f"__d_{name}", windows)
@@ -377,7 +377,31 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
     long = rust_windowed_sums(frame, value_cols, windows)
 
     with _phase.phase("batch.assemble(pivot+join)"):
-        return assemble_from_long(groups, long, frame.filter(pl.col("minute") == latest), latest, plan, reg_plan)
+        return assemble_from_long(groups, long, resolve_points(groups, frame, latest), latest, plan, reg_plan)
+
+
+def resolve_points(groups: list[ReductionGroup], frame: pl.DataFrame, latest: object) -> pl.DataFrame:
+    """Evaluate every group's ``points()`` exprs over the FULL trailing buffer (so positive-lag exprs such as
+    ``close.shift(w).over("symbol")`` resolve against history — exactly as backfill ``compute()`` does), then
+    return the single latest-minute row per symbol carrying the materialised ``__pt_<name>`` columns.
+
+    PARITY FIX (was a live-vs-backfill break): every assemble path previously re-evaluated the point exprs on
+    a SINGLE-minute frame (``frame.filter(minute == latest)``), where ``shift(w>0).over("symbol")`` is null —
+    so the lag-point feature families (efficiency, return_dynamics, momentum_consistency, ...) emitted 100%
+    NaN live while backfill computed them fine. Resolving over the whole buffer is gap-safe (a sparse
+    symbol's prior bar is found however far back it is) and matches the backfill truth. Point names that
+    collide across groups carry the SAME expr on the SAME input column (dedup by output name is byte-correct
+    — the invariant ``emit_rust_unified`` already relies on). Assemble paths now SELECT the precomputed
+    ``__pt_<name>`` columns by name rather than re-evaluating the exprs on the latest minute."""
+    point_exprs: dict[str, pl.Expr] = {}
+    for group in groups:
+        for name, expr in group.points().items():
+            point_exprs.setdefault(f"__pt_{name}", expr.alias(f"__pt_{name}"))
+    return (
+        frame.sort(["symbol", "minute"])
+        .select(["symbol", "minute", *point_exprs.values()])
+        .filter(pl.col("minute") == latest)
+    )
 
 
 def assemble_from_long(
@@ -389,9 +413,11 @@ def assemble_from_long(
     reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
 ) -> dict[str, pl.DataFrame]:
     """Build each group's feature frame from a LONG (symbol, window, <value-col sums>) frame + the latest
-    minute's rows (for points). SHARED by the live-batch path (``long`` from the Rust kernel) and the
-    incremental path (``long`` from the running-sum state) — so the canonical algebra and ``assemble()`` are
-    the SAME code in both; only the source of the sums differs. ``latest`` is the minute stamped on output."""
+    minute's rows carrying the precomputed ``__pt_<name>`` point columns (from ``resolve_points``, which
+    resolves positive-lag points over the whole buffer — see that function). SHARED by the live-batch path
+    (``long`` from the Rust kernel) and the incremental path (``long`` from the running-sum state) — so the
+    canonical algebra and ``assemble()`` are the SAME code in both; only the source of the sums differs.
+    ``latest`` is the minute stamped on output."""
     results: dict[str, pl.DataFrame] = {}
     for gi, group in enumerate(groups):
         canon: list[pl.Expr] = []
@@ -412,7 +438,7 @@ def assemble_from_long(
         piv = glong.pivot(on="window", index="symbol")
         piv = piv.rename({c: "__" + c[4:] for c in piv.columns if c.startswith("__c_") and not c.startswith("__c_z")})
         wide = latest_frame.select(
-            ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
+            ["symbol", *[f"__pt_{name}" for name in group.points()]]
         ).join(piv, on="symbol", how="left")
         feats = group.assemble()
         results[group.name] = (
@@ -513,7 +539,7 @@ def emit_rust(
         # copy): pl.from_numpy over the C-contiguous (n_symbols, n_group_cols) slice. NaN stays NaN (not null),
         # exactly as the numpy emit's per-column Series — so assemble()'s null/NaN handling is unchanged.
         points_select = latest_frame.select(
-            ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
+            ["symbol", *[f"__pt_{name}" for name in group.points()]]
         )
         if stop > start:
             block = np.ascontiguousarray(canon[:, start:stop])
@@ -569,12 +595,14 @@ def emit_rust_unified(
 
     # The UNION of every group's at-T point columns, deduped by output name (colliding names are identical
     # exprs), evaluated on the latest minute's frame ONCE and joined onto the wide canonical frame.
-    point_exprs: dict[str, pl.Expr] = {}
+    point_cols: list[str] = []
     for group in groups:
-        for name, expr in group.points().items():
-            point_exprs.setdefault(f"__pt_{name}", expr.alias(f"__pt_{name}"))
-    if point_exprs:
-        points = latest_frame.select(["symbol", *point_exprs.values()])
+        for name in group.points():
+            col = f"__pt_{name}"
+            if col not in point_cols:
+                point_cols.append(col)
+    if point_cols:
+        points = latest_frame.select(["symbol", *point_cols])
         wide = wide.join(points, on="symbol", how="left")
 
     # Evaluate ALL groups' assemble() exprs in ONE with_columns pass (feature names unique across groups).
@@ -692,7 +720,7 @@ def emit_numpy(
                     wide_cols[f"__{stat}_{name}_{w}"] = pl.Series(ols[stat], dtype=pl.Float64)
         piv = pl.DataFrame({"symbol": symbols, **wide_cols})
         wide = latest_frame.select(
-            ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
+            ["symbol", *[f"__pt_{name}" for name in group.points()]]
         ).join(piv, on="symbol", how="left")
         feats = group.assemble()
         results[group.name] = (

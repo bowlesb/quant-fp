@@ -36,6 +36,7 @@ from quantlib.features.declarative import (
     emit_numpy,
     emit_rust,
     emit_rust_unified,
+    resolve_points,
 )
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
@@ -387,7 +388,7 @@ class IncrementalEngine:
             except SymbolSetExpanded:
                 self.seed(frame, slice_derive=slice_derive)  # rebuild the index to include the new ticker(s)
         long = self._running_long()
-        latest_frame = frame.filter(pl.col("minute") == latest)
+        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
         return assemble_from_long(self.groups, long, latest_frame, latest, self.plan, self.reg_plan)
 
     def step_numpy(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
@@ -402,7 +403,7 @@ class IncrementalEngine:
             self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
             self.state.trim()
         assert self.state is not None
-        latest_frame = frame.filter(pl.col("minute") == latest)
+        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
         return emit_numpy(
             self.groups,
             self.state.running,
@@ -428,7 +429,7 @@ class IncrementalEngine:
             self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
             self.state.trim()
         assert self.state is not None
-        latest_frame = frame.filter(pl.col("minute") == latest)
+        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
         return emit_rust(self.groups, self.state.running, self.symbols or [], self.asm_plan, latest_frame, latest)
 
     def step_rust_unified(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
@@ -444,7 +445,7 @@ class IncrementalEngine:
             self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
             self.state.trim()
         assert self.state is not None
-        latest_frame = frame.filter(pl.col("minute") == latest)
+        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
         return emit_rust_unified(
             self.groups, self.state.running, self.symbols or [], self.asm_plan, latest_frame, latest
         )
