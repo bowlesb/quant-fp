@@ -8,7 +8,7 @@ the prior Edgar system's FEATURE_GROUP_DURATION histogram.
 """
 from __future__ import annotations
 
-from prometheus_client import Histogram, start_http_server
+from prometheus_client import Counter, Histogram, start_http_server
 
 # Buckets span 0.5ms .. 2.5s — the range a per-group live compute can plausibly take at shard scale.
 GROUP_COMPUTE_SECONDS = Histogram(
@@ -56,6 +56,34 @@ ASSEMBLE_SECONDS = Histogram(
     ["shard"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0),
 )
+
+
+# Incremental-path parity self-check (FP_INCREMENTAL_PARITY). Each minute the incremental engine output is
+# compared cell-for-cell against the batch recompute (the truth); we observe the WORST divergence per
+# reduce_input bucket as a MULTIPLE of the parity tolerance (1.0 == exactly at tolerance) and count any
+# minute that breaches benign drift. While the incremental fast path is DEFAULT-OFF this is the live
+# evidence that it stays parity-true before it is ever flipped on. Parity is sacred (CLAUDE.md): a
+# non-zero breach counter must block enabling the fast path.
+INCREMENTAL_PARITY_TOL_RATIO = Histogram(
+    "feature_incremental_parity_tol_ratio",
+    "Worst per-minute incremental-vs-batch divergence as a multiple of the parity tolerance, by reduce_input",
+    ["reduce_input"],
+    buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 1000.0),
+)
+INCREMENTAL_PARITY_BREACH = Counter(
+    "feature_incremental_parity_breach_total",
+    "Minutes where incremental-vs-batch divergence exceeded benign drift, by reduce_input bucket",
+    ["reduce_input"],
+)
+
+
+def record_incremental_parity(reduce_input: str, tol_ratio: float, breached: bool) -> None:
+    """Observe one minute's incremental-vs-batch parity self-check for ``reduce_input``: the worst
+    divergence as a multiple of the parity tolerance, and whether it breached benign drift (see
+    capture._incremental_parity)."""
+    INCREMENTAL_PARITY_TOL_RATIO.labels(reduce_input=reduce_input).observe(tol_ratio)
+    if breached:
+        INCREMENTAL_PARITY_BREACH.labels(reduce_input=reduce_input).inc()
 
 
 def record_group_timings(timings: dict[str, float]) -> None:
