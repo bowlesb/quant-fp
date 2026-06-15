@@ -125,18 +125,25 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
         worker.start()
 
     reduce_state = CaptureState()
-    pending: dict = {"minute": None, "bars": [], "done": 0, "arrival": 0.0}
+    # arrival       = time.time() of the minute's FIRST bar (end-to-end / delivery-inclusive anchor).
+    # last_arrival  = time.time() of the minute's LAST bar (pure-compute anchor; max over the minute).
+    # symbol_arrivals = per-symbol time.time() of that symbol's bar (drill-down: which tickers are slow).
+    pending: dict = {"minute": None, "bars": [], "done": 0, "arrival": 0.0,
+                     "last_arrival": 0.0, "symbol_arrivals": {}}
     stream = build_stream()
 
     bench_reader = _reader_bench_path(root)  # FP_BENCH_LOG: time the single-threaded reader (route+reduce)
 
-    def dispatch(bars: list[dict], arrival_wallclock: float) -> None:
+    def dispatch(bars: list[dict], first_arrival: float, last_arrival: float,
+                 symbol_arrivals: dict[str, float], minute) -> None:  # type: ignore[no-untyped-def]
         start = time.perf_counter()
         for shard_id, shard_bars in enumerate(route_minute(bars, n_shards)):
             if shard_bars:
-                # (arrival_wallclock, bars) — the worker records bar->vector latency off this wall-clock
-                # stamp (time.time(), comparable across the reader/worker processes; perf_counter is not).
-                queues[shard_id].put((arrival_wallclock, shard_bars))  # map: per-shard workers
+                # (first_arrival, last_arrival, symbol_arrivals, minute, bars) — the worker records the two
+                # latency metrics off these wall-clock stamps (time.time(), comparable across the
+                # reader/worker processes; perf_counter is not) and writes the per-symbol drill-down rows.
+                shard_symbol_arrivals = {bar["S"]: symbol_arrivals[bar["S"]] for bar in shard_bars}
+                queues[shard_id].put((first_arrival, last_arrival, shard_symbol_arrivals, minute, shard_bars))
         process_reduce(reduce_state, bars, root, mode, day, window)  # gather: universe-wide rank
         if bench_reader is not None:
             with bench_reader.open("a") as handle:
@@ -146,8 +153,10 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
         minute = bar.timestamp.replace(second=0, microsecond=0)
         if pending["minute"] is not None and minute != pending["minute"] and pending["bars"]:
-            dispatch(pending["bars"], pending["arrival"])
+            dispatch(pending["bars"], pending["arrival"], pending["last_arrival"],
+                     pending["symbol_arrivals"], pending["minute"])
             pending["bars"] = []
+            pending["symbol_arrivals"] = {}
             pending["done"] += 1
             if max_minutes is not None and pending["done"] >= max_minutes:
                 if os.environ.get("FP_BENCH_LOG"):
@@ -157,10 +166,16 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
                     queue.put(None)  # shutdown sentinel: workers drain their queue then exit
                 await stream.stop_ws()
                 return
+        now = time.time()
         if not pending["bars"]:
-            # Wall-clock the instant THIS minute's first bar landed off the websocket — the honest "bar
-            # arrival" anchor for the bar->vector latency metric (recorded by the worker after assemble).
-            pending["arrival"] = time.time()
+            # Wall-clock the instant THIS minute's first bar landed off the websocket — the end-to-end
+            # (delivery-inclusive) anchor for feature_vector_latency_seconds.
+            pending["arrival"] = now
+        # Every bar updates last_arrival (kept as the max) — the LAST bar of the minute is the pure-compute
+        # anchor for feature_assemble_seconds (Alpaca has finished delivering by then). Per-symbol arrival
+        # feeds the drill-down (which tickers were delivered late / slow in our pipeline).
+        pending["last_arrival"] = now
+        pending["symbol_arrivals"][bar.symbol] = now
         pending["minute"] = minute
         pending["bars"].append(
             {"S": bar.symbol, "o": float(bar.open), "c": float(bar.close), "h": float(bar.high),

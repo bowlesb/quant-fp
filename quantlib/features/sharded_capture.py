@@ -27,7 +27,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-from quantlib.features import metrics
+from quantlib.features import latency_drilldown, metrics
 from quantlib.features.capture import CaptureState, StoreWriter, process_bars
 from quantlib.features.registry import REGISTRY
 
@@ -144,16 +144,27 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
             if bench_log is not None:
                 print(f"[worker {shard_id}] exiting after {processed} minutes", file=sys.stderr, flush=True)
             return
-        # Reader hands (arrival_wallclock, bars): arrival_wallclock is time.time() stamped the instant the
-        # minute's first bar landed off the websocket (cross-process comparable; perf_counter is not).
-        arrival_wallclock, batch = item
+        # Reader hands (first_arrival, last_arrival, symbol_arrivals, minute, bars). All arrival stamps are
+        # time.time() (cross-process comparable; perf_counter is not): first_arrival = the minute's FIRST
+        # bar landing (end-to-end anchor, incl. Alpaca delivery spread), last_arrival = the minute's LAST
+        # bar landing (pure-compute anchor), symbol_arrivals = per-symbol arrival for the drill-down.
+        first_arrival, last_arrival, symbol_arrivals, minute, batch = item
         processed += 1
         start = time.perf_counter()
         process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id)
-        # Bar-arrival -> vector-ready: now (vector assembled) minus arrival, with the write subtracted so
-        # the metric ends at the assemble (the bet point), not the post-bet parquet write. process_bars
-        # records last_write_ms separately; subtract it whether the write was sync (here) or async-queued.
-        metrics.record_bar_to_vector(shard_id, max(0.0, time.time() - arrival_wallclock - state.last_write_ms / 1000.0))
+        ready_wallclock = time.time()
+        # Two complementary latencies, both ending at the assemble (the bet point) with the post-bet
+        # parquet write subtracted (process_bars records last_write_ms separately; subtract it whether the
+        # write was sync here or async-queued). feature_vector_latency_seconds (first-bar) is end-to-end
+        # incl. Alpaca's delivery spread; feature_assemble_seconds (last-bar) is OUR pure compute.
+        write_seconds = state.last_write_ms / 1000.0
+        metrics.record_bar_to_vector(shard_id, max(0.0, ready_wallclock - first_arrival - write_seconds))
+        metrics.record_assemble(shard_id, max(0.0, ready_wallclock - last_arrival - write_seconds))
+        # Drill-down (best-effort, fault-isolated, off the hot path): top-K slowest symbols this minute ->
+        # latency_slow_symbols. A DB error logs a warning and continues — it must never stall capture.
+        minute_boundary_epoch = minute.timestamp()
+        slow_rows = latency_drilldown.top_k_slow_symbols(symbol_arrivals, ready_wallclock, minute_boundary_epoch)
+        latency_drilldown.write_slow_symbols(minute, shard_id, slow_rows)
         if bench_log is not None:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             # The bet-relevant latency is COMPUTE only; the write happens after the decision, so report it

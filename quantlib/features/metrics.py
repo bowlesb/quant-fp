@@ -18,16 +18,43 @@ GROUP_COMPUTE_SECONDS = Histogram(
     buckets=(0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
 )
 
-# Bar-arrival -> vector-ready end-to-end latency, per shard. This is the bet-relevant number from
-# Ben's memory ("Bet-latency metric"): the wall-clock from the instant the capture process RECEIVED a
-# minute's bar off the Alpaca websocket to the instant THIS shard's feature vector for that minute is
-# assembled (BEFORE the parquet write — the write is post-bet and excluded). Buckets span 5ms .. 5s,
-# the plausible range for a single shard's assemble across the reader-dispatch + queue + compute hops.
+# FIRST-bar anchor = END-TO-END latency incl. Alpaca's bar-delivery window, per shard. The wall-clock
+# from the instant the capture process RECEIVED the minute's FIRST bar off the Alpaca websocket to the
+# instant THIS shard's feature vector for that minute is assembled (BEFORE the parquet write — the write
+# is post-bet and excluded).
+#
+# HONESTY CAVEAT: because the anchor is the minute's FIRST bar, this number CONFLATES two things: (a)
+# Alpaca's per-minute bar-DELIVERY spread (bars stream in one-at-a-time over several seconds after each
+# minute closes) and (b) OUR compute. At the widened ~11k-symbol universe the delivery spread dominates
+# and pushed the value into the old 5s top bucket (p50=p95=p99=5.000s == overflow). Buckets now span
+# 50ms .. 60s so multi-second end-to-end latency is actually measurable. To isolate OUR compute from the
+# delivery spread, compare against feature_assemble_seconds (last-bar anchor) below.
+#
+# NOTE: Prometheus histograms cannot change buckets without recreating the metric, so this bucket change
+# only takes effect after a CAPTURE PROCESS RESTART.
 BAR_TO_VECTOR_SECONDS = Histogram(
     "feature_vector_latency_seconds",
-    "Bar-arrival -> vector-ready wall time per shard (excludes the post-bet parquet write)",
+    "Bar-arrival(FIRST bar of minute) -> vector-ready wall time per shard (end-to-end incl. Alpaca "
+    "delivery spread; excludes the post-bet parquet write)",
     ["shard"],
-    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0),
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0),
+)
+
+# LAST-bar anchor = PURE COMPUTE latency, per shard. The wall-clock from the instant the LAST bar of the
+# shard's minute landed off the websocket (i.e. once Alpaca has finished delivering that minute's bars
+# for this shard's symbols) to the instant THIS shard's feature vector is assembled (BEFORE the parquet
+# write). By anchoring on the LAST bar this EXCLUDES Alpaca's bar-delivery spread that feature_vector_
+# latency_seconds includes — it measures only the route-dispatch + queue + compute hops that are OURS.
+# Comparing the two side by side separates "slow because Alpaca delivered late" from "slow in our
+# pipeline". Same bucket range as above so the two are directly comparable.
+#
+# NOTE: same bucket-change-needs-restart caveat as above.
+ASSEMBLE_SECONDS = Histogram(
+    "feature_assemble_seconds",
+    "Bar-arrival(LAST bar of minute) -> vector-ready wall time per shard (pure compute, excludes both "
+    "Alpaca delivery spread and the post-bet parquet write)",
+    ["shard"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0),
 )
 
 
@@ -39,12 +66,24 @@ def record_group_timings(timings: dict[str, float]) -> None:
 
 
 def record_bar_to_vector(shard_id: int, seconds: float) -> None:
-    """Observe one minute's bar-arrival -> vector-ready latency for ``shard_id`` (seconds, write excluded).
+    """Observe one minute's FIRST-bar-anchored end-to-end latency for ``shard_id`` (seconds, write
+    excluded). This INCLUDES Alpaca's per-minute bar-delivery spread (see BAR_TO_VECTOR_SECONDS doc).
 
     ``seconds`` MUST be measured with a clock comparable ACROSS the reader and worker processes (i.e.
     ``time.time()`` wall clock, NOT ``time.perf_counter()`` which is per-process). The caller computes
-    ``time.time() - arrival_wallclock`` after the vector is assembled and subtracts the write time."""
+    ``time.time() - first_bar_arrival_wallclock`` after the vector is assembled and subtracts the write
+    time."""
     BAR_TO_VECTOR_SECONDS.labels(shard=str(shard_id)).observe(seconds)
+
+
+def record_assemble(shard_id: int, seconds: float) -> None:
+    """Observe one minute's LAST-bar-anchored PURE-COMPUTE latency for ``shard_id`` (seconds, write
+    excluded). This EXCLUDES Alpaca's bar-delivery spread (see ASSEMBLE_SECONDS doc).
+
+    ``seconds`` MUST be measured with the same cross-process wall clock (``time.time()``). The caller
+    computes ``time.time() - last_bar_arrival_wallclock`` after the vector is assembled and subtracts the
+    write time."""
+    ASSEMBLE_SECONDS.labels(shard=str(shard_id)).observe(seconds)
 
 
 def start_metrics_server(port: int) -> None:
