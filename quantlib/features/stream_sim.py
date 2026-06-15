@@ -145,7 +145,13 @@ from quantlib.features.consolidated import (
     emit_daily_broadcast,
     emit_point_in_time,
 )
-from quantlib.features.declarative import _USE_RUST_ASSEMBLE, ReductionGroup, emit_numpy, emit_rust
+from quantlib.features.declarative import (
+    _USE_RUST_ASSEMBLE,
+    ReductionGroup,
+    emit_numpy,
+    emit_rust,
+    emit_rust_unified,
+)
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _shard_snapshots, build_stream
 from quantlib.features.sharded_capture import INDEX_SYMBOLS, REDUCE_GROUPS, shard_of
@@ -332,7 +338,10 @@ def process_stream_minute(
     latest_frame = frame.filter(pl.col("minute") == latest)
     reduction_emit_start = time.perf_counter()
     if _USE_RUST_ASSEMBLE:
-        reduction_out = emit_rust(
+        # UNIFIED single-pass emit: assemble EVERY reduction group's features in ONE shared wide-frame pass
+        # (one kernel + one canonical ingest + one shared point-select + one with_columns), instead of the
+        # ~13 per-group polars frame-builds + assemble passes — byte-identical (tests/test_fp_unified_emit.py).
+        reduction_out = emit_rust_unified(
             engine.groups, engine.state.running, engine.symbols or [], engine.asm_plan, latest_frame, latest
         )
     else:

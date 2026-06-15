@@ -519,6 +519,66 @@ def emit_rust(
     return results
 
 
+def emit_rust_unified(
+    groups: list[ReductionGroup],
+    running: np.ndarray,
+    symbols: list[str],
+    asm_plan: _AssemblePlan,
+    latest_frame: pl.DataFrame,
+    latest: object,
+) -> dict[str, pl.DataFrame]:
+    """UNIFIED single-pass twin of ``emit_rust`` (a SCHEDULING change, not a math change).
+
+    ``emit_rust`` runs the ONE ``assemble_canonical`` Rust kernel, then for EACH of the ~13 reduction
+    groups builds its own polars frame (ingest its canonical slice + a per-group points select + a join)
+    and evaluates that group's ``assemble()`` exprs in its OWN ``with_columns`` — the per-group polars
+    frame-build + expr-eval is the reduction-emit floor (the canonical algebra is ~1-3ms). This builds ONE
+    wide frame keyed (symbol) carrying EVERY group's canonical columns (the kernel's full contiguous
+    ``(n_symbols, n_out)`` block ingested in ONE ``pl.from_numpy`` — every canonical name is unique across
+    groups by construction of ``build_assemble_plan``) plus the UNION of every group's ``__pt_<name>`` point
+    columns (deduped by output name; colliding point names across groups carry the SAME expr on the SAME
+    input column, so one shared column is byte-correct), then evaluates ALL groups' ``assemble()`` exprs in
+    ONE ``with_columns`` pass, and slices each group's feature columns back out.
+
+    Byte-identical to per-group ``emit_rust`` by construction: the SAME kernel output, the SAME point exprs,
+    feeding the SAME ``assemble()`` expressions — only the polars pass/join count changes (1 ingest + 1
+    points-select + 1 join + 1 with_columns, vs N of each). Feature names are unique across groups, so the
+    per-group slice is exact. Returns the SAME ``{group_name: feature_frame}`` shape ``emit_rust`` returns."""
+    canon = quant_tick.assemble_canonical(
+        np.ascontiguousarray(running), asm_plan.win, asm_plan.kind, *asm_plan.idx
+    )  # (n_symbols, n_out), NaN where null
+    symbol_series = pl.Series("symbol", symbols)
+
+    # Ingest EVERY group's canonical columns in ONE pl.from_numpy over the full contiguous kernel block.
+    # All canonical names (asm_plan.col_names) are unique across groups, so there is no column collision.
+    if canon.shape[1] > 0:
+        wide = pl.from_numpy(np.ascontiguousarray(canon), schema=asm_plan.col_names).with_columns(symbol_series)
+    else:
+        wide = pl.DataFrame({"symbol": symbols})
+
+    # The UNION of every group's at-T point columns, deduped by output name (colliding names are identical
+    # exprs), evaluated on the latest minute's frame ONCE and joined onto the wide canonical frame.
+    point_exprs: dict[str, pl.Expr] = {}
+    for group in groups:
+        for name, expr in group.points().items():
+            point_exprs.setdefault(f"__pt_{name}", expr.alias(f"__pt_{name}"))
+    if point_exprs:
+        points = latest_frame.select(["symbol", *point_exprs.values()])
+        wide = wide.join(points, on="symbol", how="left")
+
+    # Evaluate ALL groups' assemble() exprs in ONE with_columns pass (feature names unique across groups).
+    all_feature_exprs: list[pl.Expr] = []
+    for group in groups:
+        for name, expr in group.assemble().items():
+            all_feature_exprs.append(expr.cast(pl.Float64).alias(name))
+    wide = wide.with_columns(all_feature_exprs).with_columns(pl.lit(latest).alias("minute"))
+
+    results: dict[str, pl.DataFrame] = {}
+    for group in groups:
+        results[group.name] = wide.select(["symbol", "minute", *group._feature_names()])
+    return results
+
+
 def _canonical_numpy(
     sums: np.ndarray, stats: tuple[str, ...], col_index: dict[str, int], base: str
 ) -> dict[str, np.ndarray]:

@@ -35,6 +35,7 @@ from quantlib.features.declarative import (
     build_plan,
     emit_numpy,
     emit_rust,
+    emit_rust_unified,
 )
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
@@ -381,6 +382,24 @@ class IncrementalEngine:
         assert self.state is not None
         latest_frame = frame.filter(pl.col("minute") == latest)
         return emit_rust(self.groups, self.state.running, self.symbols or [], self.asm_plan, latest_frame, latest)
+
+    def step_rust_unified(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
+        """UNIFIED single-pass twin of ``step_rust``: fold the new minute, then assemble EVERY reduction
+        group's features in ONE shared wide-frame pass (``emit_rust_unified``) instead of one per-group
+        polars frame-build + ``assemble`` each. Parity-true by construction — same kernel, same point exprs,
+        same ``assemble`` expressions; only the polars pass count changes. Guarded == ``step_rust`` /
+        ``step_numpy`` / ``step`` / batch by tests/test_fp_unified_emit.py."""
+        latest = frame["minute"].max()
+        if self.state is None:
+            self.seed(frame)
+        else:
+            self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
+            self.state.trim()
+        assert self.state is not None
+        latest_frame = frame.filter(pl.col("minute") == latest)
+        return emit_rust_unified(
+            self.groups, self.state.running, self.symbols or [], self.asm_plan, latest_frame, latest
+        )
 
     def _running_long(self) -> pl.DataFrame:
         """The running sums as a LONG (symbol, window, <value-col sum>) frame — the exact shape
