@@ -5,15 +5,37 @@ backfill would silently break — so this is the guard that lets us scale out ac
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
 from pathlib import Path
 
+from quantlib.aggregates import (
+    QuoteTick,
+    TickState,
+    TradeTick,
+    aggregate_quotes,
+    aggregate_trades,
+    bucket_minute,
+)
 from quantlib.features import store
+from quantlib.features.base import BatchContext
 from quantlib.features.capture import CaptureState, process_bars
-from quantlib.features.sharded_capture import REDUCE_GROUPS, process_reduce, process_shard, route_minute
+from quantlib.features.compare import runnable
+from quantlib.features.registry import REGISTRY
+from quantlib.features.sharded_capture import (
+    INDEX_SYMBOLS,
+    REDUCE_GROUPS,
+    aggregate_shard_ticks,
+    process_reduce,
+    process_shard,
+    route_minute,
+    route_ticks,
+    shard_of,
+)
+from quantlib.features.tick_capture import TICK_COLUMNS
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
 SYMBOLS = ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "SPY", "QQQ")
@@ -158,3 +180,156 @@ def test_reduce_group_absent_from_shards() -> None:
                           snapshots=snapshots, write=False, accumulate=True)
     for group in REDUCE_GROUPS:
         assert all(group not in state.accumulated for state in shard_states)
+
+
+# ---- Per-shard tick aggregation (the firehose distributed onto the workers) ----
+# A larger universe than the old 24-symbol reader-side tick cap, so the scale-out is exercised.
+TICK_SYMBOLS = tuple(f"T{i:03d}" for i in range(40)) + INDEX_SYMBOLS
+
+
+def _ticks_for_minute(minute_index: int) -> tuple[list[dict], list[dict], list[dict]]:
+    """One minute of bars + sub-minute trades + quotes per symbol. Prices walk so signs flip (the
+    tick-rule classification is exercised, not a degenerate all-up tape)."""
+    minute = BASE + timedelta(minutes=minute_index)
+    bars, trades, quotes = [], [], []
+    for offset, symbol in enumerate(TICK_SYMBOLS):
+        close = 100.0 + offset + minute_index * 0.1 + (0.3 if (minute_index + offset) % 3 == 0 else -0.2)
+        bars.append({"S": symbol, "o": close - 0.04, "c": close, "h": close + 0.05, "l": close - 0.05,
+                     "v": 1000.0 + offset, "t": minute.isoformat()})
+        for seq in range(5):
+            ts = minute + timedelta(seconds=(seq + 1) * 10.0)
+            trades.append({"S": symbol, "p": close + (seq - 2) * 0.01, "s": 100.0 + seq,
+                           "ts_epoch": ts.timestamp()})
+        for seq in range(4):
+            ts = minute + timedelta(seconds=(seq + 1) * 12.0)
+            quotes.append({"S": symbol, "bp": close - 0.02, "ap": close + 0.02,
+                           "bs": 5.0 + seq, "as": 6.0 + seq, "ts_epoch": ts.timestamp()})
+    return bars, trades, quotes
+
+
+def _single_process_enriched(n_minutes: int) -> dict[str, dict[str, dict]]:
+    """Single-process truth: ONE TickState dict, every symbol aggregated in one pass per minute."""
+    states: dict[str, TickState] = {}
+    out: dict[str, dict[str, dict]] = {}
+    for mi in range(n_minutes):
+        bars, trades, quotes = _ticks_for_minute(mi)
+        minute = bars[0]["t"]
+        minute_epoch = bucket_minute(datetime.fromisoformat(minute).timestamp())
+        enriched, _ = aggregate_shard_ticks(bars, trades, quotes, minute_epoch, states)
+        out[minute] = {bar["S"]: bar for bar in enriched}
+    return out
+
+
+def _sharded_enriched(n_minutes: int, n_shards: int) -> dict[str, dict[str, dict]]:
+    """Sharded: each shard owns a TickState dict; bars + ticks routed by hash(symbol)."""
+    shard_states: list[dict[str, TickState]] = [dict() for _ in range(n_shards)]
+    out: defaultdict[str, dict[str, dict]] = defaultdict(dict)
+    for mi in range(n_minutes):
+        bars, trades, quotes = _ticks_for_minute(mi)
+        minute = bars[0]["t"]
+        minute_epoch = bucket_minute(datetime.fromisoformat(minute).timestamp())
+        routed_bars = route_minute(bars, n_shards)
+        routed_trades = route_ticks(trades, n_shards)
+        routed_quotes = route_ticks(quotes, n_shards)
+        for sid in range(n_shards):
+            if not routed_bars[sid]:
+                continue
+            enriched, _ = aggregate_shard_ticks(routed_bars[sid], routed_trades[sid], routed_quotes[sid],
+                                                minute_epoch, shard_states[sid])
+            for bar in enriched:
+                out[minute][bar["S"]] = bar
+    return dict(out)
+
+
+def test_per_shard_tick_aggregation_equals_single_process() -> None:
+    """The enriched minute_agg tick columns a WORKER computes on its shard's ticks (threaded per-worker
+    TickState) must equal the single-process aggregate — the tick-layer parity the scale-out preserves."""
+    n_shards = 6
+    single = _single_process_enriched(8)
+    sharded = _sharded_enriched(8, n_shards)
+    compared = 0
+    for minute, single_map in single.items():
+        for symbol, single_bar in single_map.items():
+            sharded_bar = sharded[minute][symbol]
+            for col in TICK_COLUMNS:
+                compared += 1
+                assert abs(single_bar[col] - sharded_bar[col]) <= 1e-9, (
+                    f"{symbol} {minute} {col}: single={single_bar[col]} sharded={sharded_bar[col]}"
+                )
+    assert compared > 24 * len(TICK_COLUMNS)  # exercised past the old 24-symbol tick cap
+
+
+def test_route_ticks_replicates_index_and_hashes_rest() -> None:
+    n_shards = 6
+    _, trades, _ = _ticks_for_minute(0)
+    routed = route_ticks(trades, n_shards)
+    # index ETF trades are replicated to EVERY shard (their bars are too -> each shard enriches its copy)
+    for sid in range(n_shards):
+        for index_symbol in INDEX_SYMBOLS:
+            assert any(tick["S"] == index_symbol for tick in routed[sid])
+    # non-index trades land ONLY on their owning shard (same hash as the bars)
+    for symbol in TICK_SYMBOLS:
+        if symbol in INDEX_SYMBOLS:
+            continue
+        owner = shard_of(symbol, n_shards)
+        for sid in range(n_shards):
+            present = any(tick["S"] == symbol for tick in routed[sid])
+            assert present == (sid == owner)
+
+
+def test_raw_trades_groups_runnable_only_with_trades_frame() -> None:
+    """tick_runlength + microstructure_burst (InputSpec name='trades') are NOT runnable off the bars/
+    minute_agg frame alone — they become runnable ONLY once the worker supplies the raw trades frame, and
+    then they emit real (non-null) rows. This is the gap the refactor closes."""
+    n_shards = 4
+    bars, trades, quotes = _ticks_for_minute(0)
+    minute_epoch = bucket_minute(BASE.timestamp())
+    routed_bars = route_minute(bars, n_shards)
+    routed_trades = route_ticks(trades, n_shards)
+    routed_quotes = route_ticks(quotes, n_shards)
+    enriched, trades_df = aggregate_shard_ticks(routed_bars[0], routed_trades[0], routed_quotes[0],
+                                                minute_epoch, dict())
+    minute_agg = pl.DataFrame(
+        [{"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": bar["o"],
+          "close": bar["c"], "high": bar["h"], "low": bar["l"], "volume": bar["v"],
+          **{col: bar[col] for col in TICK_COLUMNS}} for bar in enriched]
+    )
+    without_trades = {g.name for g in runnable({"minute_agg": minute_agg})}
+    with_trades = {g.name for g in runnable({"minute_agg": minute_agg, "trades": trades_df})}
+    for group_name in ("tick_runlength", "microstructure_burst"):
+        assert group_name not in without_trades
+        assert group_name in with_trades
+        out = REGISTRY.get_group(group_name).compute(BatchContext(frames={"minute_agg": minute_agg, "trades": trades_df}))
+        assert out.height > 0
+        for feature in out.columns:
+            if feature in ("symbol", "minute"):
+                continue
+            assert out.select(pl.col(feature).is_not_null().any()).item(), f"{group_name}.{feature} all-null"
+
+
+def test_raw_trades_frame_sign_aggregation_matches_batch() -> None:
+    """The shard's raw trades frame fed to the groups carries the SAME ordered ticks a batch pass sees, and
+    the worker's threaded TickState reproduces a batch sign classification across minutes (parity)."""
+    symbol = "T000"
+    n_shards = 4
+    shard_states: dict[str, TickState] = {}
+    batch_state = TickState()
+    for mi in range(5):
+        bars, trades, quotes = _ticks_for_minute(mi)
+        minute_epoch = bucket_minute((BASE + timedelta(minutes=mi)).timestamp())
+        owner = shard_of(symbol, n_shards)
+        routed_bars = route_minute(bars, n_shards)
+        routed_trades = route_ticks(trades, n_shards)
+        routed_quotes = route_ticks(quotes, n_shards)
+        enriched, _ = aggregate_shard_ticks(routed_bars[owner], routed_trades[owner], routed_quotes[owner],
+                                            minute_epoch, shard_states)
+        live = {bar["S"]: bar for bar in enriched}[symbol]
+        symbol_trades = [TradeTick(tick["ts_epoch"], tick["p"], tick["s"])
+                         for tick in trades if tick["S"] == symbol and bucket_minute(tick["ts_epoch"]) == minute_epoch]
+        symbol_quotes = [QuoteTick(tick["ts_epoch"], tick["bp"], tick["ap"], tick["bs"], tick["as"])
+                         for tick in quotes if tick["S"] == symbol and bucket_minute(tick["ts_epoch"]) == minute_epoch]
+        batch_trade = aggregate_trades(symbol_trades, batch_state)
+        batch_quote = aggregate_quotes(symbol_quotes)
+        assert live["signed_volume"] == batch_trade.signed_volume
+        assert live["n_trades"] == float(batch_trade.n_trades)
+        assert abs(live["mean_spread_bps"] - batch_quote.mean_spread_bps) <= 1e-9

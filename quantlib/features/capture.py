@@ -276,6 +276,7 @@ def process_bars(
     accumulate: bool = False,
     project_columns: tuple[str, ...] | None = None,
     buffer_minutes: int | None = None,
+    extra_frames: dict[str, pl.DataFrame] | None = None,
 ) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
     S, o, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
@@ -296,7 +297,14 @@ def process_bars(
     path needs only symbol/minute/close/volume, never the full 7-column frame). ``buffer_minutes`` caps
     the ring depth below ``window`` (the reduce groups' longest window + slack, not the full 300m). Both
     are PARITY-NEUTRAL where used: the dropped columns/older minutes are never read by the groups that
-    run there. Default (None/None) = the full 7-column ``window``-deep ring (the map path)."""
+    run there. Default (None/None) = the full 7-column ``window``-deep ring (the map path).
+
+    ``extra_frames`` are SINGLE-MINUTE input frames (not the trailing-ring bars) merged into the compute
+    context so input-specific groups self-select — the worker passes THIS minute's raw ``trades`` frame
+    here so ``tick_runlength`` / ``microstructure_burst`` (InputSpec name="trades") become ``runnable``.
+    These groups truncate to the minute internally and emit one (symbol, minute) row, so the per-minute
+    frame is exactly their input (no trailing buffer); an absent/empty ``trades`` frame -> they emit no
+    rows for the minute (honest 'no trades'), they don't fabricate zeros."""
     # Append THIS minute's rows into the trailing ring (O(new), not an O(full-buffer) rescan). The ring
     # keeps one frame per minute, overwrites a re-delivered minute (keep-last), and evicts past its depth,
     # so the materialized frame is the SAME (symbol, minute) row set the old concat+unique+filter produced.
@@ -308,7 +316,7 @@ def process_bars(
     frame = state.ring.materialize()
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
-    frames = {"minute_agg": frame, **(snapshots or {})}
+    frames = {"minute_agg": frame, **(snapshots or {}), **(extra_frames or {})}
     ctx = BatchContext(frames=frames)
     selected = [
         group

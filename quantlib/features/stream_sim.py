@@ -229,7 +229,6 @@ from quantlib.features.declarative import (
     _USE_RUST_ASSEMBLE,
     ReductionGroup,
     emit_numpy,
-    emit_rust,
     emit_rust_unified,
     resolve_points,
 )
@@ -244,8 +243,10 @@ from quantlib.features.stateful import (
 )
 from quantlib.features.tick_capture import enrich_bars_with_ticks
 
-# The non-reduction groups that still consume the raw per-minute trades tape (tick_runlength's Rust kernel).
-TRADES_GROUPS: tuple[str, ...] = ("tick_runlength",)
+# The non-reduction groups that consume the raw per-minute trades tape (InputSpec name="trades"):
+# tick_runlength's Rust run-length kernel + microstructure_burst's sub-minute burst stats. Both get the
+# per-minute ``trades`` frame so they self-select (runnable) and emit data, not zero rows.
+TRADES_GROUPS: tuple[str, ...] = ("tick_runlength", "microstructure_burst")
 # Per-symbol stateful groups now on the incremental fold path (StatefulEngine) instead of batch compute_latest:
 # technical/candlestick (recursive EMA + lag-ring kinds), price_returns (lag/last-k kind), price_levels
 # (rolling-extrema kind). liquidity is NOT here — it decomposes into additive-window reductions + an OLS

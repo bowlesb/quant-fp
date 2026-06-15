@@ -24,9 +24,13 @@ import json
 import os
 import sys
 import time
+from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
+import polars as pl
+
+from quantlib.aggregates import QuoteTick, TickState, TradeTick, bucket_minute
 from quantlib.features import latency_drilldown, metrics
 from quantlib.features.capture import (
     CaptureState,
@@ -36,6 +40,7 @@ from quantlib.features.capture import (
     warm_start_ring,
 )
 from quantlib.features.registry import REGISTRY
+from quantlib.features.tick_capture import enrich_bars_with_ticks, trades_frame
 
 # Index ETFs replicated to every shard so market-context/beta compute locally (tiny, ~3 symbols).
 INDEX_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "IWM")
@@ -111,13 +116,68 @@ def route_minute(bars: list[dict], n_shards: int) -> list[list[dict]]:
     return routed
 
 
+def route_ticks(ticks: list[dict], n_shards: int) -> list[list[dict]]:
+    """Partition a minute's raw trade (or quote) dicts by ``hash(symbol) % n_shards`` — the SAME hash
+    routing as the bars, so each symbol's ticks land on the worker that owns its bars and aggregates them
+    locally. The index ETFs are REPLICATED to every shard (their bars already are), so each shard enriches
+    its replicated SPY/QQQ/IWM bars with those symbols' ticks — exactly the single enriched index rows the
+    reader produced and replicated before. ``ticks`` dicts are the reader's normalized shape with an ``S``
+    symbol key (trades: S/p/s/ts_epoch; quotes: S/bp/ap/bs/as/ts_epoch)."""
+    index_ticks = [tick for tick in ticks if tick["S"] in INDEX_SYMBOLS]
+    routed: list[list[dict]] = [list(index_ticks) for _ in range(n_shards)]
+    for tick in ticks:
+        if tick["S"] in INDEX_SYMBOLS:
+            continue  # already replicated to all shards
+        routed[shard_of(tick["S"], n_shards)].append(tick)
+    return routed
+
+
 def process_shard(state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
                   window: int, snapshots: dict | None = None, write: bool = True, shard: int | None = None,
-                  accumulate: bool = False) -> None:
+                  accumulate: bool = False, extra_frames: dict | None = None) -> None:
     """One shard's map step: the shared core, minus the universe-wide reduce groups. Each minute appends
-    its OWN per-minute file inside the partition (atomic, no clobber) so all shards write concurrently."""
+    its OWN per-minute file inside the partition (atomic, no clobber) so all shards write concurrently.
+
+    ``extra_frames`` carries THIS minute's raw ``trades`` frame so the raw-trades groups
+    (tick_runlength / microstructure_burst) run on the shard's own trades — built by ``aggregate_shard_ticks``."""
     process_bars(state, bars, root, mode, day, window, snapshots, exclude_groups=REDUCE_GROUPS,
-                 write=write, shard=shard, accumulate=accumulate)
+                 write=write, shard=shard, accumulate=accumulate, extra_frames=extra_frames)
+
+
+def aggregate_shard_ticks(
+    bars: list[dict], trades: list[dict], quotes: list[dict], minute_epoch: int,
+    tick_states: dict[str, TickState],
+) -> tuple[list[dict], pl.DataFrame]:
+    """One shard's per-minute tick aggregation — moved OFF the single reader onto the worker that owns the
+    shard, so the firehose is distributed across workers instead of all aggregated inline by the reader.
+
+    Buckets THIS shard's raw trade/quote dicts to ``minute_epoch`` (the exchange-ts minute the backfill
+    agrees with), aggregates per symbol with the threaded ``TickState`` (live == batch at the tick layer),
+    and returns:
+      * the bars ENRICHED with the minute_agg tick columns (n_trades / signed_volume / mean_spread_bps /
+        ...) the trade_flow / quote_spread / liquidity groups consume — same as the reader produced before,
+        now per shard; and
+      * the raw ``trades`` frame (symbol, ts, price, size) the tick_runlength / microstructure_burst groups
+        consume — which the reader NEVER built, so those two raw-trades groups produced nothing before.
+
+    ``tick_states`` is the WORKER's per-symbol state, threaded across minutes — each symbol lives on exactly
+    one shard (stable hash routing), so its tick history is contiguous on its owning worker and the live
+    classification matches a single batch pass over that symbol's whole ordered tape (parity)."""
+    trades_by_symbol: dict[str, list[TradeTick]] = defaultdict(list)
+    quotes_by_symbol: dict[str, list[QuoteTick]] = defaultdict(list)
+    for trade in trades:
+        if bucket_minute(trade["ts_epoch"]) == minute_epoch:
+            trades_by_symbol[trade["S"]].append(
+                TradeTick(ts_epoch=trade["ts_epoch"], price=trade["p"], size=trade["s"])
+            )
+    for quote in quotes:
+        if bucket_minute(quote["ts_epoch"]) == minute_epoch:
+            quotes_by_symbol[quote["S"]].append(
+                QuoteTick(ts_epoch=quote["ts_epoch"], bid=quote["bp"], ask=quote["ap"],
+                          bid_size=quote["bs"], ask_size=quote["as"])
+            )
+    enriched = enrich_bars_with_ticks(bars, dict(trades_by_symbol), dict(quotes_by_symbol), tick_states)
+    return enriched, trades_frame(dict(trades_by_symbol))
 
 
 def process_reduce(reduce_state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
@@ -150,6 +210,10 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
     BEFORE the first live minute, so a restart does not start cold (CRITICAL-2). Default OFF / no symbols =
     today's cold start, unchanged."""
     state = CaptureState()
+    # Per-symbol tick state, threaded across minutes ON THIS WORKER. Each symbol lives on exactly one shard
+    # (stable hash routing), so its trade tape is contiguous here and the live sign-classification matches a
+    # single batch pass over that symbol's whole tape — the parity guarantee at the tick layer, now per shard.
+    tick_states: dict[str, TickState] = {}
     if os.environ.get("FP_ASYNC_WRITE"):  # opt-in: a background writer thread (can contend with compute)
         state.writer = StoreWriter()
     if warm_start_enabled() and day and symbols:
@@ -174,14 +238,26 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
             if bench_log is not None:
                 print(f"[worker {shard_id}] exiting after {processed} minutes", file=sys.stderr, flush=True)
             return
-        # Reader hands (first_arrival, last_arrival, symbol_arrivals, minute, bars). All arrival stamps are
-        # time.time() (cross-process comparable; perf_counter is not): first_arrival = the minute's FIRST
-        # bar landing (end-to-end anchor, incl. Alpaca delivery spread), last_arrival = the minute's LAST
-        # bar landing (pure-compute anchor), symbol_arrivals = per-symbol arrival for the drill-down.
-        first_arrival, last_arrival, symbol_arrivals, minute, batch = item
+        # Reader hands (first_arrival, last_arrival, symbol_arrivals, minute, bars, trades, quotes). All
+        # arrival stamps are time.time() (cross-process comparable; perf_counter is not): first_arrival =
+        # the minute's FIRST bar landing (end-to-end anchor, incl. Alpaca delivery spread), last_arrival =
+        # the minute's LAST bar landing (pure-compute anchor), symbol_arrivals = per-symbol arrival for the
+        # drill-down. ``trades``/``quotes`` are THIS shard's raw ticks (reader forwards them un-aggregated so
+        # the firehose distributes across workers); empty when no ticks are subscribed.
+        first_arrival, last_arrival, symbol_arrivals, minute, batch, trades, quotes = item
         processed += 1
         start = time.perf_counter()
-        process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id)
+        # Aggregate THIS shard's ticks on THIS worker: enrich the bars with the minute_agg tick columns and
+        # build the raw ``trades`` frame the tick_runlength / microstructure_burst groups consume. No
+        # subscribed ticks -> empty trades/quotes -> bars pass through unenriched, trades frame empty.
+        if trades or quotes:
+            minute_epoch = bucket_minute(minute.timestamp())
+            batch, trades_df = aggregate_shard_ticks(batch, trades, quotes, minute_epoch, tick_states)
+            extra_frames = {"trades": trades_df} if trades_df.height else None
+        else:
+            extra_frames = None
+        process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id,
+                      extra_frames=extra_frames)
         ready_wallclock = time.time()
         # Two complementary latencies, both ending at the assemble (the bet point) with the post-bet
         # parquet write subtracted (process_bars records last_write_ms separately; subtract it whether the
