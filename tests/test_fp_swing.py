@@ -25,6 +25,7 @@ import polars as pl
 from quantlib.features.base import BatchContext
 from quantlib.features.groups.swing import (
     DAY_SECS,
+    FIB_MAX_ABS,
     RING_K,
     THETA,
     SwingGroup,
@@ -161,7 +162,9 @@ def _python_swing(closes: list[float], minutes: list[int]) -> dict[str, list[flo
         out["n_alternations"].append(n_alternations)
         out["swing_persistence"].append(sum(leg_returns) + len_pct)
         if have_prev_leg and abs(prev_leg_start - prev_leg_end) > 0.0:
-            out["fib_retracement"].append((close - prev_leg_end) / (prev_leg_start - prev_leg_end))
+            fib = (close - prev_leg_end) / (prev_leg_start - prev_leg_end)
+            # mirror swing_fold_frame's degenerate-micro-leg guard: beyond the valid_range fib is undefined.
+            out["fib_retracement"].append(fib if abs(fib) <= FIB_MAX_ABS else float("nan"))
         else:
             out["fib_retracement"].append(float("nan"))
         resolved = 0.0
@@ -270,6 +273,26 @@ def test_swing_compute_latest_equals_backfill() -> None:
             b = back_t[name].to_list()
             for sym_i in range(len(a)):
                 assert _cell_equal(a[sym_i], b[sym_i]), f"latest@min{ti} {name} sym{sym_i}"
+
+
+def test_swing_fib_degenerate_microleg_guarded() -> None:
+    """fib_retracement off a confirmed MICRO-leg (near-zero prior-leg range) explodes; the guard nulls any read
+    beyond the declared valid_range so the column never ships an out-of-range degenerate value (seen LIVE to 450).
+    This exact close path drives the raw kernel fib to ~13.5 (> FIB_MAX_ABS); the guarded frame must null it."""
+    # up-dir established, a hair-thin up micro-leg to 100.02, then a deep drop -> tiny denom, explosive raw fib.
+    closes = [100.0, 100.0, 100.8, 100.0, 100.02, 90.0, 90.0, 90.0]
+    minutes = [BASE + dt.timedelta(minutes=i) for i in range(len(closes))]
+    frame = pl.DataFrame(
+        {"symbol": ["S0"] * len(closes), "minute": minutes, "close": closes}
+    ).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    out = swing_fold_frame(frame)
+    fib = out["fib_retracement"]
+    # the degenerate rows are nulled (not finite), and EVERY surviving value is within the declared range.
+    assert fib.null_count() >= 1, "expected the explosive micro-leg fib to be nulled"
+    finite = out.filter(pl.col("fib_retracement").is_not_null())["fib_retracement"]
+    assert finite.len() >= 1 and float(finite.abs().max()) <= FIB_MAX_ABS, (
+        f"fib_retracement must stay within +/-{FIB_MAX_ABS}; got max |{float(finite.abs().max())}|"
+    )
 
 
 def test_swing_features_are_valid() -> None:
