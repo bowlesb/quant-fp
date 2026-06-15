@@ -322,6 +322,42 @@ def process_bars(
     state.minutes += 1
 
 
+def warm_start_enabled() -> bool:
+    """``FP_WARM_START=1`` — on capture startup, rehydrate the trailing ring from the session's already-
+    settled bars BEFORE the first live minute, so a restart/relaunch no longer begins with an empty buffer
+    (CRITICAL-2: an empty ring makes every long-window feature collapse/emit NaN for the first ``window``
+    minutes of streaming, and re-corrupts the long windows on every deploy restart). DEFAULT OFF: with the
+    flag unset the launch path is byte-identical to today's cold start (no deploy risk); flip it on for the
+    one clean restart once it has been exercised."""
+    return os.environ.get("FP_WARM_START") == "1"
+
+
+def warm_start_ring(
+    state: CaptureState,
+    bars: pl.DataFrame,
+    depth: int,
+    project_columns: tuple[str, ...] | None = None,
+) -> int:
+    """Rehydrate ``state.ring`` from ALREADY-FETCHED trailing bars so a restart does not start cold
+    (CRITICAL-2). ``bars`` is the ring schema (symbol, minute, open, close, high, low, volume) — typically
+    the session's bars from ``backfill_bars`` (Alpaca historical **RAW**, i.e. the SAME unadjusted SIP bars
+    the live stream delivers), so the seeded buffer is parity-true: the warmed ring holds exactly the rows
+    the live path would itself have accumulated over those minutes, and the first live minute computes with
+    full lookback identical to backfill. Keeps only the trailing ``depth`` distinct minutes (the ring's own
+    eviction). Pushed minute-ascending so a later RE-DELIVERED live minute keep-last-overwrites its slot
+    (the live stream's exact semantics). Returns the number of distinct minutes seeded.
+
+    Idempotent-safe: if the ring already holds minutes, ``push`` merges by the same keep-last rule. No-ops on
+    an empty ``bars`` (a relaunch before any session bar exists)."""
+    if bars.is_empty():
+        return 0
+    if state.ring is None:
+        state.ring = MinuteRing(maxlen=depth, columns=project_columns)
+    # Minute-ascending so the trailing ``depth`` slots survive eviction (push evicts the OLDEST past maxlen).
+    state.ring.push(bars.sort(["minute", "symbol"]))
+    return len(state.ring._slots)
+
+
 async def capture(
     url: str,
     symbols: list[str],
