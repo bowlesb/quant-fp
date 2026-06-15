@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-519 features across 29 group(s).
+549 features across 30 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -8,6 +8,36 @@
 | `is_fractionable` | asset_flags | reference | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when the broker supports fractional-share trading of the symbol, else 0.0. |
 | `is_marginable` | asset_flags | reference | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when the symbol is marginable (can be held on margin), else 0.0. |
 | `is_shortable` | asset_flags | reference | A | tolerance | Float64 | sparse | (-0.01, 1.01) | 1.0 when the symbol can be sold short at the broker, else 0.0 (broadcast across the day). |
+| `breadth_down_1d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 1d is down (< -1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_down_30m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 30m is down (< -1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_down_5d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 5d is down (< -1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_down_5m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 5m is down (< -1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_down_60m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 60m is down (< -1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_net_1d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net market breadth over 1d: up fraction minus down fraction of the universe, broadcast to every ticker (positive = more up than down). |
+| `breadth_net_30m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net market breadth over 30m: up fraction minus down fraction of the universe, broadcast to every ticker (positive = more up than down). |
+| `breadth_net_5d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net market breadth over 5d: up fraction minus down fraction of the universe, broadcast to every ticker (positive = more up than down). |
+| `breadth_net_5m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net market breadth over 5m: up fraction minus down fraction of the universe, broadcast to every ticker (positive = more up than down). |
+| `breadth_net_60m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net market breadth over 60m: up fraction minus down fraction of the universe, broadcast to every ticker (positive = more up than down). |
+| `breadth_up_1d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 1d is up (> +1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_up_30m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 30m is up (> +1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_up_5d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 5d is up (> +1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_up_5m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 5m is up (> +1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `breadth_up_60m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of the universe whose return over 60m is up (> +1bp dead-band); a market-wide scalar broadcast to every ticker. |
+| `sector_breadth_down_1d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 1d is down (< -1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_down_30m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 30m is down (< -1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_down_5d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 5d is down (< -1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_down_5m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 5m is down (< -1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_down_60m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 60m is down (< -1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_net_1d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net breadth within THIS ticker's sector over 1d: up fraction minus down fraction of the sector, joined onto the ticker by its sector. |
+| `sector_breadth_net_30m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net breadth within THIS ticker's sector over 30m: up fraction minus down fraction of the sector, joined onto the ticker by its sector. |
+| `sector_breadth_net_5d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net breadth within THIS ticker's sector over 5d: up fraction minus down fraction of the sector, joined onto the ticker by its sector. |
+| `sector_breadth_net_5m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net breadth within THIS ticker's sector over 5m: up fraction minus down fraction of the sector, joined onto the ticker by its sector. |
+| `sector_breadth_net_60m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Net breadth within THIS ticker's sector over 60m: up fraction minus down fraction of the sector, joined onto the ticker by its sector. |
+| `sector_breadth_up_1d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 1d is up (> +1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_up_30m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 30m is up (> +1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_up_5d` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 5d is up (> +1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_up_5m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 5m is up (> +1bp dead-band), joined onto the ticker by its sector. |
+| `sector_breadth_up_60m` | breadth | cross_sectional | A | tolerance | Float64 | sparse | (-0.01, 1.01) | Fraction of THIS ticker's sector whose return over 60m is up (> +1bp dead-band), joined onto the ticker by its sector. |
 | `day_of_week` | calendar | calendar | A | tolerance | Float64 | none | (1.0, 7.0) | ISO weekday of the bar in ET (Monday=1 .. Sunday=7). |
 | `is_regular_session` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1.0) | 1.0 if within the 09:30-16:00 ET regular session, else 0.0 (extended hours). |
 | `minute_of_day_et` | calendar | calendar | A | tolerance | Float64 | none | (0.0, 1440.0) | Minutes since ET midnight for this bar (0-1439); encodes time of day. |
