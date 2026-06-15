@@ -20,3 +20,4 @@ experiments/shape_ensemble_results.jsonl
 # Rust build artifacts
 rust/target/
 *.so
+.claude/worktrees/

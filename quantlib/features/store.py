@@ -178,7 +178,9 @@ def get_features(
         else:
             part = _scan_source(root, group, version, source, feats, symbols, start, end)
         result = part if result is None else result.join(part, on=list(KEY_COLUMNS), how="full", coalesce=True)
-    return result.sort(list(KEY_COLUMNS)) if result is not None and result.height else (result or pl.DataFrame())
+    if result is not None and result.height:
+        return result.sort(list(KEY_COLUMNS))
+    return result if result is not None else pl.DataFrame()
 
 
 def drop_before(root: str | Path, cutoff_day: str) -> list[Path]:
