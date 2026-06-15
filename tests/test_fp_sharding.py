@@ -19,6 +19,7 @@ BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
 SYMBOLS = ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "SPY", "QQQ")
 WINDOW = 300
 N_SHARDS = 3
+SECTORS = ("technology", "healthcare", "energy")
 
 
 def _bars_for_minute(i: int) -> list[dict]:
@@ -30,22 +31,44 @@ def _bars_for_minute(i: int) -> list[dict]:
     return bars
 
 
+def _snapshots() -> dict[str, pl.DataFrame]:
+    """The slowly-changing reference frames the gather groups read. breadth needs ``reference`` (sector) and
+    ``daily`` (close) to self-select and compute its sector + 1d/5d horizons; the reader holds the FULL
+    (un-sharded) snapshots so the gather sees every symbol — mirrored here for both paths."""
+    reference = pl.DataFrame(
+        {"symbol": list(SYMBOLS), "sector": [SECTORS[idx % len(SECTORS)] for idx in range(len(SYMBOLS))]}
+    )
+    daily = pl.DataFrame(
+        [
+            {"symbol": symbol, "date": (BASE + timedelta(days=d - 9)).date(), "close": 100.0 + off + d * 0.5}
+            for off, symbol in enumerate(SYMBOLS)
+            for d in range(10)
+        ]
+    )
+    return {"reference": reference, "daily": daily}
+
+
 def _single_process(n_minutes: int) -> dict[str, pl.DataFrame]:
     state = CaptureState()
+    snapshots = _snapshots()
     for i in range(n_minutes):
-        process_bars(state, _bars_for_minute(i), "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
+        process_bars(state, _bars_for_minute(i), "x", "mock", "2026-06-12", WINDOW, snapshots=snapshots,
+                     write=False, accumulate=True)
     return state.accumulated
 
 
 def _sharded(n_minutes: int) -> dict[str, pl.DataFrame]:
     shard_states = [CaptureState() for _ in range(N_SHARDS)]
     reduce_state = CaptureState()
+    snapshots = _snapshots()
     for i in range(n_minutes):
         bars = _bars_for_minute(i)
         for shard_id, shard_bars in enumerate(route_minute(bars, N_SHARDS)):
             if shard_bars:
-                process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
-        process_reduce(reduce_state, bars, "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
+                process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW,
+                              snapshots=snapshots, write=False, accumulate=True)
+        process_reduce(reduce_state, bars, "x", "mock", "2026-06-12", WINDOW, snapshots=snapshots,
+                       write=False, accumulate=True)
     merged: dict[str, pl.DataFrame] = {}
     for state in shard_states:
         for name, frame in state.accumulated.items():
@@ -90,8 +113,26 @@ def test_sharded_market_context_identical_via_index_replication() -> None:
 
 def test_cross_sectional_rank_via_reduce_identical() -> None:
     single, sharded = _single_process(10), _sharded(10)
-    assert REDUCE_GROUPS == ("cross_sectional_rank",)
+    assert REDUCE_GROUPS == ("cross_sectional_rank", "breadth")
     _assert_same(single["cross_sectional_rank"], sharded["cross_sectional_rank"])
+
+
+def test_breadth_via_reduce_identical() -> None:
+    # breadth is a whole-market GATHER: per-shard it would see only ~1/N of the universe and emit N
+    # different "market-wide" fractions per minute (CRITICAL-3). Routed through the reduce it must equal
+    # the single-process value over ALL symbols — the live↔backfill parity the per-shard form broke.
+    single, sharded = _single_process(10), _sharded(10)
+    _assert_same(single["breadth"], sharded["breadth"])
+
+
+def test_breadth_market_scalar_is_single_valued_per_minute() -> None:
+    # The defining symptom of the per-shard bug: a "market-wide" breadth scalar took N distinct values
+    # per minute (one per shard). After routing through the gather it is ONE value broadcast to every
+    # ticker that minute — assert exactly one distinct market-breadth value per minute.
+    sharded = _sharded(10)
+    breadth = sharded["breadth"]
+    per_minute = breadth.group_by("minute").agg(pl.col("breadth_net_5m").n_unique().alias("n"))
+    assert per_minute.filter(pl.col("n") > 1).height == 0, "market breadth must be one scalar per minute"
 
 
 def test_store_concurrent_shard_writes_do_not_clobber(tmp_path: Path) -> None:
@@ -107,10 +148,13 @@ def test_store_concurrent_shard_writes_do_not_clobber(tmp_path: Path) -> None:
 
 
 def test_reduce_group_absent_from_shards() -> None:
-    # the universe-wide group must NOT be computed inside a shard (it would rank only the shard)
+    # the universe-wide groups must NOT be computed inside a shard (they would reduce only over the shard)
     shard_states = [CaptureState() for _ in range(N_SHARDS)]
+    snapshots = _snapshots()
     bars = _bars_for_minute(0)
     for shard_id, shard_bars in enumerate(route_minute(bars, N_SHARDS)):
         if shard_bars:
-            process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW, write=False, accumulate=True)
-    assert all("cross_sectional_rank" not in state.accumulated for state in shard_states)
+            process_shard(shard_states[shard_id], shard_bars, "x", "mock", "2026-06-12", WINDOW,
+                          snapshots=snapshots, write=False, accumulate=True)
+    for group in REDUCE_GROUPS:
+        assert all(group not in state.accumulated for state in shard_states)
