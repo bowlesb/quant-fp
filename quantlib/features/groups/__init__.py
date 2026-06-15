@@ -32,6 +32,7 @@ from quantlib.features.groups import (  # noqa: F401
     return_dynamics,
     round_levels,
     sector,
+    swing,
     technical,
     tick_runlength,
     trade_flow,
