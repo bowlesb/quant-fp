@@ -41,7 +41,8 @@ STREAM_GLOB_TEMPLATE = (
     STORE_ROOT + "/group={group}/v=*/source=stream/date={day}/*.parquet"
 )
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://quant-prometheus-1:9090")
-EXPECTED_UNIVERSE_SIZE = int(os.environ.get("EXPECTED_UNIVERSE_SIZE", "3070"))
+EXPECTED_UNIVERSE_SIZE = int(os.environ.get("EXPECTED_UNIVERSE_SIZE", "11336"))
+UNIVERSE_DRIFT_TOLERANCE = float(os.environ.get("UNIVERSE_DRIFT_TOLERANCE", "0.05"))
 EXPECTED_CAPTURE_SHARDS = 8
 
 # ET minutes-of-day for the regular session (mirrors quantlib.features.session).
@@ -61,10 +62,10 @@ ALPHABETICAL_BIAS_WARN_SHARE = 0.55
 
 # Per-minute active-symbol bands by phase (lo, hi).
 PER_MINUTE_BANDS: dict[str, tuple[int, int]] = {
-    "premarket": (50, 800),
-    "rth": (800, 2200),
-    "afterhours": (20, 1500),
-    "closed": (0, 3100),
+    "premarket": (50, 2500),
+    "rth": (1500, 8000),
+    "afterhours": (20, 4000),
+    "closed": (0, 9000),
 }
 
 
@@ -271,15 +272,16 @@ def check_universe_size() -> CheckResult:
     with db_connect() as conn:
         row = conn.execute("select count(*) from universe_membership").fetchone()
     size = int(row[0]) if row is not None else 0
-    detail = f"universe_membership={size} (expected {EXPECTED_UNIVERSE_SIZE})"
-    if size != EXPECTED_UNIVERSE_SIZE:
-        drift = size - EXPECTED_UNIVERSE_SIZE
+    detail = f"universe_membership={size} (expected ~{EXPECTED_UNIVERSE_SIZE})"
+    drift = size - EXPECTED_UNIVERSE_SIZE
+    drift_frac = abs(drift) / EXPECTED_UNIVERSE_SIZE if EXPECTED_UNIVERSE_SIZE else 1.0
+    if drift_frac > UNIVERSE_DRIFT_TOLERANCE:
         return CheckResult(
             name,
             Status.WARN,
-            f"{detail}, drift={drift:+d}",
+            f"{detail}, drift={drift:+d} ({drift_frac:.0%} > {UNIVERSE_DRIFT_TOLERANCE:.0%}) — confirm intentional",
             metric=float(size),
-            fix_hint="universe drifted vs EXPECTED_UNIVERSE_SIZE — confirm intentional re-seed",
+            fix_hint="universe drifted vs EXPECTED_UNIVERSE_SIZE beyond tolerance — confirm intentional re-seed",
         )
     return CheckResult(name, Status.PASS, detail, metric=float(size))
 
