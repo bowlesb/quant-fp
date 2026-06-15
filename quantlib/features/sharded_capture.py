@@ -28,7 +28,13 @@ from functools import lru_cache
 from pathlib import Path
 
 from quantlib.features import latency_drilldown, metrics
-from quantlib.features.capture import CaptureState, StoreWriter, process_bars
+from quantlib.features.capture import (
+    CaptureState,
+    StoreWriter,
+    process_bars,
+    warm_start_enabled,
+    warm_start_ring,
+)
 from quantlib.features.registry import REGISTRY
 
 # Index ETFs replicated to every shard so market-context/beta compute locally (tiny, ~3 symbols).
@@ -124,12 +130,26 @@ def process_reduce(reduce_state: CaptureState, bars: list[dict], root: str, mode
 
 
 def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, window: int,
-                day: str | None, snapshots: dict | None) -> None:  # pragma: no cover (process entry)
+                day: str | None, snapshots: dict | None,
+                symbols: list[str] | None = None) -> None:  # pragma: no cover (process entry)
     """Persistent worker process entry: own ``shard_id``, drain the queue of minute bar-batches (already
-    routed to this shard), and run the map step. A ``None`` batch is the shutdown sentinel."""
+    routed to this shard), and run the map step. A ``None`` batch is the shutdown sentinel.
+
+    ``symbols`` are this shard's owned tickers (+ the replicated index ETFs); when ``FP_WARM_START=1`` and a
+    session ``day`` is set, the shard's trailing ring is rehydrated from those symbols' already-settled bars
+    BEFORE the first live minute, so a restart does not start cold (CRITICAL-2). Default OFF / no symbols =
+    today's cold start, unchanged."""
     state = CaptureState()
     if os.environ.get("FP_ASYNC_WRITE"):  # opt-in: a background writer thread (can contend with compute)
         state.writer = StoreWriter()
+    if warm_start_enabled() and day and symbols:
+        from quantlib.features.backfill_bars import backfill_bars
+
+        # Alpaca historical RAW = the same unadjusted SIP bars this shard will stream — a parity-true seed.
+        bars = backfill_bars(day, symbols)
+        seeded = warm_start_ring(state, bars, depth=window)
+        print(f"[worker {shard_id}] warm-started ring: {seeded} minutes from {bars.height} bars",
+              file=sys.stderr, flush=True)
     metrics.start_metrics_server(WORKER_METRICS_BASE_PORT + shard_id)  # /metrics for Prometheus/Grafana
     bench_log = _bench_log_path(root, shard_id)  # set FP_BENCH_LOG=1 to record per-minute shard latency
     if bench_log is not None:

@@ -19,10 +19,24 @@ from alpaca.data.live import StockDataStream
 
 import polars as pl
 
-from quantlib.features.backfill_bars import backfill_daily
-from quantlib.features.capture import DEFAULT_BUFFER_MINUTES, CaptureState, process_bars
+from quantlib.features.backfill_bars import backfill_bars, backfill_daily
+from quantlib.features.capture import (
+    DEFAULT_BUFFER_MINUTES,
+    CaptureState,
+    process_bars,
+    warm_start_enabled,
+    warm_start_ring,
+)
 from quantlib.features.loaders import load_reference
-from quantlib.features.sharded_capture import INDEX_SYMBOLS, process_reduce, route_minute, shard_of, worker_main
+from quantlib.features.sharded_capture import (
+    INDEX_SYMBOLS,
+    process_reduce,
+    reduce_buffer_columns,
+    reduce_buffer_minutes,
+    route_minute,
+    shard_of,
+    worker_main,
+)
 
 
 def _shard_snapshots(snapshots: dict | None, symbols: list[str], shard_id: int, n_shards: int) -> dict | None:
@@ -63,6 +77,11 @@ def run_capture(symbols: list[str], root: str, mode: str, window: int = DEFAULT_
     snapshots = {"reference": load_reference()}
     if day is not None:
         snapshots["daily"] = backfill_daily(day, symbols)
+    if warm_start_enabled() and day is not None:
+        # Rehydrate the trailing ring from the session's settled bars (Alpaca historical RAW = the same
+        # SIP tape the stream delivers) so a restart starts warm, not cold (CRITICAL-2; inert by default).
+        seeded = warm_start_ring(state, backfill_bars(day, symbols), depth=window)
+        print(f"[capture] warm-started ring: {seeded} minutes", file=sys.stderr, flush=True)
     stream = build_stream()
 
     async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
@@ -113,10 +132,17 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     # first parallel polars op. Spawned workers get a fresh interpreter + fresh threadpool — no inheritance.
     ctx = mp.get_context("spawn")
     queues = [ctx.Queue() for _ in range(n_shards)]
+    # Each shard's owned tickers (+ the replicated index ETFs) — handed to the worker so it can warm-start
+    # its ring from those symbols' settled bars when FP_WARM_START=1 (CRITICAL-2; inert otherwise).
+    shard_symbols = [
+        [s for s in symbols if shard_of(s, n_shards) == i] + list(INDEX_SYMBOLS)
+        for i in range(n_shards)
+    ]
     workers = [
         ctx.Process(
             target=worker_main,
-            args=(i, n_shards, queues[i], root, mode, window, day, _shard_snapshots(snapshots, symbols, i, n_shards)),
+            args=(i, n_shards, queues[i], root, mode, window, day,
+                  _shard_snapshots(snapshots, symbols, i, n_shards), shard_symbols[i]),
             daemon=True,
         )
         for i in range(n_shards)
@@ -125,6 +151,15 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
         worker.start()
 
     reduce_state = CaptureState()
+    if warm_start_enabled() and day:
+        # The reader's universe-wide reduce buffer is warm-started too (projected + depth-capped exactly as
+        # process_reduce keeps it live), so the gather-phase reduce groups also start with full lookback.
+        reduce_bars = backfill_bars(day, symbols)
+        reduce_minutes = warm_start_ring(
+            reduce_state, reduce_bars, depth=reduce_buffer_minutes(window),
+            project_columns=reduce_buffer_columns(),
+        )
+        print(f"[reader] warm-started reduce ring: {reduce_minutes} minutes", file=sys.stderr, flush=True)
     # arrival       = time.time() of the minute's FIRST bar (end-to-end / delivery-inclusive anchor).
     # last_arrival  = time.time() of the minute's LAST bar (pure-compute anchor; max over the minute).
     # symbol_arrivals = per-symbol time.time() of that symbol's bar (drill-down: which tickers are slow).
