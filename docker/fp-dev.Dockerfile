@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir \
     websockets \
     prometheus-client \
     'psycopg[binary]' \
+    'httpx>=0.27,<1.0' \
     'alpaca-py>=0.30,<1.0'
 COPY --from=rustbuild /wheels/*.whl /tmp/
 RUN pip install /tmp/*.whl && rm /tmp/*.whl
