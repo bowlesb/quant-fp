@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
 import sys
 import threading
@@ -23,6 +24,7 @@ from quantlib.features import metrics, store
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
+from quantlib.features.incremental import IncrementalEngine
 
 BARS_SCHEMA = {
     "symbol": pl.String,
@@ -41,6 +43,74 @@ BARS_SCHEMA = {
 # price_levels' 240m; 300 leaves headroom. (The separate latest-minute compute mode removes the
 # per-minute cost of recomputing this whole buffer at 10k-ticker scale.)
 DEFAULT_BUFFER_MINUTES = 300
+
+# Sacred parity tolerance (CLAUDE.md ~1e-6 rel). The self-check measures live incremental-vs-batch
+# divergence as a MULTIPLE of this tolerance and records a BREACH when it exceeds benign float drift.
+# Well-conditioned features track the batch to ~1-2x tolerance; the OLS r2/corr family near a PERFECT fit
+# is numerically sensitive — sum-based r2 is a difference of large near-equal sums, and the incremental
+# running add/subtract rounds differently from the batch's fresh window sums, so r2≈1 can diverge far
+# beyond tolerance. That conditioning sensitivity is SPECIFIC to the incremental path (batch and backfill
+# both use fresh window sums and agree), which is exactly what this self-check exists to surface BEFORE
+# the fast path is ever trusted as the source. See docs/AUTONOMOUS_BACKLOG.md (P1 #1).
+_PARITY_ATOL = 1e-6
+_PARITY_RTOL = 1e-6
+_PARITY_BREACH_RATIO = 10.0  # divergence beyond 10x tolerance = beyond benign drift -> record a breach
+
+
+def _incremental_config() -> tuple[bool, bool, bool]:
+    """Read the incremental fast-path env switches each minute (cheap; lets ops flip them without a code
+    change). Returns (enabled, parity_check, slice_derive). ALL DEFAULT OFF — with nothing set the path is
+    byte-identical to the batch (no deploy risk):
+    - ``FP_INCREMENTAL=1``    — assemble the batched reduction groups from the incremental running sums.
+    - ``FP_INCREMENTAL_PARITY=1`` — compute BOTH batch (the written truth) and incremental each minute and
+      record the divergence to Prometheus; the batch output is still what gets written. This is the live
+      evidence gate before the fast path is ever trusted as the source.
+    - ``FP_INCREMENTAL_SLICE=1`` — use the fast trailing-slice derive. DEFAULT OFF: the slice path assumes
+      active symbols are dense within ``DERIVE_SLICE`` and is NOT parity-gated for sparse symbols yet
+      (the OPEN PARITY CONSTRAINT in docs/AUTONOMOUS_BACKLOG.md); the gap-safe whole-buffer derive is used."""
+    return (
+        os.environ.get("FP_INCREMENTAL") == "1",
+        os.environ.get("FP_INCREMENTAL_PARITY") == "1",
+        os.environ.get("FP_INCREMENTAL_SLICE") == "1",
+    )
+
+
+def _engine_for(state: "CaptureState", reduce_input: str, batch_groups: list) -> IncrementalEngine:
+    """The per-bucket incremental engine, created on first use and held on the state (it seeds lazily from
+    the buffer on its first ``step`` and re-seeds itself when a genuinely-new ticker appears)."""
+    engine = state.engines.get(reduce_input)
+    if engine is None:
+        engine = IncrementalEngine(batch_groups)
+        state.engines[reduce_input] = engine
+    return engine
+
+
+def _incremental_parity(batch: dict, incremental: dict) -> float:
+    """Worst divergence between the batch (truth) and incremental feature frames for one minute, expressed
+    as a MULTIPLE of the parity tolerance ``atol + rtol*|a|`` over the symbols and numeric columns present
+    in BOTH (<=1 means within tolerance; the absolute floor keeps near-zero values robust). A null in one
+    path that is non-null in the other returns ``inf`` — a hard divergence, not a magnitude one."""
+    worst = 0.0
+    for name, batch_frame in batch.items():
+        inc_frame = incremental.get(name)
+        if inc_frame is None:
+            return float("inf")
+        cols = [c for c in batch_frame.columns if c not in ("symbol", "minute") and c in inc_frame.columns]
+        joined = batch_frame.select(["symbol", *cols]).join(
+            inc_frame.select(["symbol", *cols]), on="symbol", how="inner", suffix="__inc"
+        )
+        if joined.is_empty():
+            continue
+        for col in cols:
+            a, b = pl.col(col), pl.col(f"{col}__inc")
+            if joined.filter(a.is_null() != b.is_null()).height:
+                return float("inf")
+            ratio = joined.select(
+                ((a - b).abs() / (_PARITY_ATOL + _PARITY_RTOL * a.abs())).fill_null(0.0).max()
+            ).item()
+            if ratio is not None:
+                worst = max(worst, float(ratio))
+    return worst
 
 
 class MinuteRing:
@@ -127,6 +197,7 @@ class CaptureState:
         self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
         self.last_write_ms = 0.0  # time spent WRITING last minute — excluded from the bet-relevant compute latency
         self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
+        self.engines: dict[str, IncrementalEngine] = {}  # one incremental engine per reduce_input bucket (FP_INCREMENTAL)
 
     @property
     def buffer(self) -> pl.DataFrame | None:
@@ -207,9 +278,22 @@ def process_bars(
             group_start = time.perf_counter()
             out = group.compute_latest(ctx)  # live = aggregate-at-T (fast where overridden; parity-guarded)
             outputs.append((group, out, (time.perf_counter() - group_start) * 1000.0))
-    for batch_groups in batchable.values():
+    incremental, parity_check, slice_derive = _incremental_config()
+    for reduce_input, batch_groups in batchable.items():
         batch_start = time.perf_counter()
-        batched = compute_reduction_batch(batch_groups, ctx)
+        if incremental and not parity_check:
+            # Fast path is the source of truth: assemble from the per-bucket incremental running sums via
+            # ``step`` (the SAME ``assemble_from_long`` the batch uses — so warmup/flag null handling is
+            # byte-identical to the batch, store-parity-true). The Rust emit variants are faster but their
+            # warmup representation is not yet gated against the batch, so they are NOT used live (CLAUDE.md).
+            batched = _engine_for(state, reduce_input, batch_groups).step(frame, slice_derive=slice_derive)
+        else:
+            # Batch is the source of truth (default, and during the parity self-check).
+            batched = compute_reduction_batch(batch_groups, ctx)
+            if incremental and parity_check:
+                inc_out = _engine_for(state, reduce_input, batch_groups).step(frame, slice_derive=slice_derive)
+                tol_ratio = _incremental_parity(batched, inc_out)
+                metrics.record_incremental_parity(reduce_input, tol_ratio, tol_ratio > _PARITY_BREACH_RATIO)
         per_ms = (time.perf_counter() - batch_start) * 1000.0 / len(batch_groups)
         for group in batch_groups:
             outputs.append((group, batched[group.name], per_ms))
