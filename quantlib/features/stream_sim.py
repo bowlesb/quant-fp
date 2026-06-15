@@ -231,6 +231,7 @@ from quantlib.features.declarative import (
     emit_numpy,
     emit_rust,
     emit_rust_unified,
+    resolve_points,
 )
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _reader_bench_path, _shard_snapshots, build_stream
@@ -436,7 +437,12 @@ def process_stream_minute(
     outputs: list[tuple[str, str, pl.DataFrame]] = []
     engine = state.engine
     assert engine.state is not None
-    latest_frame = state.ring.last_minutes(1)  # the ring's newest slot == frame.filter(minute == latest)
+    # The reduction emit needs the latest-minute rows carrying the precomputed ``__pt_<name>`` point
+    # columns. Resolve them over the WHOLE buffer (gap-safe positive-lag shift, matching backfill) — the
+    # SAME thing the deployed ``compute_reduction_batch`` feeds emit (declarative.resolve_points): the
+    # ring's newest slot alone has null lag-points (CRITICAL-1), so emit_rust_unified/emit_numpy would
+    # fail to find ``__pt_*``. Resolved over ``engine.groups`` so the point-column union matches emit.
+    latest_frame = resolve_points(engine.groups, frame, latest)
     reduction_emit_start = time.perf_counter()
     if _USE_RUST_ASSEMBLE:
         # UNIFIED single-pass emit: assemble EVERY reduction group's features in ONE shared wide-frame pass
