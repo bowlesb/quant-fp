@@ -125,16 +125,18 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
         worker.start()
 
     reduce_state = CaptureState()
-    pending: dict = {"minute": None, "bars": [], "done": 0}
+    pending: dict = {"minute": None, "bars": [], "done": 0, "arrival": 0.0}
     stream = build_stream()
 
     bench_reader = _reader_bench_path(root)  # FP_BENCH_LOG: time the single-threaded reader (route+reduce)
 
-    def dispatch(bars: list[dict]) -> None:
+    def dispatch(bars: list[dict], arrival_wallclock: float) -> None:
         start = time.perf_counter()
         for shard_id, shard_bars in enumerate(route_minute(bars, n_shards)):
             if shard_bars:
-                queues[shard_id].put(shard_bars)  # map: per-shard workers
+                # (arrival_wallclock, bars) — the worker records bar->vector latency off this wall-clock
+                # stamp (time.time(), comparable across the reader/worker processes; perf_counter is not).
+                queues[shard_id].put((arrival_wallclock, shard_bars))  # map: per-shard workers
         process_reduce(reduce_state, bars, root, mode, day, window)  # gather: universe-wide rank
         if bench_reader is not None:
             with bench_reader.open("a") as handle:
@@ -144,7 +146,7 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
         minute = bar.timestamp.replace(second=0, microsecond=0)
         if pending["minute"] is not None and minute != pending["minute"] and pending["bars"]:
-            dispatch(pending["bars"])
+            dispatch(pending["bars"], pending["arrival"])
             pending["bars"] = []
             pending["done"] += 1
             if max_minutes is not None and pending["done"] >= max_minutes:
@@ -155,6 +157,10 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
                     queue.put(None)  # shutdown sentinel: workers drain their queue then exit
                 await stream.stop_ws()
                 return
+        if not pending["bars"]:
+            # Wall-clock the instant THIS minute's first bar landed off the websocket — the honest "bar
+            # arrival" anchor for the bar->vector latency metric (recorded by the worker after assemble).
+            pending["arrival"] = time.time()
         pending["minute"] = minute
         pending["bars"].append(
             {"S": bar.symbol, "o": float(bar.open), "c": float(bar.close), "h": float(bar.high),

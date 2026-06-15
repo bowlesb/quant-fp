@@ -9,16 +9,6 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
-  # M2 sharded ingestor: per-worker coverage gauges (streamed==subscribed invariant).
-  # One target per shard worker (BASE_PORT + shard_id). Keep in sync with
-  # INGESTOR_SHARDS / WORKER_METRICS_BASE_PORT in docker-compose.yml.
-  - job_name: ingestor-coverage
-    static_configs:
-      - targets:
-          - "ingestor:9101"
-          - "ingestor:9102"
-          - "ingestor:9103"
-          - "ingestor:9104"
   # Feature capture: each shard worker exposes feature_group_compute_seconds on
   # WORKER_METRICS_BASE_PORT (9201) + shard_id. Keep the target count in sync with N shards.
   - job_name: feature-capture

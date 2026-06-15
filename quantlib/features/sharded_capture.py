@@ -136,17 +136,24 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         print(f"[worker {shard_id}] up", file=sys.stderr, flush=True)
     processed = 0
     while True:
-        batch = queue.get()
-        if batch is None:
+        item = queue.get()
+        if item is None:
             if state.writer is not None:
                 state.writer.flush()  # drain pending writes before exit so nothing is lost
                 state.writer.stop()
             if bench_log is not None:
                 print(f"[worker {shard_id}] exiting after {processed} minutes", file=sys.stderr, flush=True)
             return
+        # Reader hands (arrival_wallclock, bars): arrival_wallclock is time.time() stamped the instant the
+        # minute's first bar landed off the websocket (cross-process comparable; perf_counter is not).
+        arrival_wallclock, batch = item
         processed += 1
         start = time.perf_counter()
         process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id)
+        # Bar-arrival -> vector-ready: now (vector assembled) minus arrival, with the write subtracted so
+        # the metric ends at the assemble (the bet point), not the post-bet parquet write. process_bars
+        # records last_write_ms separately; subtract it whether the write was sync (here) or async-queued.
+        metrics.record_bar_to_vector(shard_id, max(0.0, time.time() - arrival_wallclock - state.last_write_ms / 1000.0))
         if bench_log is not None:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             # The bet-relevant latency is COMPUTE only; the write happens after the decision, so report it
