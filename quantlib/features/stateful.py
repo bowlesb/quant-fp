@@ -189,6 +189,52 @@ def _gathered_frame(symbols: list[str], data: dict[str, np.ndarray]) -> pl.DataF
     )
 
 
+def coded_prev_within_minute(coded: _CodedBuffer, source: str, minutes: int) -> np.ndarray:
+    """The TIME-based prior value of ``source`` (``source`` as of minute − ``minutes``, NaN when that exact
+    minute is absent — the ``base.lagged`` contract) at EVERY buffer row, computed off the shared coded
+    buffer with NO extra sort/join. The buffer is already (code, minute-epoch)-sorted, so the positional
+    predecessor within a symbol block is the prior bar; it is the time-based lag iff its minute is exactly
+    ``minutes`` earlier, which we enforce by nulling rows whose predecessor's epoch != this row's − 60·m
+    (or that cross a symbol-block boundary). This makes per-row gain/loss derivation cheap and gappy-safe."""
+    values = coded.column(source)
+    codes = coded.codes
+    minute_epochs = coded.minutes
+    prev = np.empty_like(values)
+    prev[0] = np.nan
+    prev[1:] = values[:-1]
+    same_symbol = np.zeros(len(codes), dtype=bool)
+    same_symbol[1:] = codes[1:] == codes[:-1]
+    contiguous = np.zeros(len(codes), dtype=bool)
+    contiguous[1:] = minute_epochs[1:] - minute_epochs[:-1] == minutes * 60
+    valid = same_symbol & contiguous
+    return np.where(valid, prev, np.nan)
+
+
+def windowed_sums_from(
+    coded: _CodedBuffer, value_arrays: dict[str, np.ndarray], windows: tuple[int, ...]
+) -> pl.DataFrame:
+    """Windowed sums of caller-provided per-row value arrays over the shared coded buffer in ONE
+    ``quant_tick.windowed_sums`` pass — the no-extra-sort/no-extra-marshal twin of ``latest.rust_windowed_sums``
+    that reuses the buffer already built for the stateful tier. ``value_arrays`` maps an output name to a
+    ``(n_rows,)`` array aligned to ``coded.codes``/``coded.minutes`` (nulls pre-zeroed by the caller). Returns
+    a LONG (symbol, window, _n, <one sum column per name>) frame, identical to ``rust_windowed_sums`` output."""
+    names = list(value_arrays)
+    arrays = [value_arrays[name] for name in names]
+    win_min = sorted(int(w) for w in windows)
+    _sym, win, counts, sums = quant_tick.windowed_sums(
+        coded.codes, coded.minutes, arrays, [w * 60 for w in win_min], coded.t
+    )
+    reverse = dict(enumerate(coded.symbols))
+    data: dict[str, list] = {
+        "symbol": [reverse[code] for code in _sym],
+        "window": [w // 60 for w in win],
+        "_n": counts,
+    }
+    for idx, name in enumerate(names):
+        data[name] = sums[idx]
+    return pl.DataFrame(data)
+
+
 class ExtremaState:
     """Rolling-extrema KIND (docs/STATE_ABSTRACTION.md): a per-(symbol, spec) MONOTONIC DEQUE of recent
     ``(minute_epoch, value)`` so the trailing max/min is read in O(1) amortized. For a ``max`` deque the
@@ -380,6 +426,15 @@ class StatefulGroup(FeatureGroup):
         columns, so the fast and certified live forms agree."""
         return None
 
+    def reduction_columns_from_coded(self, coded: _CodedBuffer) -> pl.DataFrame | None:
+        """The SAME windowed-reduction columns as ``reduction_columns``, but computed off the SHARED coded
+        buffer the stateful tier already builds (one sort + one marshal for ALL stateful groups) instead of
+        each kernel call re-sorting + re-marshaling the whole buffer. Used ONLY by the consolidated
+        ``emit_stateful`` fast path; ``compute_latest``/``step`` keep ``reduction_columns`` as the certified
+        reference, and a byte-equality gate asserts this == that. Default None (no coded fast path — the engine
+        falls back to ``reduction_columns``)."""
+        return None
+
     def _input_columns(self) -> tuple[str, ...]:
         return self.inputs[0].columns
 
@@ -516,13 +571,16 @@ class StatefulEngine:
         buffer across ALL stateful groups in a minute (the buffer carries every bar column the groups' identity
         ``prepare`` needs), cutting the redundant per-group sort — the real stateful-emit lever."""
         rust_needs = self.use_rust and bool(self.lag_specs or self.extrema_specs)
-        if rust_needs:
-            if coded is None:
-                coded = _CodedBuffer(self.group.prepare(frame.select(self.group._input_columns())), latest)
+        if rust_needs and coded is None:
+            coded = _CodedBuffer(self.group.prepare(frame.select(self.group._input_columns())), latest)
+        if coded is not None:
+            # The coded buffer is already (symbol, minute)-sorted, so the at-T row read is a cheap filter —
+            # no per-group re-sort. Valid because the stateful groups' ``prepare`` is identity over the bar
+            # columns the buffer carries; the rows come back in code (= sorted-symbol) order, aligning with
+            # the EMA/lag/extrema arrays. Shared whether or not the group needs the Rust gather.
             at_t_cols = [col for col in self.group._input_columns() if col not in ("symbol", "minute")]
             row = coded.frame.filter(pl.col("_mi") == coded.t).select(["symbol", "minute", *at_t_cols])
         else:
-            coded = None  # type: ignore[assignment]
             row = self._prepared_latest(frame, latest)
         columns: list[pl.Series] = []
         if self.ema_state is not None:
@@ -565,7 +623,11 @@ class StatefulEngine:
             # at emit-time, so there is nothing to fold here.
             self._fold_minute(frame, latest)
         state = self._state_row(frame, latest, coded)
-        reduction = self.group.reduction_columns(ctx) if ctx is not None else None
+        reduction = None
+        if coded is not None:
+            reduction = self.group.reduction_columns_from_coded(coded)
+        if reduction is None and ctx is not None:
+            reduction = self.group.reduction_columns(ctx)
         if reduction is not None:
             state = state.join(reduction, on="symbol", how="left")
         return state, latest

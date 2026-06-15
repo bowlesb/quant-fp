@@ -118,6 +118,56 @@ def test_emit_stateful_matches_backfill_last() -> None:
             assert bad.height == 0, f"{group.name}.{col}: {bad.height} mismatches vs backfill\n{bad.head()}"
 
 
+def _gappy_stream(n_sym: int = 8, n_min: int = 90, seed: int = 23) -> pl.DataFrame:
+    """A stream with DROPPED minutes per symbol — every (symbol, minute) where (s + mi) % 7 == 0 is absent.
+    On a gappy grid a POSITIONAL prior bar differs from the TIME-based ``base.lagged`` prior, so this is the
+    adversarial case that catches any positional-vs-time confusion in the coded reduction path."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    price = {s: 100.0 + s for s in range(n_sym)}
+    for mi in range(n_min):
+        minute = BASE + dt.timedelta(minutes=mi)
+        for s in range(n_sym):
+            price[s] *= 1.0 + rng.standard_normal() * 0.003
+            if (s + mi) % 7 == 0:
+                continue
+            close = price[s]
+            opn = close * (1.0 + rng.standard_normal() * 0.001)
+            high = max(opn, close) * (1.0 + abs(rng.standard_normal()) * 0.001)
+            low = min(opn, close) * (1.0 - abs(rng.standard_normal()) * 0.001)
+            rows.append({"symbol": f"S{s}", "minute": minute, "open": opn, "high": high, "low": low, "close": close})
+    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+
+
+@pytest.mark.parametrize("stream_factory", [_stream, _gappy_stream])
+def test_technical_coded_reduction_matches_certified(stream_factory) -> None:  # type: ignore[no-untyped-def]
+    """technical's coded-buffer reduction (``reduction_columns_from_coded``, the fast path the consolidated
+    emit uses) must equal the certified ``reduction_columns`` CELL-FOR-CELL — including on a GAPPY grid, where
+    the time-based prior close (RSI's gain/loss) differs from a naive positional shift. Byte-equality, no
+    tolerance: this is the reduction the streaming write commits."""
+    stream = stream_factory()
+    latest = stream["minute"].max()
+    ctx = BatchContext(frames={"minute_agg": stream})
+    group = TechnicalGroup()
+    coded = coded_buffer(stream, latest)
+    fast = group.reduction_columns_from_coded(coded).sort("symbol")
+    certified = group.reduction_columns(ctx).sort("symbol").select(fast.columns)
+    assert fast.height == certified.height, "coded reduction row count differs"
+    # null<->null and value equality within float-kernel noise (the same tol the reduction parity uses);
+    # the algebra is identical, only the marshal differs, so this is effectively byte-equal.
+    for col in [c for c in fast.columns if c != "symbol"]:
+        joined = certified.select("symbol", col).join(
+            fast.select("symbol", pl.col(col).alias("_g")), on="symbol"
+        )
+        bad = joined.filter(
+            ~(
+                (pl.col(col).is_null() & pl.col("_g").is_null())
+                | ((pl.col(col) - pl.col("_g")).abs() <= 1e-9 + 1e-9 * pl.col(col).abs())
+            )
+        )
+        assert bad.height == 0, f"technical.{col}: {bad.height} coded-vs-certified mismatches\n{bad.head()}"
+
+
 @pytest.mark.parametrize("factory", STATEFUL_GROUP_FACTORIES)
 def test_emit_stateful_single_group(factory: type) -> None:
     """A single stateful group through the consolidated pass still equals its own ``step`` — the

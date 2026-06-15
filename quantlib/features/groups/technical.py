@@ -25,7 +25,13 @@ from quantlib.features.base import (
 )
 from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_sums
 from quantlib.features.registry import register
-from quantlib.features.stateful import EMASpec, StatefulGroup
+from quantlib.features.stateful import (
+    EMASpec,
+    StatefulGroup,
+    _CodedBuffer,
+    coded_prev_within_minute,
+    windowed_sums_from,
+)
 
 SMA_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 50, 100, 200)
 
@@ -114,6 +120,57 @@ class TechnicalGroup(StatefulGroup):
         red = rust_reductions(frame, "close", SMA_WINDOWS)  # 20 is in SMA_WINDOWS, so Bollinger reuses it
         means = pivot_stat(red, "mean", "_sma_{w}", SMA_WINDOWS)
         std20 = red.filter(pl.col("window") == 20).select(["symbol", pl.col("std").alias("_std20")])
+        return rsi.join(means, on="symbol", how="left").join(std20, on="symbol", how="left")
+
+    def reduction_columns_from_coded(self, coded: _CodedBuffer) -> pl.DataFrame:
+        """The SAME RSI/SMA/std20 reduction columns as ``reduction_columns``, computed off the SHARED coded
+        buffer in ONE windowed-sums pass — no extra whole-buffer sort, no second kernel marshal, no lag
+        self-join. The certified ``reduction_columns`` re-sorts + re-marshals the buffer three times (its own
+        prep sort + the RSI ``rust_windowed_sums`` + the SMA ``rust_reductions``); this reuses the buffer the
+        stateful tier already built. Byte-identical algebra: gain/loss from the time-based prior close (the
+        ``base.lagged`` contract, gappy-safe via ``coded_prev_within_minute``), RSI = the gain/loss sums over
+        14m, each SMA = close-sum / close-count, std20 = sqrt((sumsq − sum²/n)/(n−1)). Guarded == the certified
+        path by tests/test_fp_stateful_emit.py."""
+        close = coded.column("close")
+        present = np.isfinite(close)
+        prev = coded_prev_within_minute(coded, "close", 1)
+        diff = close - prev
+        gain = np.where(diff > 0.0, diff, 0.0)
+        loss = np.where(diff < 0.0, -diff, 0.0)
+        close_value = np.where(present, close, 0.0)
+        windows = tuple(sorted(set(SMA_WINDOWS) | {14}))
+        long = windowed_sums_from(
+            coded,
+            {
+                "_gain": gain,
+                "_loss": loss,
+                "_close": close_value,
+                "_close_sq": close_value * close_value,
+                "_close_n": present.astype(np.float64),
+            },
+            windows,
+        )
+        rsi = long.filter(pl.col("window") == 14).select(
+            ["symbol", (100.0 - 100.0 / (1.0 + pl.col("_gain") / pl.col("_loss"))).cast(pl.Float64).alias("_rsi_14m")]
+        )
+        count = pl.col("_close_n")
+        sma_long = long.with_columns(
+            pl.when(count > 0).then(pl.col("_close") / count).otherwise(None).cast(pl.Float64).alias("_mean")
+        )
+        means = pivot_stat(sma_long, "_mean", "_sma_{w}", SMA_WINDOWS)
+        std20 = (
+            long.filter(pl.col("window") == 20)
+            .select(
+                [
+                    "symbol",
+                    pl.when(count > 1)
+                    .then(((pl.col("_close_sq") - pl.col("_close") ** 2 / count) / (count - 1)).sqrt())
+                    .otherwise(None)
+                    .cast(pl.Float64)
+                    .alias("_std20"),
+                ]
+            )
+        )
         return rsi.join(means, on="symbol", how="left").join(std20, on="symbol", how="left")
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
