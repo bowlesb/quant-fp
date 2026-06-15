@@ -64,7 +64,7 @@ BARS_SCHEMA = {
 # the dominant term, which needs 60m) with recompute they don't use. Eliminate via per-group buffer-depth
 # slicing before compute_latest, or a stateful swing accumulator (its kernel is already an O(1)/bar state
 # machine — retain the fold across minutes, parity-gated like WindowedSumState). Neither blocks this fix.
-DEFAULT_BUFFER_MINUTES = 750
+DEFAULT_BUFFER_MINUTES = 300
 
 # Sacred parity tolerance (CLAUDE.md ~1e-6 rel). The self-check measures live incremental-vs-batch
 # divergence as a MULTIPLE of this tolerance and records a BREACH when it exceeds benign float drift.
