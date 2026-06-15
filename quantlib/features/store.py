@@ -1,9 +1,11 @@
 """Parquet feature store — per-group, per-source partitioned writes + the ``get_features`` read API.
 
-Layout (FEATURE_PLATFORM.md §3.3.1): ``<root>/group=<g>/v=<ver>/source=<stream|backfill>/date=<d>/data.parquet``.
+Layout (FEATURE_PLATFORM.md §3.3.1): ``<root>/group=<g>/v=<ver>/source=<stream|sim|backfill>/date=<d>/data.parquet``.
 
 We store features written BOTH ways and track which: ``source=stream`` are the provisional values the
-running system computed live; ``source=backfill`` are the settled values recomputed from the
+running REAL system computed live; ``source=sim`` are the provisional values a MOCK/sim run computed
+live (mode-separated, so the simulation exercises the EXACT real path but never pollutes the real
+``source=stream``); ``source=backfill`` are the settled values recomputed from the
 historical tape (truth, available ~T+1). Both are retained — the T+1 parity test compares them, and
 a model trains on backfill but infers on live, so the train/serve gap IS the stream-vs-backfill
 difference. ``get_features(source="auto")`` returns backfill where available, stream for the
@@ -25,8 +27,22 @@ from quantlib.features.registry import REGISTRY
 LIVE_ZSTD_LEVEL = 1  # per-minute append writes: latency-sensitive, tiny files -> fast compression
 BATCH_ZSTD_LEVEL = 19  # backfill / compaction: written once, read for training -> max ratio (tight disk)
 
-SOURCES = ("backfill", "stream")  # priority order for source="auto" (backfill = truth, preferred)
+SOURCES = ("backfill", "stream", "sim")  # priority order for source="auto" (backfill = truth, preferred)
 MODE_FILE = "_store_mode"  # "real" | "mock" — physically separates real and simulated data
+
+# The live write source is DERIVED from the run mode so simulated data never lands under the real
+# ``source=stream``: a real Alpaca run (mode='real') writes ``source=stream``; a mock/sim run
+# (mode='mock') writes ``source=sim``. Backfill is written explicitly as ``source=backfill`` (truth).
+_MODE_SOURCE = {"real": "stream", "mock": "sim"}
+
+
+def source_for_mode(mode: str) -> str:
+    """The live write source for a capture ``mode``: real->'stream', mock->'sim'. A mock/sim run is
+    thus physically separated under ``source=sim``, so it can exercise the EXACT real path while never
+    polluting the real provisional ``source=stream`` partitions."""
+    if mode not in _MODE_SOURCE:
+        raise ValueError(f"capture mode must be 'real' or 'mock', got {mode!r}")
+    return _MODE_SOURCE[mode]
 
 
 def _partition_dir(root: str | Path, group: str, version: str, source: str, day: str) -> Path:
@@ -155,13 +171,18 @@ def get_features(
     for name in names:
         by_group.setdefault(_resolve(name), []).append(name)
 
+    # ``auto`` merges settled truth with the provisional live source. The provisional source is the one
+    # this store mode writes: ``stream`` for a real store, ``sim`` for a mock store (mode-separated roots
+    # never hold both), so a sim store reads its own ``source=sim`` under ``auto``.
+    provisional = "sim" if store_mode(root) == "mock" else "stream"
+
     if require_settled:
         for (group, version), _ in by_group.items():
-            unsettled = _date_dirs(root, group, version, "stream") - _date_dirs(root, group, version, "backfill")
+            unsettled = _date_dirs(root, group, version, provisional) - _date_dirs(root, group, version, "backfill")
             in_range = {d for d in unsettled if start.date() <= dt.date.fromisoformat(d) <= end.date()}
             if in_range:
                 raise ValueError(
-                    f"require_settled: group '{group}' has unsettled (stream-only) dates {sorted(in_range)} "
+                    f"require_settled: group '{group}' has unsettled ({provisional}-only) dates {sorted(in_range)} "
                     f"in range — backfill them before using for training"
                 )
 
@@ -169,7 +190,7 @@ def get_features(
     for (group, version), feats in by_group.items():
         if source == "auto":
             part = _scan_source(root, group, version, "backfill", feats, symbols, start, end)
-            stream = _scan_source(root, group, version, "stream", feats, symbols, start, end)
+            stream = _scan_source(root, group, version, provisional, feats, symbols, start, end)
             if part.height == 0:
                 part = stream
             elif stream.height:
