@@ -132,16 +132,31 @@ def route_ticks(ticks: list[dict], n_shards: int) -> list[list[dict]]:
     return routed
 
 
+def unowned_index_symbols(shard_id: int, n_shards: int) -> frozenset[str]:
+    """The index ETFs replicated into THIS shard for compute that it must NOT persist — every index symbol
+    except the one this shard OWNS by the stable hash routing. Each index symbol is written by exactly one
+    shard (its ``shard_of`` owner), so the store holds ONE (symbol, minute) row per broadcast symbol instead
+    of N byte-identical copies (one per shard). The symbols still compute on every shard — only the persisted
+    output is filtered, so feature values are unchanged (parity-neutral)."""
+    return frozenset(symbol for symbol in INDEX_SYMBOLS if shard_of(symbol, n_shards) != shard_id)
+
+
 def process_shard(state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
                   window: int, snapshots: dict | None = None, write: bool = True, shard: int | None = None,
-                  accumulate: bool = False, extra_frames: dict | None = None) -> None:
+                  accumulate: bool = False, extra_frames: dict | None = None,
+                  drop_output_symbols: frozenset[str] = frozenset()) -> None:
     """One shard's map step: the shared core, minus the universe-wide reduce groups. Each minute appends
     its OWN per-minute file inside the partition (atomic, no clobber) so all shards write concurrently.
 
     ``extra_frames`` carries THIS minute's raw ``trades`` frame so the raw-trades groups
-    (tick_runlength / microstructure_burst) run on the shard's own trades — built by ``aggregate_shard_ticks``."""
+    (tick_runlength / microstructure_burst) run on the shard's own trades — built by ``aggregate_shard_ticks``.
+
+    ``drop_output_symbols`` are the replicated index ETFs this shard does NOT own — computed here (required
+    market-context inputs) but PERSISTED only by their owning shard, so each broadcast (symbol, minute) is
+    written once. Pass ``unowned_index_symbols(shard, n_shards)``."""
     process_bars(state, bars, root, mode, day, window, snapshots, exclude_groups=REDUCE_GROUPS,
-                 write=write, shard=shard, accumulate=accumulate, extra_frames=extra_frames)
+                 write=write, shard=shard, accumulate=accumulate, extra_frames=extra_frames,
+                 drop_output_symbols=drop_output_symbols)
 
 
 def aggregate_shard_ticks(
@@ -229,6 +244,9 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
     if bench_log is not None:
         print(f"[worker {shard_id}] up", file=sys.stderr, flush=True)
     processed = 0
+    # The replicated index ETFs this shard must compute but NOT persist — only their owning shard writes
+    # them, so the store holds one (symbol, minute) row per broadcast symbol, not one per shard.
+    drop_output_symbols = unowned_index_symbols(shard_id, n_shards)
     while True:
         item = queue.get()
         if item is None:
@@ -257,7 +275,7 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         else:
             extra_frames = None
         process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id,
-                      extra_frames=extra_frames)
+                      extra_frames=extra_frames, drop_output_symbols=drop_output_symbols)
         ready_wallclock = time.time()
         # Two complementary latencies, both ending at the assemble (the bet point) with the post-bet
         # parquet write subtracted (process_bars records last_write_ms separately; subtract it whether the

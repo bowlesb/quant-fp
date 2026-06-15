@@ -34,6 +34,7 @@ from quantlib.features.sharded_capture import (
     route_minute,
     route_ticks,
     shard_of,
+    unowned_index_symbols,
 )
 from quantlib.features.tick_capture import TICK_COLUMNS
 
@@ -167,6 +168,54 @@ def test_store_concurrent_shard_writes_do_not_clobber(tmp_path: Path) -> None:
         store.write_group(root, "price_returns", "1.0.0", "stream", day, frame, mode="mock", shard=shard)
     df = store.get_features(["ret_1m"], "universe", BASE, BASE + timedelta(minutes=5), root, source="stream")
     assert set(df["symbol"].to_list()) == {"AAA", "BBB", "CCC"}  # all 3 shards present, none clobbered
+
+
+def test_unowned_index_symbols_partition_each_index_to_one_shard() -> None:
+    # Each index symbol is OWNED by exactly one shard; every OTHER shard lists it as drop-from-output.
+    # Across all shards the union of "owned" (= INDEX - dropped) must be each index symbol exactly once.
+    for n_shards in (1, 3, 8):
+        owners: dict[str, list[int]] = {symbol: [] for symbol in INDEX_SYMBOLS}
+        for shard_id in range(n_shards):
+            dropped = unowned_index_symbols(shard_id, n_shards)
+            for symbol in INDEX_SYMBOLS:
+                if symbol not in dropped:
+                    owners[symbol].append(shard_id)
+        for symbol, shard_ids in owners.items():
+            assert shard_ids == [shard_of(symbol, n_shards)], f"{symbol} owned by {shard_ids}"
+
+
+def test_sharded_store_writes_one_row_per_broadcast_symbol(tmp_path: Path) -> None:
+    # The MED-DEDUP fix end-to-end through the real store: drive N shards (each replicated the index ETFs)
+    # writing per-minute files, then read back. Broadcast symbols must appear ONCE per (symbol, minute)
+    # (only the owning shard persists them); non-broadcast symbols are untouched (one row each, as before).
+    root = str(tmp_path / "store")
+    day = "2026-06-12"
+    n_minutes = 4
+    shard_states = [CaptureState() for _ in range(N_SHARDS)]
+    snapshots = _snapshots()
+    for i in range(n_minutes):
+        bars = _bars_for_minute(i)
+        for shard_id, shard_bars in enumerate(route_minute(bars, N_SHARDS)):
+            if shard_bars:
+                process_shard(shard_states[shard_id], shard_bars, root, "mock", day, WINDOW,
+                              snapshots=snapshots, write=True, shard=shard_id,
+                              drop_output_symbols=unowned_index_symbols(shard_id, N_SHARDS))
+        process_reduce(CaptureState(), bars, root, "mock", day, WINDOW, snapshots=snapshots, write=False)
+
+    files = list(Path(root).glob("group=market_context/v=*/source=sim/date=*/data*.parquet"))
+    assert files, "market_context stream files were written"
+    written = pl.concat([pl.read_parquet(f).select("symbol", "minute") for f in files])
+    index_rows = written.filter(pl.col("symbol").is_in(list(INDEX_SYMBOLS)))
+    dup = index_rows.group_by("symbol", "minute").agg(pl.len().alias("copies"))
+    assert dup.filter(pl.col("copies") > 1).height == 0, (
+        f"broadcast symbols written more than once: {dup.filter(pl.col('copies') > 1)}"
+    )
+    # every index symbol present for every minute (exactly one owning shard wrote each)
+    assert index_rows.height == len([s for s in SYMBOLS if s in INDEX_SYMBOLS]) * n_minutes
+    # non-broadcast symbols are unaffected — still exactly one row per (symbol, minute)
+    non_index = written.filter(~pl.col("symbol").is_in(list(INDEX_SYMBOLS)))
+    non_dup = non_index.group_by("symbol", "minute").agg(pl.len().alias("copies"))
+    assert non_dup.filter(pl.col("copies") != 1).height == 0, "non-broadcast symbol row count changed"
 
 
 def test_reduce_group_absent_from_shards() -> None:
