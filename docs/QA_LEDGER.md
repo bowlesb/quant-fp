@@ -167,6 +167,43 @@ PASS on the active set. The 3 FAILs:
 | P2 | view-fanout | training_data 2× horizon fan-out | LOW — trainer filters horizon; harden the view |
 | P2 | suite-too-slow | **The invariant suite no longer completes as a single gate** — full `qa_invariants.py` exceeds 500s on the 5.5M-row v1.1.1 panel (bars_integrity ~50s + no_inf ~23s + calendar ~32s + jump ~77s + the 4 unmeasured heavy scans parity/trade_agg/pit/warmup). A fail-loud suite that's too slow to run defeats its own purpose (the role's core thesis). Per-invariant `--only` works fine; the all-in-one run times out. | MITIGATED 2026-06-12 — `--fast`/`--full` tiering shipped: fast tier (universe trio + live_feature_coverage) is the every-wake/post-close standalone gate, full tier (panel scans) nightly. Residual: fast wall-time ~38s is `docker compose exec`-per-query spawn overhead (user-cpu <1s) — future opt = batched queries / persistent conn. Runnable now. |
 
+## multi_day_vwap group audit (2026-06-15) — INDEPENDENT CONFIRMATION of the P0 ETF regression
+
+Audited `quantlib/features/groups/multi_day_vwap.py` (10 features: dist_from_vwap_{5,10,20,60,120}d +
+above_vwap_*). **Group LOGIC is clean; it is BLOCKED-ON-SYSTEMIC by the 6/15 universe regression.**
+
+GROUP-LOCAL = OK (the multi-session warm-start the brief feared is WORKING):
+- **NaN rates LOW and horizon-monotone:** 5d 0.4% → 10d 0.6% → 20d 0.7% → 60d 1.5% → 120d 2.5%
+  (null only; 0 NaN-sentinel, 0 Inf). The CRITICAL-2 warm-start fear is NOT realized here — the daily
+  cache is seeded with real multi-session history, so even the 120d window resolves for 97.5% of rows.
+  The rising-with-horizon null is the correct warmup signature (longer window = more names lack N days).
+- **Sign/scale sane vs tape:** AAPL dist_5d −1.8% / dist_120d +6.95% with above_120d=1, above_5d=0
+  (recent dip under a longer uptrend — internally consistent, boolean matches dist sign on all 4 names
+  checked AAPL/SPY/MSFT/NVDA). No div-by-zero leak (0 Inf — zero-vol windows land as null via warmup,
+  not Inf). No dead/constant features (1100+ distinct dist values; above_* = {0,1,null}).
+- **Range violations: 32/141k rows (0.02%), 3 thin microcaps** (NINE dist_120d=13.7, SMCL 60d=14.67,
+  QH 120d=8.75) over the valid_range upper 5.0 — real microcap moves / mixed-basis (backfill-split-jump
+  class), NOT a logic bug. NOTE: valid_range=(-1.0,5.0) is too tight for thin names; either widen or
+  accept these as expected outliers (don't gate on them).
+- **Duplicate (symbol,minute): VALUE-IDENTICAL, confined to QQQ/SPY/IWM** (the 3 market-context ETFs),
+  8× byte-identical copies = redundant snapshot re-write across overlapping flush windows. Harmless to
+  any consumer that dedups on (symbol,minute); trivial waste. MED-DEDUP class, low sev for this group.
+
+GROUP IS BLOCKED-ON-SYSTEMIC (the headline — independent of cross_sectional_rank's finding):
+- **multi_day_vwap is emitted for 5,845 distinct symbols today** (whole-day sample), **1,436 (24.6%) on
+  the fund denylist** — QQQ/SPY/IWM/TNA/VEA/IEMG/GUSH/SRTY/SMN/ZSL/BITU… The feature-computer startup log
+  (`docker logs feature-computer`) prints **`symbols=11336`** for day=2026-06-15 — it subscribed the
+  ENTIRE contaminated universe, not the clean ~1000. So unlike cross_sectional_rank (which ranks over raw
+  minute_agg), multi_day_vwap is correctly reading `universe_membership WHERE in_universe` via
+  `live_capture.load_universe_symbols` — but THAT TABLE is the polluted 11,336-member set. **This is the
+  same P0 regression seen from a second, universe-PINNED group: proves the rot is in the universe seed,
+  not in any one group's logic.** multi_day_vwap's distance-from-VWAP for a real equity is fine in
+  isolation, but the moment it's used cross-sectionally (or its name set feeds a model) it carries
+  leveraged-ETF members (SOXL/TQQQ have multi-day VWAP too). RE-COLLECT after the universe is re-cleaned.
+
+VERDICT: **ISSUES-LOCAL=minor (dup ETFs, tight valid_range) / BLOCKED-ON-SYSTEMIC=the 11,336-member
+34.3%-fund universe regression (P0 etf-contamination, already open).** Group logic itself = OK.
+
 ## Unprovoked creative probes (Ben's directive — log every probe + result, even clean)
 
 - **2026-06-12 #1 — Execution loop end-to-end consistency (orders→fills→pnl→recon).** NOT
