@@ -5,6 +5,7 @@ base/registry/engine/store/parity/introspect (FEATURE_PLATFORM.md §3.7).
 """
 from quantlib.features.groups import (  # noqa: F401
     asset_flags,
+    breadth,
     calendar,
     calendar_events,
     candlestick,
