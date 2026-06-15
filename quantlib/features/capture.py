@@ -277,6 +277,7 @@ def process_bars(
     project_columns: tuple[str, ...] | None = None,
     buffer_minutes: int | None = None,
     extra_frames: dict[str, pl.DataFrame] | None = None,
+    drop_output_symbols: frozenset[str] = frozenset(),
 ) -> None:
     """The SHARED compute→store core (connection-agnostic). ``bars`` are normalized dicts with keys
     S, o, c, h, l, v, t — the parity boundary: both the mock JSON feed and the real Alpaca Bar objects
@@ -304,7 +305,14 @@ def process_bars(
     here so ``tick_runlength`` / ``microstructure_burst`` (InputSpec name="trades") become ``runnable``.
     These groups truncate to the minute internally and emit one (symbol, minute) row, so the per-minute
     frame is exactly their input (no trailing buffer); an absent/empty ``trades`` frame -> they emit no
-    rows for the minute (honest 'no trades'), they don't fabricate zeros."""
+    rows for the minute (honest 'no trades'), they don't fabricate zeros.
+
+    ``drop_output_symbols`` are symbols this caller COMPUTES but must NOT PERSIST — the sharded executor
+    replicates the index ETFs (SPY/QQQ/IWM) into EVERY shard as market-context compute inputs, but only the
+    shard that OWNS each index symbol should write it; the others drop it from their output so the store
+    holds ONE (symbol, minute) row per broadcast symbol instead of N byte-identical shard copies. The symbols
+    stay in the trailing ring and compute context (they are required inputs there) — only the persisted rows
+    are filtered, so feature VALUES are unchanged (parity-neutral)."""
     # Append THIS minute's rows into the trailing ring (O(new), not an O(full-buffer) rescan). The ring
     # keeps one frame per minute, overwrites a re-delivered minute (keep-last), and evicts past its depth,
     # so the materialized frame is the SAME (symbol, minute) row set the old concat+unique+filter produced.
@@ -357,6 +365,10 @@ def process_bars(
     write_start = time.perf_counter()
     for group, out, compute_ms in outputs:
         state.group_timings[group.name] = compute_ms
+        if drop_output_symbols and "symbol" in out.columns:
+            # Persist-only filter: drop the replicated index symbols this shard does not OWN so the store
+            # holds one row per (symbol, minute), not N shard copies. Computed values above are untouched.
+            out = out.filter(~pl.col("symbol").is_in(list(drop_output_symbols)))
         if accumulate:
             prior = state.accumulated.get(group.name)
             state.accumulated[group.name] = (
