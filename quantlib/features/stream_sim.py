@@ -134,6 +134,37 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     running-sum tier (so they fold like the reduction groups instead of recomputing each minute) and/or a fully
     numpy/Rust state-frame assembly that bypasses the per-engine polars state-row build — NOT another scheduling
     consolidation. The fast-path 305-feature reduction flow remains under 100ms (~94ms p99).
+  * TECHNICAL FOLD (stateful.ReductionSpec / ReductionFoldState + technical.reduction_columns_from_sums). The
+    last per-minute RECOMPUTE on the stateful tier — technical re-running its RSI/Bollinger/SMA windowed-
+    reduction kernel over the WHOLE buffer every minute (reduction_columns_from_coded) — moves onto the
+    incremental running-sum tier: a per-(window, symbol, col) WindowedSumState (the SAME class the 305
+    reduction features fold on) that ADDS the new minute and EXPIRES minutes leaving each window, plus a
+    per-symbol TIME-based prior close so RSI's gain/loss stays gappy-safe. SMA = windowed mean, Bollinger =
+    mean ± k·std, RSI = ratio of 14m avg gain/loss now FOLD (O(symbols × windows × cols)) instead of
+    recomputing. MACD stays on the EMAState (genuinely recursive). The folded and certified paths share ONE
+    column-algebra (_reduction_columns_from_long), so they are byte-identical by construction: RSI byte-exact
+    (sums cancel), SMA/std within the 1e-9 incremental-sum tolerance the reduction tier already uses (the same
+    WindowedSumState drift, bounded by per-session re-seed). Gated on dense AND gappy streams
+    (tests/test_fp_stateful_emit.py::test_technical_folded_reduction_matches_certified), and emit_stateful ==
+    per-group step == backfill still holds. MEASURED — ISOLATED (312 sym/shard, deep buffer, single process):
+    technical's fold_and_state ~27ms -> ~6ms p50 (the ~14ms whole-buffer kernel recompute removed + the
+    state-row build); emit_stateful over all four engines ~20ms p50. CLEAN 10k (32 shards, flood, 5t+5q/sym/min,
+    this machine, median of 5 interleaved A/B runs vs the unified-emit base): stateful-emit p50 ~48ms -> ~45.5ms,
+    FULL-flow p50 ~136ms -> ~131ms, p99 noise-dominated (~210-250ms both; the new path's interleaved p99 ran
+    slightly LOWER, 200/211 vs 226/212). VERDICT: the architectural recompute->fold win is real and proven in
+    isolation (~21ms off technical's per-minute work), but at 32 concurrent shards the full flow is
+    MEMORY-BANDWIDTH / contention bound, NOT compute bound — removing technical's ~14ms isolated recompute yields
+    only ~3-5ms of wall time, because the stateful-emit cost under 32x concurrency is the per-engine polars
+    state-frame BUILD + the cross-process memory pressure, not the arithmetic. So the full 519-feature flow is
+    STILL ~131ms p50 / ~210-250ms p99 — NOT under 100ms. The p99 tail is slowest-shard jitter across 32 shards
+    (each shard's worst minute lands on a different wall slice) and is an ARCHITECTURAL FLOOR of the sharded-
+    polars emit: every per-minute phase is a polars frame-build contending for the same memory bandwidth across
+    32 processes, so the tail is set by the unluckiest shard×minute, not by any one phase's median. Cracking
+    <100ms for ALL 519 needs a fundamentally different emit — a fully numpy/Rust state-frame assembly that
+    bypasses the per-engine polars state-row build entirely (the reduction tier already proved this with the
+    assemble_canonical kernel; the stateful tier's state-row build is the remaining polars cost), or fewer/
+    fatter shards traded against per-shard compute. (Fast-path 305-feature p50 stays ~75ms; its p99 ~107-114ms
+    on this more-contended machine state is unchanged-code machine contention, not a regression from this fold.)
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
