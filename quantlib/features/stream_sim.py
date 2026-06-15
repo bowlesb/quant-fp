@@ -61,10 +61,27 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     + join to the latest row) + the per-group ``assemble()`` EXPRESSION EVALUATION (~40ms). The kernel removed
     the (small) canonical cost AND the block ingest replaced 330 per-column ``pl.Series`` copies (~52ms ->
     ~42ms). The remaining reduction-emit floor is polars' per-group assemble eval + join, NOT arithmetic.
-  * Full-flow p99 is still ~288ms — UNCHANGED by the assemble kernel, because the full flow is now dominated
-    by the STATEFUL EMIT (~108-118ms p99) and the ~82 NON-REDUCTION "rest" features (calendar / sector /
-    multi_day, ~108-122ms p99) on the batch ``compute_latest``, NOT the reduction emit. Those two phases are
-    the next levers for <100ms full-flow; the reduction fast path itself is now under budget.
+  * Full-flow p99 was ~288ms — dominated by the STATEFUL EMIT and the ~82 NON-REDUCTION "rest" features
+    (calendar / sector / multi_day) on the batch ``compute_latest``, NOT the reduction emit.
+  * EMIT-CONSOLIDATE (quantlib.features.consolidated) took the "rest" phase off the per-group
+    ``compute_latest`` loop: the residual cost was per-group POLARS FRAME-BUILD, not arithmetic — ~8 of those
+    groups each filter+select+with_columns their own frame per minute. Two families that share an index are
+    now computed in ONE shared pass each: (a) the POINT-IN-TIME groups (calendar / calendar_events / sector /
+    asset_flags / round_levels, 30 feats) build the latest minute's (symbol, minute, close) index + ONE
+    reference join and run all five groups' expressions in one ``with_columns`` (isolated 625-sym profile:
+    35.9ms -> 3.0ms); (b) the DAILY-BROADCAST groups (multi_day_returns / multi_day_vwap / prior_day, 48
+    feats) merge their three per-(symbol, date) daily frames ONCE per session (cached on the daily-snapshot
+    identity) and do a SINGLE broadcast-join of the latest minute per minute instead of three (14.8ms ->
+    10.6ms). SCHEDULING change only — each group exposes its column expressions (``exprs()``) and the
+    consolidated emit applies the SAME expressions on the shared frame, so output is byte-identical
+    (tests/test_fp_consolidated.py: consolidated == compute_latest == compute().last, cell-for-cell). MEASURED
+    (10k, 16 shards, flood, same machine state, back-to-back vs the rust-assemble base): the non-reduction
+    "rest (82)" phase 102ms -> 28ms p99, and FULL-flow p99 215ms -> 135ms (the entire ~80ms full-flow drop is
+    the rest-phase collapse). The reduction-emit + stateful-emit phases are unchanged. The largest remaining
+    full-flow phase is now the REDUCTION EMIT (~60ms p99, the polars per-group assemble eval + wide-frame
+    join) ~tied with the STATEFUL EMIT (~43ms p99); the rest phase is no longer a top lever. 519 full-flow is
+    NOT yet under 100ms (~135ms p99) — the floor is the two remaining emit tiers, both polars frame/expr
+    bound, not arithmetic.
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
