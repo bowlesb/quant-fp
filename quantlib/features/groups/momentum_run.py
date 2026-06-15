@@ -32,6 +32,13 @@ from quantlib.features.registry import register
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
 RUN_TOL = 1e-4
 MIN_POINTS = 4.0  # the old codebase required >=4 closes for a meaningful residual distribution
+# Skewness = m3 / m2**1.5; m2 is the residual VARIANCE (price^2 units). An absolute ``m2 > 0`` guard is too
+# loose: when the window's price path is near-perfectly linear the residual variance collapses to f32 noise
+# (~1e-18 of the price level) yet stays positive, so the ratio explodes by ~8 orders of magnitude (observed
+# live: residual_skew up to ±1.6e9 vs the declared ±20 range). Gate instead on a RELATIVE residual spread:
+# the residual std must exceed REL_RESID_FLOOR of the window's mean price, i.e. m2 > (REL_RESID_FLOOR·my)^2.
+# 1e-6 is far below any real intraday tick noise, so it only nulls the genuinely-degenerate near-linear fits.
+REL_RESID_FLOOR = 1e-6
 
 
 def _residual_skew_column(w: int) -> pl.Expr:
@@ -41,7 +48,8 @@ def _residual_skew_column(w: int) -> pl.Expr:
         Σr^2 = Syy_c - slope·Sxy_c
         Σr^3 = Syyy_c - 3·slope·Sxyy_c + 3·slope^2·Sxxy_c - slope^3·Sxxx_c
     with the centered third-order sums expanded from the raw rolling sums. Null where undefined (n<MIN_POINTS,
-    zero x-variance, or zero residual spread)."""
+    zero x-variance, or a degenerate residual spread below REL_RESID_FLOOR of the price level — see the note
+    on REL_RESID_FLOOR; the skew ratio m3/m2**1.5 blows up when m2 is f32 noise on a near-linear path)."""
     size = f"{w}m"
 
     def roll(name: str) -> pl.Expr:
@@ -67,7 +75,8 @@ def _residual_skew_column(w: int) -> pl.Expr:
     sr3 = syyy_c - 3.0 * slope * sxyy_c + 3.0 * slope * slope * sxxy_c - slope**3 * sxxx_c
     m2 = ssr / n
     m3 = sr3 / n
-    defined = (n >= MIN_POINTS) & (sxx_c > 0.0) & (m2 > 0.0)
+    resid_var_floor = (REL_RESID_FLOOR * my).pow(2)  # (rel_eps · price)^2 — degenerate near-linear cutoff
+    defined = (n >= MIN_POINTS) & (sxx_c > 0.0) & (m2 > resid_var_floor)
     return pl.when(defined).then(m3 / m2.clip(lower_bound=0.0).pow(1.5)).otherwise(None)
 
 
