@@ -33,7 +33,7 @@ code fixes, land the warm-start fix, then do ONE clean restart + recollect conta
 | group | status | open issue / note | audited |
 |-------|--------|-------------------|---------|
 | volume | FIXED-CODE | std=0 zscore guard (e0c9957); recollect after clean restart | wave1 |
-| technical | ISSUES-LOCAL | bb_position inf guarded (e0c9957); STILL: enforce warmup on long SMAs (`sma_dist_{50,100,200}m` compute partial-window ≈0 instead of NaN) | wave1 |
+| technical | OK | bb_position inf guarded (e0c9957). `sma_dist_*` nan_policy corrected `warmup`→`sparse` (wave4): the SMA is defined from the 1st bar so there's NO warmup null-prefix — "sparse" honestly describes the partial-window behavior; metadata-only, no value/parity/recollect impact. Gating the early partial window to null is a separate MODELLER signal-design choice (needs an elapsed-minutes signal threaded through 5 reduction paths; not a corruption/parity bug) | wave1/4 |
 | volatility | BLOCKED-ON-SYSTEMIC | CRITICAL-2 (realized_vol collapse); Parkinson OK | wave1 |
 | momentum | BLOCKED-ON-SYSTEMIC | CRITICAL-2 (long-horizon collapse from 14:58 UTC) | wave1 |
 | ohlc_vol | BLOCKED-ON-SYSTEMIC | CRITICAL-2 (60/120m collapse) | wave1 |

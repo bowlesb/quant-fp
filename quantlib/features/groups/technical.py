@@ -100,8 +100,15 @@ class TechnicalGroup(StatefulGroup):
         ]
         for w in SMA_WINDOWS:
             specs.append(
+                # nan_policy="sparse" (not "warmup"): the SMA is _close/_close_n, defined from the FIRST
+                # observed bar, so sma_dist has NO leading-null warmup prefix — it emits a partial-window value
+                # (≈0 early, since close≈its own short-history mean) that grows toward a true w-minute mean as
+                # history fills. "sparse" honestly describes "defined whenever the symbol has bars, reliability
+                # grows with history." Gating the early partial window to null (true "warmup") is a separate
+                # modeller signal-design choice: it needs an elapsed-minutes/window-full signal threaded through
+                # all reduction paths (none carry it today) and is NOT a parity/corruption issue.
                 FeatureSpec(name=f"sma_dist_{w}m", description=f"Close relative to its trailing {w}-minute simple moving average (close/sma - 1).",
-                            dtype="Float64", valid_range=(-1.0, 5.0), nan_policy="warmup", layer="A")
+                            dtype="Float64", valid_range=(-1.0, 5.0), nan_policy="sparse", layer="A")
             )
         return specs
 
