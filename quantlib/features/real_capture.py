@@ -179,7 +179,9 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
                 # reader/worker processes; perf_counter is not) and writes the per-symbol drill-down rows.
                 shard_symbol_arrivals = {bar["S"]: symbol_arrivals[bar["S"]] for bar in shard_bars}
                 queues[shard_id].put((first_arrival, last_arrival, shard_symbol_arrivals, minute, shard_bars))
-        process_reduce(reduce_state, bars, root, mode, day, window)  # gather: universe-wide rank
+        # gather: universe-wide reduces (cross_sectional_rank + breadth) over ALL symbols. Pass the reader's
+        # FULL snapshots (reference/daily) so breadth's sector + multi-day horizons see the whole universe.
+        process_reduce(reduce_state, bars, root, mode, day, window, snapshots=snapshots)
         if bench_reader is not None:
             with bench_reader.open("a") as handle:
                 handle.write(json.dumps({"minute": max(bar["t"] for bar in bars),

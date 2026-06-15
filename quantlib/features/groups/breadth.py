@@ -124,6 +124,13 @@ class BreadthGroup(FeatureGroup):
     def _all_tags(self) -> list[str]:
         return [_window_tag(w, False) for w in MINUTE_WINDOWS] + [_window_tag(w, True) for w in DAY_WINDOWS]
 
+    def reduce_buffer_minutes(self) -> int | None:
+        """Breadth is a universe-wide GATHER (it runs in the reader's reduce phase, not per shard), so the
+        reader's minimal reduce ring must be deep enough for it. The deepest MINUTE-RING lookback is the
+        longest intraday horizon (``max(MINUTE_WINDOWS)``); the multi-day horizons (1d/5d) read the settled
+        ``daily`` snapshot, NOT the minute ring, so they impose no minute-buffer depth."""
+        return max(MINUTE_WINDOWS)
+
     def _sector_map(self, ctx: BatchContext) -> pl.DataFrame:
         """Per-symbol normalized sector, with null/blank → the UNKNOWN bucket (never dropped)."""
         norm = (

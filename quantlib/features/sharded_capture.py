@@ -42,8 +42,12 @@ INDEX_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "IWM")
 # Each shard worker exposes /metrics here (Prometheus scrapes BASE + shard_id) — keep in sync with the
 # feature-capture job in config/prometheus/prometheus.yml.
 WORKER_METRICS_BASE_PORT = 9201
-# Groups that depend on the WHOLE universe at a minute — run in the gather phase, not per shard.
-REDUCE_GROUPS: tuple[str, ...] = ("cross_sectional_rank",)
+# Groups that depend on the WHOLE universe at a minute — run in the gather phase, not per shard. Both are
+# universe-wide GATHER reduces: cross_sectional_rank percentiles over all symbols; breadth counts the
+# up/down fraction of the whole market (+ each sector). Run per-shard they would see only ~1/8 of the
+# universe and produce 8 different "market-wide" values per minute, breaking live↔backfill parity — so
+# they MUST run once in the reader's gather phase over every symbol.
+REDUCE_GROUPS: tuple[str, ...] = ("cross_sectional_rank", "breadth")
 # Slack minutes on top of the reduce groups' deepest declared window — leaves the leading-edge lookback
 # the reduce path needs (e.g. the bar exactly ``window`` ago) defined, exactly as the full buffer did.
 REDUCE_WINDOW_SLACK = 30
@@ -117,15 +121,21 @@ def process_shard(state: CaptureState, bars: list[dict], root: str, mode: str, d
 
 
 def process_reduce(reduce_state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
-                   window: int, write: bool = True, accumulate: bool = False) -> None:
+                   window: int, snapshots: dict | None = None, write: bool = True,
+                   accumulate: bool = False) -> None:
     """The gather step: compute the universe-wide reduce groups over ALL symbols once. The reader holds a
     MINIMAL full-universe buffer — projected to the columns the reduce groups read (close+volume + keys)
     and capped at the reduce groups' deepest declared window + slack, NOT the full 300m — and runs ONLY
     the reduce groups on it. Both the projection and the depth cap are derived from the reduce groups'
     declarations (``reduce_buffer_columns``/``reduce_buffer_minutes``) and are parity-neutral: the dropped
-    columns and older minutes were never read on this path."""
-    process_bars(reduce_state, bars, root, mode, day, window, only_groups=REDUCE_GROUPS,
-                 write=write, accumulate=accumulate,
+    columns and older minutes were never read on this path.
+
+    ``snapshots`` carries the slowly-changing reference frames some reduce groups read — breadth needs the
+    WHOLE-UNIVERSE ``reference`` (sector) and ``daily`` (close) frames to self-select (``runnable``) and to
+    bucket sectors / compute its 1d/5d horizons. The reader passes its full (un-sharded) snapshots so the
+    gather sees every symbol, exactly as the single-process path does."""
+    process_bars(reduce_state, bars, root, mode, day, window, snapshots=snapshots,
+                 only_groups=REDUCE_GROUPS, write=write, accumulate=accumulate,
                  project_columns=reduce_buffer_columns(), buffer_minutes=reduce_buffer_minutes(window))
 
 
