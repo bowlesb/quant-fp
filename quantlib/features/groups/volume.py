@@ -70,6 +70,16 @@ class VolumeGroup(ReductionGroup):
     def assemble(self) -> dict[str, pl.Expr]:
         feats: dict[str, pl.Expr] = {"dollar_volume_1m": pt_("dv")}
         for w in WINDOWS:
-            feats[f"volume_zscore_{w}m"] = (pt_("volT") - mean_("volume", w)) / std_("volume", w)
+            std = std_("volume", w)
+            zscore = (pt_("volT") - mean_("volume", w)) / std
+            # std is null during warmup (<2 samples) -> keep null; std == 0 is a degenerate
+            # constant-volume window (0/0), NOT warmup -> emit 0.0 instead of leaking NaN.
+            feats[f"volume_zscore_{w}m"] = (
+                pl.when(std > 0)
+                .then(zscore)
+                .when(std == 0)
+                .then(pl.lit(0.0))
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+            )
             feats[f"volume_ratio_{w}m"] = pt_("volT") / mean_("volume", w)
         return feats

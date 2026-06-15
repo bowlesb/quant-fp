@@ -121,13 +121,17 @@ class TechnicalGroup(StatefulGroup):
         """MACD from the three EMA columns + RSI/Bollinger/SMA from the reduction columns the state frame
         carries (``_rsi_14m``, ``_std20``, ``_sma_<w>``, with ``close`` as the at-T price)."""
         macd_line = pl.col("_ema12") - pl.col("_ema26")
+        std20 = pl.col("_std20")
+        # std20 == 0 is a flat 20m window -> Bollinger band has zero width, position is undefined;
+        # emit null (not +/-inf). std20 null during warmup also -> null.
+        bb_position = (pl.col("close") - pl.col("_sma_20")) / (2.0 * std20)
         feats: dict[str, pl.Expr] = {
             "rsi_14m": pl.col("_rsi_14m"),
             "macd_line": macd_line,
             "macd_signal": pl.col("_macd_signal"),
             "macd_hist": macd_line - pl.col("_macd_signal"),
-            "bb_position_20m": (pl.col("close") - pl.col("_sma_20")) / (2.0 * pl.col("_std20")),
-            "bb_width_20m": 4.0 * pl.col("_std20") / pl.col("_sma_20"),
+            "bb_position_20m": pl.when(std20 > 0).then(bb_position).otherwise(pl.lit(None, dtype=pl.Float64)),
+            "bb_width_20m": 4.0 * std20 / pl.col("_sma_20"),
         }
         for w in SMA_WINDOWS:
             feats[f"sma_dist_{w}m"] = pl.col("close") / pl.col(f"_sma_{w}") - 1.0
