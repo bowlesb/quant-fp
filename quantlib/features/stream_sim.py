@@ -423,10 +423,10 @@ def process_stream_minute(
         state.engine.seed(frame)  # replays the buffer -> establishes symbols + running sums + stateful state
     else:
         assert state.engine.state is not None
-        # The fold's slice-derive reads only the last DERIVE_SLICE minutes — hand it just those slots from
-        # the ring (concat of a few frames) instead of the whole buffer. _matrix_at's own time-based filter
-        # (minute > latest - DERIVE_SLICE) makes this byte-identical: the last DERIVE_SLICE+1 present-minute
-        # slots always cover that window, and any extra older slot is dropped by the same filter.
+        # The fold's slice-derive tails each symbol's last max_lag+1 ROWS. For this sim's DENSE feed (every
+        # symbol prints every minute) the last DERIVE_SLICE+1 minute slots contain exactly those rows, so
+        # handing just those slots is equivalent to handing the whole buffer — and far cheaper. (The live
+        # ``step`` path hands the whole buffer, the parity-safe source for sparse symbols.)
         fold_slice = state.ring.last_minutes(IncrementalEngine.DERIVE_SLICE + 1)
         state.engine.state.update(int(latest.timestamp()), state.engine._matrix_at(fold_slice, latest, slice_derive=True))
         state.engine.state.trim()

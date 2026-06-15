@@ -87,9 +87,11 @@ def _incremental_config() -> tuple[bool, bool, bool]:
     - ``FP_INCREMENTAL_PARITY=1`` — compute BOTH batch (the written truth) and incremental each minute and
       record the divergence to Prometheus; the batch output is still what gets written. This is the live
       evidence gate before the fast path is ever trusted as the source.
-    - ``FP_INCREMENTAL_SLICE=1`` — use the fast trailing-slice derive. DEFAULT OFF: the slice path assumes
-      active symbols are dense within ``DERIVE_SLICE`` and is NOT parity-gated for sparse symbols yet
-      (the OPEN PARITY CONSTRAINT in docs/AUTONOMOUS_BACKLOG.md); the gap-safe whole-buffer derive is used."""
+    - ``FP_INCREMENTAL_SLICE=1`` — use the fast slice derive (per-symbol last-``max_lag+1``-rows tail). This is
+      now PARITY-SAFE for sparse symbols (the tail is positionally exact — it reaches each symbol's actual prior
+      bars even across minute gaps), gated cell-for-cell vs the whole-buffer derive by tests/test_fp_incremental
+      _features.py. DEFAULT OFF pending live A/B under ``FP_INCREMENTAL_PARITY``; the whole-buffer derive (also
+      parity-true) is used until then."""
     return (
         os.environ.get("FP_INCREMENTAL") == "1",
         os.environ.get("FP_INCREMENTAL_PARITY") == "1",

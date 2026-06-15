@@ -87,3 +87,51 @@ def test_slice_derive_matches_whole_buffer() -> None:
             ref = whole_safe[:, safe_i]
             got = sliced[:, engine.col_index[col]]
             assert np.allclose(ref, got, rtol=1e-9, atol=1e-9), f"{minute} {col}: slice != whole-buffer derive"
+
+
+def _sparse_stream(n_dense: int = 6, n_min: int = 64, gap: int = 10) -> pl.DataFrame:
+    """A dense stream (every symbol every minute) PLUS one sparse symbol ``SP`` that prints only every ``gap``
+    minutes (gaps far larger than the legacy DERIVE_SLICE window). At a minute where SP prints, its positional
+    prior bar (``close.shift(1).over("symbol")``) is ``gap`` minutes back — a minute-window slice would miss it
+    and slice-derive a wrong null lag; the per-symbol row tail reaches it."""
+    base = _stream(n_sym=n_dense, n_min=n_min)
+    rng = np.random.default_rng(11)
+    price = 250.0
+    rows = []
+    template = base.row(0, named=True)
+    for mi in range(0, n_min, gap):
+        minute = BASE + dt.timedelta(minutes=mi)
+        price *= 1.0 + rng.standard_normal() * 0.003
+        row = dict(template)
+        row.update({"symbol": "SP", "minute": minute, "open": price * 0.999, "high": price * 1.002,
+                    "low": price * 0.998, "close": price, "volume": 2000.0})
+        rows.append(row)
+    sparse = pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))).select(base.columns)
+    return pl.concat([base, sparse]).sort(["symbol", "minute"])
+
+
+def test_slice_derive_sparse_symbol_matches_whole_buffer() -> None:
+    """REGRESSION (OPEN PARITY CONSTRAINT, resolved): a symbol that skips minutes still assembles cell-for-cell
+    equal to the gap-safe whole-buffer derive. Positional lags need the k-th prior ROW (however far back in
+    time), so the slice must tail by ROW per symbol, not by a fixed minute window. Two engines step the same
+    sparse stream — one slicing (fast), one whole-buffer (truth); their features must agree at every minute.
+    Under the old minute-window slice the sparse symbol's lag columns were a wrong null at its print minutes,
+    diverging the running sums — this test would have caught that."""
+    stream = _sparse_stream()
+    minutes = sorted(stream["minute"].unique())
+    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
+    eng_slice = IncrementalEngine(groups)
+    eng_whole = IncrementalEngine(groups)
+    assert eng_slice.max_lag >= 1  # the sparse gap (10) must exceed max_lag (and the legacy DERIVE_SLICE) to bite
+
+    sp_minutes = set(stream.filter(pl.col("symbol") == "SP")["minute"].to_list())
+    checked_sparse = 0
+    for minute in minutes:
+        buffer = stream.filter(pl.col("minute") <= minute)
+        out_slice = eng_slice.step(buffer, slice_derive=True)
+        out_whole = eng_whole.step(buffer, slice_derive=False)
+        for group in groups:
+            _assert_close(out_whole[group.name], out_slice[group.name], f"{minute}:{group.name}")
+        if minute in sp_minutes and minute > min(sp_minutes):
+            checked_sparse += 1
+    assert checked_sparse >= 3, "test did not exercise enough sparse-symbol print minutes past its first bar"
