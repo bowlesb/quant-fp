@@ -27,7 +27,9 @@ from quantlib.features.capture import (
     warm_start_enabled,
     warm_start_ring,
 )
+from quantlib.aggregates import QuoteTick, TickState, TradeTick
 from quantlib.features.loaders import load_reference
+from quantlib.features.tick_capture import enrich_bars_with_ticks
 from quantlib.features.sharded_capture import (
     INDEX_SYMBOLS,
     process_reduce,
@@ -37,6 +39,28 @@ from quantlib.features.sharded_capture import (
     shard_of,
     worker_main,
 )
+
+
+# Trades+quotes for the FULL ~11k universe is a firehose the single reader cannot yet absorb (quotes
+# especially) — so by default we subscribe ticks for a small liquid canary set (env FP_TICK_SYMBOLS can
+# override with a comma list, or "all" for the whole universe once the reader can take it). These light up
+# the trade_flow / quote_spread / liquidity groups via the parity-true tick aggregation; the rest stay
+# honest-null (we don't fabricate all-zero tick features for symbols we didn't subscribe).
+DEFAULT_TICK_SYMBOLS: tuple[str, ...] = (
+    "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "GOOG", "AMD",
+    "NFLX", "JPM", "BAC", "XOM", "INTC", "F", "PLTR", "COIN", "AAPU", "SOXL", "TQQQ", "DIA",
+)
+
+
+def tick_symbols(universe: list[str]) -> list[str]:
+    """Symbols to subscribe trades+quotes for (FP_TICK_SYMBOLS overrides: a comma list, or 'all')."""
+    env = os.environ.get("FP_TICK_SYMBOLS", "").strip()
+    if env == "all":
+        return universe
+    if env:
+        return [s.strip().upper() for s in env.split(",") if s.strip()]
+    universe_set = set(universe)
+    return [s for s in DEFAULT_TICK_SYMBOLS if s in universe_set]
 
 
 def _shard_snapshots(snapshots: dict | None, symbols: list[str], shard_id: int, n_shards: int) -> dict | None:
@@ -165,6 +189,13 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     # symbol_arrivals = per-symbol time.time() of that symbol's bar (drill-down: which tickers are slow).
     pending: dict = {"minute": None, "bars": [], "done": 0, "arrival": 0.0,
                      "last_arrival": 0.0, "symbol_arrivals": {}}
+    # Tick (trade+quote) aggregation state. tick_states is threaded per-symbol across minutes so the
+    # live trade-sign classification == a batch pass (parity at the tick layer). trade_buf/quote_buf
+    # bucket raw ticks by minute until that minute's bars are dispatched.
+    tick_syms = set(tick_symbols(symbols))
+    tick_states: dict[str, TickState] = {}
+    trade_buf: dict = {}
+    quote_buf: dict = {}
     stream = build_stream()
 
     bench_reader = _reader_bench_path(root)  # FP_BENCH_LOG: time the single-threaded reader (route+reduce)
@@ -172,6 +203,21 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     def dispatch(bars: list[dict], first_arrival: float, last_arrival: float,
                  symbol_arrivals: dict[str, float], minute) -> None:  # type: ignore[no-untyped-def]
         start = time.perf_counter()
+        if tick_syms:
+            # Enrich ONLY the subscribed symbols' bars with their minute's aggregated tick columns
+            # (n_trades, signed_volume, mean_spread_bps, ...); unsubscribed symbols keep no tick columns
+            # (-> null in the frame, honest "not collected", not a fabricated zero). Drop stale buckets.
+            trades_by_symbol = trade_buf.pop(minute, {})
+            quotes_by_symbol = quote_buf.pop(minute, {})
+            for stale in [m for m in trade_buf if m < minute]:
+                del trade_buf[stale]
+            for stale in [m for m in quote_buf if m < minute]:
+                del quote_buf[stale]
+            tick_bars = [bar for bar in bars if bar["S"] in tick_syms]
+            if tick_bars:
+                enriched = {bar["S"]: bar for bar in
+                            enrich_bars_with_ticks(tick_bars, trades_by_symbol, quotes_by_symbol, tick_states)}
+                bars = [enriched.get(bar["S"], bar) for bar in bars]
         for shard_id, shard_bars in enumerate(route_minute(bars, n_shards)):
             if shard_bars:
                 # (first_arrival, last_arrival, symbol_arrivals, minute, bars) — the worker records the two
@@ -219,7 +265,24 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
              "l": float(bar.low), "v": float(bar.volume), "t": bar.timestamp.isoformat()}
         )
 
+    async def on_trade(trade) -> None:  # type: ignore[no-untyped-def]
+        minute = trade.timestamp.replace(second=0, microsecond=0)
+        trade_buf.setdefault(minute, {}).setdefault(trade.symbol, []).append(
+            TradeTick(trade.timestamp.timestamp(), float(trade.price), float(trade.size))
+        )
+
+    async def on_quote(quote) -> None:  # type: ignore[no-untyped-def]
+        minute = quote.timestamp.replace(second=0, microsecond=0)
+        quote_buf.setdefault(minute, {}).setdefault(quote.symbol, []).append(
+            QuoteTick(quote.timestamp.timestamp(), float(quote.bid_price), float(quote.ask_price),
+                      float(quote.bid_size), float(quote.ask_size))
+        )
+
     stream.subscribe_bars(on_bar, *symbols)
+    if tick_syms:
+        stream.subscribe_trades(on_trade, *tick_syms)
+        stream.subscribe_quotes(on_quote, *tick_syms)
+        print(f"[reader] tick streaming ON: trades+quotes for {len(tick_syms)} symbols", file=sys.stderr, flush=True)
     stream.run()
     if os.environ.get("FP_BENCH_LOG"):
         print("[reader] stream.run() returned; joining workers", file=sys.stderr, flush=True)
