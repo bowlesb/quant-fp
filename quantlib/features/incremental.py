@@ -16,8 +16,10 @@ live uses this; the parity test proves they agree.
 
 V1 derived each new minute's value columns over the WHOLE trailing buffer (correct, but O(buffer) — the last
 big cost at the minute mark). V2 (this module) SLICE-DERIVES: the cheap short-lag columns (returns, products,
-power sums, presence/square) only need the last few bars, so they're derived over a ~6-minute slice; the few
-columns that depend on long history — a frame-relative OLS time axis and a cumulative regressor (OBV) — are
+power sums, presence/square) only need the last few bars, so they're derived over each symbol's last
+``max_lag+1`` rows (a per-symbol row tail — positionally exact for sparse symbols, so parity holds even when a
+symbol skips minutes); the columns that depend on long history — a frame-relative OLS time axis and a
+cumulative regressor (OBV) — are
 maintained as running per-symbol engine state (``stateful_regressors()``). Both produce the IDENTICAL value
 matrix the batch would, so the running sums (and therefore every feature) stay parity-true by construction.
 """
@@ -100,8 +102,9 @@ class IncrementalEngine:
     assembles features from the running sums via ``assemble_from_long`` (the SAME core as the batch). So the
     feature logic is identical to the batch/backfill paths; only the source of the sums differs.
 
-    V2 slice-derive: the new minute's short-lag value columns are derived over a ~6-minute slice (not the
-    whole buffer); the long-history regressor columns (a frame-relative OLS time axis, a cumulative OBV) are
+    V2 slice-derive: the new minute's short-lag value columns are derived over each symbol's last ``max_lag+1``
+    rows (a per-symbol row tail — positionally exact for sparse symbols, not a fixed minute window); the
+    long-history regressor columns (a frame-relative OLS time axis, a cumulative OBV) are
     declared via ``stateful_regressors()`` and maintained as running per-symbol engine state. The produced
     value matrix is identical to the whole-buffer derive, so parity holds (guarded by
     tests/test_fp_incremental_features.py).
@@ -110,7 +113,7 @@ class IncrementalEngine:
     each minute (``frame`` = the trailing buffer including the new latest minute) -> {group: feature_frame}.
     """
 
-    DERIVE_SLICE = 6  # minutes of history needed to slice-derive a minute's short-lag value columns (max lag + slack)
+    DERIVE_SLICE = 6  # legacy minute-window depth (>= max_lag); the live slice tails by ROW (see _matrix_at). Used by the rust-vs-polars unit tests and the dense-feed sim slot count.
 
     def __init__(self, groups: list[ReductionGroup], *, rust_slice: bool = True) -> None:
         self.rust_slice = rust_slice
@@ -174,7 +177,7 @@ class IncrementalEngine:
         # the exprs to read plain ``__lag{k}_{c}`` columns — the derive then runs GLOBALLY (no Polars partition,
         # the ~53ms cost). lag_columns: col -> [lags needed]; rewritten exprs evaluate on the kernel's lag frame.
         all_derive_exprs = [*self.safe_derived, *self.stateful_aux, *self.extra]
-        lags, _ = lag_specs(all_derive_exprs)
+        lags, self.max_lag = lag_specs(all_derive_exprs)
         self.lag_columns: dict[str, list[int]] = {}
         for column, lag in sorted(lags):
             self.lag_columns.setdefault(column, []).append(lag)
@@ -311,8 +314,15 @@ class IncrementalEngine:
         given. Asserts a fixed symbol set (V1)."""
         source = frame
         if slice_derive:
-            cutoff = minute - pl.duration(minutes=self.DERIVE_SLICE)  # type: ignore[operator]
-            source = frame.filter(pl.col("minute") > cutoff)
+            # Positional lags (``shift(k).over("symbol")``) need each present symbol's last ``max_lag+1`` ROWS,
+            # not a fixed minute window. A sparse symbol's prior bar can be arbitrarily far back in time, and
+            # backfill's shift is POSITIONAL (the k-th prior ROW, not the bar k minutes ago); a minute-window
+            # slice would miss it and slice-derive a wrong null lag where backfill returns a real value. Tailing
+            # by ROW per symbol reaches each symbol's actual prior bars regardless of gaps, so the slice derive
+            # is cell-for-cell identical to the whole-buffer derive at the latest row for dense AND sparse
+            # symbols (this resolves the OPEN PARITY CONSTRAINT). ``minute``-sort so each symbol's ``tail`` is
+            # its latest rows; the derive then runs on ~``max_lag+1`` rows/symbol, not the whole buffer.
+            source = frame.sort("minute").group_by("symbol", maintain_order=True).tail(self.max_lag + 1)
         row = self._derived_row_rust(source, minute) if self.rust_slice else self._derived_row(source, minute)
         n_sym = len(self.symbols or [])
         # Live capture delivers only the minute's ACTIVE symbols — a fluctuating SUBSET of the fixed session
@@ -362,8 +372,9 @@ class IncrementalEngine:
         ``symbols`` pins the index to a FIXED session set (e.g. the shard's full universe) — a stable superset
         of any single minute's active symbols, so intraday membership churn folds in as absent (zero) rows
         instead of forcing a re-seed. When None, the index is the symbols seen in ``buffer_frame`` (the prior
-        behaviour). ``slice_derive`` controls whether per-minute value columns are derived over a small trailing
-        slice (fast; assumes active symbols are dense within ``DERIVE_SLICE``) or the whole buffer (gap-safe)."""
+        behaviour). ``slice_derive`` controls whether per-minute value columns are derived over a per-symbol
+        last-``max_lag+1``-rows tail (fast, and parity-safe for sparse symbols — positional lags reach each
+        symbol's actual prior bars) or the whole buffer (gap-safe; identical result, just more rows derived)."""
         index = symbols if symbols is not None else buffer_frame["symbol"].unique().to_list()
         self.symbols = sorted(index)
         self.state = WindowedSumState(self.symbols, self.windows, len(self.value_cols))
@@ -377,7 +388,9 @@ class IncrementalEngine:
         buffer including the new minute. Seeds lazily on first call. A ``SymbolSetExpanded`` (a genuinely new
         ticker appeared) triggers a re-seed from ``frame`` — the parity-safe resync — and a retry, so live
         membership growth never breaks the run. ``slice_derive=False`` derives over the whole buffer (gap-safe,
-        O(buffer)); the default fast slice assumes active symbols are dense within ``DERIVE_SLICE`` minutes."""
+        O(buffer)); the default fast slice tails each symbol's last ``max_lag+1`` ROWS — positionally exact for
+        sparse symbols, so it is cell-for-cell identical to the whole-buffer derive (the OPEN PARITY CONSTRAINT,
+        resolved)."""
         latest = frame["minute"].max()
         if self.state is None:
             self.seed(frame, slice_derive=slice_derive)
