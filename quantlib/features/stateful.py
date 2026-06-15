@@ -547,15 +547,15 @@ class StatefulEngine:
                 )
         return row
 
-    def step(
+    def fold_and_state(
         self, frame: pl.DataFrame, ctx: BatchContext | None = None, coded: _CodedBuffer | None = None
-    ) -> pl.DataFrame:
-        """Fold the new latest minute and emit the group's features from state. ``frame`` is the trailing
-        buffer incl. the new minute; seeds lazily on first call. ``ctx`` is required iff the group is HYBRID
-        (declares ``reduction_columns``) — the engine joins those windowed-reduction columns onto the state row
-        (the SAME columns the group's own ``compute_latest`` joins), so the fast and certified live forms agree.
-        ``coded`` is an optional shared ``_CodedBuffer`` (``coded_buffer(frame)``) reused across all stateful
-        groups in a minute so the whole-buffer sort happens once, not once per group."""
+    ) -> tuple[pl.DataFrame, object]:
+        """Fold the new latest minute and build the per-symbol STATE FRAME the group's ``assemble`` consumes —
+        the prepared at-T columns + each EMA/lag/extrema alias + (for a HYBRID group) the windowed-reduction
+        columns — WITHOUT yet evaluating ``assemble``. Returns ``(state, latest)``. ``step`` calls this then
+        runs the group's ``assemble`` on the state; the consolidated stateful emit (``emit_stateful``) calls it
+        for every engine and runs ALL groups' ``assemble`` exprs in ONE shared polars pass — the same
+        scheduling lever the cheap-tier consolidation applied, the math byte-identical by construction."""
         latest = frame["minute"].max()
         if self.symbols is None:
             self.seed(frame)
@@ -568,9 +568,67 @@ class StatefulEngine:
         reduction = self.group.reduction_columns(ctx) if ctx is not None else None
         if reduction is not None:
             state = state.join(reduction, on="symbol", how="left")
+        return state, latest
+
+    def step(
+        self, frame: pl.DataFrame, ctx: BatchContext | None = None, coded: _CodedBuffer | None = None
+    ) -> pl.DataFrame:
+        """Fold the new latest minute and emit the group's features from state. ``frame`` is the trailing
+        buffer incl. the new minute; seeds lazily on first call. ``ctx`` is required iff the group is HYBRID
+        (declares ``reduction_columns``) — the engine joins those windowed-reduction columns onto the state row
+        (the SAME columns the group's own ``compute_latest`` joins), so the fast and certified live forms agree.
+        ``coded`` is an optional shared ``_CodedBuffer`` (``coded_buffer(frame)``) reused across all stateful
+        groups in a minute so the whole-buffer sort happens once, not once per group."""
+        state, latest = self.fold_and_state(frame, ctx, coded)
         feats = self.group.assemble()
         return (
             state.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
             .with_columns(pl.lit(latest).alias("minute"))
             .select(["symbol", "minute", *self.group.feature_names])
         )
+
+
+def emit_stateful(
+    engines: list[StatefulEngine],
+    frame: pl.DataFrame,
+    ctx: BatchContext | None = None,
+    coded: _CodedBuffer | None = None,
+) -> dict[str, pl.DataFrame]:
+    """Consolidated per-minute emit for the stateful groups (a SCHEDULING change, not a math change).
+
+    Each engine's ``step`` folds its state then runs the group's ``assemble`` over its OWN per-symbol state
+    frame; for the four stateful groups that per-group ``with_columns(assemble exprs)`` + frame-build is the
+    stateful-tier cost. This builds every engine's state frame (sharing the ONE coded buffer + folding state
+    once, exactly as ``step`` does), MERGES them onto a single symbol-keyed wide frame (the groups' private
+    EMA/lag/extrema aliases are unique, and the shared at-T bar columns — close/open/high/low — carry identical
+    per-symbol values from the same buffer), evaluates ALL groups' ``assemble`` exprs in ONE ``with_columns``,
+    then slices each group's feature columns back out. Byte-identical to per-group ``step`` by construction:
+    the SAME state columns feed the SAME ``assemble`` expressions; only the polars pass count changes.
+
+    Returns ``{group_name: frame}`` keyed by (symbol, minute) — the exact shape ``step`` returns, so the caller
+    writes them identically. ``engines`` is the subset runnable this minute; ``coded`` is the shared buffer."""
+    if not engines:
+        return {}
+    states: list[tuple[StatefulEngine, pl.DataFrame]] = []
+    latest: object = None
+    for engine in engines:
+        state, latest = engine.fold_and_state(frame, ctx, coded)
+        states.append((engine, state))
+
+    merged = states[0][1].sort("symbol")
+    seen = set(merged.columns)
+    for _engine, state in states[1:]:
+        new_cols = [col for col in state.columns if col not in seen]
+        merged = merged.join(state.sort("symbol").select(["symbol", *new_cols]), on="symbol", how="left")
+        seen.update(new_cols)
+
+    all_exprs: list[pl.Expr] = []
+    for engine, _state in states:
+        for name, expr in engine.group.assemble().items():
+            all_exprs.append(expr.cast(pl.Float64).alias(name))
+    wide = merged.with_columns(all_exprs).with_columns(pl.lit(latest).alias("minute"))
+
+    outputs: dict[str, pl.DataFrame] = {}
+    for engine, _state in states:
+        outputs[engine.group.name] = wide.select(["symbol", "minute", *engine.group.feature_names])
+    return outputs

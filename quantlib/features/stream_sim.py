@@ -122,7 +122,12 @@ from quantlib.features.declarative import _USE_RUST_ASSEMBLE, ReductionGroup, em
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _shard_snapshots, build_stream
 from quantlib.features.sharded_capture import INDEX_SYMBOLS, REDUCE_GROUPS, shard_of
-from quantlib.features.stateful import StatefulEngine, StatefulGroup, coded_buffer
+from quantlib.features.stateful import (
+    StatefulEngine,
+    StatefulGroup,
+    coded_buffer,
+    emit_stateful,
+)
 from quantlib.features.tick_capture import enrich_bars_with_ticks
 
 # The non-reduction groups that still consume the raw per-minute trades tape (tick_runlength's Rust kernel).
@@ -318,14 +323,22 @@ def process_stream_minute(
     # Rust extrema/lag gather — the whole-buffer sort is the stateful-emit's real cost, so it is paid once,
     # not once per group. (Valid because the stateful groups' ``prepare`` is identity over the bar columns.)
     shared_coded = coded_buffer(frame, latest) if stateful_groups else None
+    stateful_engines: list[StatefulEngine] = []
+    stateful_versions: dict[str, str] = {}
     for group in stateful_groups:
         assert isinstance(group, StatefulGroup)
         engine_s = state.stateful_engines.get(group.name)
         if engine_s is None:
             engine_s = StatefulEngine(group)
             state.stateful_engines[group.name] = engine_s
-        out = engine_s.step(frame, ctx, coded=shared_coded)
-        outputs.append((group.name, group.version, out))
+        stateful_engines.append(engine_s)
+        stateful_versions[group.name] = group.version
+    if stateful_engines:
+        # CONSOLIDATED: every stateful group's state frame folded + built off the ONE shared coded buffer,
+        # then ALL groups' assemble exprs evaluated in one shared pass and sliced per group (byte-identical
+        # to the per-group step) — the same scheduling lever the cheap-tier consolidation applied.
+        for name, out in emit_stateful(stateful_engines, frame, ctx, coded=shared_coded).items():
+            outputs.append((name, stateful_versions[name], out))
     state.stateful_emit_ms = (time.perf_counter() - stateful_emit_start) * 1000.0
     # The CROSS-SECTIONAL gather groups (market_context) — a per-minute universe gather (index broadcasts +
     # own-return point lags), O(universe) once, NOT per-symbol rolling. Timed apart as the cross-sectional phase.
