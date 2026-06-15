@@ -358,8 +358,8 @@ def process_bars(
             # Append THIS minute only (minute-keyed file) — O(1) per tick, idempotent on re-delivery.
             # Off the critical path when a StoreWriter is set (live workers): submit + move on to next minute.
             write_kwargs = dict(
-                root=root, group=group.name, version=group.version, source="stream", day=target_day,
-                frame=out, mode=mode, shard=shard, minute=latest,
+                root=root, group=group.name, version=group.version, source=store.source_for_mode(mode),
+                day=target_day, frame=out, mode=mode, shard=shard, minute=latest,
             )
             if state.writer is not None:
                 state.writer.submit(**write_kwargs)

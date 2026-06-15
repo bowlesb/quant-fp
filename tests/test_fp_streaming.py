@@ -1,7 +1,9 @@
 """End-to-end streaming simulation (scenario B): mock feed → live capture → mock-tagged store.
 
 Runs the REAL capture client against the mock websocket server over a real websocket connection, at
-a compressed interval, and verifies features land in a mock-tagged store (never the real one).
+a compressed interval, and verifies features land in a mock-tagged store (never the real one) under
+``source=sim`` — physically separated from the real ``source=stream`` so a sim run can exercise the
+EXACT real path without polluting the real provisional partitions.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ def test_capture_dedups_redelivered_minutes(tmp_path: Path) -> None:
     process_bars(state, [_dbar("AAA", 0, 100.0), _dbar("BBB", 0, 200.0)], root, "mock", "2026-06-16", 60)
     process_bars(state, [_dbar("AAA", 1, 101.0), _dbar("BBB", 1, 201.0)], root, "mock", "2026-06-16", 60)
     process_bars(state, [_dbar("AAA", 1, 101.0), _dbar("BBB", 1, 201.0)], root, "mock", "2026-06-16", 60)  # RE-DELIVERY
-    df = store.get_features(["ret_1m"], "universe", DEDUP_BASE, DEDUP_BASE + timedelta(minutes=5), root, source="stream")
+    df = store.get_features(["ret_1m"], "universe", DEDUP_BASE, DEDUP_BASE + timedelta(minutes=5), root, source="sim")
     assert df.height == 4  # 2 symbols x 2 minutes — re-delivered minute did NOT duplicate
     assert int(df.select(["symbol", "minute"]).is_duplicated().sum()) == 0
 
@@ -52,8 +54,11 @@ def test_streaming_mock_to_store(tmp_path: Path) -> None:
         datetime(2026, 6, 16, tzinfo=timezone.utc),
         datetime(2026, 6, 16, 23, 59, tzinfo=timezone.utc),
         str(root),
-        source="stream",
+        source="sim",
     )
     assert df.height > 0
     assert set(df["symbol"].unique().to_list()) >= {"AAA", "BBB"}
     assert df.filter(pl.col("ret_1m").is_not_null()).height > 0  # returns computed across minutes
+    # SEPARATE STORAGE: a mock/sim run writes ONLY source=sim, never the real source=stream.
+    assert list(root.glob("group=*/v=*/source=sim/date=*/data*.parquet")), "sim run wrote no source=sim files"
+    assert not list(root.glob("group=*/v=*/source=stream/**/*.parquet")), "sim run must NOT write source=stream"

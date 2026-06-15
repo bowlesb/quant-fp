@@ -31,6 +31,14 @@ import websockets
 SESSION_OPEN = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)  # a Monday 09:30 ET
 CHUNK = 1000  # bars per websocket frame (real feed also splits large universes across frames)
 
+# Realistic per-symbol-per-minute tick rates for a liquid name, so the sim exercises the trade_flow /
+# quote_spread / liquidity groups under a Monday-like firehose by default (configurable via env). The
+# REFERENCE measurement (after-hours live, 24 liquid symbols) was ~550 trades/min + ~1700 quotes/min
+# AGGREGATE across the 24, i.e. ~23 trades + ~71 quotes per symbol per minute; liquid names run hundreds
+# of trades + thousands of quotes/min at the open, so these are a conservative, representative default.
+DEFAULT_TRADES_PER_MIN = 24
+DEFAULT_QUOTES_PER_MIN = 72
+
 
 def _pack(obj: object) -> bytes:
     """msgpack with datetime=True so a python datetime encodes as the Timestamp ext alpaca-py expects."""
@@ -107,8 +115,10 @@ def make_handler(minutes: int, interval: float, trades_per_min: int, quotes_per_
 async def serve(host: str = "0.0.0.0", port: int = 9001) -> None:
     minutes = int(os.environ.get("MOCK_MINUTES", "390"))
     interval = float(os.environ.get("MOCK_INTERVAL_SEC", "60"))
-    trades_per_min = int(os.environ.get("MOCK_TRADES_PER_MIN", "0"))  # 0 = bars-only (back-compat default)
-    quotes_per_min = int(os.environ.get("MOCK_QUOTES_PER_MIN", "0"))
+    # Default to a realistic liquid-name tick firehose so the sim drives the full tick path (trade_flow /
+    # quote_spread / liquidity); set MOCK_TRADES_PER_MIN=0 / MOCK_QUOTES_PER_MIN=0 for a bars-only run.
+    trades_per_min = int(os.environ.get("MOCK_TRADES_PER_MIN", str(DEFAULT_TRADES_PER_MIN)))
+    quotes_per_min = int(os.environ.get("MOCK_QUOTES_PER_MIN", str(DEFAULT_QUOTES_PER_MIN)))
     handler = make_handler(minutes, interval, trades_per_min, quotes_per_min)
     # ping_interval=None: don't keepalive-drop a client whose event loop is briefly busy computing a
     # minute (under interval=0 flood the client's loop is busy back-to-back); the real feed tolerates this.

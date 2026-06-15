@@ -516,8 +516,8 @@ def process_stream_minute(
     write_start = time.perf_counter()
     if write:
         for name, version, out in outputs:
-            store.write_group(root=root, group=name, version=version, source="stream", day=target_day,
-                              frame=out, mode=mode, shard=shard, minute=latest)
+            store.write_group(root=root, group=name, version=version, source=store.source_for_mode(mode),
+                              day=target_day, frame=out, mode=mode, shard=shard, minute=latest)
     state.write_ms = (time.perf_counter() - write_start) * 1000.0
     state.minutes += 1
 
