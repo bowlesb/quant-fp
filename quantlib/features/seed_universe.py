@@ -22,6 +22,8 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest
 
+from quantlib.universe import is_etf_like
+
 # Primary US listing venues we keep — full-tape, liquid names. OTC = pink/grey markets (no SIP depth),
 # BATS = the test/secondary venue Alpaca tags some names with; both dropped for night 1.
 KEEP_EXCHANGES = {"NASDAQ", "NYSE", "AMEX", "ARCA"}
@@ -75,12 +77,18 @@ def upsert_asset_metadata(conn: psycopg.Connection, assets: list) -> int:
 
 
 def select_universe(assets: list) -> list[str]:
+    # Drop ETF/ETN/leveraged-inverse/commodity-pool products (``is_etf_like`` by asset name) so the
+    # cross-sectional features (rank deciles, multi_day_vwap, residual_analysis) are computed over a
+    # predominantly common-stock universe rather than a basket of derivative products. Index ETFs the
+    # platform needs (SPY/QQQ/IWM, see sharded_capture.INDEX_SYMBOLS) are added to the captured set
+    # separately in live_capture, so excluding them from the universe here is safe and intended.
     kept = [
         asset.symbol
         for asset in assets
         if asset.tradable
         and "/" not in asset.symbol
         and str(asset.exchange.value if hasattr(asset.exchange, "value") else asset.exchange) in KEEP_EXCHANGES
+        and not is_etf_like(asset.name)
     ]
     return sorted(set(kept))[:MAX_SYMBOLS]
 

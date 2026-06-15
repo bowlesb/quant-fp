@@ -44,9 +44,14 @@ def test_is_etf_like_classifies_funds_not_stocks() -> None:
         "Sprott Physical Silver Trust",
         "Fidelity Wise Origin Bitcoin Fund",
         "Grayscale Bitcoin Trust",
+        "FlexShares Ultra-Short Income Fund",
+        "Direxion Daily AAPL Bull 2X ETF",
     ]:
         assert is_etf_like(name), name
     # Real single-name equities (incl. ADRs / banks / REITs whose names contain "Trust") — kept.
+    # The "Bull"/"Bear"/"Ultra" tail covers operating companies that share a leveraged-ETP token but
+    # are NOT funds: "Bull"/"Bear" only screen when paired with a daily-leverage multiplier (Bull 3X),
+    # and bare "Ultra" must not screen (only UltraPro / Ultra-Short).
     for name in [
         "Apple Inc. Common Stock",
         "NVIDIA Corporation Common Stock",
@@ -55,6 +60,10 @@ def test_is_etf_like_classifies_funds_not_stocks() -> None:
         "Northern Trust Corporation Common Stock",
         "Digital Realty Trust, Inc.",
         "State Street Corporation Common Stock",
+        "Build-A-Bear Workshop, Inc.",
+        "SILVER BULL RES INC Common Stock",
+        "Ultra Clean Holdings, Inc. Common Stock",
+        "KPET Ultra Paceline Corporation",
     ]:
         assert not is_etf_like(name), name
 
