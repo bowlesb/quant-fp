@@ -50,12 +50,21 @@ MEASURED (10k symbols, 5 trades + 5 quotes/symbol/min, flood, 300m buffer, 32-co
     big lever was building the symbol-coded, (symbol, minute)-sorted buffer ONCE per minute and sharing it
     across all four stateful groups (one sort, not four) — ``stateful.coded_buffer`` passed to each
     ``StatefulEngine.step``. The Rust gather then reads numpy off that shared buffer.
-  * The FAST-PATH floor is still the REDUCTION EMIT (~67ms p99): the running sums fold cheaply (tick-agg ~30 +
-    fold ~18), but assembling 305 reduction features (numpy canonical/OLS + the polars wide-frame build) is
-    the floor — fast-path-only is ~98-103ms p99. So the next lever is (a) a Rust ASSEMBLE to take the
-    reduction emit + wide-frame build under ~100ms, plus (b) the ~82 cheap batch features (calendar / sector /
-    multi_day, ~120ms p99) still on the batch ``compute_latest``. Stateful-emit is no longer the dominant
-    phase — reduction-emit and the residual rest now are.
+  * RUST ASSEMBLE (FP_RUST_ASSEMBLE) took the reduction-emit's CANONICAL column algebra into the
+    ``quant_tick.assemble_canonical`` kernel (one pass over the whole running-sum array -> all groups'
+    mean/std/sum + OLS slope/corr/r2/mean_y columns, NaN==null by construction, parity-true cell-for-cell vs
+    the numpy/polars emit — tests/test_fp_incremental_emit.py). reduction-emit p50 ~50ms -> ~44ms; the
+    FAST-PATH (tick-agg + fold + reduction-emit) now clears the bar: ~110ms -> ~88ms p99 (< 100ms ✅).
+    CRUCIAL FINDING (micro-profile, 625-sym shard): the canonical algebra was NEVER the cost — the numpy
+    canonical build is ~1.4ms and the Rust kernel ~0.4ms. The ~100ms reduction-emit is the POLARS WIDE-FRAME
+    BUILD (~42ms: 330 canonical columns -> 13 per-group DataFrames via ``pl.from_numpy`` of a contiguous block
+    + join to the latest row) + the per-group ``assemble()`` EXPRESSION EVALUATION (~40ms). The kernel removed
+    the (small) canonical cost AND the block ingest replaced 330 per-column ``pl.Series`` copies (~52ms ->
+    ~42ms). The remaining reduction-emit floor is polars' per-group assemble eval + join, NOT arithmetic.
+  * Full-flow p99 is still ~288ms — UNCHANGED by the assemble kernel, because the full flow is now dominated
+    by the STATEFUL EMIT (~108-118ms p99) and the ~82 NON-REDUCTION "rest" features (calendar / sector /
+    multi_day, ~108-122ms p99) on the batch ``compute_latest``, NOT the reduction emit. Those two phases are
+    the next levers for <100ms full-flow; the reduction fast path itself is now under budget.
 
 Usage:  python -m quantlib.features.stream_sim <n_symbols> <n_shards> <measure_minutes> [warmup] [window]
 """
@@ -86,7 +95,7 @@ from quantlib.features.bench_stream import (
 )
 from quantlib.features.capture import BARS_SCHEMA, DEFAULT_BUFFER_MINUTES
 from quantlib.features.compare import runnable
-from quantlib.features.declarative import ReductionGroup, emit_numpy
+from quantlib.features.declarative import _USE_RUST_ASSEMBLE, ReductionGroup, emit_numpy, emit_rust
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _shard_snapshots, build_stream
 from quantlib.features.sharded_capture import INDEX_SYMBOLS, REDUCE_GROUPS, shard_of
@@ -256,10 +265,15 @@ def process_stream_minute(
     assert engine.state is not None
     latest_frame = frame.filter(pl.col("minute") == latest)
     reduction_emit_start = time.perf_counter()
-    reduction_out = emit_numpy(
-        engine.groups, engine.state.running, engine.symbols or [], engine.windows, engine.col_index,
-        latest_frame, latest, engine.plan, engine.reg_plan,
-    )
+    if _USE_RUST_ASSEMBLE:
+        reduction_out = emit_rust(
+            engine.groups, engine.state.running, engine.symbols or [], engine.asm_plan, latest_frame, latest
+        )
+    else:
+        reduction_out = emit_numpy(
+            engine.groups, engine.state.running, engine.symbols or [], engine.windows, engine.col_index,
+            latest_frame, latest, engine.plan, engine.reg_plan,
+        )
     for group in reduction_groups:
         outputs.append((group.name, group.version, reduction_out[group.name]))
     state.reduction_emit_ms = (time.perf_counter() - reduction_emit_start) * 1000.0

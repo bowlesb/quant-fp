@@ -146,3 +146,55 @@ def test_step_numpy_std_r2_meany_accessors() -> None:
         polars_out = polars_engine.step(buffer)[group.name]
         numpy_out = numpy_engine.step_numpy(buffer)[group.name]
         _assert_cellwise(polars_out, numpy_out, f"probe-min{minute}", tol=0.0)
+
+
+def test_step_rust_matches_numpy_step_price_volume() -> None:
+    """The Rust-assemble path (``step_rust``) equals the numpy-emit AND polars-assemble paths for price_volume,
+    every minute (incl. warmup nulls). The Rust ``assemble_canonical`` kernel produces the canonical
+    sum/mean/OLS-corr/OLS-slope columns; identical sums + identical algebra => IDENTICAL (tol 0)."""
+    stream = _stream()
+    minutes = sorted(stream["minute"].unique())
+    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
+    polars_engine = IncrementalEngine(groups)
+    numpy_engine = IncrementalEngine(groups)
+    rust_engine = IncrementalEngine(groups)
+    for minute in minutes:
+        buffer = stream.filter(pl.col("minute") <= minute)
+        polars_out = polars_engine.step(buffer)[GROUP_NAME]
+        numpy_out = numpy_engine.step_numpy(buffer)[GROUP_NAME]
+        rust_out = rust_engine.step_rust(buffer)[GROUP_NAME]
+        _assert_cellwise(numpy_out, rust_out, f"rust-vs-numpy-min{minute}", tol=0.0)
+        _assert_cellwise(polars_out, rust_out, f"rust-vs-polars-min{minute}", tol=0.0)
+
+
+def test_step_rust_matches_batch_price_volume() -> None:
+    """The Rust-assemble path equals the batch ``compute_latest`` (live source of truth) for price_volume —
+    closing backfill==batch==incremental(rust-emit), proving corr/slope/mean/sum cell-for-cell."""
+    stream = _stream()
+    minutes = sorted(stream["minute"].unique())
+    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
+    pv_group = next(g for g in groups if g.name == GROUP_NAME)
+    engine = IncrementalEngine(groups)
+    checkpoints = {10, 30, len(minutes) - 1}
+    for ti, minute in enumerate(minutes):
+        buffer = stream.filter(pl.col("minute") <= minute)
+        rust_out = engine.step_rust(buffer)[GROUP_NAME]
+        if ti in checkpoints:
+            ctx = BatchContext(frames={"minute_agg": buffer})
+            tol = max(spec.tolerance for spec in pv_group.declare())
+            _assert_cellwise(pv_group.compute_latest(ctx), rust_out, f"rust-batch-min{ti}", tol=max(tol, 1e-6))
+
+
+def test_step_rust_std_r2_meany_accessors() -> None:
+    """std, r2, mean_y via the Rust assemble kernel match the polars assemble path (the accessors price_volume
+    lacks) — pins the std (count>1 guard) and r2/mean_y (denom_y guard) arms of ``assemble_canonical``."""
+    stream = _stream()
+    minutes = sorted(stream["minute"].unique())
+    group = _StdR2Group()
+    polars_engine = IncrementalEngine([group])
+    rust_engine = IncrementalEngine([group])
+    for minute in minutes:
+        buffer = stream.filter(pl.col("minute") <= minute)
+        polars_out = polars_engine.step(buffer)[group.name]
+        rust_out = rust_engine.step_rust(buffer)[group.name]
+        _assert_cellwise(polars_out, rust_out, f"rust-probe-min{minute}", tol=0.0)

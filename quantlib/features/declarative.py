@@ -20,15 +20,27 @@ arbitrary polars — this is the fast lane for the common windowed-reduction sha
 """
 from __future__ import annotations
 
+import os
 from abc import abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+import quant_tick
 
 from quantlib.features import _phase
 from quantlib.features.base import BatchContext, FeatureGroup
 from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_sums
+
+# The reduction EMIT (building each group's canonical __<stat>_<col>_<w> columns from the running sums) is
+# the fast-path floor. FP_RUST_ASSEMBLE moves that canonical column algebra into the ``assemble_canonical``
+# Rust kernel (one pass over the whole running-sum array, NaN==null by construction); the numpy/polars
+# ``emit_numpy`` stays the parity reference (FP_RUST_ASSEMBLE unset, or FP_RUST_ASSEMBLE=0).
+_USE_RUST_ASSEMBLE = bool(os.environ.get("FP_RUST_ASSEMBLE")) and os.environ.get("FP_RUST_ASSEMBLE") != "0"
+
+# Statistic codes shared with the Rust ``assemble_canonical`` kernel (kind byte). The OLS codes' order
+# (slope, corr, r2, mean_y) matches the kernel's 3..=6 arm.
+_STAT_CODE = {"sum": 0, "mean": 1, "std": 2, "slope": 3, "corr": 4, "r2": 5, "mean_y": 6}
 
 # Agg accessors — used inside assemble() to reference the canonical aggregate columns the engine builds.
 STATS = ("mean", "std", "sum")
@@ -391,6 +403,113 @@ def assemble_from_long(
         wide = latest_frame.select(
             ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
         ).join(piv, on="symbol", how="left")
+        feats = group.assemble()
+        results[group.name] = (
+            wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
+            .with_columns(pl.lit(latest).alias("minute"))
+            .select(["symbol", "minute", *group._feature_names()])
+        )
+    return results
+
+
+@dataclass(frozen=True)
+class _AssemblePlan:
+    """The flattened, group-INDEPENDENT plan the Rust ``assemble_canonical`` kernel consumes, built ONCE per
+    engine (it is pure metadata over plan/reg_plan/col_index/windows). One row per OUTPUT canonical column:
+    the window index into ``running``, the statistic kind byte, and up to six value-col indices. ``col_names``
+    is the per-column accessor name (``__<stat>_<name>_<w>``) and ``group_slices`` maps each group index to its
+    contiguous half-open column range in the kernel output, so a group's wide columns are sliced with no copy."""
+
+    win: list[int]
+    kind: list[int]
+    idx: tuple[list[int], list[int], list[int], list[int], list[int], list[int]]
+    col_names: list[str]
+    group_slices: dict[int, tuple[int, int]]
+
+
+def build_assemble_plan(
+    groups: list[ReductionGroup],
+    windows: tuple[int, ...],
+    col_index: dict[str, int],
+    plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+    reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+) -> _AssemblePlan:
+    """Flatten plan/reg_plan into the per-output-column spec the Rust kernel needs, in the SAME column order
+    (per group: reduced columns then regressions, each window then stat) ``emit_numpy`` builds ``wide_cols``.
+    Pure metadata; built once and reused every minute."""
+    win_index = {int(w): wi for wi, w in enumerate(windows)}
+    win: list[int] = []
+    kind: list[int] = []
+    idx_lists: tuple[list[int], ...] = ([], [], [], [], [], [])
+    col_names: list[str] = []
+    group_slices: dict[int, tuple[int, int]] = {}
+
+    def push(window: int, stat: str, indices: list[int], col_name: str) -> None:
+        win.append(win_index[int(window)])
+        kind.append(_STAT_CODE[stat])
+        padded = (indices + [0, 0, 0, 0, 0, 0])[:6]
+        for axis in range(6):
+            idx_lists[axis].append(padded[axis])
+        col_names.append(col_name)
+
+    for gi, _group in enumerate(groups):
+        start = len(col_names)
+        for pgi, name, stats, group_windows, base in plan:
+            if pgi != gi:
+                continue
+            for window in group_windows:
+                for stat in stats:
+                    if stat == "sum":
+                        indices = [col_index[base]]
+                    elif stat == "mean":
+                        indices = [col_index[base], col_index[f"{base}__p"]]
+                    else:  # std
+                        indices = [col_index[base], col_index[f"{base}__p"], col_index[f"{base}__sq"]]
+                    push(window, stat, indices, f"__{stat}_{name}_{window}")
+        for pgi, name, stats, group_windows, ns in reg_plan:
+            if pgi != gi:
+                continue
+            ols_indices = [col_index[f"__rd_{ns}_{key}"] for key in ("b", "x", "y", "xy", "xx", "yy")]
+            for window in group_windows:
+                for stat in stats:
+                    push(window, stat, ols_indices, f"__{stat}_{name}_{window}")
+        group_slices[gi] = (start, len(col_names))
+    return _AssemblePlan(win, kind, idx_lists, col_names, group_slices)
+
+
+def emit_rust(
+    groups: list[ReductionGroup],
+    running: np.ndarray,
+    symbols: list[str],
+    asm_plan: _AssemblePlan,
+    latest_frame: pl.DataFrame,
+    latest: object,
+) -> dict[str, pl.DataFrame]:
+    """RUST-ASSEMBLE alternative to ``emit_numpy``: compute EVERY group's per-window canonical columns in ONE
+    ``quant_tick.assemble_canonical`` pass over the whole ``(n_windows, n_symbols, n_value_cols)`` running-sum
+    array (the same canonical/OLS algebra as ``_canonical_numpy``/``_ols_stat_numpy``, NaN==null by
+    construction), then slice each group's columns out of the contiguous result. Replaces ONLY how the
+    ``__<stat>_<name>_<w>`` columns are PRODUCED — each group's ``assemble()`` (the feature formulas) is
+    unchanged. ``asm_plan`` is ``build_assemble_plan(...)`` (pure metadata, built once)."""
+    canon = quant_tick.assemble_canonical(
+        np.ascontiguousarray(running), asm_plan.win, asm_plan.kind, *asm_plan.idx
+    )  # (n_symbols, n_out), NaN where null
+    symbol_series = pl.Series("symbol", symbols)
+    results: dict[str, pl.DataFrame] = {}
+    for gi, group in enumerate(groups):
+        start, stop = asm_plan.group_slices[gi]
+        # Ingest the group's contiguous canonical block in ONE polars allocation (vs a per-column pl.Series
+        # copy): pl.from_numpy over the C-contiguous (n_symbols, n_group_cols) slice. NaN stays NaN (not null),
+        # exactly as the numpy emit's per-column Series — so assemble()'s null/NaN handling is unchanged.
+        points_select = latest_frame.select(
+            ["symbol", *[expr.alias(f"__pt_{name}") for name, expr in group.points().items()]]
+        )
+        if stop > start:
+            block = np.ascontiguousarray(canon[:, start:stop])
+            piv = pl.from_numpy(block, schema=asm_plan.col_names[start:stop]).with_columns(symbol_series)
+            wide = points_select.join(piv, on="symbol", how="left")
+        else:
+            wide = points_select  # points-only group: no canonical columns to ingest
         feats = group.assemble()
         results[group.name] = (
             wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])

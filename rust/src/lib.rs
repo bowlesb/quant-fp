@@ -3,7 +3,8 @@
 //! one Python FeatureGroup, so parity holds by construction; a pure-Python reference pins the output
 //! (tests/test_fp_rust.py). The kernel is a single ordered pass — exactly the shape Polars can't do.
 
-use numpy::PyReadonlyArray1;
+use numpy::ndarray::Array2;
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray3};
 use pyo3::prelude::*;
 
 /// Per-(symbol, minute) tick run-length + signed-flow features.
@@ -468,6 +469,142 @@ fn time_lag_gather(
     Ok((out_sym, out_lags))
 }
 
+/// The CANONICAL reduction-emit moved into Rust — build a group set's per-(symbol, window) canonical
+/// statistic columns DIRECTLY from the running per-(window, symbol, value-col) sums, eliminating the
+/// per-column numpy Python overhead (and the polars wide-frame pivot) that dominates the fast-path emit.
+///
+/// This computes the SAME canonical columns ``emit_numpy`` (``_canonical_numpy`` / ``_ols_stat_numpy``)
+/// produces, character-identical algebra, with ``f64::NAN`` exactly where the numpy/polars path emits a
+/// null. The Python caller flattens its plan/reg_plan into one row per OUTPUT column (in the order the
+/// caller wants the result columns), then slices the returned ``(n_symbols, n_out)`` matrix per group.
+///
+/// Inputs (all parallel, length ``n_out`` except ``running``):
+///   running   — (n_windows, n_symbols, n_value_cols) running sums (``WindowedSumState.running``)
+///   win       — per output column: the WINDOW INDEX (0..n_windows) to read from ``running``
+///   kind      — per output column: the statistic to compute, coded:
+///                 0 = sum     (idx0 = base value-col index)
+///                 1 = mean    (idx0 = base, idx1 = base__p [presence count])
+///                 2 = std     (idx0 = base, idx1 = base__p, idx2 = base__sq)
+///                 3 = slope   (idx0..5 = b, x, y, xy, xx, yy)
+///                 4 = corr    (idx0..5 = b, x, y, xy, xx, yy)
+///                 5 = r2      (idx0..5 = b, x, y, xy, xx, yy)
+///                 6 = mean_y  (idx0..5 = b, x, y, xy, xx, yy)
+///   idx0..idx5 — value-col indices into ``running``'s last axis; only the ones the kind needs are read.
+/// Returns a (n_symbols, n_out) row-major matrix; column j holds the kind[j] statistic over window win[j],
+/// one value per symbol, NaN where the (numpy/polars) emit is null.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn assemble_canonical<'py>(
+    py: Python<'py>,
+    running: PyReadonlyArray3<f64>,
+    win: Vec<usize>,
+    kind: Vec<u8>,
+    idx0: Vec<usize>,
+    idx1: Vec<usize>,
+    idx2: Vec<usize>,
+    idx3: Vec<usize>,
+    idx4: Vec<usize>,
+    idx5: Vec<usize>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let running = running.as_array(); // (n_windows, n_symbols, n_value_cols)
+    let n_sym = running.shape()[1];
+    let n_out = win.len();
+    let mut out: Array2<f64> = Array2::zeros((n_sym, n_out));
+
+    for j in 0..n_out {
+        let wi = win[j];
+        let k = kind[j];
+        let plane = running.index_axis(numpy::ndarray::Axis(0), wi); // (n_symbols, n_value_cols)
+        match k {
+            0 => {
+                // sum: the raw running total (no guard — matches _canonical_numpy "__c_sum")
+                let c0 = idx0[j];
+                for s in 0..n_sym {
+                    out[[s, j]] = plane[[s, c0]];
+                }
+            }
+            1 => {
+                // mean = sum/count, NaN where count <= 0 (matches _canonical_numpy guard count>0)
+                let (c0, c1) = (idx0[j], idx1[j]);
+                for s in 0..n_sym {
+                    let total = plane[[s, c0]];
+                    let count = plane[[s, c1]];
+                    out[[s, j]] = if count > 0.0 { total / count } else { f64::NAN };
+                }
+            }
+            2 => {
+                // std(ddof=1) = sqrt((sumsq - total^2/count)/(count-1)); NaN where count <= 1
+                let (c0, c1, c2) = (idx0[j], idx1[j], idx2[j]);
+                for s in 0..n_sym {
+                    let total = plane[[s, c0]];
+                    let count = plane[[s, c1]];
+                    let sumsq = plane[[s, c2]];
+                    out[[s, j]] = if count > 1.0 {
+                        ((sumsq - total * total / count) / (count - 1.0)).sqrt()
+                    } else {
+                        f64::NAN
+                    };
+                }
+            }
+            3..=6 => {
+                // OLS: the six paired sums b, x, y, xy, xx, yy -> slope/corr/r2/mean_y
+                let (cb, cx, cy, cxy, cxx, cyy) =
+                    (idx0[j], idx1[j], idx2[j], idx3[j], idx4[j], idx5[j]);
+                for s in 0..n_sym {
+                    let b = plane[[s, cb]];
+                    let sx = plane[[s, cx]];
+                    let sy = plane[[s, cy]];
+                    let sxy = plane[[s, cxy]];
+                    let sxx = plane[[s, cxx]];
+                    let syy = plane[[s, cyy]];
+                    let denom_x = b * sxx - sx * sx;
+                    let denom_y = b * syy - sy * sy;
+                    let cov_n = b * sxy - sx * sy;
+                    let defined = b >= 2.0 && denom_x > 0.0;
+                    let defined_corr = defined && denom_y > 0.0;
+                    out[[s, j]] = match k {
+                        3 => {
+                            if defined {
+                                cov_n / denom_x
+                            } else {
+                                f64::NAN
+                            }
+                        }
+                        4 => {
+                            if defined_corr {
+                                cov_n / (denom_x * denom_y).sqrt()
+                            } else {
+                                f64::NAN
+                            }
+                        }
+                        5 => {
+                            if defined_corr {
+                                (cov_n * cov_n) / (denom_x * denom_y)
+                            } else {
+                                f64::NAN
+                            }
+                        }
+                        _ => {
+                            // mean_y = sy/b, NaN where b <= 0 (matches numpy guard b>0)
+                            if b > 0.0 {
+                                sy / b
+                            } else {
+                                f64::NAN
+                            }
+                        }
+                    };
+                }
+            }
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "assemble_canonical: unknown kind {k}"
+                )))
+            }
+        }
+    }
+    Ok(out.into_pyarray_bound(py))
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
@@ -476,5 +613,6 @@ fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(slice_derive_lags, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_extrema, m)?)?;
     m.add_function(wrap_pyfunction!(time_lag_gather, m)?)?;
+    m.add_function(wrap_pyfunction!(assemble_canonical, m)?)?;
     Ok(())
 }

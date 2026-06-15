@@ -31,8 +31,10 @@ from quantlib.features.declarative import (
     ReductionGroup,
     StatefulRegressor,
     assemble_from_long,
+    build_assemble_plan,
     build_plan,
     emit_numpy,
+    emit_rust,
 )
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
@@ -106,6 +108,8 @@ class IncrementalEngine:
         self.groups = [g for g in groups if isinstance(g, ReductionGroup)]
         self.derived, self.extra, self.value_cols, self.plan, self.reg_plan, self.windows = build_plan(self.groups)
         self.col_index = {col: i for i, col in enumerate(self.value_cols)}
+        # Flattened metadata for the Rust assemble kernel (FP_RUST_ASSEMBLE) — built ONCE here, reused each minute.
+        self.asm_plan = build_assemble_plan(self.groups, self.windows, self.col_index, self.plan, self.reg_plan)
         self.reduce_input = self.groups[0].reduce_input if self.groups else "minute_agg"
         input_cols: list[str] = []
         for group in self.groups:
@@ -361,6 +365,22 @@ class IncrementalEngine:
             self.plan,
             self.reg_plan,
         )
+
+    def step_rust(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
+        """RUST-ASSEMBLE alternative to ``step_numpy``: fold the new minute, then assemble features from the
+        running-sum array via ``emit_rust`` (the canonical/OLS columns built in ONE ``assemble_canonical`` Rust
+        pass instead of per-column numpy). Parity-true by construction — the kernel mirrors ``_canonical_numpy``
+        / ``_ols_stat_numpy`` cell-for-cell (NaN==null). Guarded against ``step_numpy``/``step`` and the batch by
+        tests/test_fp_incremental_emit.py."""
+        latest = frame["minute"].max()
+        if self.state is None:
+            self.seed(frame)
+        else:
+            self.state.update(int(latest.timestamp()), self._matrix_at(frame, latest, slice_derive=True))
+            self.state.trim()
+        assert self.state is not None
+        latest_frame = frame.filter(pl.col("minute") == latest)
+        return emit_rust(self.groups, self.state.running, self.symbols or [], self.asm_plan, latest_frame, latest)
 
     def _running_long(self) -> pl.DataFrame:
         """The running sums as a LONG (symbol, window, <value-col sum>) frame — the exact shape
