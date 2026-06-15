@@ -23,7 +23,12 @@ from quantlib.features.groups.candlestick import CandlestickGroup
 from quantlib.features.groups.price_levels import PriceLevelGroup
 from quantlib.features.groups.price_returns import PriceReturnGroup
 from quantlib.features.groups.technical import TechnicalGroup
-from quantlib.features.stateful import StatefulEngine, coded_buffer, emit_stateful
+from quantlib.features.stateful import (
+    ReductionFoldState,
+    StatefulEngine,
+    coded_buffer,
+    emit_stateful,
+)
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 
@@ -166,6 +171,42 @@ def test_technical_coded_reduction_matches_certified(stream_factory) -> None:  #
             )
         )
         assert bad.height == 0, f"technical.{col}: {bad.height} coded-vs-certified mismatches\n{bad.head()}"
+
+
+@pytest.mark.parametrize("stream_factory", [_stream, _gappy_stream])
+def test_technical_folded_reduction_matches_certified(stream_factory) -> None:  # type: ignore[no-untyped-def]
+    """technical's FOLDED reduction (``reduction_columns_from_sums`` off a ``ReductionFoldState`` folded one
+    minute at a time over the buffer — the running-sum tier the fast path now rides) must equal the certified
+    ``reduction_columns`` — including on a GAPPY grid, where the time-based prior close (RSI's gain/loss) and
+    the per-window present-count differ from a naive positional shift. RSI is byte-exact (sums cancel);
+    SMA/std match within the incremental-sum float tolerance the reduction tier already uses (1e-9), the SAME
+    drift ``IncrementalEngine``'s ``WindowedSumState`` has — bounded by per-session re-seed."""
+    stream = stream_factory()
+    ctx = BatchContext(frames={"minute_agg": stream})
+    group = TechnicalGroup()
+    certified = group.reduction_columns(ctx).sort("symbol")
+
+    symbols = sorted(stream["symbol"].unique().to_list())
+    rstate = ReductionFoldState(symbols, group.reduction_spec())
+    for minute in sorted(stream["minute"].unique()):
+        minute_row = stream.select(["symbol", "minute", "close"]).filter(pl.col("minute") == minute).sort("symbol")
+        present = minute_row["symbol"].to_list()
+        close = minute_row.select(pl.col("close").cast(pl.Float64)).to_numpy().reshape(-1)
+        rstate.fold(int(minute.timestamp()), present, close)
+    folded = group.reduction_columns_from_sums(rstate.running_long()).sort("symbol").select(certified.columns)
+
+    assert folded.height == certified.height, "folded reduction row count differs"
+    for col in [c for c in folded.columns if c != "symbol"]:
+        joined = certified.select("symbol", col).join(
+            folded.select("symbol", pl.col(col).alias("_g")), on="symbol"
+        )
+        bad = joined.filter(
+            ~(
+                (pl.col(col).is_null() & pl.col("_g").is_null())
+                | ((pl.col(col) - pl.col("_g")).abs() <= 1e-9 + 1e-9 * pl.col(col).abs())
+            )
+        )
+        assert bad.height == 0, f"technical.{col}: {bad.height} folded-vs-certified mismatches\n{bad.head()}"
 
 
 @pytest.mark.parametrize("factory", STATEFUL_GROUP_FACTORIES)

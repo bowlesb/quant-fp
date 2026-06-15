@@ -32,6 +32,7 @@ import polars as pl
 import quant_tick
 
 from quantlib.features.base import BatchContext, FeatureGroup
+from quantlib.features.incremental import WindowedSumState
 
 # The per-symbol extrema/lag FOLD is the platform's stateful-emit hotspot at ~625 symbols/shard: the
 # monotonic-deque / epoch-ring loops are pure Python and O(symbols) per minute. The Rust kernels
@@ -67,6 +68,24 @@ class LagSpec:
     alias: str
     source: str
     minutes: int
+
+
+@dataclass(frozen=True)
+class ReductionSpec:
+    """One windowed-reduction the group FOLDS on the incremental running-sum tier instead of recomputing
+    the windowed kernel over the whole buffer each minute. ``value_cols`` are the per-minute value columns
+    the group sums (e.g. ``_gain`` / ``_loss`` / ``_close`` / ``_close_sq`` / ``_close_n`` for technical's
+    RSI/SMA/std); ``windows`` are the windows (minutes) those sums are kept over. The group derives one
+    minute's value row from the at-T close + the TIME-based prior close (``reduction_value_row``), the engine
+    folds it into a ``WindowedSumState`` (O(symbols × windows × cols), no whole-buffer rescan), and the group
+    reads the running sums to build its reduction columns (``reduction_columns_from_sums``). This is the
+    per-symbol twin of how the ``ReductionGroup`` tier already folds — the additive-window class belongs on
+    the running-sum tier, so SMA = windowed mean, Bollinger = mean ± k·std, RSI = ratio of windowed avg
+    gain/loss all FOLD rather than recompute."""
+
+    value_cols: tuple[str, ...]
+    windows: tuple[int, ...]
+    close_source: str  # the at-T column whose time-based 1m prior gives gain/loss (and whose value SMA averages)
 
 
 @dataclass(frozen=True)
@@ -233,6 +252,81 @@ def windowed_sums_from(
     for idx, name in enumerate(names):
         data[name] = sums[idx]
     return pl.DataFrame(data)
+
+
+class ReductionFoldState:
+    """Per-symbol windowed running-sum state for a group's ``ReductionSpec`` — the FOLD twin of the
+    per-minute windowed-kernel recompute. Holds a ``WindowedSumState`` over the spec's value columns (one
+    running per-(window, symbol, col) sum) plus the TIME-based prior close per symbol (the ``base.lagged``
+    contract, gappy-safe), so folding one minute is O(symbols × windows × cols) — no whole-buffer rescan.
+
+    PARITY: the running sums equal the windowed-kernel sums over the same present bars by construction —
+    ``WindowedSumState`` adds the new minute to every window and expires minutes that fall out of ``(T−w·60,
+    T]``, the IDENTICAL window the kernel reduces. The value row is derived from the at-T close + the
+    time-based prior close, byte-identical to ``reduction_columns_from_coded`` (gain/loss zeroed when the
+    immediate prior minute is absent — ``NaN > 0`` is False — and absent symbols contribute a zero row, just
+    as their bar is absent from the kernel's buffer). ``running_long`` returns the (symbol, window, _n,
+    <sum per col>) LONG frame, the SAME shape ``windowed_sums_from`` returns, so the group's
+    ``reduction_columns_from_sums`` reads it exactly as it read the kernel's long frame."""
+
+    def __init__(self, symbols: list[str], spec: ReductionSpec) -> None:
+        self.symbols = list(symbols)
+        self.index = {symbol: i for i, symbol in enumerate(self.symbols)}
+        self.n = len(self.symbols)
+        self.spec = spec
+        self.value_cols = list(spec.value_cols)
+        self.windows = tuple(int(w) for w in spec.windows)
+        self.state = WindowedSumState(self.symbols, self.windows, len(self.value_cols))
+        # The TIME-based prior close per symbol: the value folded at this symbol's last present minute, and
+        # that minute's epoch (so a 1m gain/loss is taken only when the immediate prior minute is present).
+        self.prev_close = np.full(self.n, np.nan, dtype=np.float64)
+        self.prev_epoch = np.full(self.n, -1, dtype=np.int64)
+
+    def fold(self, minute_epoch: int, present_symbols: list[str], close: np.ndarray) -> None:
+        """Fold one minute. ``present_symbols`` are the symbols with a bar this minute (a subset of the fixed
+        seed set on a gappy grid); ``close`` is their close, aligned to ``present_symbols``. Builds the
+        full-symbol value row (absent symbols -> zero, exactly as their bar is absent from the kernel buffer),
+        folds it into every window, and advances the per-symbol prior close/epoch."""
+        present_close = np.full(self.n, np.nan, dtype=np.float64)
+        positions = np.array([self.index[symbol] for symbol in present_symbols], dtype=np.int64)
+        present_close[positions] = close
+        present = np.isfinite(present_close)
+        # TIME-based prior close: the predecessor is the gain/loss base only when it is exactly one minute
+        # earlier for this symbol (matching ``coded_prev_within_minute`` / ``base.lagged``); else NaN -> 0.
+        prior = np.where(self.prev_epoch == minute_epoch - 60, self.prev_close, np.nan)
+        diff = present_close - prior
+        gain = np.where(diff > 0.0, diff, 0.0)
+        loss = np.where(diff < 0.0, -diff, 0.0)
+        close_value = np.where(present, present_close, 0.0)
+        row_by_name = {
+            "_gain": gain,
+            "_loss": loss,
+            "_close": close_value,
+            "_close_sq": close_value * close_value,
+            "_close_n": present.astype(np.float64),
+        }
+        values = np.stack([row_by_name[name] for name in self.value_cols], axis=1)
+        self.state.update(minute_epoch, values)
+        self.state.trim()
+        # Advance prior close/epoch only where a bar was present this minute (absent symbols keep their prior).
+        self.prev_close = np.where(present, present_close, self.prev_close)
+        self.prev_epoch = np.where(present, minute_epoch, self.prev_epoch)
+
+    def running_long(self) -> pl.DataFrame:
+        """The running sums as a LONG (symbol, window, _n, <sum per value col>) frame — the SAME shape
+        ``windowed_sums_from`` returns, so the group reads it identically. ``_n`` is the per-window count of
+        present bars (the ``_close_n`` sum), included so SMA = _close/_n / std = sqrt(...) read it directly."""
+        running = self.state.running  # (n_windows, n_symbols, n_cols)
+        n_win = len(self.windows)
+        col_pos = {name: i for i, name in enumerate(self.value_cols)}
+        data: dict[str, object] = {
+            "symbol": self.symbols * n_win,
+            "window": [w for w in self.windows for _ in range(self.n)],
+            "_n": running[:, :, col_pos["_close_n"]].reshape(-1),
+        }
+        for name in self.value_cols:
+            data[name] = running[:, :, col_pos[name]].reshape(-1)
+        return pl.DataFrame(data)
 
 
 class ExtremaState:
@@ -413,6 +507,20 @@ class StatefulGroup(FeatureGroup):
         """The rolling max/min extrema this group maintains. Default none."""
         return []
 
+    def reduction_spec(self) -> ReductionSpec | None:
+        """The windowed-reduction state this group FOLDS on the incremental running-sum tier (SMA/Bollinger/
+        RSI etc.) instead of recomputing the kernel over the whole buffer each minute. Default none. When set,
+        the engine maintains a ``ReductionFoldState`` over the spec's value columns and supplies the running
+        sums to ``reduction_columns_from_sums`` — the FOLD twin of ``reduction_columns_from_coded``."""
+        return None
+
+    def reduction_columns_from_sums(self, running_long: pl.DataFrame) -> pl.DataFrame | None:
+        """The group's windowed-reduction columns (one row per symbol at T) read from the FOLDED running sums
+        (``ReductionFoldState.running_long`` — the SAME LONG shape ``windowed_sums_from`` returns). Byte-
+        identical algebra to ``reduction_columns_from_coded``, only the source of the sums differs (folded vs
+        recomputed). Default none."""
+        return None
+
     @abstractmethod
     def assemble(self) -> dict[str, pl.Expr]:
         """{feature: expr} over the state frame's columns (prepared at-T columns + each EMA/lag alias). The
@@ -510,10 +618,12 @@ class StatefulEngine:
         self.ema_root_sources = sorted({spec.source for spec in self.ema_specs if spec.source is not None})
         self.lag_sources = sorted({spec.source for spec in self.lag_specs})
         self.extrema_sources = sorted({spec.source for spec in self.extrema_specs})
+        self.reduction_spec = group.reduction_spec()
         self.symbols: list[str] | None = None
         self.ema_state: EMAState | None = None
         self.lag_state: LastKState | None = None
         self.extrema_state: ExtremaState | None = None
+        self.reduction_state: ReductionFoldState | None = None
 
     def _prepared_latest(self, frame: pl.DataFrame, minute: object) -> pl.DataFrame:
         """The group's prepared at-T columns for ``minute``, one row per symbol, symbol-sorted."""
@@ -529,6 +639,10 @@ class StatefulEngine:
         return out
 
     def _fold_minute(self, frame: pl.DataFrame, minute: object) -> None:
+        if self.reduction_state is not None:
+            self._fold_reduction(frame, minute)
+        if self.ema_state is None and self.lag_state is None and self.extrema_state is None:
+            return
         row = self._prepared_latest(frame, minute)
         assert self.symbols is not None and row.height == len(self.symbols), "stateful: symbol set changed; re-seed"
         sources = self._source_columns(row)
@@ -540,6 +654,20 @@ class StatefulEngine:
             self.lag_state.fold(int(minute.timestamp()), sources)  # type: ignore[attr-defined]
         if self.extrema_state is not None:
             self.extrema_state.fold(int(minute.timestamp()), sources)  # type: ignore[attr-defined]
+
+    def _fold_reduction(self, frame: pl.DataFrame, minute: object) -> None:
+        """Fold ONE minute into the windowed running-sum state — only the symbols present this minute (gappy-
+        safe; absent symbols contribute a zero row exactly as their bar is absent from the kernel buffer)."""
+        assert self.reduction_state is not None and self.reduction_spec is not None
+        source = self.reduction_spec.close_source
+        minute_row = (
+            frame.select(["symbol", "minute", source])
+            .filter(pl.col("minute") == minute)
+            .sort("symbol")
+        )
+        present_symbols = minute_row["symbol"].to_list()
+        close = minute_row.select(pl.col(source).cast(pl.Float64)).to_numpy().reshape(-1)
+        self.reduction_state.fold(int(minute.timestamp()), present_symbols, close)  # type: ignore[attr-defined]
 
     def seed(self, buffer_frame: pl.DataFrame) -> None:
         """Establish the symbol set and fold every buffered minute into fresh state (== batch over the buffer;
@@ -554,7 +682,15 @@ class StatefulEngine:
         self.extrema_state = (
             ExtremaState(self.symbols, self.extrema_specs) if self.extrema_specs and not self.use_rust else None
         )
-        folds_minutes = self.ema_state is not None or self.lag_state is not None or self.extrema_state is not None
+        self.reduction_state = (
+            ReductionFoldState(self.symbols, self.reduction_spec) if self.reduction_spec is not None else None
+        )
+        folds_minutes = (
+            self.ema_state is not None
+            or self.lag_state is not None
+            or self.extrema_state is not None
+            or self.reduction_state is not None
+        )
         if folds_minutes:
             for minute in sorted(buffer_frame["minute"].unique()):
                 self._fold_minute(buffer_frame, minute)
@@ -617,14 +753,24 @@ class StatefulEngine:
         latest = frame["minute"].max()
         if self.symbols is None:
             self.seed(frame)
-        elif self.ema_state is not None or self.lag_state is not None or self.extrema_state is not None:
-            # Only fold per-minute state that is maintained incrementally (the EMA recursion, plus the Python
-            # deque/ring reference). On the Rust path with no EMAs, extrema/lags are gathered from the buffer
-            # at emit-time, so there is nothing to fold here.
+        elif (
+            self.ema_state is not None
+            or self.lag_state is not None
+            or self.extrema_state is not None
+            or self.reduction_state is not None
+        ):
+            # Only fold per-minute state that is maintained incrementally (the EMA recursion + the folded
+            # windowed running sums, plus the Python deque/ring reference). On the Rust path with no EMAs,
+            # extrema/lags are gathered from the buffer at emit-time, so there is nothing to fold there.
             self._fold_minute(frame, latest)
         state = self._state_row(frame, latest, coded)
         reduction = None
-        if coded is not None:
+        # FOLDED windowed-reduction columns (SMA/Bollinger/RSI): read the running sums the engine folds each
+        # minute (O(symbols × windows × cols)) instead of recomputing the windowed kernel over the whole
+        # buffer — byte-identical algebra to ``reduction_columns_from_coded``, only the sum SOURCE differs.
+        if self.reduction_state is not None:
+            reduction = self.group.reduction_columns_from_sums(self.reduction_state.running_long())
+        if reduction is None and coded is not None:
             reduction = self.group.reduction_columns_from_coded(coded)
         if reduction is None and ctx is not None:
             reduction = self.group.reduction_columns(ctx)

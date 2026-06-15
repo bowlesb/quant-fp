@@ -27,6 +27,7 @@ from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_
 from quantlib.features.registry import register
 from quantlib.features.stateful import (
     EMASpec,
+    ReductionSpec,
     StatefulGroup,
     _CodedBuffer,
     coded_prev_within_minute,
@@ -35,11 +36,43 @@ from quantlib.features.stateful import (
 
 SMA_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 50, 100, 200)
 
+# The windowed running sums the RSI/Bollinger/SMA reductions FOLD on (gain/loss for RSI, close + close² +
+# presence-count for SMA mean / Bollinger std). The reduction windows are the SMA windows plus RSI's 14m.
+_REDUCTION_VALUE_COLS: tuple[str, ...] = ("_gain", "_loss", "_close", "_close_sq", "_close_n")
+_REDUCTION_WINDOWS: tuple[int, ...] = tuple(sorted(set(SMA_WINDOWS) | {14}))
+
 
 def _macd_line(emitted: dict[str, np.ndarray], sources: dict[str, np.ndarray]) -> np.ndarray:
     """The macd-line series the 9-span signal EMA folds: ema12 − ema26 at this minute (the same per-minute
     expression the backfill ewms via ``rolling=pl.col("_ema12") - pl.col("_ema26")``)."""
     return emitted["_ema12"] - emitted["_ema26"]
+
+
+def _reduction_columns_from_long(long: pl.DataFrame) -> pl.DataFrame:
+    """RSI/SMA/std20 reduction columns from a LONG (symbol, window, _n, _gain, _loss, _close, _close_sq,
+    _close_n) windowed-sum frame — the SINGLE algebra shared by the kernel-recompute path
+    (``reduction_columns_from_coded``) and the FOLDED running-sum path (``reduction_columns_from_sums``), so
+    both are byte-identical by construction: only the SOURCE of the sums differs. RSI = the 14m gain/loss sums
+    (counts cancel), each SMA = close-sum / close-count, std20 = sqrt((sumsq − sum²/n)/(n−1))."""
+    rsi = long.filter(pl.col("window") == 14).select(
+        ["symbol", (100.0 - 100.0 / (1.0 + pl.col("_gain") / pl.col("_loss"))).cast(pl.Float64).alias("_rsi_14m")]
+    )
+    count = pl.col("_close_n")
+    sma_long = long.with_columns(
+        pl.when(count > 0).then(pl.col("_close") / count).otherwise(None).cast(pl.Float64).alias("_mean")
+    )
+    means = pivot_stat(sma_long, "_mean", "_sma_{w}", SMA_WINDOWS)
+    std20 = long.filter(pl.col("window") == 20).select(
+        [
+            "symbol",
+            pl.when(count > 1)
+            .then(((pl.col("_close_sq") - pl.col("_close") ** 2 / count) / (count - 1)).sqrt())
+            .otherwise(None)
+            .cast(pl.Float64)
+            .alias("_std20"),
+        ]
+    )
+    return rsi.join(means, on="symbol", how="left").join(std20, on="symbol", how="left")
 
 
 @register
@@ -138,7 +171,6 @@ class TechnicalGroup(StatefulGroup):
         gain = np.where(diff > 0.0, diff, 0.0)
         loss = np.where(diff < 0.0, -diff, 0.0)
         close_value = np.where(present, close, 0.0)
-        windows = tuple(sorted(set(SMA_WINDOWS) | {14}))
         long = windowed_sums_from(
             coded,
             {
@@ -148,30 +180,25 @@ class TechnicalGroup(StatefulGroup):
                 "_close_sq": close_value * close_value,
                 "_close_n": present.astype(np.float64),
             },
-            windows,
+            _REDUCTION_WINDOWS,
         )
-        rsi = long.filter(pl.col("window") == 14).select(
-            ["symbol", (100.0 - 100.0 / (1.0 + pl.col("_gain") / pl.col("_loss"))).cast(pl.Float64).alias("_rsi_14m")]
+        return _reduction_columns_from_long(long)
+
+    def reduction_spec(self) -> ReductionSpec:
+        """RSI/Bollinger/SMA FOLD on the incremental running-sum tier (the ``ReductionFoldState``): the engine
+        keeps a per-(window, symbol) running sum of gain/loss/close/close²/presence and folds one minute at a
+        time, instead of recomputing the windowed kernel over the whole buffer each minute."""
+        return ReductionSpec(
+            value_cols=_REDUCTION_VALUE_COLS, windows=_REDUCTION_WINDOWS, close_source="close"
         )
-        count = pl.col("_close_n")
-        sma_long = long.with_columns(
-            pl.when(count > 0).then(pl.col("_close") / count).otherwise(None).cast(pl.Float64).alias("_mean")
-        )
-        means = pivot_stat(sma_long, "_mean", "_sma_{w}", SMA_WINDOWS)
-        std20 = (
-            long.filter(pl.col("window") == 20)
-            .select(
-                [
-                    "symbol",
-                    pl.when(count > 1)
-                    .then(((pl.col("_close_sq") - pl.col("_close") ** 2 / count) / (count - 1)).sqrt())
-                    .otherwise(None)
-                    .cast(pl.Float64)
-                    .alias("_std20"),
-                ]
-            )
-        )
-        return rsi.join(means, on="symbol", how="left").join(std20, on="symbol", how="left")
+
+    def reduction_columns_from_sums(self, running_long: pl.DataFrame) -> pl.DataFrame:
+        """The SAME RSI/SMA/std20 columns as ``reduction_columns_from_coded``, read from the FOLDED running
+        sums (``ReductionFoldState.running_long``) instead of the per-minute kernel recompute. Byte-identical
+        by construction — the running sums equal the kernel sums over the same window/present bars, and the
+        column algebra is the shared ``_reduction_columns_from_long``. Guarded == the certified
+        ``reduction_columns`` by tests/test_fp_stateful_emit.py."""
+        return _reduction_columns_from_long(running_long)
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
         """LIVE form: EMAs via the sequential ewm (taken at T) joined to the windowed-reduction columns, then
