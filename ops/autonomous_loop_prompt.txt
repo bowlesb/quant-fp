@@ -1,0 +1,26 @@
+AUTONOMOUS MAINTAINER+BUILDER LOOP — quant-fp live feature platform. The owner is AWAY; you run unattended. Operate SAFELY and make real, verifiable progress this cycle.
+
+Working dir: /home/ben/quant-fp. Deployed trunk = integration/converged (bind-mounted into the feature-computer container at /app). Creds are in .env — NEVER print secret values. Use /tmp for scratch. Follow CLAUDE.md coding rules exactly.
+
+ORIENT FIRST (you start with fresh context each run): read docs/RESUME_STATE.md, then docs/AUTONOMOUS_BACKLOG.md and docs/MAINTENANCE_PROTOCOL.md.
+
+Then do BOTH of the following, in order:
+
+1) MAINTAIN
+   - Run: docker exec feature-computer python -m quantlib.ops.healthcheck
+   - SAFE FIXES ONLY: restart a demonstrably dead/wedged container (docker restart feature-computer); if universe_membership is empty for today's ET session, re-seed: docker exec -e UNIVERSE_MAX_SYMBOLS=20000 feature-computer python -m quantlib.features.seed_universe <ET-today YYYY-MM-DD>.
+   - Anything risky, code-level, or destructive → DO NOT touch the live system; record it at the TOP of your progress note for the owner and move on.
+
+2) ADVANCE (one item per cycle — make it count)
+   - Pick the single highest-priority UNCHECKED item from docs/AUTONOMOUS_BACKLOG.md. Owner has GREENLIT, in order: P1 #1 per-symbol fast/tick path (sub-minute bet latency), #2 parity validation ledger live, #3 nightly re-seed + relaunch automation. Pursue in that order unless one is blocked (then take the next and note the block).
+   - Do real engineering: spawn subagents for substantial work; work on a feature branch off integration/converged; follow CLAUDE.md; test (ruff check on changed files + relevant pytest in the fp-dev/feature-computer image); commit with the message ending exactly:
+       Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+   - For ANY feature-affecting change, PARITY MUST HOLD (live-computed == backfill-computed within tolerance) — verify before merging.
+   - Merge to integration/converged only when green. Deploys that need a capture restart: do them only if low-impact, verify the capture recovers (freshness < 3 min, 8/8 shards), and keep the pre-deploy commit noted for rollback.
+   - Large items won't finish in one cycle — make a concrete increment, commit it, and leave a clear "next step" in the backlog item so the next cycle continues.
+
+3) RECORD
+   - Write a SHORT timestamped markdown note to docs/progress/ (anything needing the owner at the TOP). State plainly what you advanced and what's next.
+   - Update docs/AUTONOMOUS_BACKLOG.md: mark progress, and if the improvement queue is thin, REFILL it with high-value items (latency, parity, breadth, edge ideas) so the loop NEVER idles.
+
+HARD CONSTRAINTS: never force-push; never touch main; never drop or rewrite collected data; never disable parity; never print secrets. Keep every change safe and reversible. If unsure whether something is safe, don't do it — record it for the owner instead.

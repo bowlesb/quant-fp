@@ -1,3 +1,43 @@
+# ⏵ CURRENT OPERATIONAL STATE — 2026-06-15 ~11:30 ET (read this block first)
+
+**Live now:** parity-true capture running on the real Alpaca SIP feed. Trunk = `integration/converged`
+(bind-mounted into the `feature-computer` container at `/app`; running process picks up code only on
+`docker restart feature-computer`). Universe **11,336** symbols (widened from 3,070; alphabetical bias
+removed). Stack: `quant-timescaledb-1` (db quant/quant, pw in .env), `quant-prometheus-1` (:9090),
+`quant-grafana-1` (host **:3001**, dashboard uid `bar-to-vector-latency`). Creds in `.env` — never print.
+
+**Autonomous operation (runs WITHOUT any interactive session — host cron):**
+- `*/5` → `ops/healthcheck.sh --json` read-only tripwire → `~/.quant-healthcheck/healthcheck.jsonl`.
+- `14,44 * * * *` → `ops/autonomous_loop.sh` → one headless `claude -p` cycle (maintain + advance one
+  backlog item), logs in `~/.quant-loop/`. Reads `ops/autonomous_loop_prompt.txt`, this file,
+  `docs/AUTONOMOUS_BACKLOG.md`, `docs/MAINTENANCE_PROTOCOL.md`. flock = no overlap; 25-min cap/cycle.
+- Check it: `tail ~/.quant-loop/cycle-*.log`; latest `docs/progress/*`; `git log --oneline -15 integration/converged`.
+- Pause it: `crontab -e`, comment the `autonomous_loop.sh` line.
+
+**Owner-greenlit priorities (loop pursues in order — see `docs/AUTONOMOUS_BACKLOG.md`):**
+1. **Per-symbol fast/tick path on the real feed** — sub-minute bet latency. The deployed bars-only batch
+   path is ~60s bar→vector BY DESIGN (minute-close wait); feature compute itself is ~0.7s. **Big de-risk:**
+   the incremental accumulator that makes this possible is ALREADY BUILT + PARITY-PROVEN —
+   `quantlib/features/incremental.py` `WindowedSumState`, 0.49ms/minute, matches `quant_tick.windowed_sums`
+   cell-for-cell (see "THE chosen design" + "Exact next steps" below). Remaining = integration into the live
+   worker. Parity is sacred.
+2. **Parity validation ledger live** — populate `feature_validation_day`/`feature_trust`, certify trust grades.
+3. **Nightly re-seed + relaunch automation** — capture launched with a HARDCODED `2026-06-15` date arg;
+   wire a nightly re-seed + relaunch for autonomous daily operation.
+
+**Latency observability (this session):** dual metric `feature_vector_latency_seconds` (end-to-end) +
+`feature_assemble_seconds` (last-bar) + per-ticker drill-down table `latency_slow_symbols` + Grafana.
+The healthcheck `bar_to_vector_latency` FAIL (~60s) is the batch floor surfaced on purpose → fixed by #1.
+
+**Resume this conversation:** `cd /home/ben/quant-fp && claude --resume` (or `--continue`). The loop runs
+regardless. Dirty working-tree files (`experiments/dl_research/train.py`, `quantlib/features/backfill_bars.py`)
+are earlier-agent leftovers, left intentionally uncommitted.
+
+---
+
+_The block below is the deep engine state from the pre-reboot fused/incremental-engine session. It is the
+authoritative technical reference for priority #1 (the fast path). Keep it._
+
 # Resume State — pick up exactly here after reboot
 
 Written before a `sudo reboot` (to fix the GPU driver). Everything below is COMMITTED on branch
