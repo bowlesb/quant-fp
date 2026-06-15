@@ -28,7 +28,7 @@ from quantlib.features.capture import (
     warm_start_ring,
 )
 from quantlib.features import metrics
-from quantlib.features.loaders import load_reference
+from quantlib.features.loaders import load_reference, load_universe
 from quantlib.features.sharded_capture import (
     INDEX_SYMBOLS,
     process_reduce,
@@ -104,6 +104,9 @@ def run_capture(symbols: list[str], root: str, mode: str, window: int = DEFAULT_
     snapshots = {"reference": load_reference()}
     if day is not None:
         snapshots["daily"] = backfill_daily(day, symbols)
+        # Pin cross_sectional_rank to the day's FIXED in-universe set (gap #3) so ranks are over the same
+        # membership live and backfill, not "whoever printed this minute" (a parity hazard).
+        snapshots["universe"] = load_universe(day)
     if warm_start_enabled() and day is not None:
         # Rehydrate the trailing ring from the session's settled bars (Alpaca historical RAW = the same
         # SIP tape the stream delivers) so a restart starts warm, not cold (CRITICAL-2; inert by default).
@@ -147,6 +150,10 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
         snapshots = {"reference": load_reference()}
         if day is not None:
             snapshots["daily"] = backfill_daily(day, symbols)
+            # Pin cross_sectional_rank to the day's FIXED in-universe set (gap #3): the reduce/gather phase
+            # ranks ONLY within this membership, so live ranks over the SAME set backfill does — not the
+            # ad-hoc "whoever printed this minute" set, which swings wildly and breaks live↔backfill parity.
+            snapshots["universe"] = load_universe(day)
     # Pin each worker's polars to a slice of the cores. Without this every one of the N spawned workers
     # defaults to a full all-core rayon pool, so N workers x C cores = N*C threads thrash C cores (measured:
     # ~20x slower per shard). One thread per shard when n_shards ~= cores; the spawned children inherit this

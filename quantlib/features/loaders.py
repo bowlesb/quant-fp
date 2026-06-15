@@ -40,6 +40,12 @@ FROM universe_membership
 WHERE trade_date = %(day)s AND in_universe AND adv_dollar IS NOT NULL
 """
 
+_UNIVERSE_SQL = """
+SELECT symbol
+FROM universe_membership
+WHERE trade_date = %(day)s AND in_universe
+"""
+
 # Slowly-changing per-symbol reference: sector (FMP, may be NULL until the key is wired) + Alpaca
 # tradability flags. Static, so it is IDENTICAL for the live and backfill sources — sector/flag
 # features are parity-true by construction. Based on asset_metadata so EVERY tradable symbol gets a
@@ -96,6 +102,21 @@ def load_reference() -> pl.DataFrame:
     if frame.height == 0:
         return pl.DataFrame(schema=REFERENCE_SCHEMA)
     return frame.cast(REFERENCE_SCHEMA)
+
+
+UNIVERSE_SCHEMA = {"symbol": pl.String}
+
+
+def load_universe(day: str) -> pl.DataFrame:
+    """The day's FIXED in-universe symbol set (a one-column ``symbol`` frame) — the SAME membership the
+    parity harness pins ranks to (``parity.parity_test``). cross_sectional_rank ranks ONLY within this set
+    so live and backfill rank the identical symbols regardless of which names happened to print a given
+    minute; without it each minute ranks over "whoever printed", a parity hazard. Source-independent
+    (universe_membership is settled before the session), so feeding it to live and backfill is parity-true."""
+    frame = _query(_UNIVERSE_SQL, {"day": day})
+    if frame.height == 0:
+        return pl.DataFrame(schema=UNIVERSE_SCHEMA)
+    return frame.cast(UNIVERSE_SCHEMA)
 
 
 def load_tiers(day: str) -> pl.DataFrame:

@@ -216,6 +216,83 @@ def test_sharded_store_writes_one_row_per_broadcast_symbol(tmp_path: Path) -> No
     non_index = written.filter(~pl.col("symbol").is_in(list(INDEX_SYMBOLS)))
     non_dup = non_index.group_by("symbol", "minute").agg(pl.len().alias("copies"))
     assert non_dup.filter(pl.col("copies") != 1).height == 0, "non-broadcast symbol row count changed"
+# The official, fixed in-universe set the capture pins ranks to — the index ETFs are NOT a tradable
+# universe member, and OFF is an off-universe name that occasionally prints on the LIVE tape only.
+PINNED_UNIVERSE = ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF")
+
+
+def _snapshots_with_universe() -> dict[str, pl.DataFrame]:
+    """The reader's snapshots WITH the day's fixed in-universe set wired in — exactly what
+    ``real_capture.run_sharded_capture`` now builds (``snapshots['universe'] = load_universe(day)``)."""
+    snapshots = _snapshots()
+    snapshots["universe"] = pl.DataFrame({"symbol": list(PINNED_UNIVERSE)})
+    return snapshots
+
+
+def _bars_with_offuniverse(i: int) -> list[dict]:
+    """A minute's bars PLUS an off-universe name (OFF) that prints on the live tape — the exact parity
+    hazard: a name present live but never in the fixed universe (and absent from backfill)."""
+    close = 100.0 + i * 0.1
+    extra = {"S": "OFF", "o": close - 0.04, "c": close, "h": close + 0.05, "l": close - 0.05,
+             "v": 1000.0 + i, "t": (BASE + timedelta(minutes=i)).isoformat()}
+    return _bars_for_minute(i) + [extra]
+
+
+def _reduce_ranks(bars_fn, snapshots: dict[str, pl.DataFrame], n_minutes: int = 12) -> pl.DataFrame:
+    """Run ONLY the reduce/gather path (``process_reduce``) for ``n_minutes`` and return the
+    cross_sectional_rank output — the universe-wide gather the reader runs each minute."""
+    reduce_state = CaptureState()
+    for i in range(n_minutes):
+        process_reduce(reduce_state, bars_fn(i), "x", "mock", "2026-06-12", WINDOW, snapshots=snapshots,
+                       write=False, accumulate=True)
+    return reduce_state.accumulated["cross_sectional_rank"]
+
+
+def test_universe_frame_reaches_reduce_and_fixes_ranked_set() -> None:
+    # The capture now SUPPLIES the universe frame to the reduce ctx (it never did before — the gate in the
+    # group was dead code live). With it, the reduce ranks over EXACTLY the fixed universe: index ETFs
+    # (SPY/QQQ, present in the bars) and the off-universe OFF print are excluded, so the ranked set is the
+    # stable pinned membership regardless of what else prints.
+    ranks = _reduce_ranks(_bars_with_offuniverse, _snapshots_with_universe())
+    ranked_symbols = set(ranks.filter(pl.col("volume_rank_1m").is_not_null())["symbol"].unique().to_list())
+    assert ranked_symbols == set(PINNED_UNIVERSE), f"ranked set must be the pinned universe, got {ranked_symbols}"
+    assert "OFF" not in ranked_symbols and "SPY" not in ranked_symbols
+    # Stable count every minute: the pinned universe size, not "whoever printed this minute".
+    per_minute = (
+        ranks.filter(pl.col("volume_rank_1m").is_not_null())
+        .group_by("minute").agg(pl.col("symbol").n_unique().alias("n"))
+    )
+    assert set(per_minute["n"].to_list()) == {len(PINNED_UNIVERSE)}
+
+
+def test_universe_pin_live_equals_backfill_when_offuniverse_prints_live_only() -> None:
+    # PARITY: an OFF-universe name prints on the LIVE tape but not in backfill. WITHOUT the pin it would
+    # join the rank set live and shift every in-universe name's percentile (live != backfill). WITH the
+    # pin both sides rank over the identical fixed membership, so every in-universe rank is byte-identical.
+    live = _reduce_ranks(_bars_with_offuniverse, _snapshots_with_universe())  # OFF prints live
+    backfill = _reduce_ranks(_bars_for_minute, _snapshots_with_universe())  # OFF absent in backfill
+    common = live.join(backfill, on=["symbol", "minute"], how="inner", suffix="_bf")
+    rank_cols = [c for c in live.columns if c.endswith("_rank_5m") or c.endswith("_rank_1m")]
+    for col in rank_cols:
+        bad = common.filter(
+            ~(
+                (pl.col(col).is_null() & pl.col(f"{col}_bf").is_null())
+                | ((pl.col(col) - pl.col(f"{col}_bf")).abs() <= 1e-9)
+            )
+        )
+        assert bad.height == 0, f"{col}: live != backfill on {bad.height} cells (universe pin broken)"
+
+
+def test_no_universe_frame_offuniverse_print_breaks_parity() -> None:
+    # The BEFORE state, asserted: WITHOUT the universe frame the off-universe live print DOES shift the
+    # in-universe percentiles, so live != backfill. This is exactly the hazard the pin closes.
+    live = _reduce_ranks(_bars_with_offuniverse, _snapshots())  # no 'universe' key -> gate is dead
+    backfill = _reduce_ranks(_bars_for_minute, _snapshots())
+    common = live.join(backfill, on=["symbol", "minute"], how="inner", suffix="_bf")
+    diverged = common.filter(
+        (pl.col("volume_rank_1m") - pl.col("volume_rank_1m_bf")).abs() > 1e-9
+    )
+    assert diverged.height > 0, "expected the unpinned path to diverge live-vs-backfill (the hazard)"
 
 
 def test_reduce_group_absent_from_shards() -> None:

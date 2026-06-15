@@ -5,10 +5,11 @@ return, its volume, and its dollar volume across all symbols present that minute
 natural inputs to a cross-sectional ranking model (top/bottom deciles).
 
 PARITY NOTE: a rank is only reproducible if the set of symbols ranked is the same live and in
-backfill. The values themselves are deterministic; the dependency is universe MEMBERSHIP at each
-minute. Today both paths rank over whatever is in minute_agg; the standing follow-up (FEATURE_
-TAXONOMY gap #3) is to pin a per-minute universe snapshot so a name missing live but present in
-backfill cannot shift everyone's rank. Until then this is coverage-gated like any sparse feature.
+backfill. The values themselves are deterministic; the dependency is universe MEMBERSHIP. Both paths
+now pin to the day's FIXED in-universe set via the ``universe`` frame (live: capture supplies it from
+``loaders.load_universe``; backfill/parity: ``parity_test`` supplies the same membership), so a name
+that prints live but not in backfill (or vice-versa) cannot shift everyone's rank. When the frame is
+absent (e.g. a tick-only parity run) it falls back to ranking over whoever is in minute_agg.
 """
 from __future__ import annotations
 
