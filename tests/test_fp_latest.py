@@ -48,12 +48,18 @@ def test_compute_latest_matches_rolling_for_every_group(group_name: str) -> None
         joined = expected.select("symbol", feature).join(
             actual.select("symbol", pl.col(feature).alias("_a")), on="symbol"
         )
+        # A divergence is bad if exactly ONE side is null (a null-vs-value mismatch — e.g. a lag feature that
+        # emits null live but has a real backfill value — is the single most important parity break, and an
+        # ``(a - null)`` arithmetic predicate evaluates to NULL, which polars ``filter`` would DROP, silently
+        # masking it), OR both are non-null and beyond tolerance.
+        # 1e-9 absolute floor: float-noise near zero (e.g. a sqrt of an autocovariance that flips sign at ~0
+        # between rolling-sum and group_by-sum order) is not a real divergence.
         bad = joined.filter(
-            ~(
-                (pl.col(feature).is_null() & pl.col("_a").is_null())
-                # 1e-9 absolute floor: float-noise near zero (e.g. a sqrt of an autocovariance that
-                # flips sign at ~0 between rolling-sum and group_by-sum order) is not a real divergence.
-                | ((pl.col(feature) - pl.col("_a")).abs() <= 1e-9 + tol * pl.col(feature).abs())
+            (pl.col(feature).is_null() != pl.col("_a").is_null())
+            | (
+                pl.col(feature).is_not_null()
+                & pl.col("_a").is_not_null()
+                & ((pl.col(feature) - pl.col("_a")).abs() > 1e-9 + tol * pl.col(feature).abs())
             )
         )
         assert bad.height == 0, f"{group_name}.{feature}: compute_latest != compute().last on {bad.height} (tol={tol})"
@@ -83,9 +89,61 @@ def test_volume_latest_matches_rolling() -> None:
             fast.select("symbol", pl.col(feature).alias("_fast")), on="symbol"
         )
         bad = joined.filter(
-            ~(
-                (pl.col(feature).is_null() & pl.col("_fast").is_null())
-                | ((pl.col(feature) - pl.col("_fast")).abs() <= 1e-9 + 1e-9 * pl.col(feature).abs())
+            (pl.col(feature).is_null() != pl.col("_fast").is_null())  # null-vs-value mismatch (see generic test)
+            | (
+                pl.col(feature).is_not_null()
+                & pl.col("_fast").is_not_null()
+                & ((pl.col(feature) - pl.col("_fast")).abs() > 1e-9 + 1e-9 * pl.col(feature).abs())
             )
         )
         assert bad.height == 0, f"{feature}: latest != rolling.last on {bad.height} symbols"
+
+
+# Groups whose ``points()`` carry a POSITIVE per-symbol lag (``close.shift(w>0).over("symbol")``). These
+# are the families the single-minute points bug silently nulled live: evaluating the lag expr on only the
+# latest minute's row yields null, so the live path emitted 100% NaN while backfill computed real values
+# (a live-vs-backfill parity break). The fix resolves points over the whole buffer (declarative.resolve_points).
+LAG_POINT_GROUPS = ("efficiency", "return_dynamics", "momentum_consistency")
+
+
+@pytest.mark.parametrize("group_name", LAG_POINT_GROUPS)
+def test_lag_point_group_is_not_all_null_live(group_name: str) -> None:
+    """Direct regression guard for the single-minute points bug: a lag-point group's live ``compute_latest``
+    must emit REAL (non-null) values on a warm dense buffer — exactly what backfill produces. If points were
+    re-evaluated on the latest minute alone (the bug), every lag feature would be null here."""
+    frames = build_frames(n_tickers=10, window_min=250, daily_days=60)
+    group = REGISTRY.get_group(group_name)
+    ctx = BatchContext(frames=frames)
+    latest = group.compute_latest(ctx)
+    feature_cols = [c for c in latest.columns if c not in ("symbol", "minute")]
+    all_null = [c for c in feature_cols if latest[c].null_count() == latest.height]
+    assert not all_null, f"{group_name}: {len(all_null)} feature(s) all-null live (points-on-1-minute regression): {all_null[:5]}"
+
+
+def test_lag_points_gap_safe_matches_backfill() -> None:
+    """The whole-buffer points resolution must stay parity-true when a symbol's history is SPARSE (gaps).
+    ``shift(w).over("symbol")`` is positional, so as long as the live path sees the same per-symbol rows as
+    backfill it agrees; a buffer-depth shortcut that assumed dense minutes would diverge here."""
+    dense = _buffer(("AAA", "BBB"), 200)
+    # GAP: drop every 3rd minute of CCC (sparse), but keep it present at the latest minute.
+    ccc = _buffer(("CCC",), 200).with_row_index("i").filter((pl.col("i") % 3 != 0) | (pl.col("i") == 199)).drop("i")
+    frame = pl.concat([dense, ccc])
+    ctx = BatchContext(frames={"minute_agg": frame})
+    latest = frame["minute"].max()
+    for group_name in LAG_POINT_GROUPS:
+        group = REGISTRY.get_group(group_name)
+        expected = group.compute(ctx).filter(pl.col("minute") == latest).sort("symbol")
+        actual = group.compute_latest(ctx).filter(pl.col("minute") == latest).sort("symbol").select(expected.columns)
+        for feature in [c for c in expected.columns if c not in ("symbol", "minute")]:
+            joined = expected.select("symbol", feature).join(
+                actual.select("symbol", pl.col(feature).alias("_a")), on="symbol"
+            )
+            bad = joined.filter(
+                (pl.col(feature).is_null() != pl.col("_a").is_null())
+                | (
+                    pl.col(feature).is_not_null()
+                    & pl.col("_a").is_not_null()
+                    & ((pl.col(feature) - pl.col("_a")).abs() > 1e-9 + 1e-6 * pl.col(feature).abs())
+                )
+            )
+            assert bad.height == 0, f"{group_name}.{feature}: gap-safe latest != backfill on {bad.height}"
