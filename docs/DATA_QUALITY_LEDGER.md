@@ -21,6 +21,10 @@ code fixes, land the warm-start fix, then do ONE clean restart + recollect conta
 |----|-------|--------|
 | CRITICAL-1 | `points()` lag features 100% NaN on live (incremental engine evaluates points on a 1-minute frame) | OPEN |
 | CRITICAL-2 | capture restart wipes ring/incremental buffers → long-window collapse; no warm-start from store | OPEN |
+| CRITICAL-3 | `breadth` computed PER-SHARD (8 distinct values/min) — `REDUCE_GROUPS` omits it; all breadth wrong + parity break | OPEN (backlog P1.0) |
+| HIGH-SECTOR | `sector_map` table EMPTY (FMP ingestion never wired) → sector group 100% `unknown` + sector_breadth dead | OPEN (backlog P1.0) |
+| MED-BETA | `market_beta_*` out-of-range ±7700 from degenerate 2-point OLS fits (shared kernel guard too loose) | OPEN (backlog P1.0) |
+| MED-UNIVERSE | warrants/`.PR`/`.WS`/`.U`/leveraged-ETFs in the STREAM feature-input universe (ETF-pollution lesson recurring) | OPEN (backlog P1.0) |
 | MED-DEDUP | duplicate (symbol,minute) rows (broadcast symbols written by all 8 shards) | OPEN |
 
 ## Per-group status
@@ -36,15 +40,18 @@ code fixes, land the warm-start fix, then do ONE clean restart + recollect conta
 | price_volume | OK | clean (short-window corr degenerate = expected) | wave1 |
 | distribution | OK | clean (power-sum safe on returns) | wave1 |
 | candlestick | OK | clean | wave1 |
-| efficiency | UNAUDITED | likely CRITICAL-1 (points) per return_dynamics auditor | - |
-| momentum_consistency | UNAUDITED | likely CRITICAL-1 (points) | - |
+| efficiency | BLOCKED-ON-SYSTEMIC | CRITICAL-1 CONFIRMED: all 18 feats 100% NaN live (points/shift on 1-min frame); group code correct. NB no efficiency backfill exists yet ⇒ no parity ref / recovery source | wave2 |
+| momentum_consistency | BLOCKED-ON-SYSTEMIC | CRITICAL-1 CONFIRMED: `consistent_direction_*` (6) 100% NaN live. Local note: `momentum_acceleration` valid_range (-50,50) slightly tight (max 74 on penny names) — cosmetic, not enforced | wave2 |
+| trend_quality | FIXED-CODE | flat-price R²→0 guard (so trend_strength=0 not null), parity-safe null↔NaN, landed this cycle. Residual: CRITICAL-2 long-window collapse (r2_90m==120m==180m 100% post-restart) | wave2 |
+| clean_momentum | OK | value-side clean (all in [0,1], 0 Inf). Residuals are SYSTEMIC: warmup not gated per-window (long scores from 1-2 pts) + ETF contamination in stream universe (CRITICAL-2 / universe) | wave2 |
+| breadth | BLOCKED-ON-SYSTEMIC | CRITICAL-3: computed per-shard (8 values/min); + sector_breadth dead via HIGH-SECTOR; + ETF pollution. All 30 cols corrupt | wave2 |
+| sector | BLOCKED-ON-SYSTEMIC | HIGH-SECTOR: 100% `unknown` (sector_map empty). Group code correct; needs FMP ingestion, no bar recollect | wave2 |
+| market_beta | BLOCKED-ON-SYSTEMIC | MED-BETA: ±7700 out-of-range from 2-pt OLS fits + warrants in universe. SPY self-beta=1.0 (join healthy). Shared-kernel fix | wave2 |
+| round_levels | OK | math correct, 0 NaN/Inf, ranges hold. Flags: fixed-$ grid is price-scale-incomparable (modeller design note) + ETF/non-equity universe (systemic) | wave2 |
 | asset_flags | UNAUDITED | | - |
-| breadth | UNAUDITED | | - |
 | calendar | UNAUDITED | | - |
 | calendar_events | UNAUDITED | | - |
-| clean_momentum | UNAUDITED | | - |
 | cross_sectional_rank | UNAUDITED | cross-section gather (480 files, 1/min) | - |
-| market_beta | UNAUDITED | SPY-join regression | - |
 | market_context | UNAUDITED | | - |
 | momentum_run | UNAUDITED | | - |
 | multi_day_returns | UNAUDITED | multi-day (warms over days) | - |
@@ -52,10 +59,7 @@ code fixes, land the warm-start fix, then do ONE clean restart + recollect conta
 | price_levels | UNAUDITED | min/max windows | - |
 | prior_day | UNAUDITED | prior-session anchored | - |
 | residual_analysis | UNAUDITED | | - |
-| round_levels | UNAUDITED | | - |
-| sector | UNAUDITED | sector one-hots; sector_map may be empty (FMP key) → check | - |
 | swing | UNAUDITED | Rust zigzag | - |
-| trend_quality | UNAUDITED | | - |
 | trade_flow | PENDING-STREAM | needs trades streaming | - |
 | quote_spread | PENDING-STREAM | needs quotes streaming | - |
 | tick_runlength | PENDING-STREAM | needs trades streaming | - |

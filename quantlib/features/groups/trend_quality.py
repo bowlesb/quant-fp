@@ -64,8 +64,20 @@ class TrendQualityGroup(ReductionGroup):
     def assemble(self) -> dict[str, pl.Expr]:
         feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
-            price_slope = slope_("trend", w) / mean_("close", w)
+            slope = slope_("trend", w)
+            raw_r2 = r2_("trend", w)
+            # Flat price over a *warmed* window: the slope is defined (≈0) but the R^2 denominator (price
+            # variance) is zero, so the shared OLS kernel leaves R^2 undefined — null on the polars/backfill
+            # path, NaN on the numpy/live path. A flat line has zero *explained* variance (not an undefined
+            # fit), so pin R^2=0 there. This keeps trend_strength = slope·R^2 = 0 (a real, valid 0-trend)
+            # instead of silently nulling a row whose slope IS defined, and — because the guard is applied
+            # here in the shared assemble() and treats null↔NaN identically — backfill and live agree by
+            # construction (parity). True warmup (slope still missing) is untouched and stays missing.
+            slope_defined = slope.is_not_null() & slope.is_not_nan()
+            r2_undefined = raw_r2.is_null() | raw_r2.is_nan()
+            r2 = pl.when(slope_defined & r2_undefined).then(0.0).otherwise(raw_r2)
+            price_slope = slope / mean_("close", w)
             feats[f"price_slope_{w}m"] = price_slope
-            feats[f"price_r2_{w}m"] = r2_("trend", w)
-            feats[f"trend_strength_{w}m"] = price_slope * r2_("trend", w)
+            feats[f"price_r2_{w}m"] = r2
+            feats[f"trend_strength_{w}m"] = price_slope * r2
         return feats
