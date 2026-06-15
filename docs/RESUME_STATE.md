@@ -8,9 +8,13 @@ removed). Stack: `quant-timescaledb-1` (db quant/quant, pw in .env), `quant-prom
 
 **Autonomous operation (runs WITHOUT any interactive session — host cron):**
 - `*/5` → `ops/healthcheck.sh --json` read-only tripwire → `~/.quant-healthcheck/healthcheck.jsonl`.
-- `14,44 * * * *` → `ops/autonomous_loop.sh` → one headless `claude -p` cycle (maintain + advance one
-  backlog item), logs in `~/.quant-loop/`. Reads `ops/autonomous_loop_prompt.txt`, this file,
-  `docs/AUTONOMOUS_BACKLOG.md`, `docs/MAINTENANCE_PROTOCOL.md`. flock = no overlap; 25-min cap/cycle.
+- `14,44 * * * *` → `ops/autonomous_loop.sh` → MAIN loop: one headless `claude -p` cycle (maintain +
+  advance one backlog item: items 1/2/3 + systemic engine/store data-quality fixes). Reads
+  `ops/autonomous_loop_prompt.txt`, this file, `docs/AUTONOMOUS_BACKLOG.md`, `docs/DATA_QUALITY_LEDGER.md`.
+- `29,59 * * * *` → `ops/audit_loop.sh` → AUDIT loop: dispatches per-feature-group auditor subagents and
+  applies LOCAL data-quality fixes until every group is OK; drives `docs/DATA_QUALITY_LEDGER.md`. Own lock,
+  own lane (feature-group code), logs `~/.quant-loop/audit-cycle-*.log`. Runs concurrently with the main loop.
+- Each loop: flock (no self-overlap), 25-min cap, fresh context per cycle, merges to integration/converged.
 - Check it: `tail ~/.quant-loop/cycle-*.log`; latest `docs/progress/*`; `git log --oneline -15 integration/converged`.
 - Pause it: `crontab -e`, comment the `autonomous_loop.sh` line.
 
