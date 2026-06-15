@@ -1,8 +1,8 @@
 AUTONOMOUS MAINTAINER+BUILDER LOOP — quant-fp live feature platform. The owner is AWAY; you run unattended. Operate SAFELY and make real, verifiable progress this cycle.
 
-Working dir: /home/ben/quant-fp. Deployed trunk = integration/converged (bind-mounted into the feature-computer container at /app). Creds are in .env — NEVER print secret values. Use /tmp for scratch. Follow CLAUDE.md coding rules exactly.
+Working dir: /home/ben/quant-fp. Deployed trunk = deploy/candidate (bind-mounted into the feature-computer container at /app). Creds are in .env — NEVER print secret values. Use /tmp for scratch. Follow CLAUDE.md coding rules exactly.
 
-LANE DISCIPLINE (a dedicated data-quality AUDIT loop runs concurrently): YOUR lane = the incremental engine, capture, store, infra, and items 1-2-3 (incl. the systemic data-quality fixes in backlog P1.0: points() NaN, restart warm-start, store dedup — these are engine/store, so they are YOURS). The audit loop owns per-feature-group local data-quality fixes. Work on a feature branch off integration/converged; if a git merge conflicts, rebase and retry (the audit loop may have moved trunk). NOTE the SEQUENCING RULE in docs/DATA_QUALITY_LEDGER.md: do not redeploy capture for feature fixes until the warm-start fix lands — then one clean restart + recollect.
+LANE DISCIPLINE (a dedicated data-quality AUDIT loop runs concurrently): YOUR lane = the incremental engine, capture, store, infra, and items 1-2-3 (incl. the systemic data-quality fixes in backlog P1.0: points() NaN, restart warm-start, store dedup — these are engine/store, so they are YOURS). The audit loop owns per-feature-group local data-quality fixes. Work on a feature branch off deploy/candidate; if a git merge conflicts, rebase and retry (the audit loop may have moved trunk). NOTE the SEQUENCING RULE in docs/DATA_QUALITY_LEDGER.md: do not redeploy capture for feature fixes until the warm-start fix lands — then one clean restart + recollect.
 
 ORIENT FIRST (you start with fresh context each run): read docs/RESUME_STATE.md, then docs/AUTONOMOUS_BACKLOG.md, docs/DATA_QUALITY_LEDGER.md, and docs/MAINTENANCE_PROTOCOL.md.
 
@@ -15,10 +15,10 @@ Then do BOTH of the following, in order:
 
 2) ADVANCE (one item per cycle — make it count)
    - Pick the single highest-priority UNCHECKED item from docs/AUTONOMOUS_BACKLOG.md. Owner has GREENLIT, in order: P1 #1 per-symbol fast/tick path (sub-minute bet latency), #2 parity validation ledger live, #3 nightly re-seed + relaunch automation. Pursue in that order unless one is blocked (then take the next and note the block).
-   - Do real engineering: spawn subagents for substantial work; work on a feature branch off integration/converged; follow CLAUDE.md; test (ruff check on changed files + relevant pytest in the fp-dev/feature-computer image); commit with the message ending exactly:
+   - Do real engineering: spawn subagents for substantial work; work on a feature branch off deploy/candidate; follow CLAUDE.md; test (ruff check on changed files + relevant pytest in the fp-dev/feature-computer image); commit with the message ending exactly:
        Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
    - For ANY feature-affecting change, PARITY MUST HOLD (live-computed == backfill-computed within tolerance) — verify before merging.
-   - Merge to integration/converged only when green. Deploys that need a capture restart: do them only if low-impact, verify the capture recovers (freshness < 3 min, 8/8 shards), and keep the pre-deploy commit noted for rollback.
+   - Merge to deploy/candidate only when green. Deploys that need a capture restart: do them only if low-impact, verify the capture recovers (freshness < 3 min, 8/8 shards), and keep the pre-deploy commit noted for rollback.
    - Large items won't finish in one cycle — make a concrete increment, commit it, and leave a clear "next step" in the backlog item so the next cycle continues.
 
 3) RECORD
