@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import msgpack
 import numpy as np
 import polars as pl
 
@@ -20,7 +21,11 @@ from quantlib.features.base import BatchContext
 from quantlib.features.bench_stream import SESSION_DAY, synth_daily, synth_reference
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup, emit_numpy
-from quantlib.features.stream_sim import StreamShardState, process_stream_minute
+from quantlib.features.stream_sim import (
+    StreamShardState,
+    process_stream_minute,
+    route_stream_minute,
+)
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 
@@ -104,3 +109,20 @@ def test_incremental_reduction_matches_batch_on_enriched_buffer() -> None:
                 )
             )
             assert bad.height == 0, f"{group.name}.{col}: {bad.height} mismatches\n{bad.head()}"
+
+
+def test_msgpack_transport_roundtrips_routed_batches_byte_identically() -> None:
+    """FP_IPC_MSGPACK transport is PARITY-NEUTRAL: msgpack-packing each shard's routed (bars, trades,
+    quotes) slice and unpacking it in the worker reproduces the SAME dicts the pickle path delivers, so
+    process_stream_minute computes identical features either way — only the IPC transport differs."""
+    symbols = [f"T{i:03d}" for i in range(40)] + ["SPY", "QQQ", "IWM"]
+    rng = np.random.default_rng(7)
+    price = {symbol: 100.0 + i for i, symbol in enumerate(symbols)}
+    bars, trades, quotes = _synthetic_minute(symbols, 3, rng, price)
+    n_shards = 8
+    routed = route_stream_minute(bars, trades, quotes, n_shards)
+    for shard_batch in routed:
+        # The worker decode (msgpack.unpackb of the reader's msgpack.packb) must equal the original tuple
+        # of dict-lists the pickle path hands the worker — list-for-list, dict-for-dict.
+        decoded = msgpack.unpackb(msgpack.packb(shard_batch))
+        assert decoded == [list(stream) for stream in shard_batch]
