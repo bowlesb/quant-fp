@@ -77,6 +77,14 @@ INCREMENTAL_PARITY_BREACH = Counter(
 )
 
 
+# Ingestion-rate counters, incremented in the READER process per message off the websocket and exposed on
+# the reader's own /metrics port, so `rate(feature_*_ingested_total[1m])` gives bars/trades/quotes per
+# second — the live ingestion frequency for the dashboard.
+BARS_INGESTED = Counter("feature_bars_ingested_total", "Minute bars received off the stream")
+TRADES_INGESTED = Counter("feature_trades_ingested_total", "Trade ticks received off the stream")
+QUOTES_INGESTED = Counter("feature_quotes_ingested_total", "Quote ticks received off the stream")
+
+
 def record_incremental_parity(reduce_input: str, tol_ratio: float, breached: bool) -> None:
     """Observe one minute's incremental-vs-batch parity self-check for ``reduce_input``: the worst
     divergence as a multiple of the parity tolerance, and whether it breached benign drift (see

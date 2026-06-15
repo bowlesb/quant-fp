@@ -28,6 +28,7 @@ from quantlib.features.capture import (
     warm_start_ring,
 )
 from quantlib.aggregates import QuoteTick, TickState, TradeTick
+from quantlib.features import metrics
 from quantlib.features.loaders import load_reference
 from quantlib.features.tick_capture import enrich_bars_with_ticks
 from quantlib.features.sharded_capture import (
@@ -259,6 +260,7 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
         # feeds the drill-down (which tickers were delivered late / slow in our pipeline).
         pending["last_arrival"] = now
         pending["symbol_arrivals"][bar.symbol] = now
+        metrics.BARS_INGESTED.inc()
         pending["minute"] = minute
         pending["bars"].append(
             {"S": bar.symbol, "o": float(bar.open), "c": float(bar.close), "h": float(bar.high),
@@ -266,18 +268,22 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
         )
 
     async def on_trade(trade) -> None:  # type: ignore[no-untyped-def]
+        metrics.TRADES_INGESTED.inc()
         minute = trade.timestamp.replace(second=0, microsecond=0)
         trade_buf.setdefault(minute, {}).setdefault(trade.symbol, []).append(
             TradeTick(trade.timestamp.timestamp(), float(trade.price), float(trade.size))
         )
 
     async def on_quote(quote) -> None:  # type: ignore[no-untyped-def]
+        metrics.QUOTES_INGESTED.inc()
         minute = quote.timestamp.replace(second=0, microsecond=0)
         quote_buf.setdefault(minute, {}).setdefault(quote.symbol, []).append(
             QuoteTick(quote.timestamp.timestamp(), float(quote.bid_price), float(quote.ask_price),
                       float(quote.bid_size), float(quote.ask_size))
         )
 
+    # The reader exposes its own /metrics (ingestion counters) — workers own 9201..9208, reader owns 9200.
+    metrics.start_metrics_server(int(os.environ.get("READER_METRICS_PORT", "9200")))
     stream.subscribe_bars(on_bar, *symbols)
     if tick_syms:
         stream.subscribe_trades(on_trade, *tick_syms)
