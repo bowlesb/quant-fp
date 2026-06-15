@@ -29,8 +29,10 @@ removed). Stack: `quant-timescaledb-1` (db quant/quant, pw in .env), `quant-prom
 `feature_assemble_seconds` (last-bar) + per-ticker drill-down table `latency_slow_symbols` + Grafana.
 The healthcheck `bar_to_vector_latency` FAIL (~60s) is the batch floor surfaced on purpose → fixed by #1.
 
-**Resume this conversation:** `cd /home/ben/quant-fp && claude --resume` (or `--continue`). The loop runs
-regardless. Dirty working-tree files (`experiments/dl_research/train.py`, `quantlib/features/backfill_bars.py`)
+**Resume this conversation:** the transcript is filed under the `automated-day-tracking-claude` project,
+NOT quant-fp — run `cd /home/ben/automated-day-tracking-claude && claude --resume` (or `--continue`), or
+press Ctrl+A in the resume picker to show all projects. The autonomous loop runs regardless of whether this
+conversation is open. Dirty working-tree files (`experiments/dl_research/train.py`, `quantlib/features/backfill_bars.py`)
 are earlier-agent leftovers, left intentionally uncommitted.
 
 ---
