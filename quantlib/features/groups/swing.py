@@ -35,6 +35,12 @@ from quantlib.features.registry import register
 THETA: float = 0.005
 RING_K: int = 8  # confirmed pivots kept per symbol for the persistence / alternation / resolved reads
 DAY_SECS: int = 86_400
+# fib_retracement degenerate guard: when the PRIOR completed leg's range is a near-zero fraction of price
+# (a confirmed micro-leg), the (c - end)/(start - end) ratio explodes (seen LIVE up to 450 on thin names like
+# BBN/PVL). The basis is then meaningless — same situation as a flat-window bb_position. Beyond the declared
+# valid_range we treat fib as UNDEFINED (null), not a finite reading. Applied identically on the one fold path
+# (swing_fold_frame), so live == backfill cell-for-cell; mirrored in the pure-Python parity reference.
+FIB_MAX_ABS: float = 10.0
 
 _FEATURE_COLS: tuple[str, ...] = (
     "swing_dir",
@@ -89,8 +95,17 @@ def swing_fold_frame(frame: pl.DataFrame) -> pl.DataFrame:
     )
     # The kernel's NaN sentinels (minutes_since_pivot/fib_retracement before the first pivot/leg) restore to
     # Polars null so the warmup nan_policy holds and parity treats them as MISSING, not a finite 0.
-    return result.with_columns(
+    result = result.with_columns(
         [pl.col(name).fill_nan(None) for name in ("minutes_since_pivot", "fib_retracement")]
+    )
+    # Degenerate-basis guard: a confirmed micro-leg gives fib a near-zero denominator and an explosive read.
+    # Beyond the declared valid_range that value is undefined, not finite — null it (parity-safe: pure function
+    # of this row's own fib, so live and backfill null the identical cells). Pre-existing nulls stay null.
+    return result.with_columns(
+        pl.when(pl.col("fib_retracement").abs() > FIB_MAX_ABS)
+        .then(None)
+        .otherwise(pl.col("fib_retracement"))
+        .alias("fib_retracement")
     ).select(["symbol", "minute", *_FEATURE_COLS])
 
 
@@ -111,8 +126,8 @@ class SwingGroup(FeatureGroup):
             ),
             FeatureSpec(
                 name="fib_retracement",
-                description="Where the close sits within the PRIOR completed leg's range (the 0/0.382/0.5/0.618/1 read), measured from the prior leg's end back toward its start; null until a leg completes.",
-                dtype="Float64", valid_range=(-10.0, 10.0), nan_policy="warmup", layer="A",
+                description="Where the close sits within the PRIOR completed leg's range (the 0/0.382/0.5/0.618/1 read), measured from the prior leg's end back toward its start; null until a leg completes, and null when the prior leg's range is a degenerate micro-leg (read beyond the valid_range).",
+                dtype="Float64", valid_range=(-FIB_MAX_ABS, FIB_MAX_ABS), nan_policy="warmup", layer="A",
             ),
         ]
         plain = [
