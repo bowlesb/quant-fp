@@ -23,16 +23,26 @@ synthetic/golden frames in CI; the real-data audit is the stronger periodic chec
 
 ## Last audit
 
-- **Day:** 2026-06-15 (settled), 14 liquid multi-sector symbols (SPY/QQQ/IWM/DIA + AAPL/MSFT/NVDA/TSLA/
-  AMZN/META/GOOGL/AMD/NFLX/INTC), real bars+trades+quotes from `/store/raw`, ~960-minute buffer, ~126 days
-  of resampled daily history.
-- **`compute_latest` vs `compute().last`:** 606 features → **596 MATCH, 0 DIVERGE, 10 NEEDS_DATA.**
+- **Day:** 2026-06-15 (settled), **96 liquid multi-sector symbols** (SPY/QQQ/IWM/DIA + ~92 names across every
+  GICS sector — broadened from the original 14 so the cross-sectional rank / breadth groups rank over a REAL
+  distribution), real bars+trades+quotes from `/store/raw`, ~960-minute buffer, ~126 days of resampled daily
+  history. Re-run any size with `FP_AUDIT_SYMBOLS=...` or a positional count.
+- **`compute_latest` vs `compute().last`:** 606 features → **589 MATCH, 7 DIVERGE, 10 NEEDS_DATA** — where ALL
+  7 DIVERGE are on a SINGLE barely-trading symbol (**UBER**, ~3 bars / 2 distinct closes in the last window —
+  a numerically-degenerate OLS fit, see below). Excluding UBER: **596 MATCH / 0 DIVERGE.**
 - **`IncrementalEngine.step` (minute-by-minute) vs `compute().last`:** 335 reduction features →
-  **335 MATCH, 0 DIVERGE.**
+  **327 MATCH, 8 DIVERGE** — 7 on UBER (same degenerate fits, the incremental running-sum drift amplifying
+  them) + 1 on DIS (`idio_vol_90m`, a ~1.6e-8 near-zero idiosyncratic vol). Excluding UBER: **334 MATCH /
+  1 DIVERGE** (the DIS near-zero).
 - The 10 NEEDS_DATA are deep multi-day windows (`daily_return_180d/240d`, `dist_from_250d_high`,
   `nasdaq_return_120m`, `market_return_10m/20m` at the very-last-minute lag) that are all-null at the latest
   minute in BOTH paths because the store has only ~126 days of history — a legitimate warmup-null, not a
   divergence (verified: the all-null column set is IDENTICAL live and backfill).
+
+**Broadening (unit 1) confirmed the cross-sectional/breadth verdict** beyond the original modest 14-name
+breadth: with 96 symbols spanning all sectors, `cross_sectional_rank`, `breadth`, `market_context`, and
+`market_beta` all MATCH on every healthy symbol. It also surfaced + fixed two real sparse-symbol bugs (NaN
+clip + window-edge return) the dense set never exposed — see below.
 
 ## Live-path taxonomy
 
@@ -67,14 +77,14 @@ paths (data-depth, not a divergence).
 | candlestick | candlestick | 12 | custom-override | MATCH | |
 | cross_sectional_rank | cross_sectional | 6 | custom-override | MATCH | ranks over the pinned `universe` set |
 | market_context | cross_sectional | 36 | custom-override | MATCH (WARMUP) | market_return_10m/20m, nasdaq_120m null@T (both paths) |
-| multi_day_returns | multi_day | 28 | custom-override | MATCH (WARMUP) | 180d/240d/250d windows exceed store history |
-| multi_day_vwap | multi_day | 10 | custom-override | MATCH | warms with ≥126d history |
+| multi_day_returns | multi_day | 28 | custom-override | MATCH (WARMUP) | 25/28 warm with 125d bar history; only 180d/240d/250d still NEEDS_DATA (need >125 trading days) |
+| multi_day_vwap | multi_day | 10 | custom-override | MATCH | now FULLY warm (10/10) with 125d bar history |
 | price_levels | price | 21 | custom-override | MATCH | |
 | price_returns | price | 40 | custom-override | MATCH | |
 | prior_day | multi_day | 10 | custom-override | MATCH | |
 | technical | technical | 14 | custom-override | MATCH | |
-| clean_momentum | trend_quality | 12 | reduction | CONSTRUCTION/MATCH | also incremental-verified |
-| distribution | volatility | 20 | reduction | CONSTRUCTION/MATCH | also incremental-verified |
+| clean_momentum | trend_quality | 12 | reduction | CONSTRUCTION/MATCH | incremental-verified (UBER degenerate-fit residual, see KNOWN LIMITATION) |
+| distribution | volatility | 20 | reduction | CONSTRUCTION/MATCH | upside/downside_vol sqrt-clip fixed (sparse-symbol NaN) |
 | efficiency | momentum | 18 | reduction | CONSTRUCTION/MATCH | lag-point group; incremental-verified |
 | liquidity | trade_flow | 15 | reduction | CONSTRUCTION/MATCH | tick-column input; incremental-verified |
 | market_beta | cross_sectional | 21 | reduction | CONSTRUCTION/MATCH | broadcast regressor; incremental-verified |
@@ -86,7 +96,7 @@ paths (data-depth, not a divergence).
 | return_dynamics | momentum | 15 | reduction | CONSTRUCTION/MATCH | lag-point group; incremental-verified |
 | trade_flow | trade_flow | 23 | reduction | CONSTRUCTION/MATCH | tick-column input; incremental-verified |
 | trend_quality | trend_quality | 30 | reduction | CONSTRUCTION/MATCH | time-axis regressor; incremental-verified |
-| volatility | volatility | 15 | reduction | CONSTRUCTION/MATCH | incremental-verified |
+| volatility | volatility | 15 | reduction | CONSTRUCTION/MATCH | parkinson_vol sqrt-clip fixed (sparse-symbol NaN); incremental-verified |
 | volume | volume | 23 | reduction | CONSTRUCTION/MATCH | incremental-verified |
 | momentum_run | trend_quality | 12 | window-sliced | MATCH | residual_skew tolerance fixed (see below) |
 | residual_analysis | trend_quality | 6 | window-sliced | MATCH | |
@@ -110,6 +120,51 @@ second-moment — already declares for the analogous cancellation), keeping `lon
 length) at the tight `RUN_TOL`. Guarded by `tests/test_fp_momentum_run.py::
 test_residual_skew_window_sliced_latest_matches_rolling_on_deep_buffer`, which reproduces the cancellation
 on tick-quantized prices and asserts the gap exceeds the old tolerance but stays within the new one.
+
+### `volatility.parkinson_vol_*` + `distribution.upside_vol_*`/`downside_vol_*` — sqrt of a negative running-sum residue on sparse symbols (FIXED)
+
+Found by the **96-symbol** broadening (the original 14 mega-caps were too dense to trigger it). Each is a
+`sqrt` of a mathematically NON-NEGATIVE windowed mean/sum (`mean(log(high/low)²)`, `mean(squared returns)`).
+On a SPARSE symbol whose in-window bars are all flat (`high==low` → `hl2==0`) or all one-signed, the live
+`IncrementalEngine` running sum drifts to a tiny NEGATIVE residue (~−1e−22) from the add/expire float cycle,
+so `sqrt(negative) = NaN` — while the backfill `rolling_mean`/`rolling_sum` returns exactly `0.0`. A
+null/NaN-vs-value parity break on DIS/C/VZ. **Fix:** clip the non-negative quantity to `>= 0` before the
+`sqrt` (`.clip(lower_bound=0.0).sqrt()`) — exactly what `ohlc_vol`'s garman_klass/rogers_satchell and
+`clean_momentum` already do for the identical drift; these two groups simply missed it. 6 incremental
+divergences → 0.
+
+### `momentum_run.longest_streak_*` — window-edge return nulled on a sparse symbol (FIXED)
+
+Found by the broadening on **DIS** (2 bars 47 min apart in the trailing window): `longest_streak_60m` was
+`0.033` in backfill but `null` live. `longest_streak` reads a per-bar `close.shift(1)` return at every
+in-window bar; the EARLIEST in-window bar's POSITIONAL predecessor sits an arbitrary gap before the window,
+and the blunt `compute_latest_on_window` minute-cutoff slice DROPPED it — nulling the boundary return live
+while the whole-buffer backfill resolved it. The slice can't simply keep the prior bar for the WHOLE group,
+because `residual_skew` (float-order-sensitive third sums) wobbles if it sees any bar beyond its window.
+**Fix:** `momentum_run.compute_latest` now runs the two features on the slices each needs — `residual_skew`
+on the tight `LOOKBACK_MINUTES` window, `longest_streak` on that window PLUS each symbol's one prior bar
+(`_slice_with_prior_bar`) — and stitches them at T. Both halves run the identical `compute()` math on their
+minimal input, so live == backfill for dense AND sparse symbols. Guarded by `tests/test_fp_momentum_run.py`.
+
+### KNOWN LIMITATION — numerically-degenerate OLS / near-zero values on barely-trading symbols (UBER, DIS)
+
+The residual divergences after the fixes above are ALL on near-degenerate inputs where the feature value is
+itself numerically meaningless, NOT a platform logic error:
+
+- **UBER** `trend_quality.price_r2_{10,15,20}m`, `clean_momentum.clean_momentum_score_*`,
+  `technical.bb_position_20m`, `trend_strength_15m`: UBER's trailing windows held **3 bars with 2 distinct
+  closes** (72.99, 72.99, 72.9899) — a near-singular OLS fit. `price_r2 ≈ 0.987` has an essentially-zero
+  denominator, so the single-pass Rust kernel (`compute_latest`, stable ~3.6e-4 off) and the rolling polars
+  form (`compute`) round it differently; the incremental running sums (`step`) drift further (up to ~6.5e-3,
+  GROWING with warmup depth — the documented running-sum drift, bounded in production by the daily re-seed).
+- **DIS** `market_beta.idio_vol_90m`: a ~1.6e-8 idiosyncratic vol (i.e. ~0); the relative-tolerance gauge is
+  meaningless at that magnitude.
+
+These are genuinely path-different-by-design at the numerical-degeneracy boundary: a relative tolerance
+can't gauge a near-zero or near-singular quantity, and tightening the per-feature degeneracy guards to null
+them risks over-nulling healthy data — a per-feature judgement deferred rather than rushed during live hours.
+They affect only symbols barely trading in extended hours and are honestly reported (not silently passed).
+The audit flags them every run, so if they ever broaden beyond such degenerate inputs we will see it.
 
 ## Method notes / honesty
 

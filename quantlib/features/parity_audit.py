@@ -32,11 +32,29 @@ from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.registry import REGISTRY
 
 DEFAULT_RAW_ROOT = os.environ.get("FP_RAW_ROOT", "/store")
-# A liquid, multi-sector set that has bars + trades + quotes in /store/raw — enough breadth for the
-# cross-sectional/breadth ranks to have a real distribution, plus the index ETFs market_context regresses on.
-DEFAULT_SYMBOLS: tuple[str, ...] = (
-    "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "AMD",
-    "NFLX", "INTC",
+# The market-index ETFs market_context / market_beta regress every symbol against — always pinned FIRST so
+# the cross-sectional groups resolve their reference even on a sliced run.
+INDEX_ETFS: tuple[str, ...] = ("SPY", "QQQ", "IWM", "DIA")
+# A BROAD liquid, multi-sector set that has bars (all) + trades + (mostly) quotes in /store/raw. ~90 names
+# across every GICS sector so the cross-sectional rank / breadth groups have a REAL distribution to rank over
+# (a 14-name run only weakly exercises them). FP_AUDIT_SYMBOLS (env, comma list) overrides; the positional
+# count arg slices this list.
+DEFAULT_SYMBOLS: tuple[str, ...] = INDEX_ETFS + (
+    # mega-cap tech / comm
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "AVGO", "ORCL", "CRM", "ADBE", "CSCO",
+    "AMD", "INTC", "QCOM", "TXN", "MU", "AMAT", "NFLX", "DIS", "CMCSA", "T", "VZ", "TMUS",
+    # consumer discretionary / staples
+    "TSLA", "HD", "LOW", "NKE", "MCD", "SBUX", "BKNG", "TGT", "WMT", "COST", "PG", "KO", "PEP",
+    "PM", "MDLZ",
+    # financials
+    "JPM", "BAC", "WFC", "GS", "MS", "C", "SCHW", "AXP", "BLK", "SPGI", "V", "MA",
+    # healthcare
+    "UNH", "JNJ", "LLY", "PFE", "MRK", "ABBV", "TMO", "ABT", "DHR", "BMY", "AMGN", "GILD",
+    # industrials / energy / materials / utilities
+    "CAT", "BA", "HON", "GE", "UPS", "RTX", "LMT", "DE", "XOM", "CVX", "COP", "SLB",
+    "LIN", "FCX", "NEM", "NEE", "DUK", "SO",
+    # high-volume movers
+    "PLTR", "COIN", "SOFI", "F", "GM", "UBER", "ABNB", "SHOP", "MARA", "RIOT", "SNOW",
 )
 ABS_FLOOR = 1e-9  # absolute parity floor near zero (matches tests/test_fp_latest.py)
 SECTORS = ("Technology", "Communication Services", "Consumer Discretionary", "Financials", "Energy")
@@ -361,12 +379,28 @@ def _print_report(title: str, verdicts: list[FeatureVerdict]) -> None:
         print(f"\n  NEEDS_DATA groups: {needs}")
 
 
+def select_symbols(count: int | None) -> list[str]:
+    """The audit universe: ``FP_AUDIT_SYMBOLS`` (env, comma list) wins; else the broad DEFAULT_SYMBOLS,
+    sliced to ``count`` (the index ETFs stay pinned at the front so the cross-sectional reference always
+    resolves). ``count=None`` -> the whole list."""
+    env = os.environ.get("FP_AUDIT_SYMBOLS", "").strip()
+    if env:
+        explicit = [s.strip().upper() for s in env.split(",") if s.strip()]
+        return list(INDEX_ETFS) + [s for s in explicit if s not in INDEX_ETFS]
+    if count is None or count >= len(DEFAULT_SYMBOLS):
+        return list(DEFAULT_SYMBOLS)
+    # keep the index ETFs even when slicing small
+    head = list(INDEX_ETFS)
+    rest = [s for s in DEFAULT_SYMBOLS if s not in INDEX_ETFS]
+    return head + rest[: max(0, count - len(head))]
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     day = args[0] if args else "2026-06-15"
-    n = int(args[1]) if len(args) > 1 else len(DEFAULT_SYMBOLS)
-    symbols = list(DEFAULT_SYMBOLS)[:n] if n <= len(DEFAULT_SYMBOLS) else list(DEFAULT_SYMBOLS)
-    print(f"parity audit: day={day} symbols={symbols} raw_root={DEFAULT_RAW_ROOT}")
+    count = int(args[1]) if len(args) > 1 else None
+    symbols = select_symbols(count)
+    print(f"parity audit: day={day} n_symbols={len(symbols)} raw_root={DEFAULT_RAW_ROOT}")
     cl_verdicts, inc_verdicts = run_audit(DEFAULT_RAW_ROOT, day, symbols)
     _print_report("compute_latest vs compute().last (REAL data)", cl_verdicts)
     _print_report("IncrementalEngine.step vs compute().last (REAL data)", inc_verdicts)

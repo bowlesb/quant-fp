@@ -157,7 +157,15 @@ class FeatureGroup(ABC):
         buffer ends every input at the same current minute T, so per-frame slicing keeps every bar inside the
         trailing window the group reads (a sparse symbol still keeps its real bars — the window is by wall-clock
         minute, not row count). A frame with no ``minute`` column (e.g. a static reference frame) is passed
-        through whole."""
+        through whole.
+
+        NOTE on positional ``shift(k)`` at the window edge: this minute-cutoff slice does NOT retain the bar
+        before the window, so a group whose deepest-window feature reads a per-bar ``close.shift(1).over(...)``
+        return at the EARLIEST in-window bar must size ``lookback_minutes`` to also cover that bar's predecessor
+        — or, for a sparse symbol whose predecessor sits an arbitrary gap back, handle the window edge itself
+        (see momentum_run's ``compute_latest``, which derives the per-bar returns over the WHOLE buffer before
+        the window slice). The generic parity test guards the dense case; the real-data audit guards the sparse
+        case."""
         sliced = {
             name: self._slice_to_window(frame, lookback_minutes)
             for name, frame in ctx.frames.items()

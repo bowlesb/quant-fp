@@ -16,7 +16,7 @@ import polars as pl
 import numpy as np
 
 from quantlib.features import BatchContext, REGISTRY, run_group
-from quantlib.features.groups.momentum_run import RUN_TOL, SKEW_TOL
+from quantlib.features.groups.momentum_run import SKEW_TOL
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
 SKEW_COLS = [f"residual_skew_{w}m" for w in (5, 10, 15, 20, 30, 60)]
@@ -65,9 +65,9 @@ def test_residual_skew_healthy_path_in_range_not_overnulled() -> None:
 
 def _tick_quantized_closes(n: int = 900) -> list[float]:
     """A real-data-regime intraday close path: a near-linear drift plus a small random walk, QUANTIZED to
-    the penny tick. The discrete-cent residuals on a near-linear trend are what drive the third-moment
-    catastrophic cancellation (the cubed centered-time sums) to round differently between the whole-buffer
-    rolling form and the window-sliced live form — exactly the divergence the real ``/store`` audit found."""
+    the penny tick. The discrete-cent residuals on a near-linear trend are the regime that USED to drive the
+    old third-moment formulation's catastrophic cancellation (cubed centered-time power sums); the window-local
+    fit has no cross-window origin and no cancellation, so this case now agrees tightly."""
     rng = np.random.default_rng(3)
     trend = 100.0 + 0.003 * np.arange(n)
     walk = np.cumsum(rng.standard_normal(n)) * 0.01
@@ -75,18 +75,16 @@ def _tick_quantized_closes(n: int = 900) -> list[float]:
 
 
 def test_residual_skew_window_sliced_latest_matches_rolling_on_deep_buffer() -> None:
-    """PARITY: on a buffer FAR deeper than the group's window, the window-sliced ``compute_latest`` must
-    equal the backfill rolling form's last minute within the DECLARED residual_skew tolerance. The third
-    moment is catastrophic-cancellation-prone (cubed centered-time sums), so on tick-quantized real-regime
-    prices the two forms round it differently — the float-noise SKEW_TOL (0.02) bounds. This case exceeds
-    the old RUN_TOL (1e-4) on several windows, so it genuinely guards the tolerance fix; it stays well
-    within SKEW_TOL. (Discovered by the real-data parity audit, quantlib.features.parity_audit.)"""
+    """PARITY: on a buffer FAR deeper than the group's window, the window-sliced ``compute_latest`` must equal
+    the backfill rolling form's last minute within the DECLARED residual_skew tolerance. The window-local fit
+    (each window's own bars on a window-relative axis) is the IDENTICAL computation in both paths, so on the
+    tick-quantized real-regime path that broke the old power-sum form they now agree to summation float-noise —
+    well within SKEW_TOL."""
     ctx = BatchContext(frames={"minute_agg": _frame(_tick_quantized_closes())})
     group = REGISTRY.get_group("momentum_run")
     latest = group.compute(ctx)["minute"].max()
     rolling = group.compute(ctx).filter(pl.col("minute") == latest).sort("symbol")
     live = group.compute_latest(ctx).filter(pl.col("minute") == latest).sort("symbol").select(rolling.columns)
-    exceeds_old_tol = False
     for col in SKEW_COLS:
         back, real = rolling[col][0], live[col][0]
         assert (back is None) == (real is None), f"{col}: null-vs-value parity break ({back} vs {real})"
@@ -94,6 +92,19 @@ def test_residual_skew_window_sliced_latest_matches_rolling_on_deep_buffer() -> 
             assert abs(back - real) <= 1e-9 + SKEW_TOL * abs(back), (
                 f"{col}: window-sliced live {real} != rolling backfill {back} beyond SKEW_TOL={SKEW_TOL}"
             )
-            if abs(back - real) > 1e-9 + RUN_TOL * abs(back):
-                exceeds_old_tol = True
-    assert exceeds_old_tol, "test no longer exercises the third-moment cancellation it guards (would pass at old RUN_TOL)"
+
+
+def test_residual_skew_is_point_in_time_no_lookahead() -> None:
+    """LOOK-AHEAD: residual_skew at minute T must be byte-identical whether the buffer ends at T or extends
+    far past it. The old buffer-relative power-sum form FAILED this (appending future bars shifted the time
+    origin and re-rounded the cancellation-prone cubed sums, drifting past values ~1e-8). The window-local
+    fit depends only on the bars in (T−W, T], so future data cannot touch it."""
+    closes = _tick_quantized_closes(260)
+    group = REGISTRY.get_group("momentum_run")
+    cutoff = BASE + timedelta(minutes=199)
+    partial = group.compute(BatchContext(frames={"minute_agg": _frame(closes[:200])}))
+    full = group.compute(BatchContext(frames={"minute_agg": _frame(closes)}))
+    before = partial.filter(pl.col("minute") <= cutoff).sort("minute").select(["minute", *SKEW_COLS])
+    after = full.filter(pl.col("minute") <= cutoff).sort("minute").select(["minute", *SKEW_COLS])
+    assert before.height > 0
+    assert before.equals(after), "residual_skew changed at minutes <= T when future bars were appended"
