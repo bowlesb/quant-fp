@@ -31,6 +31,11 @@ services:
       SMOKE_MAX_TOTAL_NOTIONAL_USD: "200"
       # Kill switch: "1" = trade (paper); "0" = consume + log only, place NO orders.
       SMOKE_ENABLED: "1"
+      # Model overlay: "0" = bet purely on the safety gate (current default behaviour);
+      # "1" = also require the (mock) model probability for the latest vector to clear the threshold.
+      # Swap MockMLModel for a real classifier behind the same Model interface to go live.
+      SMOKE_USE_MODEL: "0"
+      SMOKE_MODEL_THRESHOLD: "0.5"
     depends_on:
       timescaledb:
         condition: service_healthy

@@ -1,8 +1,9 @@
 """BetStore integration test against the real timescaledb in a THROWAWAY schema (dropped after).
 
 Skips cleanly when no DB is reachable so the unit suite still runs without infra. We monkeypatch the
-module-level SCHEMA + DDL to a unique per-run name so this never touches the live ``strat_smoke``
-schema, then DROP ... CASCADE in teardown — zero residue.
+module-level STRATEGY name to a unique per-run value so ``StrategyStore`` builds an isolated
+``strat_smoke_test_<hex>`` schema that never touches the live ``strat_smoke``, then DROP ... CASCADE in
+teardown — zero residue.
 """
 from __future__ import annotations
 
@@ -39,19 +40,13 @@ def _db_up() -> bool:
 def throwaway_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[BetStore]:
     if not _db_up():
         pytest.skip("timescaledb not reachable")
-    schema = f"strat_smoke_test_{uuid.uuid4().hex[:8]}"
-    monkeypatch.setattr(bet_store_module, "SCHEMA", schema)
-    monkeypatch.setattr(bet_store_module, "_SCHEMA_DDL", f"CREATE SCHEMA IF NOT EXISTS {schema}")
-    monkeypatch.setattr(
-        bet_store_module,
-        "_TABLE_DDL",
-        bet_store_module._TABLE_DDL.replace("strat_smoke.bets", f"{schema}.bets"),
-    )
+    strategy = f"smoke_test_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(bet_store_module, "STRATEGY", strategy)
     store = BetStore(DB_KWARGS)
     yield store
     conn = psycopg.connect(**DB_KWARGS, autocommit=True)  # type: ignore[arg-type]
     with conn.cursor() as cur:
-        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA IF EXISTS strat_{strategy} CASCADE")
     conn.close()
 
 

@@ -1,10 +1,13 @@
-"""Postgres-backed bet ledger for the smoke strategy — its OWN schema (``strat_smoke``).
+"""Postgres-backed bet ledger for the smoke strategy — built on the reusable ``StrategyStore``.
 
-A per-strategy schema means zero table-name collision with the executor or any future strategy
-container: each one owns its namespace and can be dropped/migrated independently. The store is the
-durable book the strategy reconciles against on restart — OPEN bets are resumed, CLOSED bets are the
-realized record. All writes are parameterized SQL; the connection is short-lived per call so a
-transient DB blip never holds a stale handle.
+The smoke strategy owns its OWN schema, ``strat_smoke`` (``StrategyStore`` derives it from the strategy
+name "smoke"), so it never collides table names with the executor or any future strategy. The store is
+self-service: it declares one ``CREATE TABLE`` statement and ``StrategyStore`` creates the schema + table
+idempotently — the author never touches global DB config or schema-management internals.
+
+The store is the durable book the strategy reconciles against on restart — OPEN bets are resumed, CLOSED
+bets are the realized record. All access goes through ``StrategyStore``'s parameterized helpers (short-
+lived autocommit connections, so a transient DB blip never holds a stale handle).
 
 Schema (one table, ``bets``, status-partitioned by the ``status`` column):
     id             bigserial primary key
@@ -24,14 +27,14 @@ Schema (one table, ``bets``, status-partitioned by the ``status`` column):
 from __future__ import annotations
 
 import datetime as dt
+from typing import cast
 
-import psycopg
+from strategies.lib.store import StrategyStore
 
-SCHEMA = "strat_smoke"
+STRATEGY = "smoke"
 
-_SCHEMA_DDL = f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}"
-_TABLE_DDL = f"""
-CREATE TABLE IF NOT EXISTS {SCHEMA}.bets (
+BETS_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS {schema}.bets (
     id             bigserial PRIMARY KEY,
     symbol         text        NOT NULL,
     side           text        NOT NULL,
@@ -48,22 +51,19 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.bets (
 )
 """
 
+_OPEN_COLUMNS = (
+    "id", "symbol", "side", "qty", "entry_order_id", "entry_ts",
+    "entry_price", "hold_until", "exit_order_id", "status",
+)
+_OPEN_STATUSES = ("open", "filled", "closing")
+
 
 class BetStore:
-    """Durable OPEN/CLOSED bet ledger in the ``strat_smoke`` Postgres schema."""
+    """Durable OPEN/CLOSED bet ledger in the ``strat_smoke`` Postgres schema (via ``StrategyStore``)."""
 
     def __init__(self, db_kwargs: dict[str, str | int]) -> None:
-        self._db_kwargs = db_kwargs
-        self.init_schema()
-
-    def _connect(self) -> psycopg.Connection:
-        return psycopg.connect(**self._db_kwargs, autocommit=True)  # type: ignore[arg-type]
-
-    def init_schema(self) -> None:
-        """Create the schema + table if absent. Idempotent — safe on every startup."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(_SCHEMA_DDL)
-            cur.execute(_TABLE_DDL)
+        self._store = StrategyStore(STRATEGY, [BETS_TABLE_DDL], db_kwargs)
+        self._schema = self._store.schema
 
     def record_open(
         self,
@@ -79,45 +79,40 @@ class BetStore:
         The ``entry_order_id`` UNIQUE constraint makes this idempotent: a duplicate submit (e.g. a
         restart mid-place) hits ON CONFLICT DO NOTHING and we recover the existing id.
         """
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"""INSERT INTO {SCHEMA}.bets
-                        (symbol, side, qty, entry_order_id, entry_ts, hold_until, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'open')
-                    ON CONFLICT (entry_order_id) DO NOTHING
-                    RETURNING id""",
-                (symbol, side, qty, entry_order_id, entry_ts, hold_until),
-            )
-            row = cur.fetchone()
-            if row is not None:
-                return int(row[0])
-            cur.execute(
-                f"SELECT id FROM {SCHEMA}.bets WHERE entry_order_id = %s", (entry_order_id,)
-            )
-            existing = cur.fetchone()
-            if existing is None:
-                raise RuntimeError(f"record_open: no row for entry_order_id {entry_order_id!r}")
-            return int(existing[0])
+        row = self._store.execute_returning(
+            f"""INSERT INTO {self._schema}.bets
+                    (symbol, side, qty, entry_order_id, entry_ts, hold_until, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'open')
+                ON CONFLICT (entry_order_id) DO NOTHING
+                RETURNING id""",
+            (symbol, side, qty, entry_order_id, entry_ts, hold_until),
+        )
+        if row is not None:
+            return int(cast(int, row[0]))
+        existing = self._store.query(
+            f"SELECT id FROM {self._schema}.bets WHERE entry_order_id = %s", (entry_order_id,)
+        )
+        if not existing:
+            raise RuntimeError(f"record_open: no row for entry_order_id {entry_order_id!r}")
+        return int(cast(int, existing[0][0]))
 
     def mark_filled(self, entry_order_id: str, entry_price: float) -> None:
         """Record the open's average fill price and advance status open -> filled."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"""UPDATE {SCHEMA}.bets
-                       SET entry_price = %s, status = 'filled'
-                     WHERE entry_order_id = %s AND status = 'open'""",
-                (entry_price, entry_order_id),
-            )
+        self._store.execute(
+            f"""UPDATE {self._schema}.bets
+                   SET entry_price = %s, status = 'filled'
+                 WHERE entry_order_id = %s AND status = 'open'""",
+            (entry_price, entry_order_id),
+        )
 
     def mark_closing(self, entry_order_id: str, exit_order_id: str) -> None:
         """Record that a closing order was submitted; advance status -> closing (idempotency guard)."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"""UPDATE {SCHEMA}.bets
-                       SET exit_order_id = %s, status = 'closing'
-                     WHERE entry_order_id = %s AND status IN ('open', 'filled')""",
-                (exit_order_id, entry_order_id),
-            )
+        self._store.execute(
+            f"""UPDATE {self._schema}.bets
+                   SET exit_order_id = %s, status = 'closing'
+                 WHERE entry_order_id = %s AND status IN ('open', 'filled')""",
+            (exit_order_id, entry_order_id),
+        )
 
     def record_close(
         self,
@@ -127,38 +122,29 @@ class BetStore:
         realized_pnl: float,
     ) -> None:
         """Finalize a bet: record exit fill + realized PnL and advance status -> closed."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"""UPDATE {SCHEMA}.bets
-                       SET exit_ts = %s, exit_price = %s, realized_pnl = %s, status = 'closed'
-                     WHERE entry_order_id = %s""",
-                (exit_ts, exit_price, realized_pnl, entry_order_id),
-            )
-
-    _OPEN_COLUMNS = (
-        "id", "symbol", "side", "qty", "entry_order_id", "entry_ts",
-        "entry_price", "hold_until", "exit_order_id", "status",
-    )
+        self._store.execute(
+            f"""UPDATE {self._schema}.bets
+                   SET exit_ts = %s, exit_price = %s, realized_pnl = %s, status = 'closed'
+                 WHERE entry_order_id = %s""",
+            (exit_ts, exit_price, realized_pnl, entry_order_id),
+        )
 
     def list_open(self) -> list[dict[str, object]]:
         """All bets not yet closed (status in open/filled/closing) — the set to manage/reconcile."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT {", ".join(self._OPEN_COLUMNS)}
-                      FROM {SCHEMA}.bets
-                     WHERE status IN ('open', 'filled', 'closing')
-                     ORDER BY entry_ts ASC"""
-            )
-            return [dict(zip(self._OPEN_COLUMNS, row)) for row in cur.fetchall()]
+        return self._store.query_dicts(
+            f"""SELECT {", ".join(_OPEN_COLUMNS)}
+                  FROM {self._schema}.bets
+                 WHERE status IN ('open', 'filled', 'closing')
+                 ORDER BY entry_ts ASC""",
+            _OPEN_COLUMNS,
+        )
 
     def count_open(self) -> int:
         """Number of un-closed bets — the concurrency-cap input."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"SELECT count(*) FROM {SCHEMA}.bets WHERE status IN ('open', 'filled', 'closing')"
-            )
-            row = cur.fetchone()
-            return int(row[0]) if row is not None else 0
+        rows = self._store.query(
+            f"SELECT count(*) FROM {self._schema}.bets WHERE status IN ('open', 'filled', 'closing')"
+        )
+        return int(cast(int, rows[0][0])) if rows else 0
 
     def open_notional(self) -> float:
         """Sum of (qty * entry_price) over un-closed bets — the gross-notional-cap input.
@@ -167,11 +153,9 @@ class BetStore:
         their realized notional is unknown until fill — the caller adds the prospective new-bet
         notional to this when checking the cap, which is conservative enough for a smoke test.
         """
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT COALESCE(sum(qty * entry_price), 0)
-                      FROM {SCHEMA}.bets
-                     WHERE status IN ('filled', 'closing') AND entry_price IS NOT NULL"""
-            )
-            row = cur.fetchone()
-            return float(row[0]) if row is not None else 0.0
+        rows = self._store.query(
+            f"""SELECT COALESCE(sum(qty * entry_price), 0)
+                  FROM {self._schema}.bets
+                 WHERE status IN ('filled', 'closing') AND entry_price IS NOT NULL"""
+        )
+        return float(cast(float, rows[0][0])) if rows else 0.0

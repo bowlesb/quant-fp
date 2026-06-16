@@ -12,8 +12,9 @@ from alpaca.trading.client import TradingClient
 
 from quantlib.bus.consumer import BusConsumer
 from quantlib.bus.publisher import DEFAULT_REDIS_URL
+from strategies.lib.model import MockMLModel
 from strategies.smoke.bet_store import BetStore
-from strategies.smoke.strategy import SmokeConfig, SmokeStrategy
+from strategies.smoke.strategy import MODEL_FOLD_FEATURES, SmokeConfig, SmokeStrategy
 
 DB_KWARGS: dict[str, str | int] = {
     "host": os.environ.get("DB_HOST", "timescaledb"),
@@ -35,7 +36,8 @@ def main() -> None:
         os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
     )
     store = BetStore(DB_KWARGS)
-    strategy = SmokeStrategy(config, consumer, trading, data_client, store)
+    model = MockMLModel(MODEL_FOLD_FEATURES)
+    strategy = SmokeStrategy(config, consumer, trading, data_client, store, model)
     strategy.run()
 
 
