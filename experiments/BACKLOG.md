@@ -32,7 +32,23 @@ Every item carries: idea · prior · test · cost gate · KILL. Single-writer = 
 
 ---
 
-## ★★★ STATUS (2026-06-16, after the depth-baseline cycle)
+## ★★★★★ STATUS (2026-06-16, after the H2+H3 KILLS — raw dataset COMPLETE)
+- **`/store/raw` COMPLETE: bars 7,668×126d, trades 7,668×21d, quotes 2,504×21d.** Survey + the two
+  order-flow feature specs in `experiments/2026-06-16-raw-data-survey/`.
+- **H2 OFI/signed-flow KILLED** (powered 250×20 panel, true CKS OFI): standalone |t|<1, orthogonalized
+  marginal |t|≤1.45<2.0, cost gate fails ~8×; the 3-day t=3.96 was a small-sample mirage. `order_flow_imbalance`
+  spec SHELVED. **H3 depth/spread conditioner KILLED**: tight-spread slashes cost (2.70 vs 11.24 bps) but
+  vwap_dev gross there (~0.4 bps) is noise (within 0.04 bps of canary). **The microstructure-CONDITIONING
+  branch (H1–H3) is CLOSED.**
+- **`signed_trade_ratio` (Case-A) SHIPPED — PR #33** (parity+correctness, an input not a signal). The
+  reversion strategy container (#29) is MERGED + live; `docs/ADDING_A_FEATURE.md` added.
+- **Binding wall = gross-signal-per-trade vs a fixed ~6–11 bps RT cost; conditioning attacks the wrong side.**
+  RE-PRIORITIZED working order: **H9 (longer-horizon H60/H120 vwap_dev reversion — RUNNING; amortize cost
+  over a larger move + cut turnover) → [if H9 fails] LOW-TURNOVER event/fundamental families H4 (splits) /
+  H5 (dividends) → H7 (rank-space).** H6 (vol conditioner) DE-PRIORITIZED (same dead conditioner framing).
+  All pre-registered; cost gate honest + stressed ±cost.
+
+## ★★★ STATUS (2026-06-16, after the depth-baseline cycle) [SUPERSEDED by the block above]
 - **`/store/raw` has BARS (629 names × 126 days, 2025-12→2026-06) but NOT trades/quotes yet.** So
   **H2-RETEST and H3 are BLOCKED on the trades/quotes backfill** (read `/store/raw/trades` & `/store/raw/quotes`
   when they land — directory-existence is the gate). All heavy compute now runs via `ops/sandbox.sh` (capped,
