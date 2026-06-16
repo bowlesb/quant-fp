@@ -258,6 +258,27 @@ def test_bars_tier_budget_stop_halts(tmp_path, monkeypatch) -> None:
     assert written == 0
 
 
+def test_manifest_unions_legacy_file_and_parts(tmp_path) -> None:
+    """Resume correctness: load_manifest must union a legacy single-file manifest (what the live run
+    already wrote) with the new append-only part files."""
+    store = str(tmp_path)
+    os.makedirs(os.path.join(store, "raw"), exist_ok=True)
+    now = dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc)
+    legacy = pl.DataFrame(
+        [{"tier": "bars", "symbol": "OLD", "date": "2026-06-10", "rows": 5, "bytes": 9, "fetched_at": now}],
+        schema=raw_backfill.MANIFEST_SCHEMA,
+    )
+    legacy.write_parquet(raw_backfill.manifest_path(store, "bars"))
+    raw_backfill.write_manifest_part(
+        store, "bars",
+        [{"tier": "bars", "symbol": "NEW", "date": "2026-06-11", "rows": 7, "bytes": 8, "fetched_at": now}],
+        part_seq=1,
+    )
+    merged = raw_backfill.load_manifest(store, "bars")
+    assert merged.height == 2
+    assert raw_backfill.done_keys(merged) == {("OLD", "2026-06-10"), ("NEW", "2026-06-11")}
+
+
 def test_rank_by_dollar_volume_reads_bars(tmp_path) -> None:
     store = str(tmp_path)
     for symbol, dollar in (("HIGH", 1000.0), ("LOW", 1.0)):

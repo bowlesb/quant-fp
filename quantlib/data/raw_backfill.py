@@ -68,6 +68,7 @@ TRADES_CHUNK_DAYS = 5  # trading days per single-symbol trades request
 # 2-day NVDA chunk). Default 1 day => same peak memory as the original per-day path; raise only when the
 # run container has the RAM headroom (each concurrent worker holds one chunk).
 QUOTES_CHUNK_DAYS = 1
+MANIFEST_FLUSH_EVERY = 500  # buffer this many manifest entries before writing one append-only part file
 
 MANIFEST_SCHEMA: dict[str, pl.DataType] = {
     "tier": pl.String,
@@ -158,11 +159,27 @@ def manifest_path(store: str, tier: str) -> str:
     return os.path.join(store, "raw", f"_manifest_{tier}.parquet")
 
 
+def manifest_dir(store: str, tier: str) -> str:
+    """Directory of append-only manifest PART files. Each flush writes one immutable part — recording a
+    partition is then O(part size), not O(total manifest). load_manifest unions all parts (+ any legacy
+    single-file manifest from an earlier run), so resume sees every prior fetch."""
+    return os.path.join(store, "raw", f"_manifest_{tier}.d")
+
+
 def load_manifest(store: str, tier: str) -> pl.DataFrame:
-    path = manifest_path(store, tier)
-    if os.path.exists(path):
-        return pl.read_parquet(path)
-    return pl.DataFrame(schema=MANIFEST_SCHEMA)
+    """Union the legacy single-file manifest (if present) with every append-only part file."""
+    frames = []
+    legacy = manifest_path(store, tier)
+    if os.path.exists(legacy):
+        frames.append(pl.read_parquet(legacy))
+    parts_dir = manifest_dir(store, tier)
+    if os.path.isdir(parts_dir):
+        for name in sorted(os.listdir(parts_dir)):
+            if name.endswith(".parquet"):
+                frames.append(pl.read_parquet(os.path.join(parts_dir, name)))
+    if not frames:
+        return pl.DataFrame(schema=MANIFEST_SCHEMA)
+    return pl.concat(frames, how="vertical") if len(frames) > 1 else frames[0]
 
 
 def done_keys(manifest: pl.DataFrame) -> set[tuple[str, str]]:
@@ -177,18 +194,20 @@ def done_keys(manifest: pl.DataFrame) -> set[tuple[str, str]]:
     }
 
 
-def append_manifest(store: str, tier: str, manifest: pl.DataFrame, entry: dict) -> pl.DataFrame:
-    """Append one entry and persist the tier manifest atomically (write-tmp-then-rename)."""
-    row = pl.DataFrame([entry], schema=MANIFEST_SCHEMA)
-    updated = pl.concat([manifest, row], how="vertical") if manifest.height else row
-    path = manifest_path(store, tier)
-    # Per-process unique tmp name: within a process the lock serializes this, and a per-pid tmp keeps a
-    # transient cross-process overlap (e.g. an old run still winding down while a new one starts) from
-    # racing on a shared tmp -> rename (each process renames only its OWN tmp; no FileNotFoundError).
-    tmp_path = f"{path}.{os.getpid()}.tmp"
-    updated.write_parquet(tmp_path)
-    os.replace(tmp_path, path)
-    return updated
+def write_manifest_part(store: str, tier: str, entries: list[dict], part_seq: int) -> None:
+    """Persist a batch of manifest entries as ONE immutable append-only part file (atomic tmp+rename).
+    Part name is (pid, seq)-unique so concurrent/overlapping processes never collide. Resume tolerates a
+    crash mid-buffer: only the unflushed entries are lost and their partitions are simply re-fetched."""
+    if not entries:
+        return
+    parts_dir = manifest_dir(store, tier)
+    os.makedirs(parts_dir, exist_ok=True)
+    frame = pl.DataFrame(entries, schema=MANIFEST_SCHEMA)
+    name = f"part-{os.getpid()}-{part_seq:08d}.parquet"
+    final_path = os.path.join(parts_dir, name)
+    tmp_path = f"{final_path}.tmp"
+    frame.write_parquet(tmp_path)
+    os.replace(tmp_path, final_path)
 
 
 def free_bytes(store: str) -> int:
@@ -211,11 +230,12 @@ def write_partition(store: str, tier: str, symbol: str, day: dt.date, frame: pl.
 class _TierProgress:
     """Thread-safe shared state for a tier's concurrent fetch.
 
-    All mutation of the manifest, the done-key set, the running byte total and the stop flag happens
-    under a SINGLE lock so that workers fetching different symbols cannot: (a) double-fetch the same
-    (symbol, date), (b) corrupt the manifest parquet on append, or (c) overshoot the disk budget. The
-    fetch + parquet write themselves run OUTSIDE the lock (the slow, IO-bound part) so threads make
-    real concurrent progress; only the small book-keeping critical sections serialize.
+    The done-key set, byte totals, stop flag and the manifest buffer mutate under a SINGLE lock so
+    workers fetching different symbols cannot double-fetch a (symbol, date) or overshoot the budget.
+    Manifest persistence is APPEND-ONLY + buffered: entries accumulate in memory and flush as one
+    immutable part file every `MANIFEST_FLUSH_EVERY` (so recording a partition is O(buffer), not
+    O(total manifest) — the batched fetch otherwise drowns in O(n^2) full-manifest rewrites). The
+    fetch + parquet write run OUTSIDE the lock (the slow IO) so threads make real concurrent progress.
     """
 
     def __init__(self, store: str, tier: str, budget_bytes: int) -> None:
@@ -223,12 +243,14 @@ class _TierProgress:
         self.tier = tier
         self.budget_bytes = budget_bytes
         self.lock = threading.Lock()
-        self.manifest = load_manifest(store, tier)
-        self.done = done_keys(self.manifest)
+        manifest = load_manifest(store, tier)
+        self.done = done_keys(manifest)
         self.written = 0
         self.bytes_written = 0
-        self.budget_used = int(self.manifest["bytes"].sum()) if self.manifest.height else 0
+        self.budget_used = int(manifest["bytes"].sum()) if manifest.height else 0
         self.stopped = False
+        self._buffer: list[dict] = []
+        self._part_seq = 0
 
     def should_stop(self) -> bool:
         """True once the disk-headroom / budget STOP has tripped (sticky). Checked at the start of every
@@ -255,13 +277,28 @@ class _TierProgress:
             return [day for day in days if (symbol, day.isoformat()) not in self.done]
 
     def record(self, entry: dict, size: int) -> None:
-        """Atomically mark a (symbol, date) done, persist its manifest entry, update byte totals."""
+        """Mark a (symbol, date) done, buffer its manifest entry, update byte totals. Flushes the buffer
+        to an append-only part file once it reaches MANIFEST_FLUSH_EVERY."""
         with self.lock:
             self.done.add((entry["symbol"], entry["date"]))
-            self.manifest = append_manifest(self.store, self.tier, self.manifest, entry)
+            self._buffer.append(entry)
             self.written += 1
             self.bytes_written += size
             self.budget_used += size
+            if len(self._buffer) >= MANIFEST_FLUSH_EVERY:
+                self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        if not self._buffer:
+            return
+        self._part_seq += 1
+        write_manifest_part(self.store, self.tier, self._buffer, self._part_seq)
+        self._buffer = []
+
+    def flush(self) -> None:
+        """Persist any buffered entries — call once a tier's thread pool drains so the tail isn't lost."""
+        with self.lock:
+            self._flush_locked()
 
 
 def chunk_list(items: list, size: int) -> list[list]:
@@ -351,6 +388,7 @@ def fetch_bars_tier(
         futures = [executor.submit(_fetch_bars_unit, progress, batch, chunk) for batch, chunk in units]
         for future in as_completed(futures):
             future.result()
+    progress.flush()
     logger.info(
         "tier=bars done (%d partitions, %.3fGB this run, %d units, %d workers)",
         progress.written, progress.bytes_written / 1024**3, len(units), config.max_workers,
@@ -375,6 +413,7 @@ def fetch_ticks_tier(
         ]
         for future in as_completed(futures):
             future.result()
+    progress.flush()
     logger.info(
         "tier=%s done (%d partitions, %.3fGB this run, %d units, %d workers)",
         tier, progress.written, progress.bytes_written / 1024**3, len(units), config.max_workers,
