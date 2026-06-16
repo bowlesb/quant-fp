@@ -86,6 +86,32 @@ def test_open_fill_close_lifecycle(throwaway_store: BetStore) -> None:
     assert store.list_open() == []
 
 
+def test_update_exit_coid_rewrites_handle_while_closing(throwaway_store: BetStore) -> None:
+    store = throwaway_store
+    now = dt.datetime(2026, 6, 15, 14, 30, tzinfo=dt.timezone.utc)
+    hold = now + dt.timedelta(seconds=900)
+    store.record_open("SPY", "buy", 50.0, "smoke_SPY_z", now, hold)
+    store.mark_filled("smoke_SPY_z", 751.0, 50.0 / 751.0)
+    store.mark_closing("smoke_SPY_z", "smoke_SPY_z_exit")
+    assert store.list_open()[0]["exit_order_id"] == "smoke_SPY_z_exit"
+
+    # A lost exit gets a fresh coid; the bet stays 'closing' (position still open).
+    store.update_exit_coid("smoke_SPY_z", "smoke_SPY_z_exit_r1")
+    bet = store.list_open()[0]
+    assert bet["status"] == "closing"
+    assert bet["exit_order_id"] == "smoke_SPY_z_exit_r1"
+
+
+def test_update_exit_coid_noop_when_not_closing(throwaway_store: BetStore) -> None:
+    store = throwaway_store
+    now = dt.datetime(2026, 6, 15, 15, 0, tzinfo=dt.timezone.utc)
+    hold = now + dt.timedelta(seconds=900)
+    store.record_open("AAPL", "buy", 50.0, "smoke_AAPL_o", now, hold)
+    # status is 'open', not 'closing' -> guard prevents rewriting an exit coid prematurely.
+    store.update_exit_coid("smoke_AAPL_o", "smoke_AAPL_o_exit_r1")
+    assert store.list_open()[0]["exit_order_id"] is None
+
+
 def test_record_open_idempotent(throwaway_store: BetStore) -> None:
     store = throwaway_store
     now = dt.datetime(2026, 6, 15, 15, 0, tzinfo=dt.timezone.utc)
