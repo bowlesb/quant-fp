@@ -18,6 +18,7 @@ Run inside the fp-dev image with the /store volume mounted and Alpaca creds in e
         --budget-tb 1.8 --store /store
 A `--symbols AAPL,SPY,NVDA --days 2` sample mode fetches a tiny set for evidence without ranking.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -54,6 +55,7 @@ from quantlib.data.raw_store import (
     manifest_dir,
     manifest_path,
     partition_dir,
+    reconcile_manifest_from_disk,
     write_manifest_part,
     write_partition,
 )
@@ -74,6 +76,7 @@ __all__ = [
     "manifest_dir",
     "manifest_path",
     "partition_dir",
+    "reconcile_manifest_from_disk",
     "write_manifest_part",
     "write_partition",
 ]
@@ -103,9 +106,15 @@ TRADES_CHUNK_DAYS = 5  # trading days per single-symbol trades request
 # 2-day NVDA chunk). Default 1 day => same peak memory as the original per-day path; raise only when the
 # run container has the RAM headroom (each concurrent worker holds one chunk).
 QUOTES_CHUNK_DAYS = 1
-MANIFEST_FLUSH_EVERY = 500  # buffer this many manifest entries before writing one append-only part file
-RANK_SAMPLE_DAYS = 20  # rank dollar-volume on the most recent N days (liquidity tiering is day-stable)
-RANK_WORKERS = 16  # concurrent symbol reads when ranking (IO-bound over many tiny parquet files)
+MANIFEST_FLUSH_EVERY = (
+    500  # buffer this many manifest entries before writing one append-only part file
+)
+RANK_SAMPLE_DAYS = (
+    20  # rank dollar-volume on the most recent N days (liquidity tiering is day-stable)
+)
+RANK_WORKERS = (
+    16  # concurrent symbol reads when ranking (IO-bound over many tiny parquet files)
+)
 
 
 @dataclass
@@ -116,7 +125,9 @@ class BackfillConfig:
     top_quotes: int
     budget_bytes: int
     symbols: list[str] | None  # explicit sample set; None => full universe
-    days: int | None  # explicit day count for sample mode; None => `months` of trading days
+    days: (
+        int | None
+    )  # explicit day count for sample mode; None => `months` of trading days
     max_workers: int  # thread-pool size for concurrent request-units
     bars_symbols_per_request: int  # symbols per multi-symbol bars request
     bars_chunk_days: int  # trading days per bars request
@@ -142,7 +153,9 @@ def data_client() -> StockHistoricalDataClient:
     # requests.Session at ``_session``; mount a bigger pool on it (defensive getattr if the attr moves).
     session = getattr(client, "_session", None)
     if session is not None:
-        adapter = HTTPAdapter(pool_connections=HTTP_POOL_SIZE, pool_maxsize=HTTP_POOL_SIZE)
+        adapter = HTTPAdapter(
+            pool_connections=HTTP_POOL_SIZE, pool_maxsize=HTTP_POOL_SIZE
+        )
         session.mount("https://", adapter)
         session.mount("http://", adapter)
     return client
@@ -154,7 +167,8 @@ _thread_local = threading.local()
 def _thread_client() -> StockHistoricalDataClient:
     """One data client PER WORKER THREAD, so each thread has its OWN HTTP connection pool — this is what
     actually eliminates the cross-thread "pool is full, discarding connection" churn that serialized the
-    parallel fetch (a single shared client = a single pool of 10, contended by all workers)."""
+    parallel fetch (a single shared client = a single pool of 10, contended by all workers).
+    """
     client = getattr(_thread_local, "client", None)
     if client is None:
         client = data_client()
@@ -210,12 +224,16 @@ class _TierProgress:
 
     def should_stop(self) -> bool:
         """True once the disk-headroom / budget STOP has tripped (sticky). Checked at the start of every
-        request-unit so a tier winds down cleanly: in-flight units finish, remaining ones no-op."""
+        request-unit so a tier winds down cleanly: in-flight units finish, remaining ones no-op.
+        """
         with self.lock:
             if self.stopped:
                 return True
             disk_free = free_bytes(self.store)
-            if disk_free <= SAFETY_HEADROOM_BYTES or self.budget_used >= self.budget_bytes:
+            if (
+                disk_free <= SAFETY_HEADROOM_BYTES
+                or self.budget_used >= self.budget_bytes
+            ):
                 self.stopped = True
                 logger.warning(
                     "tier=%s STOP: budget/headroom reached (free=%.1fGB, used=%.2fTB/%.2fTB)",
@@ -305,7 +323,8 @@ def _fetch_bars_unit(
     progress: _TierProgress, symbols: list[str], day_chunk: list[dt.date]
 ) -> None:
     """One MULTI-SYMBOL bars request over a day-chunk: fetch all symbols' bars for [chunk0..chunkN] in a
-    single paginated call, then split each symbol's response into its pending per-day partitions."""
+    single paginated call, then split each symbol's response into its pending per-day partitions.
+    """
     if progress.should_stop():
         return
     pending = {symbol: progress.pending_days(symbol, day_chunk) for symbol in symbols}
@@ -341,19 +360,29 @@ def fetch_bars_tier(
     symbol_batches = chunk_list(symbols, config.bars_symbols_per_request)
     units = [(batch, chunk) for batch in symbol_batches for chunk in day_chunks]
     with ThreadPoolExecutor(max_workers=max(1, config.max_workers)) as executor:
-        futures = [executor.submit(_fetch_bars_unit, progress, batch, chunk) for batch, chunk in units]
+        futures = [
+            executor.submit(_fetch_bars_unit, progress, batch, chunk)
+            for batch, chunk in units
+        ]
         for future in as_completed(futures):
             future.result()
     progress.flush()
     logger.info(
         "tier=bars done (%d partitions, %.3fGB this run, %d units, %d workers)",
-        progress.written, progress.bytes_written / 1024**3, len(units), config.max_workers,
+        progress.written,
+        progress.bytes_written / 1024**3,
+        len(units),
+        config.max_workers,
     )
     return progress.written, progress.bytes_written
 
 
 def fetch_ticks_tier(
-    config: BackfillConfig, tier: str, symbols: list[str], days: list[dt.date], chunk_days: int
+    config: BackfillConfig,
+    tier: str,
+    symbols: list[str],
+    days: list[dt.date],
+    chunk_days: int,
 ) -> tuple[int, int]:
     """Trades/quotes via SINGLE-SYMBOL + DATE-RANGE requests: units = (symbol) x (day chunk). One
     request fetches `chunk_days` days for a symbol (paginated), bounding peak memory on the large tick
@@ -372,7 +401,11 @@ def fetch_ticks_tier(
     progress.flush()
     logger.info(
         "tier=%s done (%d partitions, %.3fGB this run, %d units, %d workers)",
-        tier, progress.written, progress.bytes_written / 1024**3, len(units), config.max_workers,
+        tier,
+        progress.written,
+        progress.bytes_written / 1024**3,
+        len(units),
+        config.max_workers,
     )
     return progress.written, progress.bytes_written
 
@@ -407,13 +440,23 @@ def rank_by_dollar_volume(
     `sample_days <= 0` scores all days (the exact, slower form)."""
     scored_days = days[-sample_days:] if sample_days > 0 else days
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-        totals = executor.map(lambda symbol: _symbol_dollar_volume(store, symbol, scored_days), symbols)
+        totals = executor.map(
+            lambda symbol: _symbol_dollar_volume(store, symbol, scored_days), symbols
+        )
         scores = dict(zip(symbols, totals))
     return sorted(symbols, key=lambda symbol: scores[symbol], reverse=True)
 
 
 def run(config: BackfillConfig) -> None:
     os.makedirs(os.path.join(config.store, "raw"), exist_ok=True)
+
+    # Reconcile FIRST: an OOM/crash can lose a worker's unflushed manifest buffer even though its
+    # partitions were already written to disk, so a naive resume re-fetches >100k complete tick units
+    # (observed after two quotes-tier OOMs). Recording the orphaned on-disk partitions into the manifest
+    # makes the resume skip them. Idempotent + cheap relative to fetching, so it runs every time.
+    for tier in ("trades", "quotes"):
+        reconcile_manifest_from_disk(config.store, tier)
+
     trade_client = trading_client()
 
     today = dt.datetime.now(dt.timezone.utc).date()
@@ -429,16 +472,23 @@ def run(config: BackfillConfig) -> None:
         all_days = trading_days(trade_client, today - dt.timedelta(days=14), today)
         days = all_days[-config.days :]
         universe = universe_symbols(trade_client)
-        logger.info("DAILY mode: %d universe symbols x %d recent trading days", len(universe), len(days))
+        logger.info(
+            "DAILY mode: %d universe symbols x %d recent trading days",
+            len(universe),
+            len(days),
+        )
     else:
         lookback = int(config.months * 31) + 7
         days = trading_days(trade_client, today - dt.timedelta(days=lookback), today)
         days = days[-int(config.months * 21) :]
         universe = universe_symbols(trade_client)
-        logger.info("FULL mode: %d universe symbols x %d trading days", len(universe), len(days))
+        logger.info(
+            "FULL mode: %d universe symbols x %d trading days", len(universe), len(days)
+        )
 
     logger.info(
-        "disk free=%.1fGB, budget=%.2fTB", free_bytes(config.store) / 1024**3,
+        "disk free=%.1fGB, budget=%.2fTB",
+        free_bytes(config.store) / 1024**3,
         config.budget_bytes / BYTES_PER_TB,
     )
 
@@ -450,7 +500,9 @@ def run(config: BackfillConfig) -> None:
     quote_symbols = ranked[: config.top_quotes]
     logger.info(
         "ranked %d symbols; trades top-%d, quotes top-%d",
-        len(ranked), len(trade_symbols), len(quote_symbols),
+        len(ranked),
+        len(trade_symbols),
+        len(quote_symbols),
     )
 
     # Ticks ALWAYS use the direct-httpx multiprocess engine — it is strictly faster than the SDK path
@@ -461,37 +513,55 @@ def run(config: BackfillConfig) -> None:
         config.threads_per_process,
     )
     trades_written, trades_bytes = run_tier_fast(
-        config.store, "trades", trade_symbols, days, config.processes, config.threads_per_process
+        config.store,
+        "trades",
+        trade_symbols,
+        days,
+        config.processes,
+        config.threads_per_process,
     )
     quotes_written, quotes_bytes = run_tier_fast(
-        config.store, "quotes", quote_symbols, days, config.processes, config.threads_per_process
+        config.store,
+        "quotes",
+        quote_symbols,
+        days,
+        config.processes,
+        config.threads_per_process,
     )
     logger.info("TRADES: %d partitions, %.3fGB", trades_written, trades_bytes / 1024**3)
     logger.info("QUOTES: %d partitions, %.3fGB", quotes_written, quotes_bytes / 1024**3)
 
     logger.info(
         "DONE: bars=%.3fGB trades=%.3fGB quotes=%.3fGB total=%.3fGB",
-        bars_bytes / 1024**3, trades_bytes / 1024**3, quotes_bytes / 1024**3,
+        bars_bytes / 1024**3,
+        trades_bytes / 1024**3,
+        quotes_bytes / 1024**3,
         (bars_bytes + trades_bytes + quotes_bytes) / 1024**3,
     )
 
 
 def parse_args(argv: list[str]) -> BackfillConfig:
-    parser = argparse.ArgumentParser(description="Resumable raw bars/trades/quotes backfill")
+    parser = argparse.ArgumentParser(
+        description="Resumable raw bars/trades/quotes backfill"
+    )
     parser.add_argument("--store", default=DEFAULT_STORE)
     parser.add_argument("--months", type=int, default=6)
     parser.add_argument("--top-trades", type=int, default=1500)
     parser.add_argument("--top-quotes", type=int, default=300)
     parser.add_argument("--budget-tb", type=float, default=1.8)
     parser.add_argument("--symbols", default=None, help="comma list => SAMPLE mode")
-    parser.add_argument("--days", type=int, default=None, help="recent trading days for SAMPLE mode")
+    parser.add_argument(
+        "--days", type=int, default=None, help="recent trading days for SAMPLE mode"
+    )
     parser.add_argument(
         "--max-workers",
         type=int,
         default=int(os.environ.get("RAW_BACKFILL_WORKERS", DEFAULT_MAX_WORKERS)),
         help="thread-pool size for concurrent request-units (env RAW_BACKFILL_WORKERS)",
     )
-    parser.add_argument("--bars-symbols-per-request", type=int, default=BARS_SYMBOLS_PER_REQUEST)
+    parser.add_argument(
+        "--bars-symbols-per-request", type=int, default=BARS_SYMBOLS_PER_REQUEST
+    )
     parser.add_argument("--bars-chunk-days", type=int, default=BARS_CHUNK_DAYS)
     parser.add_argument("--trades-chunk-days", type=int, default=TRADES_CHUNK_DAYS)
     parser.add_argument("--quotes-chunk-days", type=int, default=QUOTES_CHUNK_DAYS)
@@ -504,11 +574,15 @@ def parse_args(argv: list[str]) -> BackfillConfig:
     parser.add_argument(
         "--threads-per-process",
         type=int,
-        default=int(os.environ.get("RAW_BACKFILL_THREADS", DEFAULT_THREADS_PER_PROCESS)),
+        default=int(
+            os.environ.get("RAW_BACKFILL_THREADS", DEFAULT_THREADS_PER_PROCESS)
+        ),
         help="threads per tick-engine worker process (env RAW_BACKFILL_THREADS)",
     )
     args = parser.parse_args(argv)
-    symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
+    symbols = (
+        [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
+    )
     return BackfillConfig(
         store=args.store,
         months=args.months,
