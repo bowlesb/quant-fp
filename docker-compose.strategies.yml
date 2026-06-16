@@ -1,0 +1,36 @@
+# Strategy containers — each subscribes to the feature-vector bus for its declared symbols, places +
+# manages PAPER bets, and records to its OWN Postgres schema. Run alongside the main stack:
+#
+#   docker build -f Dockerfile.fp -t fp-dev .                       # build the shared base once
+#   docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --build smoke-strategy
+#
+# smoke-strategy is the FIRST one: a deliberately trivial end-to-end proof of the apparatus.
+name: quant
+
+services:
+  smoke-strategy:
+    build:
+      context: .
+      dockerfile: strategies/smoke/Dockerfile
+    image: smoke-strategy
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file: .env
+    environment:
+      BUS_REDIS_URL: "redis://quant-redis:6379/0"
+      DB_HOST: "timescaledb"
+      DB_PORT: "5432"
+      DB_NAME: "quant"
+      DB_USER: "quant"
+      # Risk caps + cadence (all fail-safe defaults; override here or in .env).
+      SMOKE_SYMBOLS: "AAPL,MSFT,NVDA,SPY,AMD"
+      SMOKE_BET_INTERVAL_SEC: "300"
+      SMOKE_NOTIONAL_USD: "50"
+      SMOKE_HOLD_SEC: "900"
+      SMOKE_MAX_CONCURRENT: "3"
+      SMOKE_MAX_TOTAL_NOTIONAL_USD: "200"
+      # Kill switch: "1" = trade (paper); "0" = consume + log only, place NO orders.
+      SMOKE_ENABLED: "1"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
