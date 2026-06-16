@@ -22,20 +22,43 @@ Grading that day as a parity FAILURE would condemn a correct feature. So we must
 `(symbol, day)`, whether the live capture was **CLEAN** enough to be a fair parity test, and grade each
 feature over **CLEAN comparisons only**.
 
+### Session scope — extended hours are NOT a contamination signal
+
+We capture **pre-market** (~08:00 UTC / 04:00 ET), the **regular session** (13:30–20:00 UTC / 09:30–16:00
+ET), and **post-market** (to ~24:00 UTC). A full liquid-name day is **~850+ minutes, not 390**, and
+extended-hours minutes are legitimately **sparse** — an illiquid name may print few or zero pre/post-market
+bars, and a minute with no trade simply has no bar (normal, not a gap). Requiring full-day contiguous
+coverage would wrongly flag almost every symbol-day.
+
+So the cleanliness check is scoped to the **regular session only** (`rth_mask`, ~390 minutes), which IS
+dense for any actively traded name. Extended-hours coverage is bonus, never a contamination signal.
+
 ### The cleanliness heuristic (`quantlib/features/cleanliness.py`)
 
-A stream `(symbol, day)` is **CLEAN** iff, over the regular session (09:30–16:00 ET = 390 minutes):
+Within the regular session, a capture restart is what we must catch: the live stream loses an **internal
+block** of minutes that backfill (the complete tape) had, so post-gap windows legitimately diverge. We
+measure that **relative to backfill**:
 
-1. **Coverage** — distinct RTH stream minutes ≥ **95%** of the minutes the **backfill** side actually
-   produced for that symbol-day. The denominator is "minutes truth had", not a flat 390, so a thin or
-   halted name that legitimately prints few bars is still clean.
-2. **No internal gap** — the largest gap between consecutive distinct RTH stream minutes is ≤ **5
-   minutes**. A capture restart leaves a multi-minute hole that breaks any window reaching across it; a
-   single missed print does not.
+1. **No internal missing run** (the primary signal) — the longest contiguous run of regular-session
+   minutes that **backfill produced but the stream did not** must be ≤ **5 minutes**. A restart leaves a
+   hole > this; a single missed print does not. A thin name with few-but-fully-matched backfill minutes
+   has **no** miss run relative to backfill, so it passes trivially — the fair reference is "what truth
+   had", never a flat 390.
+2. **Coverage floor** (a permissive secondary signal) — distinct regular-session stream minutes ≥ **90%**
+   of the minutes backfill produced. Catches a stream that is sparse *everywhere* vs a dense backfill
+   (capture started late and never caught up) without one long internal run.
 
 Failing either → **CONTAMINATED**: the day's comparisons for that symbol are recorded but **excluded
-from the grade** (marked, not counted as a failure). Per-symbol verdicts are persisted to
-`stream_symbol_day_cleanliness` (the audit trail behind why a symbol-day was excluded).
+from the grade**. Per-symbol verdicts are persisted to `stream_symbol_day_cleanliness` (the audit trail).
+
+### Clean-breadth floor (the sweep)
+
+A day must have ≥ **`MIN_CLEAN_SYMBOLS` (= 20)** clean symbols to contribute a clean-day grade at all.
+Grading off one or two marginal survivors of a contaminated day is noise — a single thin name's
+near-zero-denominator relative errors masquerade as failures and would file hundreds of spurious defects.
+Below the floor the day yields **no** clean comparison and every feature stays **PENDING** for it (no
+defects filed). A normal day has thousands of clean liquid names, so this only ever suppresses
+pathologically contaminated days.
 
 ## The trust state machine (`quantlib/features/trust_lifecycle.py`)
 

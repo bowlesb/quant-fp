@@ -16,7 +16,6 @@ import polars as pl
 import pytest
 
 from quantlib.features.cleanliness import (
-    MAX_GAP_MINUTES,
     MIN_COVERAGE_FRAC,
     clean_symbols,
     symbol_day_cleanliness,
@@ -31,6 +30,7 @@ from quantlib.features.trust_lifecycle import (
     defect_rows,
     lifecycle_state,
 )
+from quantlib.features.validation_sweep import MIN_CLEAN_SYMBOLS
 
 OPEN_ET = dt.datetime(2026, 6, 12, 13, 30, tzinfo=dt.timezone.utc)  # 09:30 ET (June -> EDT, UTC-4)
 
@@ -59,7 +59,7 @@ def test_full_session_symbol_is_clean() -> None:
     assert row["is_clean"] is True
     assert row["reason"] == "clean"
     assert row["coverage_frac"] == pytest.approx(1.0)
-    assert row["max_gap_minutes"] == 1
+    assert row["max_gap_minutes"] == 0  # no minute backfill had that the stream lacked
 
 
 def test_internal_gap_symbol_is_contaminated() -> None:
@@ -69,7 +69,7 @@ def test_internal_gap_symbol_is_contaminated() -> None:
     stream = [off for off in back if not (100 <= off < 116)]
     cleanliness = symbol_day_cleanliness(_coverage_frame("GAP", stream, back))
     row = cleanliness.row(0, named=True)
-    assert row["max_gap_minutes"] > MAX_GAP_MINUTES
+    assert row["max_gap_minutes"] == 16  # the contiguous backfill-had-but-stream-missing run
     assert row["is_clean"] is False
     assert row["reason"] == "internal_gap"
 
@@ -81,16 +81,41 @@ def test_low_coverage_symbol_is_contaminated() -> None:
     row = cleanliness.row(0, named=True)
     assert row["coverage_frac"] < MIN_COVERAGE_FRAC
     assert row["is_clean"] is False
-    assert row["reason"] == "low_coverage"
 
 
 def test_sparse_but_complete_thin_name_is_clean() -> None:
     """A thin name that legitimately prints few bars is CLEAN: coverage is vs backfill-present minutes, not
-    a flat 390, and its minutes are contiguous (no internal restart hole)."""
+    a flat 390, and it has no internal miss run relative to backfill."""
     back = list(range(0, 60))  # truth only had 60 contiguous minutes (a thin/halted name)
     stream = list(range(0, 60))
     cleanliness = symbol_day_cleanliness(_coverage_frame("THIN", stream, back))
     assert cleanliness.row(0, named=True)["is_clean"] is True
+
+
+def test_extended_hours_sparsity_is_not_contamination() -> None:
+    """Extended-hours minutes (outside 09:30–16:00 ET) are excluded entirely: a name with sparse/zero
+    pre/post-market bars but a complete REGULAR session is CLEAN, never flagged for the missing EH minutes.
+    Here both sides have a dense regular session (offsets 0..389) and only the STREAM has scattered
+    pre-market prints — the EH difference must not affect the verdict."""
+    regular = list(range(390))
+    # pre-market offsets are negative (before the 09:30 open); only the stream captured a few of them.
+    pre_market_stream = [-120, -90, -30]
+    frame = _coverage_frame("EH", regular + pre_market_stream, regular)
+    cleanliness = symbol_day_cleanliness(frame)
+    row = cleanliness.row(0, named=True)
+    assert row["is_clean"] is True
+    assert row["n_backfill_minutes"] == 390  # EH minutes excluded from the count on both sides
+    assert row["max_gap_minutes"] == 0
+
+
+def test_single_missed_print_within_session_is_clean() -> None:
+    """A lone missed minute (<= MAX_GAP_MINUTES) is NOT a restart — the symbol-day stays clean."""
+    back = list(range(390))
+    stream = [off for off in back if off != 200]  # one isolated missing minute
+    cleanliness = symbol_day_cleanliness(_coverage_frame("BLIP", stream, back))
+    row = cleanliness.row(0, named=True)
+    assert row["max_gap_minutes"] == 1
+    assert row["is_clean"] is True
 
 
 def test_clean_symbols_filters() -> None:
@@ -99,6 +124,22 @@ def test_clean_symbols_filters() -> None:
     frame = pl.concat([_coverage_frame("FULL", full, full), _coverage_frame("HALF", half, full)])
     cleanliness = symbol_day_cleanliness(frame)
     assert clean_symbols(cleanliness) == ["FULL"]
+
+
+def test_clean_breadth_floor_suppresses_grading_on_contaminated_day() -> None:
+    """A day with fewer clean symbols than MIN_CLEAN_SYMBOLS is too contaminated to grade — the sweep
+    contributes no clean-day comparison, so no feature is condemned off a handful of marginal survivors.
+    We assert the gate ARITHMETIC (the sweep's I/O is exercised by the live run)."""
+    full = list(range(390))
+    # one clean name among contaminated ones -> below the breadth floor
+    frame = pl.concat(
+        [_coverage_frame("ONLY_CLEAN", full, full)]
+        + [_coverage_frame(f"DIRTY{i}", list(range(100)), full) for i in range(5)]
+    )
+    cleanliness = symbol_day_cleanliness(frame)
+    clean_count = int(cleanliness["is_clean"].sum())
+    assert clean_count == 1
+    assert clean_count < MIN_CLEAN_SYMBOLS  # the sweep would skip grading and leave features PENDING
 
 
 def _cell(feature: str, symbol: str, n_match: int, n_mismatch: int) -> dict:
