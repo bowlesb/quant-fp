@@ -12,9 +12,11 @@ Two momentum-quality shapes beyond the second-moment residual spread:
     the window. A run length is a sequential state machine over the ordered returns (not a sum), so it is the
     one piece evaluated by a light per-window pass over the return signs.
 
-``compute_latest`` is the base-class default (the SAME computation filtered to T), so backfill and live are
-identical by construction (guarded by tests/test_fp_latest.py). This is not a ``ReductionGroup``, so the
-incremental reduction engine does not run it; the live path re-evaluates over the trailing buffer.
+``compute_latest`` runs the SAME ``compute()`` on the buffer SLICED to this group's trailing window
+(``LOOKBACK_MINUTES`` = deepest declared window + slack) before filtering to T — not a second formulation, so
+backfill and live stay identical by construction (guarded by tests/test_fp_latest.py); it just avoids re-rolling
+the ~300m buffer the group never reads. This is not a ``ReductionGroup``, so the incremental reduction engine
+does not run it.
 """
 from __future__ import annotations
 
@@ -31,6 +33,12 @@ from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
 RUN_TOL = 1e-4
+
+# Live ``compute_latest`` slices the buffer to this trailing depth before running the SAME ``compute()``.
+# The deepest declared window is ``max(WINDOWS)``; +15m of slack covers the 1-bar lag the per-minute return
+# (``close.shift(1)``) needs at the window's start and leaves wide margin (correctness > speed). Too-tight a
+# slice fails the generic parity test (tests/test_fp_latest.py) loudly — the guard.
+LOOKBACK_MINUTES = max(WINDOWS) + 15
 MIN_POINTS = 4.0  # the old codebase required >=4 closes for a meaningful residual distribution
 # Skewness = m3 / m2**1.5; m2 is the residual VARIANCE (price^2 units). An absolute ``m2 > 0`` guard is too
 # loose: when the window's price path is near-perfectly linear the residual variance collapses to f32 noise
@@ -122,8 +130,17 @@ class MomentumRunGroup(FeatureGroup):
             schema = {"symbol": pl.String, "minute": pl.Datetime("us", "UTC"), **{name: pl.Float64 for name in self.feature_names}}
             return pl.DataFrame(schema=schema)
         epoch = pl.col("minute").dt.epoch("s").cast(pl.Float64)
+        # Center the time axis on each symbol's LATEST minute (not the frame's global earliest). Residual
+        # moments are origin-invariant, so this is mathematically identical, but it bounds |__x| to the window
+        # depth (<= max window) instead of the whole buffer (~250m). The skew rides THIRD-order centered sums
+        # (sxxx_c, sxxy_c, ...), each a catastrophic-cancellation difference whose float rounding is acutely
+        # sensitive to |__x|: a buffer-relative origin makes that rounding depend on how DEEP the buffer is, so
+        # the whole-buffer rolling and the window-sliced compute_latest would round a near-zero skew differently
+        # (a parity break on near-symmetric residuals). Anchoring on the shared per-symbol latest minute keeps
+        # |__x| identical for the latest window in both paths, so the window-sliced live form matches the
+        # backfill cell-for-cell (tests/test_fp_latest.py) — and conditions the third-order sums better overall.
         frame = frame.with_columns(
-            ((epoch - epoch.min()) / 60.0).alias("__x"),
+            ((epoch - epoch.max().over("symbol")) / 60.0).alias("__x"),
             pl.lit(1.0).alias("__one"),
             (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("__ret"),
         )
@@ -152,6 +169,12 @@ class MomentumRunGroup(FeatureGroup):
             )
             out = out.join(piece, on=["symbol", "minute"], how="left")
         return out.select(["symbol", "minute", *self.feature_names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Window-sliced live path: the SAME rolling ``compute()`` on the trailing ``LOOKBACK_MINUTES`` it reads,
+        filtered to T. Parity-true by construction — the run-length is capped to in-window positions and the
+        rolling power sums read only the trailing window, so bars dropped before the slice cannot change T."""
+        return self.compute_latest_on_window(ctx, LOOKBACK_MINUTES)
 
     def _present_run_lengths(self, frame: pl.DataFrame) -> pl.DataFrame:
         """The present-return rows (non-null ``__ret``) with the per-symbol global run-length column ``__rl``."""

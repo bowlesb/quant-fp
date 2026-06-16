@@ -22,8 +22,9 @@ residual skew.
 
 Why a hand-written ``FeatureGroup`` and not a ``ReductionGroup``: the residual SS of a near-perfect intraday
 fit is the catastrophic-cancellation difference of two nearly-equal sums, so it must be evaluated from ONE sum
-source. ``compute_latest`` is the base-class default (the SAME rolling pass filtered to T), so backfill and
-live ride the IDENTICAL polars expression — no kernel-vs-rolling float divergence to fail parity (guarded by
+source. ``compute_latest`` runs the IDENTICAL rolling ``compute()`` on the buffer SLICED to this group's
+trailing window (``LOOKBACK_MINUTES`` = deepest declared window + slack) before filtering to T, so backfill and
+live ride the SAME polars expression on the minimal input — no kernel-vs-rolling float divergence to fail parity (guarded by
 tests/test_fp_latest.py). residual SKEW (the third moment) lives in ``momentum_run`` alongside the longest-run.
 """
 from __future__ import annotations
@@ -42,13 +43,28 @@ from quantlib.features.registry import register
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
 RESID_TOL = 1e-4
 
+# Live ``compute_latest`` slices the buffer to this trailing depth before running the SAME ``compute()``.
+# The deepest declared window is ``max(WINDOWS)``; +15m of slack is far more than the rolling power sums need
+# (they read only the trailing window ending at T), kept generous because correctness > speed and the generic
+# parity test (tests/test_fp_latest.py) fails loudly if it were ever too tight.
+LOOKBACK_MINUTES = max(WINDOWS) + 15
+
 MIN_POINTS = 4.0  # the old codebase required >=4 closes for a meaningful residual distribution
+# Degenerate near-linear cutoff (mirrors momentum_run's REL_RESID_FLOOR). residual_std = sqrt(m2)/mean_close
+# where m2 is the residual VARIANCE (a difference of large near-equal power sums). When the window's price path
+# is near-perfectly linear, m2 collapses to f32 noise (~1e-18 of the price level) yet stays positive — a
+# meaningless ~1e-6%% reading whose low bits are sensitive to the rolling accumulator's history (so the
+# whole-buffer rolling and a window-sliced rolling round it differently). Gate on a RELATIVE residual spread:
+# require the residual std to exceed REL_RESID_FLOOR (1e-6, far below any real intraday tick noise) of the
+# window's mean price, i.e. m2 > (REL_RESID_FLOOR * mean_close)^2 — so a genuinely-flat window is null (not a
+# noise reading), which is both more correct AND makes the window-sliced ``compute_latest`` parity-true.
+REL_RESID_FLOOR = 1e-6
 
 
 def _residual_std(w: int) -> pl.Expr:
     """The OLS residual-std column (percent of mean price) over the trailing ``w`` minutes, from the rolling
-    power sums of the centered time axis (__x) and close. Undefined cells (n < MIN_POINTS or zero x-variance)
-    -> null."""
+    power sums of the centered time axis (__x) and close. Undefined cells (n < MIN_POINTS, zero x-variance, or a
+    degenerate residual spread below REL_RESID_FLOOR of the price level) -> null."""
     size = f"{w}m"
 
     def roll(name: str) -> pl.Expr:
@@ -63,8 +79,10 @@ def _residual_std(w: int) -> pl.Expr:
     slope = sxy_c / sxx_c
     ssr = (syy_c - slope * sxy_c).clip(lower_bound=0.0)
     mean_close = sy / n
-    defined = (n >= MIN_POINTS) & (sxx_c > 0.0)
-    return pl.when(defined).then((ssr / n).sqrt() / mean_close * 100.0).otherwise(None)
+    resid_var = ssr / n
+    resid_var_floor = (REL_RESID_FLOOR * mean_close).pow(2)  # (rel_eps * price)^2 — degenerate near-linear cutoff
+    defined = (n >= MIN_POINTS) & (sxx_c > 0.0) & (resid_var > resid_var_floor)
+    return pl.when(defined).then(resid_var.sqrt() / mean_close * 100.0).otherwise(None)
 
 
 @register
@@ -99,3 +117,8 @@ class ResidualAnalysisGroup(FeatureGroup):
         )
         feats = [_residual_std(w).alias(f"residual_std_{w}m") for w in WINDOWS]
         return frame.with_columns(feats).select(["symbol", "minute", *self.feature_names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Window-sliced live path: the SAME rolling ``compute()`` on the trailing ``LOOKBACK_MINUTES`` it reads,
+        filtered to T — parity-true by construction (the dropped older bars cannot affect a window ending at T)."""
+        return self.compute_latest_on_window(ctx, LOOKBACK_MINUTES)

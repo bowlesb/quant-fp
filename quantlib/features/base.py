@@ -143,6 +143,39 @@ class FeatureGroup(ABC):
             return out
         return out.filter(pl.col("minute") == out["minute"].max())
 
+    def compute_latest_on_window(self, ctx: BatchContext, lookback_minutes: int) -> pl.DataFrame:
+        """Parity-true fast ``compute_latest`` for a BOUNDED-window group: run the IDENTICAL ``compute()`` on
+        the input sliced to the trailing ``lookback_minutes`` it actually reads, then emit T's row per symbol.
+
+        This is NOT a second formulation — it is the same rolling ``compute()`` on the minimal input window, so
+        live == backfill by construction (the dropped older bars cannot influence a window that ends at T and
+        spans <= ``lookback_minutes``). ``lookback_minutes`` must be the group's deepest declared window plus
+        warmup slack (e.g. the 1-bar lag a return needs at the window's start); slice conservatively — the
+        generic parity test (tests/test_fp_latest.py) fails loudly if it is too tight, which is the guard.
+
+        Each input frame is filtered to its own ``minute >= (frame latest minute) - lookback_minutes``. The live
+        buffer ends every input at the same current minute T, so per-frame slicing keeps every bar inside the
+        trailing window the group reads (a sparse symbol still keeps its real bars — the window is by wall-clock
+        minute, not row count). A frame with no ``minute`` column (e.g. a static reference frame) is passed
+        through whole."""
+        sliced = {
+            name: self._slice_to_window(frame, lookback_minutes)
+            for name, frame in ctx.frames.items()
+        }
+        out = self.compute(BatchContext(frames=sliced))
+        if out.height == 0:
+            return out
+        return out.filter(pl.col("minute") == out["minute"].max())
+
+    @staticmethod
+    def _slice_to_window(frame: pl.DataFrame, lookback_minutes: int) -> pl.DataFrame:
+        """Keep only the trailing ``lookback_minutes`` of ``frame`` (by its own latest minute). Frames with no
+        ``minute`` column or no rows pass through unchanged."""
+        if "minute" not in frame.columns or frame.height == 0:
+            return frame
+        cutoff = pl.col("minute").max() - pl.duration(minutes=lookback_minutes)
+        return frame.filter(pl.col("minute") >= cutoff)
+
     @property
     def feature_names(self) -> list[str]:
         return [spec.name for spec in self.declare()]

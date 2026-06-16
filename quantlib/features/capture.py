@@ -69,10 +69,12 @@ TICK_SCHEMA = {column: pl.Float64 for column in TICK_COLUMNS}
 # ``sharded_capture.reduce_buffer_minutes`` (cross_sectional_rank's declared window + slack), so this
 # bump only deepens the per-shard MAP ring where swing lives; the reduce path stays small.
 #
-# FOLLOW-UP (queued, backlog P1.0 CRITICAL-2): this global depth taxes WINDOWED groups (esp. momentum_run,
-# the dominant term, which needs 60m) with recompute they don't use. Eliminate via per-group buffer-depth
-# slicing before compute_latest, or a stateful swing accumulator (its kernel is already an O(1)/bar state
-# machine — retain the fold across minutes, parity-gated like WindowedSumState). Neither blocks this fix.
+# This global depth would tax WINDOWED groups with recompute they don't use, so momentum_run and
+# residual_analysis (the dominant windowed terms, max 60m) override ``compute_latest`` to SLICE the buffer to
+# their own trailing window before running the SAME ``compute()`` (FeatureGroup.compute_latest_on_window,
+# parity-guarded by tests/test_fp_latest.py). Swing still needs the full premarket-inclusive session (its fold
+# resets at the day boundary), which is what keeps this MAP ring deep; a stateful swing accumulator (retain the
+# O(1)/bar fold across minutes, parity-gated like WindowedSumState) is the remaining way to shrink it.
 DEFAULT_BUFFER_MINUTES = 300
 
 # Sacred parity tolerance (CLAUDE.md ~1e-6 rel). The self-check measures live incremental-vs-batch
