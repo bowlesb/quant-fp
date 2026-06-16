@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 
-from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 
 from quantlib.bus.consumer import BusConsumer
@@ -32,12 +31,9 @@ def main() -> None:
     trading = TradingClient(
         os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], paper=True
     )
-    data_client = StockHistoricalDataClient(
-        os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
-    )
     store = BetStore(DB_KWARGS)
     model = MockMLModel(MODEL_FOLD_FEATURES)
-    strategy = SmokeStrategy(config, consumer, trading, data_client, store, model)
+    strategy = SmokeStrategy(config, consumer, trading, store, model)
     strategy.run()
 
 
