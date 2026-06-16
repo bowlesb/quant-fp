@@ -11,6 +11,7 @@ a model trains on backfill but infers on live, so the train/serve gap IS the str
 difference. ``get_features(source="auto")`` returns backfill where available, stream for the
 unsettled recent window. Writes are atomic (write-temp-then-rename); reads are column-pruned scans.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -85,8 +86,15 @@ def set_mode(root: str | Path, mode: str) -> None:
 
 
 def write_group(
-    root: str | Path, group: str, version: str, source: str, day: str, frame: pl.DataFrame,
-    mode: str = "real", shard: int | None = None, minute: dt.datetime | None = None,
+    root: str | Path,
+    group: str,
+    version: str,
+    source: str,
+    day: str,
+    frame: pl.DataFrame,
+    mode: str = "real",
+    shard: int | None = None,
+    minute: dt.datetime | None = None,
 ) -> Path:
     """Write one group's features for one day+source. Atomic + idempotent (rerun overwrites cleanly).
 
@@ -136,8 +144,14 @@ def settled_dates(root: str | Path, group: str, version: str) -> set[str]:
 
 
 def _scan_source(
-    root: str | Path, group: str, version: str, source: str, feats: list[str],
-    symbols: list[str] | str, start: dt.datetime, end: dt.datetime,
+    root: str | Path,
+    group: str,
+    version: str,
+    source: str,
+    feats: list[str],
+    symbols: list[str] | str,
+    start: dt.datetime,
+    end: dt.datetime,
 ) -> pl.DataFrame:
     files = list(Path(root).glob(f"group={group}/v={version}/source={source}/date=*/data*.parquet"))
     if not files:
@@ -145,9 +159,7 @@ def _scan_source(
     # Features are stored narrowed (Float32 / nullable UInt8 / small int); widen back to Float64 on read so
     # every consumer (parity diff, training export, API) sees the uniform compute dtype — the narrowing is a
     # pure disk concern. (Without this, UInt8 flags would integer-underflow in the parity subtraction.)
-    frame = pl.scan_parquet(files).select(
-        [*KEY_COLUMNS, *[pl.col(name).cast(pl.Float64) for name in feats]]
-    )
+    frame = pl.scan_parquet(files).select([*KEY_COLUMNS, *[pl.col(name).cast(pl.Float64) for name in feats]])
     if symbols != "universe":
         frame = frame.filter(pl.col("symbol").is_in(symbols))
     return frame.filter((pl.col("minute") >= start) & (pl.col("minute") <= end)).collect()
@@ -202,6 +214,25 @@ def get_features(
     if result is not None and result.height:
         return result.sort(list(KEY_COLUMNS))
     return result if result is not None else pl.DataFrame()
+
+
+def stream_symbols_on(root: str | Path, day: str, source: str = "stream") -> list[str]:
+    """The DISTINCT symbols that were collected live (``source=stream``) on ``day`` — the universe the
+    nightly parity sweep must validate. Unions the ``symbol`` column across every group's partition for
+    the day (read column-pruned, so feature values are never materialized). A mock store would pass
+    ``source='sim'``. Empty when nothing was captured that day.
+
+    Each file is read with its own scan (per-file ``symbol`` projection) rather than one multi-file scan:
+    different groups have different schemas, so a single ``scan_parquet`` over the mixed file list would
+    reject the column-superset — reading the one shared key column per file sidesteps that.
+    """
+    files = list(Path(root).glob(f"group=*/v=*/source={source}/date={day}/data*.parquet"))
+    if not files:
+        return []
+    symbols: set[str] = set()
+    for file in files:
+        symbols.update(pl.read_parquet(file, columns=["symbol"])["symbol"].to_list())
+    return sorted(symbols)
 
 
 def drop_before(root: str | Path, cutoff_day: str) -> list[Path]:
