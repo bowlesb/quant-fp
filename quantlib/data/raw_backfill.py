@@ -37,9 +37,9 @@ from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest, GetCalendarRequest
 
 from quantlib.data.raw_fetchers import (
-    fetch_bars_day,
-    fetch_quotes_day,
-    fetch_trades_day,
+    fetch_bars_multi,
+    fetch_quotes_range,
+    fetch_trades_range,
 )
 from quantlib.universe import is_etf_like
 
@@ -55,6 +55,20 @@ BYTES_PER_TB = 1024**4
 DEFAULT_MAX_WORKERS = 12
 HTTP_POOL_SIZE = 64  # HTTP connection pool >> worker count so parallel fetches reuse, not churn, connections
 
+# Request-batching knobs. A single Alpaca request can span a DATE RANGE (the SDK pages internally) and,
+# for bars, MANY symbols — so one request replaces up to (symbols x days) per-symbol-day calls. We batch
+# bars aggressively (small payloads) and chunk ticks conservatively (large payloads => bound peak memory,
+# since the SDK accumulates all pages before returning). All are the SAME get_stock_* endpoints used by
+# real-time validation, so a per-day slice of a batched response is cell-identical to fetching that day.
+BARS_SYMBOLS_PER_REQUEST = 100  # symbols per multi-symbol bars request
+BARS_CHUNK_DAYS = 30  # trading days per bars request
+TRADES_CHUNK_DAYS = 5  # trading days per single-symbol trades request
+# Quotes are ~10-50x trade volume and the SDK accumulates all pages before returning, so a multi-day
+# quote chunk for a mega-cap can be tens of millions of rows held at once (a 6 GB sandbox OOM'd on a
+# 2-day NVDA chunk). Default 1 day => same peak memory as the original per-day path; raise only when the
+# run container has the RAM headroom (each concurrent worker holds one chunk).
+QUOTES_CHUNK_DAYS = 1
+
 MANIFEST_SCHEMA: dict[str, pl.DataType] = {
     "tier": pl.String,
     "symbol": pl.String,
@@ -62,12 +76,6 @@ MANIFEST_SCHEMA: dict[str, pl.DataType] = {
     "rows": pl.Int64,
     "bytes": pl.Int64,
     "fetched_at": pl.Datetime("us", "UTC"),
-}
-
-_FETCHERS = {
-    "bars": fetch_bars_day,
-    "trades": fetch_trades_day,
-    "quotes": fetch_quotes_day,
 }
 
 
@@ -80,7 +88,11 @@ class BackfillConfig:
     budget_bytes: int
     symbols: list[str] | None  # explicit sample set; None => full universe
     days: int | None  # explicit day count for sample mode; None => `months` of trading days
-    max_workers: int  # thread-pool size for concurrent per-symbol-day fetching
+    max_workers: int  # thread-pool size for concurrent request-units
+    bars_symbols_per_request: int  # symbols per multi-symbol bars request
+    bars_chunk_days: int  # trading days per bars request
+    trades_chunk_days: int  # trading days per single-symbol trades request
+    quotes_chunk_days: int  # trading days per single-symbol quotes request
 
 
 def trading_client() -> TradingClient:
@@ -218,95 +230,154 @@ class _TierProgress:
         self.budget_used = int(self.manifest["bytes"].sum()) if self.manifest.height else 0
         self.stopped = False
 
-    def claim(self, key: tuple[str, str]) -> bool:
-        """Atomically reserve a (symbol, date) for fetching. Returns False if already done, if the
-        budget/headroom STOP has tripped, or if another worker just claimed it — the caller then
-        skips. Marking the key here (before the slow fetch) prevents two threads claiming the same
-        pair; a fetch failure would leave it claimed, which is acceptable (a re-run re-fetches only
-        pairs missing from the persisted manifest, not the in-memory claim set)."""
+    def should_stop(self) -> bool:
+        """True once the disk-headroom / budget STOP has tripped (sticky). Checked at the start of every
+        request-unit so a tier winds down cleanly: in-flight units finish, remaining ones no-op."""
         with self.lock:
-            if self.stopped or key in self.done:
-                return False
+            if self.stopped:
+                return True
             disk_free = free_bytes(self.store)
             if disk_free <= SAFETY_HEADROOM_BYTES or self.budget_used >= self.budget_bytes:
-                if not self.stopped:
-                    self.stopped = True
-                    logger.warning(
-                        "tier=%s STOP: budget/headroom reached (free=%.1fGB, used=%.2fTB/%.2fTB)",
-                        self.tier,
-                        disk_free / 1024**3,
-                        self.budget_used / BYTES_PER_TB,
-                        self.budget_bytes / BYTES_PER_TB,
-                    )
-                return False
-            self.done.add(key)
-            return True
+                self.stopped = True
+                logger.warning(
+                    "tier=%s STOP: budget/headroom reached (free=%.1fGB, used=%.2fTB/%.2fTB)",
+                    self.tier,
+                    disk_free / 1024**3,
+                    self.budget_used / BYTES_PER_TB,
+                    self.budget_bytes / BYTES_PER_TB,
+                )
+                return True
+            return False
+
+    def pending_days(self, symbol: str, days: list[dt.date]) -> list[dt.date]:
+        """Days in `days` not yet recorded done for `symbol` (manifest-resumable skip)."""
+        with self.lock:
+            return [day for day in days if (symbol, day.isoformat()) not in self.done]
 
     def record(self, entry: dict, size: int) -> None:
-        """Atomically persist a fetched partition's manifest entry and update the byte totals."""
+        """Atomically mark a (symbol, date) done, persist its manifest entry, update byte totals."""
         with self.lock:
+            self.done.add((entry["symbol"], entry["date"]))
             self.manifest = append_manifest(self.store, self.tier, self.manifest, entry)
             self.written += 1
             self.bytes_written += size
             self.budget_used += size
 
 
-def _fetch_one(
+def chunk_list(items: list, size: int) -> list[list]:
+    """Split `items` into contiguous chunks of at most `size` (preserves order/liquidity ranking)."""
+    return [items[i : i + size] for i in range(0, len(items), max(1, size))]
+
+
+def split_by_day(frame: pl.DataFrame) -> dict[dt.date, pl.DataFrame]:
+    """Partition a multi-day frame into {date: frame} by the UTC date of its `ts` column."""
+    if frame.height == 0:
+        return {}
+    with_date = frame.with_columns(pl.col("ts").dt.date().alias("_day"))
+    parts = with_date.partition_by("_day", as_dict=True)
+    return {
+        (key[0] if isinstance(key, tuple) else key): part.drop("_day")
+        for key, part in parts.items()
+    }
+
+
+def _write_pending_days(
     progress: _TierProgress,
-    client: StockHistoricalDataClient,
     tier: str,
     symbol: str,
-    day: dt.date,
+    pending: list[dt.date],
+    frame: pl.DataFrame,
 ) -> None:
-    """Worker: claim, fetch and persist a single (symbol, day) partition if not already done/stopped."""
-    key = (symbol, day.isoformat())
-    if not progress.claim(key):
+    """Split one symbol's multi-day `frame` and write+record EVERY pending day — including days with no
+    rows (an empty partition marks the day done so it is never re-fetched)."""
+    by_day = split_by_day(frame)
+    empty = frame.clear()
+    for day in pending:
+        day_frame = by_day.get(day, empty)
+        size = write_partition(progress.store, tier, symbol, day, day_frame)
+        progress.record(
+            {
+                "tier": tier,
+                "symbol": symbol,
+                "date": day.isoformat(),
+                "rows": day_frame.height,
+                "bytes": size,
+                "fetched_at": dt.datetime.now(dt.timezone.utc),
+            },
+            size,
+        )
+
+
+def _fetch_bars_unit(
+    progress: _TierProgress, symbols: list[str], day_chunk: list[dt.date]
+) -> None:
+    """One MULTI-SYMBOL bars request over a day-chunk: fetch all symbols' bars for [chunk0..chunkN] in a
+    single paginated call, then split each symbol's response into its pending per-day partitions."""
+    if progress.should_stop():
         return
-    fetcher = _FETCHERS[tier]
-    frame = fetcher(_thread_client(), symbol, day)  # per-thread client (own pool) — the passed `client` is the shared one, unused here
-    size = write_partition(progress.store, tier, symbol, day, frame)
-    entry = {
-        "tier": tier,
-        "symbol": symbol,
-        "date": day.isoformat(),
-        "rows": frame.height,
-        "bytes": size,
-        "fetched_at": dt.datetime.now(dt.timezone.utc),
-    }
-    progress.record(entry, size)
+    pending = {symbol: progress.pending_days(symbol, day_chunk) for symbol in symbols}
+    active = [symbol for symbol, days in pending.items() if days]
+    if not active:
+        return
+    frames = fetch_bars_multi(_thread_client(), active, day_chunk[0], day_chunk[-1])
+    for symbol in active:
+        _write_pending_days(progress, "bars", symbol, pending[symbol], frames[symbol])
 
 
-def fetch_tier(
-    config: BackfillConfig,
-    client: StockHistoricalDataClient,
-    tier: str,
-    symbols: list[str],
-    days: list[dt.date],
+def _fetch_ticks_unit(
+    progress: _TierProgress, tier: str, symbol: str, day_chunk: list[dt.date], fetcher
+) -> None:  # type: ignore[no-untyped-def]
+    """One SINGLE-SYMBOL trades/quotes request over a day-chunk, split into pending per-day partitions."""
+    if progress.should_stop():
+        return
+    pending = progress.pending_days(symbol, day_chunk)
+    if not pending:
+        return
+    frame = fetcher(_thread_client(), symbol, day_chunk[0], day_chunk[-1])
+    _write_pending_days(progress, tier, symbol, pending, frame)
+
+
+def fetch_bars_tier(
+    config: BackfillConfig, symbols: list[str], days: list[dt.date]
 ) -> tuple[int, int]:
-    """Fetch every (symbol, day) for a tier across a thread pool, liquid-first, skipping manifest-done
-    pairs and stopping when free space drops below the budget headroom. Returns
-    (partitions_written, bytes_written).
+    """Bars via MULTI-SYMBOL + DATE-RANGE requests: units = (symbol batch) x (day chunk). One request
+    fetches up to `BARS_SYMBOLS_PER_REQUEST` symbols x `BARS_CHUNK_DAYS` days, collapsing the bars tier
+    from ~(symbols x days) requests to ~(batches x chunks)."""
+    progress = _TierProgress(config.store, "bars", config.budget_bytes)
+    day_chunks = chunk_list(days, config.bars_chunk_days)
+    symbol_batches = chunk_list(symbols, config.bars_symbols_per_request)
+    units = [(batch, chunk) for batch in symbol_batches for chunk in day_chunks]
+    with ThreadPoolExecutor(max_workers=max(1, config.max_workers)) as executor:
+        futures = [executor.submit(_fetch_bars_unit, progress, batch, chunk) for batch, chunk in units]
+        for future in as_completed(futures):
+            future.result()
+    logger.info(
+        "tier=bars done (%d partitions, %.3fGB this run, %d units, %d workers)",
+        progress.written, progress.bytes_written / 1024**3, len(units), config.max_workers,
+    )
+    return progress.written, progress.bytes_written
 
-    Concurrency is bounded by `config.max_workers` (default 12); the per-call `_with_retry` back-off in
-    the fetchers still handles 429/5xx so rate-limit pushback is respected even when many symbols are
-    in flight. Work is submitted symbol-major (liquid-first) so the highest-value symbols are claimed
-    first; once the disk-budget STOP trips, in-flight tasks finish and all remaining ones no-op via the
-    `claim` guard, so the tier winds down cleanly."""
+
+def fetch_ticks_tier(
+    config: BackfillConfig, tier: str, symbols: list[str], days: list[dt.date], chunk_days: int
+) -> tuple[int, int]:
+    """Trades/quotes via SINGLE-SYMBOL + DATE-RANGE requests: units = (symbol) x (day chunk). One
+    request fetches `chunk_days` days for a symbol (paginated), bounding peak memory on the large tick
+    payloads while still cutting the per-day request count by ~`chunk_days`x."""
+    fetcher = fetch_trades_range if tier == "trades" else fetch_quotes_range
     progress = _TierProgress(config.store, tier, config.budget_bytes)
-    pairs = [(symbol, day) for symbol in symbols for day in days]
+    day_chunks = chunk_list(days, chunk_days)
+    units = [(symbol, chunk) for symbol in symbols for chunk in day_chunks]
     with ThreadPoolExecutor(max_workers=max(1, config.max_workers)) as executor:
         futures = [
-            executor.submit(_fetch_one, progress, client, tier, symbol, day)
-            for symbol, day in pairs
+            executor.submit(_fetch_ticks_unit, progress, tier, symbol, chunk, fetcher)
+            for symbol, chunk in units
         ]
         for future in as_completed(futures):
             future.result()
     logger.info(
-        "tier=%s done (%d partitions, %.3fGB this run, %d workers)",
-        tier,
-        progress.written,
-        progress.bytes_written / 1024**3,
-        config.max_workers,
+        "tier=%s done (%d partitions, %.3fGB this run, %d units, %d workers)",
+        tier, progress.written, progress.bytes_written / 1024**3, len(units), config.max_workers,
     )
     return progress.written, progress.bytes_written
 
@@ -335,7 +406,6 @@ def rank_by_dollar_volume(store: str, symbols: list[str], days: list[dt.date]) -
 def run(config: BackfillConfig) -> None:
     os.makedirs(os.path.join(config.store, "raw"), exist_ok=True)
     trade_client = trading_client()
-    hist_client = data_client()
 
     today = dt.datetime.now(dt.timezone.utc).date()
     if config.symbols is not None and config.days is not None:
@@ -355,7 +425,7 @@ def run(config: BackfillConfig) -> None:
         config.budget_bytes / BYTES_PER_TB,
     )
 
-    bars_written, bars_bytes = fetch_tier(config, hist_client, "bars", universe, days)
+    bars_written, bars_bytes = fetch_bars_tier(config, universe, days)
     logger.info("BARS: %d partitions, %.3fGB", bars_written, bars_bytes / 1024**3)
 
     ranked = rank_by_dollar_volume(config.store, universe, days)
@@ -366,10 +436,14 @@ def run(config: BackfillConfig) -> None:
         len(ranked), len(trade_symbols), len(quote_symbols),
     )
 
-    trades_written, trades_bytes = fetch_tier(config, hist_client, "trades", trade_symbols, days)
+    trades_written, trades_bytes = fetch_ticks_tier(
+        config, "trades", trade_symbols, days, config.trades_chunk_days
+    )
     logger.info("TRADES: %d partitions, %.3fGB", trades_written, trades_bytes / 1024**3)
 
-    quotes_written, quotes_bytes = fetch_tier(config, hist_client, "quotes", quote_symbols, days)
+    quotes_written, quotes_bytes = fetch_ticks_tier(
+        config, "quotes", quote_symbols, days, config.quotes_chunk_days
+    )
     logger.info("QUOTES: %d partitions, %.3fGB", quotes_written, quotes_bytes / 1024**3)
 
     logger.info(
@@ -392,8 +466,12 @@ def parse_args(argv: list[str]) -> BackfillConfig:
         "--max-workers",
         type=int,
         default=int(os.environ.get("RAW_BACKFILL_WORKERS", DEFAULT_MAX_WORKERS)),
-        help="thread-pool size for concurrent per-symbol-day fetching (env RAW_BACKFILL_WORKERS)",
+        help="thread-pool size for concurrent request-units (env RAW_BACKFILL_WORKERS)",
     )
+    parser.add_argument("--bars-symbols-per-request", type=int, default=BARS_SYMBOLS_PER_REQUEST)
+    parser.add_argument("--bars-chunk-days", type=int, default=BARS_CHUNK_DAYS)
+    parser.add_argument("--trades-chunk-days", type=int, default=TRADES_CHUNK_DAYS)
+    parser.add_argument("--quotes-chunk-days", type=int, default=QUOTES_CHUNK_DAYS)
     args = parser.parse_args(argv)
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     return BackfillConfig(
@@ -405,6 +483,10 @@ def parse_args(argv: list[str]) -> BackfillConfig:
         symbols=symbols,
         days=args.days,
         max_workers=args.max_workers,
+        bars_symbols_per_request=args.bars_symbols_per_request,
+        bars_chunk_days=args.bars_chunk_days,
+        trades_chunk_days=args.trades_chunk_days,
+        quotes_chunk_days=args.quotes_chunk_days,
     )
 
 

@@ -1,8 +1,9 @@
 """Unit tests for the shared /store/raw bars/trades/quotes backfill (fetchers + orchestrator).
 
-No network: Alpaca clients are mocked at module level. Covers fetcher normalization/schema, the
-SIP-feed + raw-adjustment request shape, manifest resume (skip-done), the budget/headroom STOP, and
-dollar-volume ranking from on-disk bars.
+No network: Alpaca clients are mocked at module level and injected via `_thread_client`. Covers fetcher
+normalization/schema, the SIP-feed + raw-adjustment request shape, multi-symbol + date-range batching,
+per-day partition splitting, manifest resume (skip-done), the budget/headroom STOP, and dollar-volume
+ranking from on-disk bars.
 """
 from __future__ import annotations
 
@@ -19,8 +20,10 @@ from quantlib.data.raw_fetchers import (
     QUOTES_SCHEMA,
     TRADES_SCHEMA,
     fetch_bars_day,
+    fetch_bars_multi,
     fetch_quotes_day,
     fetch_trades_day,
+    fetch_trades_range,
 )
 
 DAY = dt.date(2026, 6, 12)
@@ -67,8 +70,18 @@ class FakeSet:
         self.data = data
 
 
+def _as_list(symbol_or_symbols) -> list[str]:  # type: ignore[no-untyped-def]
+    if isinstance(symbol_or_symbols, str):
+        return [symbol_or_symbols]
+    return list(symbol_or_symbols)
+
+
 class MockDataClient:
-    """Records the last request so tests can assert feed=SIP / adjustment=RAW shape."""
+    """One row per requested symbol at DAY 14:30Z; records the last request to assert SIP/RAW shape.
+
+    Handles both a single-symbol string and a multi-symbol list (and a date range — the single canned
+    bar's timestamp falls on DAY, so range requests place it in the DAY partition and leave other days
+    empty)."""
 
     def __init__(self) -> None:
         self.last_request = None
@@ -76,20 +89,22 @@ class MockDataClient:
     def get_stock_bars(self, request):  # type: ignore[no-untyped-def]
         self.last_request = request
         ts = dt.datetime(2026, 6, 12, 14, 30, tzinfo=dt.timezone.utc)
-        return FakeSet({"AAPL": [FakeBar(ts, 1.0, 2.0, 0.5, 1.5, 100, 1.4, 9)]})
+        return FakeSet(
+            {symbol: [FakeBar(ts, 1.0, 2.0, 0.5, 1.5, 100, 1.4, 9)] for symbol in _as_list(request.symbol_or_symbols)}
+        )
 
     def get_stock_trades(self, request):  # type: ignore[no-untyped-def]
         self.last_request = request
         ts = dt.datetime(2026, 6, 12, 14, 30, tzinfo=dt.timezone.utc)
         return FakeSet(
-            {"AAPL": [FakeTrade(ts, 1.5, 100.0, "Q", ["@", "I"], "C", 42)]}
+            {symbol: [FakeTrade(ts, 1.5, 100.0, "Q", ["@", "I"], "C", 42)] for symbol in _as_list(request.symbol_or_symbols)}
         )
 
     def get_stock_quotes(self, request):  # type: ignore[no-untyped-def]
         self.last_request = request
         ts = dt.datetime(2026, 6, 12, 14, 30, tzinfo=dt.timezone.utc)
         return FakeSet(
-            {"AAPL": [FakeQuote(ts, 1.4, 10.0, "P", 1.6, 12.0, "Q", ["R"], "C")]}
+            {symbol: [FakeQuote(ts, 1.4, 10.0, "P", 1.6, 12.0, "Q", ["R"], "C")] for symbol in _as_list(request.symbol_or_symbols)}
         )
 
 
@@ -132,23 +147,62 @@ def test_empty_response_yields_typed_empty_frame() -> None:
     assert frame.schema == TRADES_SCHEMA
 
 
-def _config(tmp_path, budget_bytes: int, max_workers: int = 1) -> raw_backfill.BackfillConfig:
+def test_fetch_bars_multi_returns_frame_per_symbol() -> None:
+    client = MockDataClient()
+    frames = fetch_bars_multi(client, ["AAPL", "MSFT", "NVDA"], DAY, DAY)
+    assert set(frames.keys()) == {"AAPL", "MSFT", "NVDA"}
+    assert all(frame.schema == BARS_SCHEMA and frame.height == 1 for frame in frames.values())
+    # multi-symbol request carries a LIST and the SIP/RAW shape
+    assert client.last_request.symbol_or_symbols == ["AAPL", "MSFT", "NVDA"]
+    assert client.last_request.feed.value == "sip"
+    assert client.last_request.adjustment.value == "raw"
+
+
+def test_fetch_trades_range_is_single_symbol() -> None:
+    client = MockDataClient()
+    frame = fetch_trades_range(client, "AAPL", DAY, DAY)
+    assert frame.schema == TRADES_SCHEMA
+    assert frame.height == 1
+    assert client.last_request.symbol_or_symbols == "AAPL"
+
+
+def test_split_by_day_partitions_multi_day_frame() -> None:
+    rows = {
+        "ts": [
+            dt.datetime(2026, 6, 12, 14, 30, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 6, 12, 15, 30, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 6, 13, 14, 30, tzinfo=dt.timezone.utc),
+        ],
+        "v": [1, 2, 3],
+    }
+    frame = pl.DataFrame(rows)
+    by_day = raw_backfill.split_by_day(frame)
+    assert set(by_day.keys()) == {dt.date(2026, 6, 12), dt.date(2026, 6, 13)}
+    assert by_day[dt.date(2026, 6, 12)].height == 2
+    assert by_day[dt.date(2026, 6, 13)].height == 1
+
+
+def _config(tmp_path, budget_bytes: int, max_workers: int = 1, symbols=None) -> raw_backfill.BackfillConfig:
     return raw_backfill.BackfillConfig(
         store=str(tmp_path),
         months=6,
         top_trades=2,
         top_quotes=1,
         budget_bytes=budget_bytes,
-        symbols=["AAPL"],
+        symbols=symbols or ["AAPL"],
         days=2,
         max_workers=max_workers,
+        bars_symbols_per_request=100,
+        bars_chunk_days=30,
+        trades_chunk_days=5,
+        quotes_chunk_days=2,
     )
 
 
-def test_fetch_tier_writes_partitions_and_manifest(tmp_path) -> None:
+def test_fetch_ticks_tier_writes_partitions_and_manifest(tmp_path, monkeypatch) -> None:
     config = _config(tmp_path, budget_bytes=10**12)
-    client = MockDataClient()
-    written, _bytes = raw_backfill.fetch_tier(config, client, "trades", ["AAPL"], [DAY])
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    written, _bytes = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [DAY], chunk_days=5)
     assert written == 1
     out = tmp_path / "raw" / "trades" / "symbol=AAPL" / f"date={DAY.isoformat()}" / "data.parquet"
     assert out.exists()
@@ -157,75 +211,50 @@ def test_fetch_tier_writes_partitions_and_manifest(tmp_path) -> None:
     assert manifest["rows"][0] == 1
 
 
-def test_resume_skips_done_symbol_day(tmp_path) -> None:
+def test_resume_skips_done_symbol_day(tmp_path, monkeypatch) -> None:
     config = _config(tmp_path, budget_bytes=10**12)
-    client = MockDataClient()
-    raw_backfill.fetch_tier(config, client, "trades", ["AAPL"], [DAY])
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [DAY], chunk_days=5)
     # second pass: already in manifest -> nothing new fetched
-    written, _bytes = raw_backfill.fetch_tier(config, client, "trades", ["AAPL"], [DAY])
+    written, _bytes = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [DAY], chunk_days=5)
     assert written == 0
 
 
-def test_budget_stop_prevents_writes(tmp_path) -> None:
+def test_budget_stop_prevents_writes(tmp_path, monkeypatch) -> None:
     config = _config(tmp_path, budget_bytes=0)  # zero budget -> immediate STOP
-    client = MockDataClient()
-    written, _bytes = raw_backfill.fetch_tier(config, client, "trades", ["AAPL"], [DAY])
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    written, _bytes = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [DAY], chunk_days=5)
     assert written == 0
 
 
-class MultiSymbolBarsClient:
-    """Returns a one-row bar frame for ANY requested symbol; used for concurrency tests."""
-
-    def get_stock_bars(self, request):  # type: ignore[no-untyped-def]
-        symbol = request.symbol_or_symbols
-        ts = dt.datetime(2026, 6, 12, 14, 30, tzinfo=dt.timezone.utc)
-        return FakeSet({symbol: [FakeBar(ts, 1.0, 2.0, 0.5, 1.5, 100, 1.4, 9)]})
-
-
-def test_parallel_fetch_no_duplicate_manifest_rows(tmp_path) -> None:
+def test_bars_tier_multi_symbol_writes_every_pending_day(tmp_path, monkeypatch) -> None:
     symbols = [f"SYM{i:02d}" for i in range(15)]
     days = [DAY, DAY + dt.timedelta(days=1), DAY + dt.timedelta(days=2)]
-    config = raw_backfill.BackfillConfig(
-        store=str(tmp_path),
-        months=6,
-        top_trades=2,
-        top_quotes=1,
-        budget_bytes=10**12,
-        symbols=symbols,
-        days=len(days),
-        max_workers=8,
-    )
-    written, _bytes = raw_backfill.fetch_tier(
-        config, MultiSymbolBarsClient(), "bars", symbols, days
-    )
+    config = _config(tmp_path, budget_bytes=10**12, max_workers=8, symbols=symbols)
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    written, _bytes = raw_backfill.fetch_bars_tier(config, symbols, days)
+    # every (symbol, day) partition is written — days the mock returns no bar for get an empty partition
     assert written == len(symbols) * len(days)
     manifest = raw_backfill.load_manifest(str(tmp_path), "bars")
     assert manifest.height == len(symbols) * len(days)
     dupes = manifest.group_by(["tier", "symbol", "date"]).len().filter(pl.col("len") > 1)
     assert dupes.height == 0
-    # idempotent re-run under concurrency fetches nothing new
-    rewritten, _ = raw_backfill.fetch_tier(
-        config, MultiSymbolBarsClient(), "bars", symbols, days
+    # the DAY partition has the canned bar; later days are empty but DONE
+    day0 = pl.read_parquet(
+        tmp_path / "raw" / "bars" / "symbol=SYM00" / f"date={DAY.isoformat()}" / "data.parquet"
     )
+    assert day0.height == 1
+    # idempotent re-run fetches nothing new
+    rewritten, _ = raw_backfill.fetch_bars_tier(config, symbols, days)
     assert rewritten == 0
 
 
-def test_parallel_budget_stop_halts(tmp_path) -> None:
+def test_bars_tier_budget_stop_halts(tmp_path, monkeypatch) -> None:
     symbols = [f"SYM{i:02d}" for i in range(15)]
     days = [DAY, DAY + dt.timedelta(days=1)]
-    config = raw_backfill.BackfillConfig(
-        store=str(tmp_path),
-        months=6,
-        top_trades=2,
-        top_quotes=1,
-        budget_bytes=0,  # zero budget -> immediate STOP, even with many workers
-        symbols=symbols,
-        days=len(days),
-        max_workers=8,
-    )
-    written, _bytes = raw_backfill.fetch_tier(
-        config, MultiSymbolBarsClient(), "bars", symbols, days
-    )
+    config = _config(tmp_path, budget_bytes=0, max_workers=8, symbols=symbols)
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    written, _bytes = raw_backfill.fetch_bars_tier(config, symbols, days)
     assert written == 0
 
 
