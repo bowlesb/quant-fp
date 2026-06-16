@@ -22,6 +22,7 @@ import websockets
 
 from quantlib.features import metrics, store
 from quantlib.features.base import BatchContext
+from quantlib.features.bus_hook import BusHook, bus_publish_enabled
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 from quantlib.features.incremental import IncrementalEngine
@@ -230,6 +231,7 @@ class CaptureState:
         self.last_write_ms = 0.0  # time spent WRITING last minute — excluded from the bet-relevant compute latency
         self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
         self.engines: dict[str, IncrementalEngine] = {}  # one incremental engine per reduce_input bucket (FP_INCREMENTAL)
+        self.bus_hook: BusHook | None = None  # set lazily when FP_BUS=1 (real mode) -> publishes vectors off-path
 
     @property
     def buffer(self) -> pl.DataFrame | None:
@@ -363,12 +365,16 @@ def process_bars(
             outputs.append((group, batched[group.name], per_ms))
 
     write_start = time.perf_counter()
+    publish_outputs: list[tuple[str, pl.DataFrame]] = []
+    bus_on = mode == "real" and bus_publish_enabled()
     for group, out, compute_ms in outputs:
         state.group_timings[group.name] = compute_ms
         if drop_output_symbols and "symbol" in out.columns:
             # Persist-only filter: drop the replicated index symbols this shard does not OWN so the store
             # holds one row per (symbol, minute), not N shard copies. Computed values above are untouched.
             out = out.filter(~pl.col("symbol").is_in(list(drop_output_symbols)))
+        if bus_on:
+            publish_outputs.append((group.name, out))
         if accumulate:
             prior = state.accumulated.get(group.name)
             state.accumulated[group.name] = (
@@ -386,6 +392,11 @@ def process_bars(
             else:
                 store.write_group(**write_kwargs)
     state.last_write_ms = (time.perf_counter() - write_start) * 1000.0  # measured apart from compute
+    if bus_on:
+        # Off the critical path: hand THIS minute's per-symbol frames to the bus thread (assemble+XADD).
+        if state.bus_hook is None:
+            state.bus_hook = BusHook()
+        state.bus_hook.submit(latest, publish_outputs)
     metrics.record_group_timings(state.group_timings)  # -> Prometheus histogram, graphed per-group in Grafana
     state.minutes += 1
 
