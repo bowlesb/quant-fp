@@ -57,7 +57,14 @@ from quantlib.data.raw_store import (
     write_manifest_part,
     write_partition,
 )
+from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
 from quantlib.universe import is_etf_like
+
+# The cross-sectional market-reference tickers (SPY/QQQ). They are ETF-like, so the universe screen drops
+# them — but the market-relative features (market_beta/market_corr/idio_vol/market_return/nasdaq_return/
+# relative_return/outperforming) regress against them, so their backfill bars MUST be in /store/raw or
+# those features can never validate (all-extra_live). We append them to the fetched universe unconditionally.
+MARKET_TICKERS: tuple[str, ...] = tuple(sorted(set(MARKET_INDICES.values())))
 
 __all__ = [
     "MANIFEST_SCHEMA",
@@ -171,7 +178,9 @@ def universe_symbols(client: TradingClient) -> list[str]:
         for asset in assets
         if asset.tradable and "/" not in asset.symbol and not is_etf_like(asset.name)
     ]
-    return sorted(set(symbols))
+    # The market-reference tickers are ETF-like (screened above) but their bars are REQUIRED in /store/raw
+    # for the cross-sectional features to validate — always include them.
+    return sorted(set(symbols) | set(MARKET_TICKERS))
 
 
 class _TierProgress:
@@ -413,6 +422,14 @@ def run(config: BackfillConfig) -> None:
         days = all_days[-config.days :]
         universe = config.symbols
         logger.info("SAMPLE mode: %d symbols x %d days", len(universe), len(days))
+    elif config.days is not None:
+        # DAILY mode: the full universe but only the last ``days`` settled trading days. This is the
+        # self-sustaining nightly acquire — fetch the just-completed day's tape for the whole universe,
+        # idempotent via the manifest (an already-fetched symbol-day is skipped on re-run).
+        all_days = trading_days(trade_client, today - dt.timedelta(days=14), today)
+        days = all_days[-config.days :]
+        universe = universe_symbols(trade_client)
+        logger.info("DAILY mode: %d universe symbols x %d recent trading days", len(universe), len(days))
     else:
         lookback = int(config.months * 31) + 7
         days = trading_days(trade_client, today - dt.timedelta(days=lookback), today)
