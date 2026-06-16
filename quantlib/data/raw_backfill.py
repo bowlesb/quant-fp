@@ -105,6 +105,20 @@ def data_client() -> StockHistoricalDataClient:
     return client
 
 
+_thread_local = threading.local()
+
+
+def _thread_client() -> StockHistoricalDataClient:
+    """One data client PER WORKER THREAD, so each thread has its OWN HTTP connection pool — this is what
+    actually eliminates the cross-thread "pool is full, discarding connection" churn that serialized the
+    parallel fetch (a single shared client = a single pool of 10, contended by all workers)."""
+    client = getattr(_thread_local, "client", None)
+    if client is None:
+        client = data_client()
+        _thread_local.client = client
+    return client
+
+
 def trading_days(client: TradingClient, start: dt.date, end: dt.date) -> list[dt.date]:
     """Real NYSE trading days in [start, end] via the Alpaca calendar."""
     calendar = client.get_calendar(GetCalendarRequest(start=start, end=end))
@@ -249,7 +263,7 @@ def _fetch_one(
     if not progress.claim(key):
         return
     fetcher = _FETCHERS[tier]
-    frame = fetcher(client, symbol, day)
+    frame = fetcher(_thread_client(), symbol, day)  # per-thread client (own pool) — the passed `client` is the shared one, unused here
     size = write_partition(progress.store, tier, symbol, day, frame)
     entry = {
         "tier": tier,
