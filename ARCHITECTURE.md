@@ -1,9 +1,15 @@
 # Quant Trading System — Architecture
 
-This document is the source of truth for *what we are building and why*. It is
-designed to be read cold by a new engineer (in practice, a fresh Claude session)
-with no other context. Progress lives in `STATE.md`; experiment results live in
-`JOURNAL.md`.
+> **DEPRECATED — pre-pivot snapshot (2026-06-10).** This document predates the
+> 2026-06-12 pivot to the Feature Platform spine and no longer reflects the current
+> direction (it describes a "~40 v1 feature" Phase 0–7 ladder; the live system is the
+> 618-feature / 11k-symbol parity-true feature store). It is kept for historical
+> context only. For the current source of truth see `docs/FEATURE_PLATFORM.md`,
+> `docs/RESUME_STATE.md`, and `docs/MISSION.md`.
+
+This document captured the original *what we are building and why*, designed to be
+read cold by a new engineer (in practice, a fresh Claude session) with no other
+context. Progress lives in `STATE.md`; experiment results live in `JOURNAL.md`.
 
 ## Goal
 
