@@ -1,0 +1,114 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 0,
+  "schemaVersion": 39,
+  "tags": ["quant", "pipeline", "latency"],
+  "title": "Pipeline health & latency attribution",
+  "uid": "pipeline-health",
+  "timezone": "",
+  "refresh": "30s",
+  "time": {"from": "now-3h", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "title": "Capture alive? (bars/s, last 1m)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "none", "decimals": 1, "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "green", "value": 0.1}]}}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(feature_bars_ingested_total[1m]))"}
+      ]
+    },
+    {
+      "title": "Latest vector age (s) — drill-down freshness",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "s", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 120}, {"color": "red", "value": 300}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(minute)))::int AS value FROM latency_slow_symbols WHERE minute > now() - interval '1 hour'"}
+      ]
+    },
+    {
+      "title": "Shards reporting (of 8)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 7}, {"color": "green", "value": 8}]}}},
+      "targets": [
+        {"refId": "A", "expr": "count(up{job=\"feature-capture\"} == 1)"}
+      ]
+    },
+    {
+      "title": "Scrape targets up",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}},
+      "targets": [
+        {"refId": "A", "expr": "count(up == 1) / count(up)"}
+      ]
+    },
+    {
+      "title": "Ingestion rate (bars / trades / quotes per second)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"drawStyle": "line", "fillOpacity": 10}}},
+      "targets": [
+        {"refId": "bars", "expr": "sum(rate(feature_bars_ingested_total[1m]))", "legendFormat": "bars/s"},
+        {"refId": "trades", "expr": "sum(rate(feature_trades_ingested_total[1m]))", "legendFormat": "trades/s"},
+        {"refId": "quotes", "expr": "sum(rate(feature_quotes_ingested_total[1m]))", "legendFormat": "quotes/s"}
+      ]
+    },
+    {
+      "title": "LATENCY ATTRIBUTION: Alpaca delivery lag vs OUR pipeline (top-K slow symbols)",
+      "description": "arrival_lag_s = how late Alpaca delivered the bar after the minute boundary (NOT ours). pipeline_s = vector-ready minus bar-arrival (OURS). The gap between the two is the lever we actually control.",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10}}},
+      "targets": [
+        {"refId": "alpaca", "format": "time_series", "rawSql": "SELECT minute AS time, avg(arrival_lag_s) AS \"Alpaca delivery lag (not ours)\" FROM latency_slow_symbols WHERE $__timeFilter(minute) GROUP BY minute ORDER BY minute"},
+        {"refId": "pipeline", "format": "time_series", "rawSql": "SELECT minute AS time, avg(total_latency_s - arrival_lag_s) AS \"our pipeline (arrival->vector)\" FROM latency_slow_symbols WHERE $__timeFilter(minute) GROUP BY minute ORDER BY minute"}
+      ]
+    },
+    {
+      "title": "Bar -> vector p50/p95/p99 (end-to-end incl. Alpaca delivery)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10}}},
+      "targets": [
+        {"refId": "p50", "expr": "histogram_quantile(0.50, sum(rate(feature_vector_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"refId": "p95", "expr": "histogram_quantile(0.95, sum(rate(feature_vector_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"refId": "p99", "expr": "histogram_quantile(0.99, sum(rate(feature_vector_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "title": "Slowest feature groups now — p99 compute (ms), ranked",
+      "type": "table",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [
+        {"refId": "A", "format": "table", "instant": true, "expr": "sort_desc(1000 * histogram_quantile(0.99, sum by (le, group) (rate(feature_group_compute_seconds_bucket[5m]))))"}
+      ],
+      "transformations": [
+        {"id": "labelsToFields", "options": {"valueLabel": "group"}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true}, "renameByName": {"Value": "p99_ms"}}}
+      ]
+    },
+    {
+      "title": "Symbols reporting a bar per minute (universe coverage)",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+      "fieldConfig": {"defaults": {"unit": "none", "custom": {"drawStyle": "line", "fillOpacity": 10}}},
+      "targets": [
+        {"refId": "A", "format": "time_series", "rawSql": "SELECT minute AS time, count(distinct symbol) AS \"top-K slow symbols logged\" FROM latency_slow_symbols WHERE $__timeFilter(minute) GROUP BY minute ORDER BY minute"}
+      ]
+    }
+  ]
+}
