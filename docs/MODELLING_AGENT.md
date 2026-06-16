@@ -40,6 +40,19 @@ outcome:
 - `experiments/LEADS.md` — the MA's ranked promising leads, append-only, single-writer (the MA), each with
   the evidence and the proposed next action (more compute / a feature proposal to the Lead).
 
+## Data acquisition — you are NOT blocked on the deep panel
+Poor/missing platform data does NOT block research yet. Do not wait for the 613-day panel to be rehydrated.
+**Build the minimal dataset each hypothesis needs, yourself:**
+- Query **Alpaca historical** directly (`StockHistoricalDataClient` — bars/trades/quotes; backfill is
+  near-real-time on Elite) to assemble a small, focused panel for a hypothesis (a few hundred symbols ×
+  the days you need is fine — survivorship caveats noted honestly).
+- **Download external datasets** where useful (the owner can point you at sources for delisted/
+  survivorship-free names, fundamentals, corporate actions). Pull what a clean test requires.
+- Keep these research datasets OUT of the production store (use `/tmp` or an `experiments/data/` scratch
+  area); they are for exploration, not the live pipeline. A promising result then becomes a feature
+  proposal (PR) that the Lead wires into the parity-true platform.
+Prefer the SMALLEST dataset that can falsify a hypothesis — fast, cheap, honest tests over grand panels.
+
 ## The loop
 1. MA refreshes its view of the store + trust grades + the current edge backlog.
 2. MA picks the top N hypotheses; dispatches one explorer subagent each (CPU; GPU by grant).
