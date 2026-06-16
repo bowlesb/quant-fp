@@ -39,3 +39,42 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+
+  # reversion-strategy is the SECOND strategy: a REAL (if modest) signal — intraday VWAP mean-reversion
+  # via VwapReversionModel behind the shared Model.predict interface. Its OWN strat_reversion schema, the
+  # same safety caps as smoke, paper-only. Proves the platform runs MULTIPLE independent strategy
+  # containers. NOT an edge claim (vwap_dev is real-but-uneconomic at minute turnover — docs/EXPERIMENTS.md).
+  #
+  #   docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --build reversion-strategy
+  reversion-strategy:
+    build:
+      context: .
+      dockerfile: strategies/reversion/Dockerfile
+    image: reversion-strategy
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file: .env
+    environment:
+      BUS_REDIS_URL: "redis://quant-redis:6379/0"
+      DB_HOST: "timescaledb"
+      DB_PORT: "5432"
+      DB_NAME: "quant"
+      DB_USER: "quant"
+      # Subscribe to a small liquid set; the model ranks the most-stretched-below-VWAP name each cycle.
+      REV_SYMBOLS: "AAPL,MSFT,NVDA,SPY,AMD,AMZN,META,TSLA"
+      # Risk caps + cadence (all fail-safe defaults; override here or in .env).
+      REV_BET_INTERVAL_SEC: "300"
+      REV_NOTIONAL_USD: "50"
+      REV_HOLD_SEC: "1800"
+      REV_MAX_CONCURRENT: "3"
+      REV_MAX_TOTAL_NOTIONAL_USD: "200"
+      # Kill switch: "1" = trade (paper); "0" = consume + log only, place NO orders.
+      REV_ENABLED: "1"
+      # Reversion model: which vwap_deviation window to read, the logistic gain on the (raw) deviation,
+      # and how far below VWAP (P(up) > threshold) a name must be stretched before a long fires.
+      REV_VWAP_WINDOW_M: "30"
+      REV_SENSITIVITY: "400"
+      REV_THRESHOLD: "0.60"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
