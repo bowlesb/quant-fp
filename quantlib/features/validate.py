@@ -221,8 +221,12 @@ def recompute_trust(feature_day: pl.DataFrame) -> pl.DataFrame:
                   "last_day_value_rate", "nan_policy")
         .map_elements(_status_of, return_dtype=pl.String)
         .alias("status"),
-        pl.col("lifetime_value_rate").map_elements(grade_for, return_dtype=pl.String).alias("value_grade"),
-        pl.col("lifetime_coverage_rate").map_elements(grade_for, return_dtype=pl.String).alias("coverage_grade"),
+        pl.col("lifetime_value_rate")
+        .map_elements(grade_for, return_dtype=pl.String, skip_nulls=False)
+        .alias("value_grade"),
+        pl.col("lifetime_coverage_rate")
+        .map_elements(grade_for, return_dtype=pl.String, skip_nulls=False)
+        .alias("coverage_grade"),
     ).sort("version", "feature")
 
 
@@ -239,16 +243,47 @@ def _status_of(row: dict) -> str:
     return "certified" if (value_ok and coverage_ok) else "divergent"
 
 
-def validate(feature_root: str, day: str, val_root: str, allow_today: bool = False) -> pl.DataFrame:
-    """Validate one settled day's stored stream vs backfill, write the ledger, recompute trust, return it."""
+def _scope_tiers(tiers: pl.DataFrame, scope_symbols: list[str] | None) -> pl.DataFrame:
+    """Restrict the day's tier membership to ``scope_symbols`` when a symbol scope is requested, so the
+    store reads only load those symbols (the filter is pushed down into ``store.get_features`` ->
+    ``_scan_source``'s lazy ``is_in``, never loading the full ~11k-symbol root then filtering in memory).
+    ``None`` keeps the full-universe behavior. Pinning the scope to the day's tier membership preserves
+    the universe-pinning contract: a requested symbol absent from the day's universe is dropped, never
+    compared against a tier it does not belong to."""
+    if scope_symbols is None:
+        return tiers
+    requested = set(scope_symbols)
+    scoped = tiers.filter(pl.col("symbol").is_in(list(requested)))
+    if scoped.height == 0:
+        raise ValueError(
+            f"none of the requested symbols {sorted(requested)} are in the day's universe membership — "
+            f"nothing to validate (check the symbols are in universe_membership for this day)"
+        )
+    return scoped
+
+
+def validate(
+    feature_root: str,
+    day: str,
+    val_root: str,
+    allow_today: bool = False,
+    symbols: list[str] | None = None,
+) -> pl.DataFrame:
+    """Validate one settled day's stored stream vs backfill, write the ledger, recompute trust, return it.
+
+    ``symbols`` restricts the comparison to a small SCOPE of symbols (e.g. ~10 liquid names) — the
+    symbol filter is pushed into the store reads, so only those partitions are loaded (the full-root
+    load is the OOM the scope avoids). ``None`` keeps the full-universe run. A scoped run still PINS to
+    the day's tier membership, just over the scoped subset."""
     assert_settled(day, allow_today)
     specs = {spec.name: spec for _, spec in REGISTRY.feature_specs()}
     version_of = {spec.name: group.version for group, spec in REGISTRY.feature_specs()}
     nan_policy_of = {name: spec.nan_policy for name, spec in specs.items()}
     tiers = load_tiers(day)
-    symbols = tiers["symbol"].to_list()  # PIN both sides to the day's universe membership
-    if not symbols:
+    if tiers.height == 0:
         raise ValueError(f"no universe membership for {day} — cannot validate (build_universe must have run)")
+    tiers = _scope_tiers(tiers, symbols)
+    scope_symbols = tiers["symbol"].to_list()  # PIN both sides to the day's universe membership (scoped)
     start = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), tzinfo=timezone.utc)
     end = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), 23, 59, 59, tzinfo=timezone.utc)
 
@@ -258,10 +293,10 @@ def validate(feature_root: str, day: str, val_root: str, allow_today: bool = Fal
     exception_blocks: list[pl.DataFrame] = []
     for group in REGISTRY.groups():
         feats = [spec.name for spec in group.declare()]
-        backfill = store.get_features(feats, symbols, start, end, feature_root, source="backfill")
+        backfill = store.get_features(feats, scope_symbols, start, end, feature_root, source="backfill")
         if backfill.height == 0:
             continue  # no settled backfill for this group/day -> unvalidated, skip (per-group settled check)
-        live = store.get_features(feats, symbols, start, end, feature_root, source="stream")
+        live = store.get_features(feats, scope_symbols, start, end, feature_root, source="stream")
         if live.height == 0:
             live = backfill.select(KEY_COLUMNS).clear()  # nothing captured live -> all missing_live
         joined = (
@@ -311,16 +346,33 @@ def _assemble_feature_day(tolerance_blocks: list[pl.DataFrame], dist_rows: list[
     return pl.concat(blocks) if blocks else pl.DataFrame()
 
 
+def _parse_symbols(args: list[str]) -> tuple[list[str], list[str] | None]:
+    """Pull an optional ``--symbols AAPL,MSFT,...`` scope out of the positional args."""
+    symbols: list[str] | None = None
+    rest: list[str] = []
+    iterator = iter(args)
+    for arg in iterator:
+        if arg == "--symbols":
+            symbols = [token.strip() for token in next(iterator).split(",") if token.strip()]
+        elif arg.startswith("--symbols="):
+            symbols = [token.strip() for token in arg.removeprefix("--symbols=").split(",") if token.strip()]
+        else:
+            rest.append(arg)
+    return rest, symbols
+
+
 def main() -> None:
     args = sys.argv[1:]
     allow_today = "--allow-today" in args
     args = [arg for arg in args if arg != "--allow-today"]
+    args, symbols = _parse_symbols(args)
     if len(args) != 3:
         raise SystemExit(
-            "usage: python -m quantlib.features.validate <YYYY-MM-DD> <feature_store_root> <validation_root> [--allow-today]"
+            "usage: python -m quantlib.features.validate <YYYY-MM-DD> <feature_store_root> <validation_root> "
+            "[--allow-today] [--symbols AAPL,MSFT,...]"
         )
     day, feature_root, val_root = args
-    trust = validate(feature_root, day, val_root, allow_today=allow_today)
+    trust = validate(feature_root, day, val_root, allow_today=allow_today, symbols=symbols)
     pl.Config.set_tbl_rows(60)
     print(f"=== Validation trust registration after {day} ===")
     print(trust.select("feature", "method", "status", "value_grade", "coverage_grade",

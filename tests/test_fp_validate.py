@@ -85,7 +85,8 @@ def _feature_day(day: str, n_compared: int, n_match: int, n_missing: int = 0) ->
         "version": "v1.0.0", "feature": "ret_5m", "day": day, "method": "tolerance", "nan_policy": "none",
         "n_compared": n_compared, "n_match": n_match, "n_mismatch": n_compared - n_match,
         "n_extra_live": 0, "n_missing_live": n_missing,
-        "value_rate": n_match / n_compared, "coverage_rate": n_compared / (n_compared + n_missing),
+        "value_rate": (n_match / n_compared) if n_compared else None,
+        "coverage_rate": (n_compared / (n_compared + n_missing)) if (n_compared + n_missing) else None,
         "worst_abs_err": 0.0,
     }
 
@@ -112,6 +113,18 @@ def test_recompute_trust_divergent_when_last_day_below_floor() -> None:
     rows = pl.DataFrame(good + bad).select(FEATURE_DAY_COLS)
     trust = recompute_trust(rows).to_dicts()[0]
     assert trust["status"] == "divergent"  # a single broken day flips it loudly
+
+
+def test_recompute_trust_grades_null_rate_as_unvalidated() -> None:
+    """A feature with zero compared cells (all missing_live) has a null lifetime rate — its grade must be
+    'U' (unvalidated), never null. Polars map_elements skips nulls by default, which would emit a null
+    grade and violate feature_trust.value_grade NOT NULL; skip_nulls=False feeds None through grade_for."""
+    rows = pl.DataFrame([_feature_day("2026-06-10", 0, 0, n_missing=0)]).select(FEATURE_DAY_COLS)
+    trust = recompute_trust(rows).to_dicts()[0]
+    assert trust["lifetime_value_rate"] is None
+    assert trust["lifetime_coverage_rate"] is None
+    assert trust["value_grade"] == "U"  # not null — DB requires NOT NULL
+    assert trust["coverage_grade"] == "U"
 
 
 def _trust_frame() -> pl.DataFrame:
