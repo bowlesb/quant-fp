@@ -42,11 +42,15 @@ Every item carries: idea · prior · test · cost gate · KILL. Single-writer = 
   branch (H1–H3) is CLOSED.**
 - **`signed_trade_ratio` (Case-A) SHIPPED — PR #33** (parity+correctness, an input not a signal). The
   reversion strategy container (#29) is MERGED + live; `docs/ADDING_A_FEATURE.md` added.
-- **Binding wall = gross-signal-per-trade vs a fixed ~6–11 bps RT cost; conditioning attacks the wrong side.**
-  RE-PRIORITIZED working order: **H9 (longer-horizon H60/H120 vwap_dev reversion — RUNNING; amortize cost
-  over a larger move + cut turnover) → [if H9 fails] LOW-TURNOVER event/fundamental families H4 (splits) /
-  H5 (dividends) → H7 (rank-space).** H6 (vol conditioner) DE-PRIORITIZED (same dead conditioner framing).
-  All pre-registered; cost gate honest + stressed ±cost.
+- **H9 (longer-horizon H60/H120 vwap_dev reversion): KILLED.** vwap_dev REVERSES into momentum past 30 min
+  (gross −12.7 to −33.7 bps, t −1.75 to −2.58); turnover stays ~0.90 so the cost-amortization never engages;
+  net@6bps −18 to −39 bps. **vwap_dev reversion is DEAD at ALL tradeable horizons (15–120 min). The PRICE +
+  microstructure branch (H1–H3, H9) is CLOSED.**
+- **PIVOT (pre-registered `2026-06-16-event-families-pivot/`): LOW-TURNOVER NON-PRICE event families** —
+  re-priced over DAYS so the fixed ~6 bps cost is a tiny fraction of the move. Working order: **H10 (EDGAR
+  8-K/Form-4 multi-day drift — collector LIVE; data ask routed to the Lead) → H5 (dividend timing) →
+  H4 (splits).** H6/H7 (price-conditioner / rank-space) DE-PRIORITIZED to near-dead. All pre-registered;
+  cost gate honest. NO further price-reversion variant is worth running.
 
 ## ★★★ STATUS (2026-06-16, after the depth-baseline cycle) [SUPERSEDED by the block above]
 - **`/store/raw` has BARS (629 names × 126 days, 2025-12→2026-06) but NOT trades/quotes yet.** So
