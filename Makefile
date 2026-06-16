@@ -61,7 +61,7 @@ check-fresh:
 	scripts/assert_image_fresh.sh $(S)
 
 # --- Feature platform (FEATURE_PLATFORM.md) ---
-.PHONY: dev-image feature-catalog introspect parity test-fp fp-bench fp-profile
+.PHONY: dev-image feature-catalog introspect parity test-fp fp-bench fp-profile fp-profile-latest fp-profile-sim
 
 # Baked dev/test image — deps installed ONCE so we NEVER pip-install per run.
 # ALL feature-platform docker runs use `fp-dev`. Build/refresh it after a dependency change.
@@ -95,3 +95,9 @@ fp-profile:
 # LIVE-path per-group ranking at one-shard scale — the optimize loop: rank, fix the worst, re-run.
 fp-profile-latest:
 	$(FP_RUN) fp-dev python -m quantlib.features.profile $(or $(N),312) 245 250 5 --latest
+# PRE-FLIGHT before the open: fake-run the FULL streaming path and report end-to-end bar->vector latency
+# (p50/p95/p99 vs the 100ms budget) + a per-GROUP ranking. See docs/PROFILE_SIM.md.
+#   make fp-profile-sim N=1000 SHARDS=16 MIN=20
+fp-profile-sim:
+	$(FP_RUN) --env-file .env fp-dev python -m quantlib.features.profile_sim \
+		$(or $(N),1000) $(or $(SHARDS),16) $(or $(MIN),20)
