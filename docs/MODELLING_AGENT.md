@@ -40,6 +40,20 @@ outcome:
 - `experiments/LEADS.md` — the MA's ranked promising leads, append-only, single-writer (the MA), each with
   the evidence and the proposed next action (more compute / a feature proposal to the Lead).
 
+## NEVER IDLE
+The MA always has a next action. When no hypothesis is actively running, READ relevant research
+(intraday equity microstructure, order flow / OFI, reversion, event studies, execution/cost models) and,
+if a paper suggests a concrete implementable direction, add it to the backlog and hand it to an explorer
+subagent to test. Idle time = literature time → new hypotheses. There is always a paper to read or a lead
+to push; never wait.
+
+## Shared raw dataset (use it; don't re-fetch)
+The platform maintains a SHARED 6-month backfill of raw **bars + trades + quotes** under `/store/raw/`
+(`/store/raw/<bars|trades|quotes>/symbol=<S>/date=<D>/...`), with a manifest of what's been fetched. Raw
+data has far fewer parity concerns than computed features, so it is the right substrate for research.
+Read from there FIRST; only hit Alpaca directly for symbols/dates not yet in the shared set (and tell the
+Lead so the backfill can extend). This avoids every subagent re-downloading the same data.
+
 ## Data acquisition — you are NOT blocked on the deep panel
 Poor/missing platform data does NOT block research yet. Do not wait for the 613-day panel to be rehydrated.
 **Build the minimal dataset each hypothesis needs, yourself:**
