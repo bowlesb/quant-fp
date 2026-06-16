@@ -1,5 +1,6 @@
 .env
-data/
+/data/
+experiments/data/
 *.pyc
 __pycache__/
 .venv/
