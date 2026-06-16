@@ -16,6 +16,9 @@ from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
 from quantlib.features.loaders import load_minute_agg, load_reference
+from quantlib.features.raw_loaders import load_raw_minute_agg
+
+DEFAULT_RAW_ROOT = "/store"
 
 
 def _write_all(root: str, day: str, source: str, frames: dict) -> int:
@@ -33,6 +36,20 @@ def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
     set). Returns the symbol count materialized."""
     frames = {
         "minute_agg": backfill_bars(day, symbols),
+        "daily": backfill_daily(day, symbols),
+        "reference": load_reference(),
+    }
+    return _write_all(root, day, "backfill", frames)
+
+
+def materialize_from_raw(root: str, raw_root: str, day: str, symbols: list[str]) -> int:
+    """Materialize bar features by READING the already-downloaded ``/store/raw`` minute bars instead of
+    re-fetching them from Alpaca — the MATERIALIZE stage of the acquire/materialize segregation. The
+    raw minute bars come from ``load_raw_minute_agg`` (download-once); ``daily`` still comes from
+    ``backfill_daily`` (daily history is NOT in ``/store/raw``) and ``reference`` from the DB. Returns
+    the symbol count materialized."""
+    frames = {
+        "minute_agg": load_raw_minute_agg(raw_root, day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
     }
@@ -62,9 +79,19 @@ def main() -> None:
         count = materialize_alpaca_bars(root, day, symbols)
         print(f"materialized {count} symbols from Alpaca for {day} (requested {len(symbols)})")
         return
+    if args and args[0] == "raw":
+        # raw <root> <day> <n_symbols> [raw_root]: read /store/raw minute bars (download-once) and write
+        root, day, n = args[1], args[2], int(args[3])
+        raw_root = args[4] if len(args) > 4 else DEFAULT_RAW_ROOT
+        symbols = tradable_universe(limit=n)
+        count = materialize_from_raw(root, raw_root, day, symbols)
+        print(f"materialized {count} symbols from {raw_root}/raw for {day} (requested {len(symbols)})")
+        return
     if len(args) < 3:
         raise SystemExit(
-            "usage: materialize <root> <day> <stream|backfill> [group,..]  |  materialize alpaca <root> <day> <n>"
+            "usage: materialize <root> <day> <stream|backfill> [group,..]"
+            "  |  materialize alpaca <root> <day> <n>"
+            "  |  materialize raw <root> <day> <n> [raw_root]"
         )
     only = args[3].split(",") if len(args) > 3 else None
     materialize_minute(args[0], args[1], args[2], only)
