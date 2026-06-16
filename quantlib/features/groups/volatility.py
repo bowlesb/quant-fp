@@ -78,5 +78,11 @@ class VolatilityGroup(ReductionGroup):
         for w in VOL_WINDOWS:
             feats[f"realized_vol_{w}m"] = std_("ret", w)
         for w in RANGE_WINDOWS:
-            feats[f"parkinson_vol_{w}m"] = (mean_("hl2", w) / FOUR_LN2).sqrt()
+            # mean(hl2) is mathematically NON-NEGATIVE (hl2 = log(high/low)^2 >= 0), but the live incremental
+            # running sum of a window of all-flat (high==low -> hl2==0) bars can drift to a tiny NEGATIVE
+            # residue (~-1e-22) from the add/expire float cycle, whose sqrt is NaN — while the backfill
+            # rolling_mean returns exactly 0.0 (a live-vs-backfill parity break on sparse/flat symbols). Clip
+            # the non-negative quantity to >=0 before the sqrt, exactly as ohlc_vol's garman_klass/
+            # rogers_satchell already do for the identical drift.
+            feats[f"parkinson_vol_{w}m"] = (mean_("hl2", w) / FOUR_LN2).clip(lower_bound=0.0).sqrt()
         return feats

@@ -179,10 +179,54 @@ class MomentumRunGroup(FeatureGroup):
         return out.select(["symbol", "minute", *self.feature_names])
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Window-sliced live path: the SAME rolling ``compute()`` on the trailing ``LOOKBACK_MINUTES`` it reads,
-        filtered to T. Parity-true by construction — the run-length is capped to in-window positions and the
-        rolling power sums read only the trailing window, so bars dropped before the slice cannot change T."""
-        return self.compute_latest_on_window(ctx, LOOKBACK_MINUTES)
+        """Window-sliced live path: run the SAME ``compute()`` on the trailing input it reads, filtered to T.
+
+        Two features need DIFFERENT slice depths, so the slice is sized to satisfy BOTH and is parity-true by
+        construction for each:
+
+          * ``residual_skew`` reads rolling power sums over <= ``max(WINDOWS)`` minutes — it needs ONLY the
+            trailing window. It is also float-order sensitive (third-order centered sums), so it must NOT see
+            bars beyond the deepest window or the rolling-sum accumulation order shifts (a near-zero-skew parity
+            wobble). ``LOOKBACK_MINUTES`` = deepest window + 15m slack covers it exactly.
+          * ``longest_streak`` reads a per-bar ``close.shift(1)`` return at EVERY in-window bar; the EARLIEST
+            in-window bar's return needs its POSITIONAL predecessor, which for a SPARSE symbol sits an arbitrary
+            gap before the window (real-data audit: DIS had 2 bars 47m apart -> the boundary return nulled live
+            while backfill resolved it). The streak therefore needs one extra prior bar per symbol.
+
+        So: compute ``residual_skew`` on the tight ``LOOKBACK_MINUTES`` slice, compute ``longest_streak`` on the
+        SAME slice PLUS each symbol's last bar strictly before it, and stitch the two at T. Both halves run the
+        identical ``compute()`` math their backfill form uses, on the minimal input each needs — live ==
+        backfill cell-for-cell for dense AND sparse symbols (guarded by tests/test_fp_momentum_run.py)."""
+        frame = ctx.frame("minute_agg")
+        if frame.height == 0:
+            return self.compute(ctx)
+        skew = self.compute_latest_on_window(ctx, LOOKBACK_MINUTES).select(
+            ["symbol", "minute", *[f"residual_skew_{w}m" for w in WINDOWS]]
+        )
+        streak_slice = self._slice_with_prior_bar(frame, LOOKBACK_MINUTES)
+        streak_full = self.compute(BatchContext(frames={"minute_agg": streak_slice}))
+        latest = streak_full["minute"].max()
+        streak = streak_full.filter(pl.col("minute") == latest).select(
+            ["symbol", "minute", *[f"longest_streak_{w}m" for w in WINDOWS]]
+        )
+        return skew.join(streak, on=["symbol", "minute"], how="full", coalesce=True).select(
+            ["symbol", "minute", *self.feature_names]
+        )
+
+    @staticmethod
+    def _slice_with_prior_bar(frame: pl.DataFrame, lookback_minutes: int) -> pl.DataFrame:
+        """The trailing ``lookback_minutes`` of ``frame`` PLUS each symbol's single most-recent bar strictly
+        before the cutoff — so a window-edge ``close.shift(1)`` return resolves to the SAME predecessor backfill
+        sees, even when a sparse symbol's predecessor is an arbitrary gap back. Bars older than the prior bar
+        cannot enter any window ending at T within ``lookback_minutes``, so this is parity-true by construction."""
+        cutoff = frame["minute"].max() - pl.duration(minutes=lookback_minutes)
+        in_window = frame.filter(pl.col("minute") >= cutoff)
+        prior = (
+            frame.filter(pl.col("minute") < cutoff).sort("minute").group_by("symbol", maintain_order=True).tail(1)
+        )
+        if prior.height == 0:
+            return in_window
+        return pl.concat([prior, in_window], how="vertical_relaxed").sort(["symbol", "minute"])
 
     def _present_run_lengths(self, frame: pl.DataFrame) -> pl.DataFrame:
         """The present-return rows (non-null ``__ret``) with the per-symbol global run-length column ``__rl``."""

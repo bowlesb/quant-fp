@@ -4,6 +4,7 @@ backfill == batch == incremental — the same feature from one declaration, thre
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 import numpy as np
 import polars as pl
@@ -12,6 +13,7 @@ from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup
 from quantlib.features.incremental import IncrementalEngine
+from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 
@@ -135,3 +137,30 @@ def test_slice_derive_sparse_symbol_matches_whole_buffer() -> None:
         if minute in sp_minutes and minute > min(sp_minutes):
             checked_sparse += 1
     assert checked_sparse >= 3, "test did not exercise enough sparse-symbol print minutes past its first bar"
+
+
+def test_sqrt_features_clip_negative_residue_to_zero_not_nan() -> None:
+    """REGRESSION (real-data parity audit on DIS/C/VZ): parkinson_vol / upside_vol / downside_vol are the sqrt
+    of a mathematically NON-NEGATIVE windowed quantity. The LIVE IncrementalEngine sums those columns with a
+    running add/expire cycle that, for an all-flat / one-signed sparse symbol, drifts the sum to a TINY NEGATIVE
+    residue (~−1e−22) — and an UNclipped ``sqrt`` of that is NaN, while the backfill rolling sum is exactly 0.0
+    (a null/NaN-vs-value parity break). The fix clips the non-negative quantity to >=0 before the sqrt. This
+    pins the FIX deterministically: a tiny-negative canonical-aggregate value must assemble to 0.0, NEVER NaN.
+    (A live stream can't reliably be made to drift the residue negative on demand, so we feed the negative
+    directly into each group's assemble expressions — the exact code path the clip protects.)"""
+    for group_name, agg_cols, feature_cols in (
+        ("volatility", {"__mean_hl2_15": -1e-22}, ["parkinson_vol_15m"]),
+        ("distribution", {"__sum_up2_15": -1e-22, "__sum_dn2_15": -1e-22, "__sum_p_15": 5.0},
+         ["upside_vol_15m", "downside_vol_15m"]),
+    ):
+        group = REGISTRY.get_group(group_name)
+        wide = pl.DataFrame({"symbol": ["X"], **{col: [val] for col, val in agg_cols.items()}})
+        feats = group.assemble()
+        out = wide.with_columns([feats[name].cast(pl.Float64).alias(name) for name in feature_cols])
+        for name in feature_cols:
+            value = out[name][0]
+            assert value is not None and not math.isnan(value), (
+                f"{group_name}.{name}: tiny-negative running-sum residue produced {value} (sqrt-of-negative "
+                f"NaN) — the clip-to-zero fix is missing"
+            )
+            assert value == 0.0, f"{group_name}.{name}: clipped residue should be exactly 0.0, got {value}"
