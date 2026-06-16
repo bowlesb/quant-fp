@@ -32,6 +32,19 @@ Every item carries: idea · prior · test · cost gate · KILL. Single-writer = 
 
 ---
 
+## ★★ REPRIORITIZATION (2026-06-15, after the H2 OFI cycle)
+H2 ran on a **self-built Alpaca panel** (80 names × 3 days, tick-rule OFI built from SIP trades — proving
+microstructure work is NOT blocked on the platform subscription; I build the data myself per the charter)
+and produced the **first standalone signal to clear a shuffle canary on real multi-day data**: `ofi_15`
+rank-IC +0.0185 (t +3.96), positive = continuation. AMBIGUOUS on the load-bearing marginal-lift question
+only because the vwap_dev baseline was under-powered on 3 days (sign-cancellation in the raw sum). **New top
+priority = H2-RETEST**: full universe incl. megacaps × ≥15 days, forward return **orthogonalized on
+vwap_dev** before testing `ofi_15`/`ofi_15_norm` on the residual (drop the dead `signed_vol_z`), horizon-
+matched 15–30 min holding so net-of-cost is meaningful. Resolves additive-carrier vs conditioner and is the
+clearest path to a feature-spec PR. CPU for the IC battery; the heavier ask is fetching trades for a few
+hundred names × 15 days (fetch incrementally; do it in the `fp-dev` image, NOT the live container — see ops
+note). Working order: **H2-RETEST → H3 → H5 → H4 → H6 → H7 → H1 → H8**.
+
 ## ★ REPRIORITIZATION (2026-06-15, after the H1 proof)
 H1's proof-of-loop probe KILLED its core thesis: the vwap_dev reversion carrier is concentrated in
 ILLIQUID names (illiq/liq |IC| ratio 2.06× at H5, 4.01× at H15 on a live session — see
