@@ -23,13 +23,16 @@ The Lead keeps the platform healthy and correct; the MA hunts for **edge**. They
   one workstream at a time** (see GPU allocation). No subagent grabs the GPU unilaterally.
 
 ## Resource isolation (ENFORCED — a 2026-06-15 explorer OOM-killed the live capture)
-Explorer subagents run analysis in a SEPARATE, resource-LIMITED container — NEVER inside the live
-`feature-computer` capture container (heavy pandas there OOM-killed live collection). Use the `fp-dev`
-image with hard caps, e.g.:
-  `docker run --rm --memory=8g --cpus=4 -v /home/ben/quant-fp:/app -w /app --env-file .env fp-dev python ...`
-The MA grants each explorer a bounded memory/CPU budget (default ~8 GB / 4 cpus; raise only with reason).
-The live `feature-computer` and the running backfill are OFF-LIMITS to explorer compute. Scratch data goes
-to `experiments/data/` or `/tmp`, never `/store` (production).
+Explorer subagents run ALL heavy compute through the standard sandbox `ops/sandbox.sh` — a hard
+memory/CPU-capped, auto-removed `fp-dev` container (no swap, so the JOB is OOM-killed at the limit, never
+the host; `/store` mounted READ-ONLY so a sandbox can read `/store/raw` but can never write prod). NEVER
+`docker exec` heavy work into the live `feature-computer` capture container (doing so OOM-killed live
+collection on 2026-06-15). Examples:
+  `ops/sandbox.sh "python experiments/<ws>/run.py"`        # default 8 GB / 4 cpus
+  `MEM=16g CPUS=8 ops/sandbox.sh "python -m ..."`           # larger, with the MA's grant
+The MA grants each explorer its memory/CPU budget (default ~8 GB / 4 cpus; raise only with reason). The
+live `feature-computer` and the running backfill are OFF-LIMITS to explorer compute. Scratch data goes to
+`experiments/data/` or `/tmp`, never `/store` (production).
 
 ## GPU allocation (one RTX 3090, 24GB — a scarce shared resource)
 - The MA is the GPU **scheduler**. A workstream that needs the GPU requests it from the MA with a
