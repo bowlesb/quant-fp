@@ -127,29 +127,51 @@ For a settled day (default = the **last market day** via the Alpaca calendar):
 1. **Discover** the symbols collected live that day (distinct `source=stream` symbols).
 2. **Materialize** the backfill side for those symbols from `/store/raw` (`materialize_from_raw` —
    download-once tape, no Alpaca re-fetch), in **chunks** (default 200 symbols) so a ~11k-symbol day
-   never loads at once. Symbols with no `/store/raw` bars are reported + skipped.
-3. **Validate** each chunk (`validate(symbols=chunk)`) — scoped, memory-safe, writes the per-cell
-   verdicts / exceptions / rollup / legacy trust / canonical DB record.
+   never loads at once. Symbols with no `/store/raw` bars are reported + skipped. **The market-reference
+   tickers (SPY/QQQ, `MARKET_TICKERS`) are pinned into every chunk** — see below.
+3. **Validate** each chunk (`validate(symbols=chunk + market_tickers)`) — scoped, memory-safe, writes the
+   per-cell verdicts / exceptions / rollup / legacy trust / canonical DB record.
 4. **Grade** contamination-aware, derive the lifecycle state, upsert the defect backlog.
 5. **Summarize**: symbols discovered/materialized/skipped, counts per lifecycle state, new defects,
    contamination stats.
 
 Idempotent/resumable: every write is an upsert keyed on `(feature[,symbol],day)`.
 
+### Market-reference tickers must be in every backfill chunk
+
+The cross-sectional features — `market_beta_*`, `market_corr_*`, `idio_vol_*`, `market_return_*`,
+`nasdaq_return_*`, `relative_return_*`, `outperforming_*` — regress each ticker's return against **SPY**
+(and QQQ). SPY/QQQ are **ETF-like**, so `quantlib.universe.is_etf_like` screens them out of the raw-backfill
+universe. If a materialize chunk lacks SPY, the backfill produces a **null** market return for the whole
+chunk, so every market-relative cell is `extra_live` (live had a value, backfill had none) → never compared
+→ **the feature can never validate** (it sits at `PENDING`/null forever, indistinguishable from "not enough
+days yet"). Two changes close this:
+
+- `quantlib.data.raw_backfill.universe_symbols` **force-includes** `MARKET_TICKERS` (SPY/QQQ) despite the
+  ETF screen, so their bars are always acquired into `/store/raw`.
+- `validation_sweep` **pins** `MARKET_TICKERS` into every materialize + validate chunk, so the backfill
+  regression always resolves its market reference. The tickers are reference symbols — they are NOT counted
+  in the discovered/materialized accounting, but they ARE validated themselves (SPY live vs SPY backfill).
+
 ## Schedule
 
-Run nightly **after** market close AND after that day's raw backfill (`ops/raw_backfill.sh`) has landed
-in `/store/raw`. Thin wrapper: `ops/validation_sweep.sh` (mirrors `ops/raw_backfill.sh` — fp-dev image,
-prod `fp_store_real` volume, `.env` creds; never docker-execs the live feature-computer).
+Run nightly **after** market close AND after that day's raw backfill has landed in `/store/raw`. For a
+self-sustaining daily loop use **`ops/daily_lifecycle.sh`**, which chains *acquire that day's raw tape* →
+*sweep* in one wrapper (the 6-month `ops/raw_backfill.sh full` is a ONE-TIME job; the daily acquire is the
+missing day-2 link). Thin wrappers mirror `ops/raw_backfill.sh` — fp-dev image, prod `fp_store_real`
+volume, `.env` creds; never docker-exec the live feature-computer.
 
-Crontab line (install manually — raw backfill at ~20:30 ET, sweep at 22:30 ET to let it land):
+Crontab line (install manually — `daily_lifecycle` acquires then sweeps, so it REPLACES the standalone
+sweep cron):
 
 ```cron
-# Nightly parity-validation sweep — last market day, all collected symbols, chunked. 22:30 ET.
-30 22 * * 1-5  cd /home/ben/quant-fp && ops/validation_sweep.sh >> /var/log/quant/validation_sweep.log 2>&1
+# Daily parity lifecycle: acquire the just-closed day's raw tape, then sweep. 18:30 PT (after close).
+30 18 * * 1-5  cd /home/ben/quant-fp && ops/daily_lifecycle.sh >> /home/ben/.quant-validation/daily_lifecycle.log 2>&1
 ```
 
-Evidence / sandbox run: `MAX_SYMBOLS=50 ops/validation_sweep.sh` (caps the discovered set).
+Or keep them separate: `ops/raw_backfill.sh daily` (acquire) earlier, then the existing
+`ops/validation_sweep.sh` (sweep) at 19:30 PT. Evidence / sandbox run: `MAX_SYMBOLS=50 ops/validation_sweep.sh`
+(caps the discovered set; assumes the raw tape is already present).
 
 ## Tables (`db/init/10_parity_lifecycle.sql`, additive)
 

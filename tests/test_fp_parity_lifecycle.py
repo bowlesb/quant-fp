@@ -30,7 +30,8 @@ from quantlib.features.trust_lifecycle import (
     defect_rows,
     lifecycle_state,
 )
-from quantlib.features.validation_sweep import MIN_CLEAN_SYMBOLS
+from quantlib.features import validation_sweep
+from quantlib.features.validation_sweep import MARKET_TICKERS, MIN_CLEAN_SYMBOLS
 
 OPEN_ET = dt.datetime(2026, 6, 12, 13, 30, tzinfo=dt.timezone.utc)  # 09:30 ET (June -> EDT, UTC-4)
 
@@ -140,6 +141,43 @@ def test_clean_breadth_floor_suppresses_grading_on_contaminated_day() -> None:
     clean_count = int(cleanliness["is_clean"].sum())
     assert clean_count == 1
     assert clean_count < MIN_CLEAN_SYMBOLS  # the sweep would skip grading and leave features PENDING
+
+
+def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
+    """The cross-sectional features (market_beta/idio_vol/market_return/...) regress against SPY/QQQ, which
+    are ETF-screened out of the raw universe. The sweep MUST pin the market tickers into every materialize +
+    validate chunk so the backfill side resolves its market reference — otherwise those features are all
+    extra_live (backfill produced nothing) and can never validate. We capture the scope each stage receives
+    and assert the market tickers are always present, even though they were never 'discovered' as stream
+    symbols."""
+    assert set(MARKET_TICKERS) == {"QQQ", "SPY"}
+    discovered = ["AAPL", "MSFT", "NVDA"]  # none of these is a market ticker
+    materialize_scopes: list[list[str]] = []
+    validate_scopes: list[list[str]] = []
+
+    monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    monkeypatch.setattr(
+        validation_sweep, "materialize_from_raw",
+        lambda feature_root, raw_root, day, symbols: materialize_scopes.append(list(symbols)),
+    )
+    monkeypatch.setattr(
+        validation_sweep.validate_mod, "validate",
+        lambda feature_root, day, val_root, allow_today, symbols: validate_scopes.append(list(symbols)),
+    )
+    # short-circuit everything after the chunk loop: no cell/cleanliness -> the breadth-floor early return.
+    monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
+
+    validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=200, allow_today=True)
+
+    assert materialize_scopes and validate_scopes
+    for scope in materialize_scopes + validate_scopes:
+        for ticker in MARKET_TICKERS:
+            assert ticker in scope, f"{ticker} must be pinned into every chunk scope"
+        assert scope.count("SPY") == 1  # deduped, not double-added when already discovered
 
 
 def _cell(feature: str, symbol: str, n_match: int, n_mismatch: int) -> dict:

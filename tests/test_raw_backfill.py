@@ -316,5 +316,62 @@ def test_rank_sampling_uses_recent_days(tmp_path) -> None:
     assert ranked_all == ["OLD_HEAVY", "RECENT"]
 
 
+@dataclass
+class FakeAsset:
+    symbol: str
+    name: str
+    tradable: bool = True
+
+
+class FakeTradingClient:
+    """A trading client whose universe is a single common stock + screened ETFs, to prove the market
+    tickers are force-included despite the ETF screen."""
+
+    def __init__(self, assets: list[FakeAsset]) -> None:
+        self._assets = assets
+
+    def get_all_assets(self, _request: object) -> list[FakeAsset]:
+        return self._assets
+
+
+def test_universe_includes_market_tickers_despite_etf_screen() -> None:
+    """SPY/QQQ are ETF-like (screened out as ordinary universe names) but MUST be in /store/raw for the
+    cross-sectional features to validate — universe_symbols force-includes them."""
+    assets = [
+        FakeAsset("AAPL", "Apple Inc"),
+        FakeAsset("SPY", "SPDR S&P 500 ETF Trust"),  # ETF-like -> would be screened
+        FakeAsset("QQQ", "Invesco QQQ Trust"),  # ETF-like -> would be screened
+    ]
+    universe = raw_backfill.universe_symbols(FakeTradingClient(assets))
+    for ticker in raw_backfill.MARKET_TICKERS:
+        assert ticker in universe, f"{ticker} must be force-included for parity"
+    assert "AAPL" in universe
+
+
+def test_daily_mode_uses_full_universe_for_recent_days(tmp_path, monkeypatch) -> None:
+    """A `--days N` run WITHOUT explicit symbols is DAILY mode: the full universe over the last N settled
+    trading days (the self-sustaining nightly acquire), not the 6-month FULL window."""
+    calendar_days = [DAY - dt.timedelta(days=2), DAY - dt.timedelta(days=1), DAY]
+    monkeypatch.setattr(raw_backfill, "trading_client", lambda: object())
+    monkeypatch.setattr(raw_backfill, "trading_days", lambda _client, _start, _end: calendar_days)
+    monkeypatch.setattr(raw_backfill, "universe_symbols", lambda _client: ["AAPL", "SPY", "QQQ"])
+    captured: dict[str, object] = {}
+
+    def _capture_bars(_config: object, symbols: list[str], days: list[dt.date]) -> tuple[int, int]:
+        captured["symbols"] = symbols
+        captured["days"] = days
+        return 0, 0
+
+    monkeypatch.setattr(raw_backfill, "fetch_bars_tier", _capture_bars)
+    monkeypatch.setattr(raw_backfill, "rank_by_dollar_volume", lambda *a, **k: ["AAPL"])
+    monkeypatch.setattr(raw_backfill, "run_tier_fast", lambda *a, **k: (0, 0))
+
+    config = raw_backfill.parse_args(["--store", str(tmp_path), "--days", "1"])
+    assert config.symbols is None and config.days == 1  # DAILY mode (no symbols, days set)
+    raw_backfill.run(config)
+    assert captured["days"] == [DAY]  # only the last settled day
+    assert set(captured["symbols"]) == {"AAPL", "SPY", "QQQ"}  # full universe
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

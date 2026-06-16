@@ -34,6 +34,7 @@ import polars as pl
 
 from quantlib.features import store, trust_lifecycle, validate as validate_mod, validation_store
 from quantlib.features.cleanliness import clean_symbols, symbol_day_cleanliness
+from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
 from quantlib.features.materialize import DEFAULT_RAW_ROOT, materialize_from_raw
 from quantlib.features.registry import REGISTRY
 from quantlib.features.session import rth_mask
@@ -49,6 +50,13 @@ from quantlib.data.raw_backfill import trading_client, trading_days
 # their per-minute presence is the minute-coverage signal the cleanliness heuristic reads.
 COVERAGE_FEATURES = ["ret_1m"]
 DEFAULT_CHUNK = 200
+# The market-context tickers (SPY/QQQ) the cross-sectional features regress against. They are screened out
+# of the raw-backfill UNIVERSE (is_etf_like), so a materialize chunk that lacks them produces a NULL market
+# return for the whole chunk and every market-relative feature (market_beta/market_corr/idio_vol/
+# market_return/nasdaq_return/relative_return/outperforming) reads as all-extra_live -> never compared ->
+# can NEVER validate. We therefore PIN them into every materialize+validate chunk so the regression resolves
+# its market reference. They must be acquired into /store/raw regardless of the ETF screen (ops/daily_lifecycle.sh).
+MARKET_TICKERS: tuple[str, ...] = tuple(sorted(set(MARKET_INDICES.values())))
 # A day must have at least this many CLEAN symbols to contribute a clean-day grade. Grading off one or two
 # marginal survivors of a contaminated day is noise (a single thin name's near-zero-denominator rel-errors
 # masquerade as failures); below the floor the day yields NO clean comparison and every feature stays
@@ -132,12 +140,17 @@ def sweep_day(
     materialized: list[str] = []
     no_raw: list[str] = []
     for batch in _chunks(discovered, chunk):
-        materialize_from_raw(feature_root, raw_root, day, batch)
+        # PIN the market tickers into the materialize+validate scope so the cross-sectional features have
+        # their backfill market reference (see MARKET_TICKERS). They are deduped against the batch and only
+        # the DISCOVERED symbols are accounted in materialized/no_raw — the market tickers are reference
+        # symbols, not part of the day's collected universe being certified.
+        scope = batch + [ticker for ticker in MARKET_TICKERS if ticker not in batch]
+        materialize_from_raw(feature_root, raw_root, day, scope)
         present = store.stream_symbols_on(feature_root, day, source="backfill")
         present_set = set(present)
         materialized.extend([symbol for symbol in batch if symbol in present_set])
         no_raw.extend([symbol for symbol in batch if symbol not in present_set])
-        validate_mod.validate(feature_root, day, val_root, allow_today=allow_today, symbols=batch)
+        validate_mod.validate(feature_root, day, val_root, allow_today=allow_today, symbols=scope)
 
     cell = validation_store.read_cell(val_root, day)
     exceptions = validation_store.read_exceptions(val_root, day)
