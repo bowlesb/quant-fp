@@ -32,6 +32,18 @@ Every item carries: idea · prior · test · cost gate · KILL. Single-writer = 
 
 ---
 
+## ★★★ STATUS (2026-06-16, after the depth-baseline cycle)
+- **`/store/raw` has BARS (629 names × 126 days, 2025-12→2026-06) but NOT trades/quotes yet.** So
+  **H2-RETEST and H3 are BLOCKED on the trades/quotes backfill** (read `/store/raw/trades` & `/store/raw/quotes`
+  when they land — directory-existence is the gate). All heavy compute now runs via `ops/sandbox.sh` (capped,
+  /store read-only) — NEVER `docker exec` into live `feature-computer`.
+- **H1 CONFIRMED DEAD at depth** (illiq/liq |IC| 6–10×; liquid tier fails cost net). Removed from active pursuit.
+- **Powered vwap_dev baseline established:** pooled IC −0.058 (H15) but illiquid-inflated; the H2-RETEST
+  orthogonalizes against the **liquid-tier baseline −0.017/−0.014** (see LEADS.md).
+- **Next unblocked cycles while trades backfill (bars-only or self-built):** H4 (corporate-action split events
+  — LOW-turnover, cost wall weak), H5 (dividend-timing re-confirm), H6 (Garman-Klass vol from `/store/raw`
+  OHLC), H7 (rank-space). Working order now: **H2-RETEST (gated) → H4 → H5 → H6 → H7 → H3 (gated) → H8**.
+
 ## ★★ REPRIORITIZATION (2026-06-15, after the H2 OFI cycle)
 H2 ran on a **self-built Alpaca panel** (80 names × 3 days, tick-rule OFI built from SIP trades — proving
 microstructure work is NOT blocked on the platform subscription; I build the data myself per the charter)
