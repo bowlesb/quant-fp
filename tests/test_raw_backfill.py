@@ -196,7 +196,6 @@ def _config(tmp_path, budget_bytes: int, max_workers: int = 1, symbols=None) -> 
         bars_chunk_days=30,
         trades_chunk_days=5,
         quotes_chunk_days=2,
-        fast=False,
         processes=4,
         threads_per_process=4,
     )
