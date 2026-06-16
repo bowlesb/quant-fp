@@ -268,6 +268,13 @@ GATHER_GROUPS: tuple[str, ...] = ("market_context",)
 # receives the SAME dicts either way — only the transport differs, feature values are unchanged.
 _USE_IPC_MSGPACK = bool(os.environ.get("FP_IPC_MSGPACK"))
 
+# Pre-flight profiler hook (profile_sim.py). When set, process_stream_minute records each NON-REDUCTION
+# group's individual compute_latest ms into ``state.group_timings`` so the profiler can rank WHICH group is
+# slowest — the per-group attribution the phase decomposition (which buckets ~82 groups into one "rest"
+# number) cannot give. DEFAULT OFF: the per-group ``time.perf_counter()`` brackets are skipped entirely so
+# the measured hot path and every existing test/benchmark are byte-for-byte unchanged.
+_SIM_GROUP_TIMINGS = bool(os.environ.get("FP_SIM_GROUP_TIMINGS"))
+
 
 def _bucket_ticks_by_symbol_minute(
     trades: list[dict], quotes: list[dict], minute_epoch: int
@@ -326,6 +333,11 @@ class StreamShardState:
         self.gather_emit_ms = 0.0  # the cross-sectional UNIVERSE GATHER (market_context) — O(universe) at-T
         self.other_emit_ms = 0.0  # the remaining non-reduction groups' at-T compute_latest (calendar/sector/...)
         self.write_ms = 0.0
+        # Per-GROUP compute ms for the non-reduction (at-T compute_latest) groups, populated only when
+        # FP_SIM_GROUP_TIMINGS=1 (the pre-flight profiler) — the per-feature/per-group attribution the
+        # phase decomposition cannot give. Reduction groups share one batched marshal so they have no
+        # per-group cost to attribute; they are reported as the single reduction-emit phase.
+        self.group_timings: dict[str, float] = {}
 
     @property
     def buffer(self) -> pl.DataFrame | None:
@@ -484,11 +496,20 @@ def process_stream_minute(
         for name, out in emit_stateful(stateful_engines, frame, ctx, coded=shared_coded).items():
             outputs.append((name, stateful_versions[name], out))
     state.stateful_emit_ms = (time.perf_counter() - stateful_emit_start) * 1000.0
+    if _SIM_GROUP_TIMINGS and stateful_engines:
+        # Shared consolidated pass — attribute the phase time evenly across its groups (same convention the
+        # reduction phase uses; the cost is the one shared marshal, not per-group).
+        per_stateful = state.stateful_emit_ms / len(stateful_engines)
+        for name in stateful_versions:
+            state.group_timings[name] = per_stateful
     # The CROSS-SECTIONAL gather groups (market_context) — a per-minute universe gather (index broadcasts +
     # own-return point lags), O(universe) once, NOT per-symbol rolling. Timed apart as the cross-sectional phase.
     gather_emit_start = time.perf_counter()
     for group in gather_groups:
+        group_start = time.perf_counter()
         out = group.compute_latest(ctx)
+        if _SIM_GROUP_TIMINGS:
+            state.group_timings[group.name] = (time.perf_counter() - group_start) * 1000.0
         outputs.append((group.name, group.version, out))
     state.gather_emit_ms = (time.perf_counter() - gather_emit_start) * 1000.0
     # The remaining non-reduction groups (tick-runlength/microstructure-burst/...) at-T — NOT the
@@ -498,19 +519,41 @@ def process_stream_minute(
     other_emit_start = time.perf_counter()
     consolidated_versions = {g.name: g.version for g in (*pit_groups, *daily_groups)}
     if pit_groups:
-        for name, out in emit_point_in_time(pit_groups, ctx).items():
+        pit_start = time.perf_counter()
+        pit_out = emit_point_in_time(pit_groups, ctx)
+        pit_ms = (time.perf_counter() - pit_start) * 1000.0
+        for name, out in pit_out.items():
             outputs.append((name, consolidated_versions[name], out))
+        if _SIM_GROUP_TIMINGS:
+            for group in pit_groups:
+                state.group_timings[group.name] = pit_ms / len(pit_groups)
     if daily_groups:
-        for name, out in emit_daily_broadcast(daily_groups, ctx).items():
+        daily_start = time.perf_counter()
+        daily_out = emit_daily_broadcast(daily_groups, ctx)
+        daily_ms = (time.perf_counter() - daily_start) * 1000.0
+        for name, out in daily_out.items():
             outputs.append((name, consolidated_versions[name], out))
+        if _SIM_GROUP_TIMINGS:
+            for group in daily_groups:
+                state.group_timings[group.name] = daily_ms / len(daily_groups)
     trades_frame = _trades_frame(trades_by_symbol, minute_dt)
     for group in other_groups:
         group_frames = dict(frames)
         if group.name in TRADES_GROUPS:
             group_frames = {**frames, "trades": trades_frame}
+        group_start = time.perf_counter()
         out = group.compute_latest(BatchContext(frames=group_frames))
+        if _SIM_GROUP_TIMINGS:
+            state.group_timings[group.name] = (time.perf_counter() - group_start) * 1000.0
         outputs.append((group.name, group.version, out))
     state.other_emit_ms = (time.perf_counter() - other_emit_start) * 1000.0
+    if _SIM_GROUP_TIMINGS:
+        # The single batched reduction emit (one shared marshal+kernel for all reduction groups) — attribute
+        # the phase evenly so the ranking shows the per-group share alongside the at-T groups.
+        if reduction_groups:
+            per_reduction = state.reduction_emit_ms / len(reduction_groups)
+            for group in reduction_groups:
+                state.group_timings[group.name] = per_reduction
     state.emit_ms = (time.perf_counter() - emit_start) * 1000.0
 
     # WRITE: deferred — happens AFTER the bet, measured apart and excluded from the per-minute compute.
@@ -563,15 +606,22 @@ def stream_worker_main(  # pragma: no cover (process entry)
         compute_start = time.perf_counter()
         process_stream_minute(state, bars, trades, quotes, root, mode, day, snapshots, shard=shard_id)
         compute_ms = (time.perf_counter() - compute_start) * 1000.0 - state.write_ms
+        # Cross-process wall-clock the moment this shard's vector for the minute is assembled (BEFORE the
+        # deferred write — write is post-bet). Joined against the reader's dispatch_wall by minute to give
+        # the true bar-arrival(last bar) -> vector-ready end-to-end latency, the bet-relevant number.
+        ready_wall = time.time() - state.write_ms / 1000.0
         if bench_log is not None:
             record = {
                 "shard": shard_id, "minute": bars[0]["t"], "ms": compute_ms, "write_ms": state.write_ms,
+                "ready_wall": ready_wall,
                 "ipc_decode_ms": ipc_decode_ms,
                 "tick_agg_ms": state.tick_agg_ms, "fold_ms": state.fold_ms, "emit_ms": state.emit_ms,
                 "reduction_emit_ms": state.reduction_emit_ms, "stateful_emit_ms": state.stateful_emit_ms,
                 "gather_emit_ms": state.gather_emit_ms, "other_emit_ms": state.other_emit_ms,
                 "fast_path_ms": state.tick_agg_ms + state.fold_ms + state.reduction_emit_ms,
             }
+            if _SIM_GROUP_TIMINGS:
+                record["group_timings"] = state.group_timings
             with bench_log.open("a") as handle:
                 handle.write(json.dumps(record) + "\n")
 
@@ -631,6 +681,10 @@ def run_streaming_sim(  # pragma: no cover (live multiprocess loop)
         # ON (FP_IPC_MSGPACK): the reader msgpack-PACKS each slice to bytes (faster than pickle, and the
         # subsequent queue.put only memcpy-pickles the bytes), and the WORKER unpacks in parallel.
         route_start = time.perf_counter()
+        # The cross-process wall-clock the minute's whole bar set is in hand and routing begins — the
+        # LAST-bar anchor for the end-to-end bar->vector latency (matches real_capture's last_arrival
+        # / feature_assemble anchor). time.time() is comparable across reader+worker; perf_counter is not.
+        dispatch_wall = time.time()
         routed = route_stream_minute(pending["bars"], pending["trades"], pending["quotes"], n_shards)
         for shard_id, shard_batch in enumerate(routed):
             if not shard_batch[0]:
@@ -643,7 +697,8 @@ def run_streaming_sim(  # pragma: no cover (live multiprocess loop)
             transport = "msgpack-bytes" if _USE_IPC_MSGPACK else "pickle-dicts"
             with reader_bench.open("a") as handle:
                 handle.write(json.dumps({"minute": pending["minute"].isoformat(), "transport": transport,
-                                         "route_put_ms": (time.perf_counter() - route_start) * 1000.0}) + "\n")
+                                         "route_put_ms": (time.perf_counter() - route_start) * 1000.0,
+                                         "dispatch_wall": dispatch_wall}) + "\n")
 
     async def on_bar(bar) -> None:  # type: ignore[no-untyped-def]
         minute = bar.timestamp.replace(second=0, microsecond=0)
