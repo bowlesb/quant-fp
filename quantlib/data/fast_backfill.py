@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import os
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 
 import httpx
@@ -121,10 +122,15 @@ def run_tier_fast(
 
     written = 0
     bytes_written = 0
+    failed = 0
     buffer: list[dict] = []
     part_seq = 0
 
-    with ProcessPoolExecutor(max_workers=processes) as executor:
+    # SPAWN, not fork: this engine is launched from a parent that has already run thread pools (the bars
+    # tier) and logs heavily, so a forked worker inherits the logging/alloc locks in a HELD state and
+    # deadlocks on its first log call (observed: workers run ~1min then all freeze at 0% CPU). Spawn
+    # starts each worker from a clean interpreter, so no parent lock is inherited.
+    with ProcessPoolExecutor(max_workers=processes, mp_context=mp.get_context("spawn")) as executor:
         futures = {
             executor.submit(_fetch_one, store, tier, symbol, day_iso, threads_per_process): (
                 symbol,
@@ -133,7 +139,20 @@ def run_tier_fast(
             for symbol, day_iso in units
         }
         for future in as_completed(futures):
-            result = future.result()
+            symbol, day_iso = futures[future]
+            try:
+                result = future.result()
+            except BrokenProcessPool:
+                logger.error(
+                    "tier=%s: worker pool broke (a worker process died); ending tier — resume re-runs the rest",
+                    tier,
+                )
+                break
+            except (httpx.HTTPError, KeyError, OSError, pl.exceptions.PolarsError) as error:
+                # One bad symbol-day must not abort the tier: skip it (unrecorded -> a resume retries it).
+                failed += 1
+                logger.warning("tier=%s %s %s: fetch failed, skipping: %s", tier, symbol, day_iso, error)
+                continue
             written += 1
             bytes_written += result.bytes
             buffer.append(
@@ -152,11 +171,12 @@ def run_tier_fast(
                 buffer = []
             if written % 100 == 0:
                 logger.info(
-                    "tier=%s progress: %d/%d units, %.3fGB",
+                    "tier=%s progress: %d/%d units, %.3fGB, %d failed",
                     tier,
                     written,
                     len(units),
                     bytes_written / 1024**3,
+                    failed,
                 )
 
     if buffer:

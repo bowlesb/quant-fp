@@ -115,9 +115,8 @@ class BackfillConfig:
     bars_chunk_days: int  # trading days per bars request
     trades_chunk_days: int  # trading days per single-symbol trades request
     quotes_chunk_days: int  # trading days per single-symbol quotes request
-    fast: bool  # use the direct-httpx multiprocess engine for trades/quotes
-    processes: int  # worker processes for the fast engine
-    threads_per_process: int  # threads per fast-engine worker process
+    processes: int  # worker processes for the multiprocess tick engine
+    threads_per_process: int  # threads per tick-engine worker process
 
 
 def trading_client() -> TradingClient:
@@ -437,25 +436,19 @@ def run(config: BackfillConfig) -> None:
         len(ranked), len(trade_symbols), len(quote_symbols),
     )
 
-    if config.fast:
-        logger.info(
-            "FAST engine: direct-httpx multiprocess (%d procs x %d threads)",
-            config.processes,
-            config.threads_per_process,
-        )
-        trades_written, trades_bytes = run_tier_fast(
-            config.store, "trades", trade_symbols, days, config.processes, config.threads_per_process
-        )
-        quotes_written, quotes_bytes = run_tier_fast(
-            config.store, "quotes", quote_symbols, days, config.processes, config.threads_per_process
-        )
-    else:
-        trades_written, trades_bytes = fetch_ticks_tier(
-            config, "trades", trade_symbols, days, config.trades_chunk_days
-        )
-        quotes_written, quotes_bytes = fetch_ticks_tier(
-            config, "quotes", quote_symbols, days, config.quotes_chunk_days
-        )
+    # Ticks ALWAYS use the direct-httpx multiprocess engine — it is strictly faster than the SDK path
+    # (the GIL serializes alpaca-py's per-row parse), so there is no reason to ever choose "slow".
+    logger.info(
+        "tick engine: direct-httpx multiprocess (%d procs x %d threads)",
+        config.processes,
+        config.threads_per_process,
+    )
+    trades_written, trades_bytes = run_tier_fast(
+        config.store, "trades", trade_symbols, days, config.processes, config.threads_per_process
+    )
+    quotes_written, quotes_bytes = run_tier_fast(
+        config.store, "quotes", quote_symbols, days, config.processes, config.threads_per_process
+    )
     logger.info("TRADES: %d partitions, %.3fGB", trades_written, trades_bytes / 1024**3)
     logger.info("QUOTES: %d partitions, %.3fGB", quotes_written, quotes_bytes / 1024**3)
 
@@ -486,21 +479,16 @@ def parse_args(argv: list[str]) -> BackfillConfig:
     parser.add_argument("--trades-chunk-days", type=int, default=TRADES_CHUNK_DAYS)
     parser.add_argument("--quotes-chunk-days", type=int, default=QUOTES_CHUNK_DAYS)
     parser.add_argument(
-        "--fast",
-        action="store_true",
-        help="use the direct-httpx multiprocess engine for trades/quotes (~5x faster than the SDK path)",
-    )
-    parser.add_argument(
         "--processes",
         type=int,
         default=int(os.environ.get("RAW_BACKFILL_PROCESSES", DEFAULT_PROCESSES)),
-        help="worker processes for the fast engine (env RAW_BACKFILL_PROCESSES)",
+        help="worker processes for the multiprocess tick engine (env RAW_BACKFILL_PROCESSES)",
     )
     parser.add_argument(
         "--threads-per-process",
         type=int,
         default=int(os.environ.get("RAW_BACKFILL_THREADS", DEFAULT_THREADS_PER_PROCESS)),
-        help="threads per fast-engine worker process (env RAW_BACKFILL_THREADS)",
+        help="threads per tick-engine worker process (env RAW_BACKFILL_THREADS)",
     )
     args = parser.parse_args(argv)
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
@@ -517,7 +505,6 @@ def parse_args(argv: list[str]) -> BackfillConfig:
         bars_chunk_days=args.bars_chunk_days,
         trades_chunk_days=args.trades_chunk_days,
         quotes_chunk_days=args.quotes_chunk_days,
-        fast=args.fast,
         processes=args.processes,
         threads_per_process=args.threads_per_process,
     )
