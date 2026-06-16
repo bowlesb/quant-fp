@@ -22,6 +22,7 @@ the liquid tier. The open question: does ANY signal class produce a LIQUID-trade
 
 | date | lead | evidence (real) | net-of-cost | next action |
 |---|---|---|---|---|
+| 2026-06-16 | ~~**H13 small-capital re-cost** of the illiquid H1/H10 signals~~ **KILL — the illiquid edge is unharvestable even at $5K/name** (the decisive result) | Re-scored the illiquid H10 8-K cohort at Ben's scale with a measured/estimated per-name cost + capacity ceiling (`2026-06-16-h13-smallcap-recost/`). **Median illiquid ADV = $35,822 → a $5K order is 14% of daily volume = ~813 bps round-trip (k=10), 440 bps (optimistic k=5)** — 4–8× the ~1.7–3.1% gross OOS alpha. 1%-ADV cap → max **$358/name, CAPACITY CEILING $0**. Does not survive the 2× spread stress. (Cost is an estimate — 32/2,444 illiquid names measured — but a likely UNDER-estimate, so KILL is conservative; the $0 capacity is structural regardless.) | **NET NEGATIVE at every order size + cost assumption.** The small-capital advantage INVERTS: $5K is not small for a $36K/day stock. | KILL. The illiquid signals (H1/H10) are real but unharvestable at ANY capital scale — you ARE the market. The detectability (slow illiquid price discovery) and the untradeability are the SAME property. Commit to liquid hunt / new signal class. |
 | 2026-06-16 | **H4 split POST-ex drift** — **UNDERPOWERED / NEEDS H8 backfill** (not a verdict) | `corporate_actions_pit` (`2026-06-16-h4-split-postex-drift/`). REVERSE splits: full-universe drift strongly negative + canary-clear + demean-surviving (alpha −5 to −16%, t −2.4 to −3.6) — REAL, sign-correct (distress continuation). But **only 4 of 312 reverse splits are LIQUID** (1.3% — structural: reverse splits ARE distress events on illiquid names), so the liquid cohort can't be tested (N=4 < pre-committed 20; the 4 are direction-correct + canary-clear but underpowered). FORWARD splits: only 17 total / 9 liquid — untestable, sign-wrong but meaningless at N. | reverse-split drift lives in the illiquid/mid tiers (same as H1/H10); the liquid tier is structurally near-empty. | **NEEDS H8 deep-split backfill** (delisted names + longer history) before any liquid verdict. Reinforces the meta-pattern: event drift is illiquid-concentrated, and for reverse splits it's economic-by-construction. Routed as a data ask. |
 | 2026-06-16 | ~~**H5 dividend POST-EX drift**~~ **KILLED — NO signal anywhere** (a harder null than H10) | `corporate_actions_pit`, 6,042 ex-div events, D+1-open entry, liquid-tertile-PRIMARY + walk-forward OOS (`2026-06-16-h5-dividend-postex-drift/`). **Liquid-tertile OOS demeaned best \|t\|=0.67** (1d +0.51 / 3d −0.67 / 5d −0.38 / 10d +0.31) — nowhere near t≥2. UNLIKE H10 this is NOT an illiquid mirage: the FULL universe is ALSO dead (OOS t 0.02–0.86). The explorer self-killed a tempting high-yield/10d OOS t=3.08 (zero IS support, below canary, post-hoc, N=173 — textbook false discovery, per the hold-out rule). | dead at every horizon, every tier, IS and OOS — no cost question to ask. | KILLED. Post-ex dividend drift does not exist in this universe/window. The documented Elton-Gruber effect is arbitraged away in listed large/mid caps. |
 | 2026-06-16 | ~~**H10 8-K event drift** (first KEEP in-sample)~~ **KILLED FOR TRADEABILITY at escalation** — the H1 illiquid trap in event clothing | In-sample (`2026-06-16-h10-edgar-event-drift/`): 8-K cohorts drift +2.95/+5.69/+5.53% demeaned (t 1.97/3.05/2.96) 1/3/5d, canary-clear. **H10b escalation (`2026-06-16-h10b-8k-drift-escalation/`) walk-forward OOS HELD** (1d OOS t 2.71, 3d 2.56 — the effect is REAL, not in-sample overfit) **— but the LIQUID-TERTILE is DEAD: OOS demeaned t 0.54 / 0.31 / −0.02.** The entire alpha lives in the illiquid bottom 2/3 (stale-price diffusion in thin names). Earnings-split inconclusive (7% item-code sample) but earnings-8K OOS t≈0 → NOT PEAD. | **UNHARVESTABLE**: illiquid-tertile round-trip cost 30–200 bps/side ≫ the alpha; liquid (tradeable) tertile has NO signal. Same wall as H1 (vwap_dev was illiquid-concentrated too). | **DO NOT promote to a feature** — the alpha cannot be harvested in tradeable names. A real signal but not a real EDGE. Possible reframe H10c (liquid-only 8-K conditioned on filing-type / volume-shock) but LOW prior (20%) given the liquid extinction. Higher-value next: H5/H4 (INDEPENDENT event families) — does ANY event family survive the liquid-tradeability gate? |
@@ -50,21 +51,48 @@ the liquid tier. The open question: does ANY signal class produce a LIQUID-trade
   carrier is overwhelmingly an ILLIQUID-name phenomenon (illiq/liq |IC| 6–10× at 126 days) and the liquid
   tier (the only tradeable one) fails cost net. Cost-conditioning is structurally doomed. Definitively dead.
 
-## Standing position after the EVENT-FAMILY cycle — 0/3 tradeable, two failure modes (2026-06-16)
-- **Scoreboard: 0/3 tradeable edges.** H1 (vwap_dev reversion) and H10 (8-K drift) = ILLIQUID MIRAGE (real
-  full-universe signal, OOS-replicating, but DEAD in the liquid tradeable tertile — alpha lives in stale-price
-  illiquid names). H5 (dividend post-ex drift) = NO SIGNAL ANYWHERE (dead even in the full illiquid universe).
-- **The sharpened question (two live tests):** (a) does ANY signal class live in LIQUID tradeable names? —
-  H4 (split drift) RUNNING, but expected weak (244 events, distress-illiquid by nature). (b) are the illiquid
-  mirages (H1/H10) actually HARVESTABLE at Ben's ~$5–10K/position scale where cost is ~3–7 bps not 30–200? —
-  **H13 small-capital re-cost RUNNING with a hard CAPACITY-CEILING gate.** H13 is the higher-EV of the two:
-  the illiquid signals are REAL (they cleared OOS), and the only thing that killed them was an institutional
-  cost model that may not apply to a $100K book. If H13 shows the illiquid H10/H1 alpha nets positive at
-  $5–10K/name with capacity ≥ ~$100K → the FIRST harvestable edge (small-capital illiquid). If it dies even
-  at small size → the illiquid signals are dead for Ben too and we commit to the (so-far-empty) liquid hunt.
-- **Strategic fork (Ben's call, surfaced via the Lead):** LIQUID-SCALABLE (no edge found yet) vs
-  ILLIQUID-SMALL-CAPITAL (H13 decides if it's real at his scale). The hunt's next direction depends on H13 +
-  H4.
+## ★ CYCLE SYNTHESIS — 0 tradeable edges; BOTH paths closed; the constraint is fully mapped (2026-06-16)
+**Scoreboard: 0 tradeable edges from 7 tested hypotheses (H1–H13). Every one pre-registered, cost- and
+liquidity-gated. This is a COMPLETE, honest map of where the edge ISN'T — worth more than a fragile lead.**
+
+Three exhaustive findings:
+1. **The PRICE / microstructure cross-sectional branch is CLOSED.** vwap_dev reversion (the only
+   canary-clearing price signal, t −2.76) is dead at all horizons 15–120 min (H1/H9), un-rescuable by any
+   conditioner (liquidity H1, flow H2, depth/spread H3), and flips to momentum at 60–120 min which is itself
+   marginal (H11, demeaned t 1.51). OFI/signed-flow killed (H2). No price/order-flow signal survives.
+2. **The EVENT / non-price branch is CLOSED for tradeability.** 8-K drift (H10) and reverse-split drift
+   (H4) are REAL and OOS-replicating but ILLIQUID-CONCENTRATED — dead in the liquid tier. Dividend drift (H5)
+   has no signal anywhere. Form-4 = style bias.
+3. **THE DECISIVE H13 RESULT — the illiquid signals are NOT harvestable even at Ben's $5–10K scale.** The
+   small-capital reframe (you're a tiny fraction of volume, so cost is low) INVERTS in the illiquid tail
+   where the alpha lives: median illiquid ADV is only **$35,822**, so a $5K order is **14% of daily volume =
+   ~813 bps round-trip** (8× the alpha). The 1%-ADV capacity cap allows at most **$358/name → capacity
+   ceiling $0**. The signal is real; the stocks ARE the market at any tradeable size. (Cost is an estimate —
+   only 32/2,444 illiquid names have measured spreads — but it's a likely UNDER-estimate, so the KILL is
+   conservative-safe; and the $0 capacity ceiling is structural regardless of spread precision.)
+
+**THE UNIFYING CONSTRAINT (the day's core lesson):** every signal that clears a canary in this universe is
+**illiquid-concentrated, and illiquidity is exactly what makes it both detectable (slow price discovery =
+the drift) AND untradeable (you move the price you're trying to capture).** The detectability and the
+untradeability are the SAME property. Liquid names are efficiently priced (no signal); illiquid names carry
+signal you can't extract at ANY capital scale (even $5K is too big). This holds at fund scale AND at $100K.
+
+**WHERE A REAL EDGE COULD STILL LIVE (the honest forward map — for the next cycle / Ben's call):**
+- **Higher-frequency execution on a liquid name** (intraday, not the daily cross-section) — where a real-time
+  signal + low per-trade cost on a megacap could clear; needs the quote/latency infra (partly built).
+- **A signal liquid names DO carry that we haven't tested** — options-implied (vol surface / skew), index
+  rebalance / ETF-flow events, cross-asset (rates/FX → equity), genuine fundamentals (not calendar effects).
+- **Capacity-aware mid-tier** — the MID liquidity tier (not top, not bottom) sometimes carried borderline
+  drift (H4 reverse mid-tier t −2 to −4); a mid-tier signal with a modest capacity ceiling might thread the
+  needle for a $100K book, but none cleared cleanly here.
+- **Accepting the daily-rebalance illiquid edge is NOT viable** — H13 settles that for this signal class.
+- A NEW signal class (events with bigger/faster reactions in LIQUID names; alt-data) is the highest-EV next
+  direction. The price + corporate-action-calendar classes are mapped and (mostly) empty.
+
+**Strategic fork resolved by data:** there is no illiquid-small-capital edge in the signals found
+(H13 KILL); the liquid-scalable hunt is 0-for-everything so far. → Next cycle pivots to (a) liquid-name
+higher-frequency or (b) an untested liquid-carrying signal class (options/flow/fundamentals). Surfaced to
+Ben for direction.
 
 ## Standing position after H1+H2+H3+H9 kills — the PRICE branch is CLOSED (2026-06-16)
 - `vwap_dev` reversion was the ONLY signal to clear a shuffle canary (t −2.76 at H15). It is now DEAD:
