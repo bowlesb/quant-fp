@@ -57,19 +57,24 @@ CIK_REFRESH_SECONDS = int(os.environ.get("EDGAR_CIK_REFRESH_SECONDS", str(24 * 3
 HTTP_TIMEOUT = float(os.environ.get("EDGAR_HTTP_TIMEOUT", "30.0"))
 EDGAR_MODE = os.environ.get("EDGAR_MODE", "stream")
 BACKFILL_SYMBOLS = [
-    s.strip().upper() for s in os.environ.get("EDGAR_BACKFILL_SYMBOLS", "").split(",") if s.strip()
+    s.strip().upper()
+    for s in os.environ.get("EDGAR_BACKFILL_SYMBOLS", "").split(",")
+    if s.strip()
 ]
 # Form types we collect. Empty/"*" = collect ALL forms (Phase 1 is breadth-first — keep everything,
 # filter at feature time). A comma list restricts to those forms.
 _form_filter_env = os.environ.get("EDGAR_FORMS", "").strip()
 FORM_FILTER: set[str] | None = (
-    None if _form_filter_env in ("", "*") else {f.strip().upper() for f in _form_filter_env.split(",")}
+    None
+    if _form_filter_env in ("", "*")
+    else {f.strip().upper() for f in _form_filter_env.split(",")}
 )
 
 
 def db_kwargs() -> dict[str, object]:
     """DB connection kwargs from the environment. A function (not a module constant) so the module
-    imports cleanly in tests / byte-compile without DB_* present — the real job supplies them."""
+    imports cleanly in tests / byte-compile without DB_* present — the real job supplies them.
+    """
     return {
         "host": os.environ["DB_HOST"],
         "port": int(os.environ.get("DB_PORT", "5432")),
@@ -81,7 +86,9 @@ def db_kwargs() -> dict[str, object]:
 
 def normalize_cik(cik: str) -> str:
     """SEC CIK as a zero-padded 10-digit string (the form company_tickers.json and the mapper use)."""
-    return cik.strip().lstrip("0").zfill(10) if cik.strip().lstrip("0") else "0".zfill(10)
+    return (
+        cik.strip().lstrip("0").zfill(10) if cik.strip().lstrip("0") else "0".zfill(10)
+    )
 
 
 def parse_company_tickers(payload: dict[str, dict[str, object]]) -> dict[str, str]:
@@ -100,14 +107,17 @@ def parse_company_tickers(payload: dict[str, dict[str, object]]) -> dict[str, st
 
 def parse_atom_updated(text: str) -> datetime:
     """Parse an Atom <updated> timestamp (RFC-3339, e.g. '2026-06-14T13:30:05-04:00') to an
-    aware UTC datetime. This instant IS available_at — when the filing became publicly visible."""
+    aware UTC datetime. This instant IS available_at — when the filing became publicly visible.
+    """
     parsed = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
 
-def parse_atom_entry(entry: ET.Element, cik_to_ticker: dict[str, str]) -> dict[str, object] | None:
+def parse_atom_entry(
+    entry: ET.Element, cik_to_ticker: dict[str, str]
+) -> dict[str, object] | None:
     """Parse one Atom <entry> into a filing dict with the THREE timestamps.
 
     Returns None when the entry is unparseable or filtered out by FORM_FILTER. The returned dict is
@@ -138,7 +148,9 @@ def parse_atom_entry(entry: ET.Element, cik_to_ticker: dict[str, str]) -> dict[s
     if FORM_FILTER is not None and form_type not in FORM_FILTER:
         return None
 
-    summary_text = summary_elem.text if (summary_elem is not None and summary_elem.text) else ""
+    summary_text = (
+        summary_elem.text if (summary_elem is not None and summary_elem.text) else ""
+    )
     id_text = id_elem.text if (id_elem is not None and id_elem.text) else ""
     accession = extract_accession(summary_text, id_text)
     if accession is None:
@@ -146,10 +158,19 @@ def parse_atom_entry(entry: ET.Element, cik_to_ticker: dict[str, str]) -> dict[s
 
     available_at = parse_atom_updated(updated_elem.text)
 
-    cik = extract_cik(title, id_text)
-    symbol = cik_to_ticker.get(cik) if cik is not None else None
-    company_name = extract_company_name(title)
     link = link_elem.get("href") if link_elem is not None else None
+    cik = extract_cik(title, id_text, link)
+    if cik is None:
+        # cik is NOT-NULL in the filings table; a row with no extractable CIK can't be inserted. The
+        # live feed always carries the CIK in the link path (.../edgar/data/<CIK>/...) or the title,
+        # so this is rare/malformed — skip it (don't fabricate a null-cik row that would fail the
+        # UPSERT and stall the whole batch).
+        logger.warning(
+            "skipping entry with no extractable CIK: title=%r link=%r", title, link
+        )
+        return None
+    symbol = cik_to_ticker.get(cik)
+    company_name = extract_company_name(title)
 
     return {
         "accession_number": accession,
@@ -157,8 +178,8 @@ def parse_atom_entry(entry: ET.Element, cik_to_ticker: dict[str, str]) -> dict[s
         "symbol": symbol,
         "form_type": form_type,
         "company_name": company_name,
-        "filed_at": None,          # METADATA — the live feed does NOT carry a separate filing date
-        "accepted_at": None,       # only the submissions API exposes acceptanceDateTime
+        "filed_at": None,  # METADATA — the live feed does NOT carry a separate filing date
+        "accepted_at": None,  # only the submissions API exposes acceptanceDateTime
         "available_at": available_at,
         "available_at_source": "atom_feed",
         "link": link,
@@ -181,27 +202,44 @@ def extract_accession(summary_text: str, id_text: str) -> str | None:
     return None
 
 
-def extract_cik(title: str, id_text: str) -> str | None:
-    """CIK from the Atom <title> '(0001234567)' suffix, or the <id> urn cik=... fallback.
-    Normalized to 10-digit zero-padded."""
-    match = re.search(r"\((\d{1,10})\)\s*$", title.strip())
+def extract_cik(title: str, id_text: str, link: str | None = None) -> str | None:
+    """CIK from the Atom entry, normalized to 10-digit zero-padded.
+
+    Sources, most-robust first:
+      1. the filing URL path '.../edgar/data/<CIK>/...' (the <link href>) — ALWAYS present in the live
+         current-filings feed and unambiguous (this is the source the old title-only logic missed,
+         which left cik=NULL and broke every insert).
+      2. the <title> '(0001234567)' group — note the live feed appends a ROLE suffix after it,
+         e.g. '424B2 - BofA Finance LLC (0001682472) (Filer)', so the CIK is NOT at end-of-string.
+      3. the <id>/link 'CIK=...' query param.
+    """
+    if link:
+        match = re.search(r"/edgar/data/(\d{1,10})(?:/|$)", link)
+        if match:
+            return normalize_cik(match.group(1))
+    match = re.search(r"\((\d{1,10})\)", title)
     if match:
         return normalize_cik(match.group(1))
-    match = re.search(r"[?&]CIK=(\d{1,10})", id_text)
-    if match:
-        return normalize_cik(match.group(1))
+    for source_text in (id_text, link or ""):
+        match = re.search(r"[?&]CIK=(\d{1,10})", source_text)
+        if match:
+            return normalize_cik(match.group(1))
     return None
 
 
 def extract_company_name(title: str) -> str | None:
-    """Filer name from the Atom <title>: '<form> - <COMPANY NAME> (CIK)'. Best-effort metadata."""
-    match = re.match(r"^[\w\-/. ]+?\s+-\s+(.*?)\s*\(\d{1,10}\)\s*$", title.strip())
+    """Filer name from the Atom <title>: '<form> - <COMPANY NAME> (CIK) (ROLE)'. The CIK group is
+    followed by an optional role suffix ('(Filer)', '(Reporting)', '(Issuer)', '(Subject)'), so the
+    name is everything between the ' - ' and the '(CIK)' group. Best-effort metadata."""
+    match = re.match(r"^[\w\-/. ]+?\s+-\s+(.*?)\s*\(\d{1,10}\)", title.strip())
     if match:
         return match.group(1).strip()
     return None
 
 
-def parse_atom_feed(feed_xml: str, cik_to_ticker: dict[str, str]) -> list[dict[str, object]]:
+def parse_atom_feed(
+    feed_xml: str, cik_to_ticker: dict[str, str]
+) -> list[dict[str, object]]:
     """Parse a full Atom feed payload into a list of filing dicts (skipping unparseable/filtered)."""
     root = ET.fromstring(feed_xml)
     filings: list[dict[str, object]] = []
@@ -310,7 +348,8 @@ def parse_submissions(
 
     available_at for historical filings = acceptanceDateTime, flagged available_at_source=
     'submissions_accepted' (lower confidence than the live feed — see EDGAR_INGESTION.md). filed_at is
-    the company filingDate (METADATA). This keeps the three-timestamp separation in backfill too."""
+    the company filingDate (METADATA). This keeps the three-timestamp separation in backfill too.
+    """
     filings_obj = payload["filings"]
     assert isinstance(filings_obj, dict)
     recent = filings_obj["recent"]
@@ -339,7 +378,9 @@ def parse_submissions(
         form_type = str(form).upper()
         if FORM_FILTER is not None and form_type not in FORM_FILTER:
             continue
-        accepted_at = parse_atom_updated(str(acceptance_str)) if acceptance_str else None
+        accepted_at = (
+            parse_atom_updated(str(acceptance_str)) if acceptance_str else None
+        )
         if accepted_at is None:
             # No acceptance time -> no defensible available_at; skip rather than fabricate one.
             continue
@@ -368,7 +409,9 @@ def parse_submissions(
 def parse_filing_date(date_str: str) -> datetime:
     """Company filingDate ('YYYY-MM-DD') -> midnight-UTC datetime. METADATA only (see the parity note)."""
     parsed_date: date = date.fromisoformat(date_str.strip())
-    return datetime(parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=timezone.utc)
+    return datetime(
+        parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=timezone.utc
+    )
 
 
 def backfill_symbol(
