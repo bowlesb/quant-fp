@@ -36,12 +36,40 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest, GetCalendarRequest
 
+from quantlib.data.fast_backfill import (
+    DEFAULT_PROCESSES,
+    DEFAULT_THREADS_PER_PROCESS,
+    run_tier_fast,
+)
 from quantlib.data.raw_fetchers import (
     fetch_bars_multi,
     fetch_quotes_range,
     fetch_trades_range,
 )
+from quantlib.data.raw_store import (
+    MANIFEST_SCHEMA,
+    done_keys,
+    free_bytes,
+    load_manifest,
+    manifest_dir,
+    manifest_path,
+    partition_dir,
+    write_manifest_part,
+    write_partition,
+)
 from quantlib.universe import is_etf_like
+
+__all__ = [
+    "MANIFEST_SCHEMA",
+    "done_keys",
+    "free_bytes",
+    "load_manifest",
+    "manifest_dir",
+    "manifest_path",
+    "partition_dir",
+    "write_manifest_part",
+    "write_partition",
+]
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -72,15 +100,6 @@ MANIFEST_FLUSH_EVERY = 500  # buffer this many manifest entries before writing o
 RANK_SAMPLE_DAYS = 20  # rank dollar-volume on the most recent N days (liquidity tiering is day-stable)
 RANK_WORKERS = 16  # concurrent symbol reads when ranking (IO-bound over many tiny parquet files)
 
-MANIFEST_SCHEMA: dict[str, pl.DataType] = {
-    "tier": pl.String,
-    "symbol": pl.String,
-    "date": pl.String,
-    "rows": pl.Int64,
-    "bytes": pl.Int64,
-    "fetched_at": pl.Datetime("us", "UTC"),
-}
-
 
 @dataclass
 class BackfillConfig:
@@ -96,6 +115,9 @@ class BackfillConfig:
     bars_chunk_days: int  # trading days per bars request
     trades_chunk_days: int  # trading days per single-symbol trades request
     quotes_chunk_days: int  # trading days per single-symbol quotes request
+    fast: bool  # use the direct-httpx multiprocess engine for trades/quotes
+    processes: int  # worker processes for the fast engine
+    threads_per_process: int  # threads per fast-engine worker process
 
 
 def trading_client() -> TradingClient:
@@ -151,82 +173,6 @@ def universe_symbols(client: TradingClient) -> list[str]:
         if asset.tradable and "/" not in asset.symbol and not is_etf_like(asset.name)
     ]
     return sorted(set(symbols))
-
-
-def partition_dir(store: str, tier: str, symbol: str, day: dt.date) -> str:
-    return os.path.join(store, "raw", tier, f"symbol={symbol}", f"date={day.isoformat()}")
-
-
-def manifest_path(store: str, tier: str) -> str:
-    return os.path.join(store, "raw", f"_manifest_{tier}.parquet")
-
-
-def manifest_dir(store: str, tier: str) -> str:
-    """Directory of append-only manifest PART files. Each flush writes one immutable part — recording a
-    partition is then O(part size), not O(total manifest). load_manifest unions all parts (+ any legacy
-    single-file manifest from an earlier run), so resume sees every prior fetch."""
-    return os.path.join(store, "raw", f"_manifest_{tier}.d")
-
-
-def load_manifest(store: str, tier: str) -> pl.DataFrame:
-    """Union the legacy single-file manifest (if present) with every append-only part file."""
-    frames = []
-    legacy = manifest_path(store, tier)
-    if os.path.exists(legacy):
-        frames.append(pl.read_parquet(legacy))
-    parts_dir = manifest_dir(store, tier)
-    if os.path.isdir(parts_dir):
-        for name in sorted(os.listdir(parts_dir)):
-            if name.endswith(".parquet"):
-                frames.append(pl.read_parquet(os.path.join(parts_dir, name)))
-    if not frames:
-        return pl.DataFrame(schema=MANIFEST_SCHEMA)
-    return pl.concat(frames, how="vertical") if len(frames) > 1 else frames[0]
-
-
-def done_keys(manifest: pl.DataFrame) -> set[tuple[str, str]]:
-    """Set of (symbol, date) already recorded in a tier manifest."""
-    if manifest.height == 0:
-        return set()
-    return {
-        (symbol, date)
-        for symbol, date in zip(
-            manifest["symbol"].to_list(), manifest["date"].to_list()
-        )
-    }
-
-
-def write_manifest_part(store: str, tier: str, entries: list[dict], part_seq: int) -> None:
-    """Persist a batch of manifest entries as ONE immutable append-only part file (atomic tmp+rename).
-    Part name is (pid, seq)-unique so concurrent/overlapping processes never collide. Resume tolerates a
-    crash mid-buffer: only the unflushed entries are lost and their partitions are simply re-fetched."""
-    if not entries:
-        return
-    parts_dir = manifest_dir(store, tier)
-    os.makedirs(parts_dir, exist_ok=True)
-    frame = pl.DataFrame(entries, schema=MANIFEST_SCHEMA)
-    name = f"part-{os.getpid()}-{part_seq:08d}.parquet"
-    final_path = os.path.join(parts_dir, name)
-    tmp_path = f"{final_path}.tmp"
-    frame.write_parquet(tmp_path)
-    os.replace(tmp_path, final_path)
-
-
-def free_bytes(store: str) -> int:
-    stats = os.statvfs(store)
-    return stats.f_bavail * stats.f_frsize
-
-
-def write_partition(store: str, tier: str, symbol: str, day: dt.date, frame: pl.DataFrame) -> int:
-    """Write a symbol-day partition parquet; return on-disk byte size. Empty frames still write a
-    zero-row file so the manifest marks the symbol-day DONE (no-data days are not re-fetched)."""
-    out_dir = partition_dir(store, tier, symbol, day)
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "data.parquet")
-    tmp_path = os.path.join(out_dir, "data.parquet.tmp")
-    frame.write_parquet(tmp_path, compression="zstd")
-    os.replace(tmp_path, out_path)
-    return os.path.getsize(out_path)
 
 
 class _TierProgress:
@@ -491,14 +437,26 @@ def run(config: BackfillConfig) -> None:
         len(ranked), len(trade_symbols), len(quote_symbols),
     )
 
-    trades_written, trades_bytes = fetch_ticks_tier(
-        config, "trades", trade_symbols, days, config.trades_chunk_days
-    )
+    if config.fast:
+        logger.info(
+            "FAST engine: direct-httpx multiprocess (%d procs x %d threads)",
+            config.processes,
+            config.threads_per_process,
+        )
+        trades_written, trades_bytes = run_tier_fast(
+            config.store, "trades", trade_symbols, days, config.processes, config.threads_per_process
+        )
+        quotes_written, quotes_bytes = run_tier_fast(
+            config.store, "quotes", quote_symbols, days, config.processes, config.threads_per_process
+        )
+    else:
+        trades_written, trades_bytes = fetch_ticks_tier(
+            config, "trades", trade_symbols, days, config.trades_chunk_days
+        )
+        quotes_written, quotes_bytes = fetch_ticks_tier(
+            config, "quotes", quote_symbols, days, config.quotes_chunk_days
+        )
     logger.info("TRADES: %d partitions, %.3fGB", trades_written, trades_bytes / 1024**3)
-
-    quotes_written, quotes_bytes = fetch_ticks_tier(
-        config, "quotes", quote_symbols, days, config.quotes_chunk_days
-    )
     logger.info("QUOTES: %d partitions, %.3fGB", quotes_written, quotes_bytes / 1024**3)
 
     logger.info(
@@ -527,6 +485,23 @@ def parse_args(argv: list[str]) -> BackfillConfig:
     parser.add_argument("--bars-chunk-days", type=int, default=BARS_CHUNK_DAYS)
     parser.add_argument("--trades-chunk-days", type=int, default=TRADES_CHUNK_DAYS)
     parser.add_argument("--quotes-chunk-days", type=int, default=QUOTES_CHUNK_DAYS)
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="use the direct-httpx multiprocess engine for trades/quotes (~5x faster than the SDK path)",
+    )
+    parser.add_argument(
+        "--processes",
+        type=int,
+        default=int(os.environ.get("RAW_BACKFILL_PROCESSES", DEFAULT_PROCESSES)),
+        help="worker processes for the fast engine (env RAW_BACKFILL_PROCESSES)",
+    )
+    parser.add_argument(
+        "--threads-per-process",
+        type=int,
+        default=int(os.environ.get("RAW_BACKFILL_THREADS", DEFAULT_THREADS_PER_PROCESS)),
+        help="threads per fast-engine worker process (env RAW_BACKFILL_THREADS)",
+    )
     args = parser.parse_args(argv)
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     return BackfillConfig(
@@ -542,6 +517,9 @@ def parse_args(argv: list[str]) -> BackfillConfig:
         bars_chunk_days=args.bars_chunk_days,
         trades_chunk_days=args.trades_chunk_days,
         quotes_chunk_days=args.quotes_chunk_days,
+        fast=args.fast,
+        processes=args.processes,
+        threads_per_process=args.threads_per_process,
     )
 
 
