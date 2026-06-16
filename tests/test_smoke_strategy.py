@@ -18,6 +18,7 @@ import redis
 from quantlib.bus.consumer import BusConsumer
 from quantlib.bus.publisher import BusPublisher
 from quantlib.bus.schema import default_schema
+from strategies.lib.model import MockMLModel
 from strategies.smoke.strategy import (
     SmokeConfig,
     SmokeStrategy,
@@ -48,6 +49,8 @@ def _config(**overrides: object) -> SmokeConfig:
         "max_total_notional_usd": 200.0,
         "enabled": True,
         "loop_block_ms": 100,
+        "use_model": False,
+        "model_threshold": 0.5,
     }
     base.update(overrides)
     return SmokeConfig(**base)  # type: ignore[arg-type]
@@ -248,7 +251,9 @@ def _strategy(
     strategy._trading = trading  # type: ignore[attr-defined]
     strategy._data = data  # type: ignore[attr-defined]
     strategy._store = store  # type: ignore[attr-defined]
+    strategy._model = MockMLModel()  # type: ignore[attr-defined]
     strategy._last_symbol = "AAPL"  # type: ignore[attr-defined]
+    strategy._last_vector = None  # type: ignore[attr-defined]
     strategy._last_bet_ts = None  # type: ignore[attr-defined]
     return strategy
 

@@ -40,6 +40,8 @@ from alpaca.trading.models import Clock, Order
 from alpaca.trading.requests import MarketOrderRequest
 
 from quantlib.bus.consumer import BusConsumer
+from quantlib.bus.vector import FeatureVector
+from strategies.lib.model import MockMLModel, Model
 from strategies.smoke.bet_store import BetStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -47,6 +49,7 @@ logger = logging.getLogger("smoke-strategy")
 
 DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "SPY", "AMD"]
 SAMPLE_FEATURES = ["ret_1m", "volume_zscore_5m"]
+MODEL_FOLD_FEATURES = ["ret_1m", "volume_zscore_5m"]
 COID_PREFIX = "smoke_"
 
 
@@ -69,6 +72,8 @@ class SmokeConfig:
     max_total_notional_usd: float
     enabled: bool
     loop_block_ms: int
+    use_model: bool
+    model_threshold: float
 
     @classmethod
     def from_env(cls) -> SmokeConfig:
@@ -81,6 +86,8 @@ class SmokeConfig:
             max_total_notional_usd=float(os.environ.get("SMOKE_MAX_TOTAL_NOTIONAL_USD", "200")),
             enabled=os.environ.get("SMOKE_ENABLED", "1") != "0",
             loop_block_ms=int(os.environ.get("SMOKE_LOOP_BLOCK_MS", "1000")),
+            use_model=os.environ.get("SMOKE_USE_MODEL", "0") == "1",
+            model_threshold=float(os.environ.get("SMOKE_MODEL_THRESHOLD", "0.5")),
         )
 
 
@@ -143,13 +150,16 @@ class SmokeStrategy:
         trading: TradingClient,
         data_client: StockHistoricalDataClient,
         store: BetStore,
+        model: Model | None = None,
     ) -> None:
         self._config = config
         self._consumer = consumer
         self._trading = trading
         self._data = data_client
         self._store = store
+        self._model = model if model is not None else MockMLModel(MODEL_FOLD_FEATURES)
         self._last_symbol: str | None = None
+        self._last_vector: FeatureVector | None = None
         self._last_bet_ts: dt.datetime | None = None
 
     def market_open(self) -> bool:
@@ -196,12 +206,38 @@ class SmokeStrategy:
         for vector in vectors:
             self._last_symbol = vector.symbol
         latest = vectors[-1]
+        self._last_vector = latest
         samples = sample_features(latest)
         rendered = " ".join(f"{name}={value:+.5f}" for name, value in samples.items())
         logger.info(
             "SAMPLE %s @ %s | %s (%d vectors this poll)",
             latest.symbol, latest.minute.isoformat(), rendered, len(vectors),
         )
+
+    def _model_allows(self) -> bool:
+        """Model overlay (only when SMOKE_USE_MODEL=1): predict on the latest vector and require the
+        probability to clear the threshold. The mock model is deterministic per (symbol, minute), so the
+        signal varies but is reproducible; a real classifier drops in behind the same ``Model`` interface.
+        When the overlay is off, this is a no-op (current behaviour: bet purely on the safety gate)."""
+        if not self._config.use_model:
+            return True
+        if self._last_vector is None:
+            logger.debug("no bet: model_no_vector")
+            return False
+        prediction = self._model.predict(self._last_vector)
+        if prediction.probability <= self._config.model_threshold:
+            logger.info(
+                "no bet: model p=%.3f <= threshold %.3f (%s %s)",
+                prediction.probability, self._config.model_threshold,
+                prediction.symbol, prediction.model,
+            )
+            return False
+        logger.info(
+            "model OK: p=%.3f > threshold %.3f (%s %s)",
+            prediction.probability, self._config.model_threshold,
+            prediction.symbol, prediction.model,
+        )
+        return True
 
     def maybe_place_bet(self) -> None:
         """Place one tiny paper buy if the gate allows. Records intent in the store BEFORE the order
@@ -218,6 +254,8 @@ class SmokeStrategy:
         )
         if not gate.allowed:
             logger.debug("no bet: %s", gate.reason)
+            return
+        if not self._model_allows():
             return
         symbol = str(self._last_symbol)
         price = self._latest_price(symbol)
@@ -319,10 +357,10 @@ class SmokeStrategy:
     def run(self) -> None:
         logger.info(
             "smoke strategy starting: symbols=%s enabled=%s interval=%ds notional=$%.0f hold=%ds "
-            "caps[concurrent=%d total_notional=$%.0f]",
+            "caps[concurrent=%d total_notional=$%.0f] model[use=%s threshold=%.2f]",
             self._config.symbols, self._config.enabled, self._config.bet_interval_sec,
             self._config.notional_usd, self._config.hold_sec, self._config.max_concurrent,
-            self._config.max_total_notional_usd,
+            self._config.max_total_notional_usd, self._config.use_model, self._config.model_threshold,
         )
         self.reconcile_on_startup()
         while True:
