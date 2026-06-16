@@ -13,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
+import numpy as np
+
 from quantlib.features import BatchContext, REGISTRY, run_group
+from quantlib.features.groups.momentum_run import RUN_TOL, SKEW_TOL
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
 SKEW_COLS = [f"residual_skew_{w}m" for w in (5, 10, 15, 20, 30, 60)]
@@ -58,3 +61,39 @@ def test_residual_skew_healthy_path_in_range_not_overnulled() -> None:
     # the group as a whole is not silently all-null (guard didn't over-null healthy data)
     total_non_null = sum(out[col].drop_nulls().len() for col in SKEW_COLS)
     assert total_non_null > 0
+
+
+def _tick_quantized_closes(n: int = 900) -> list[float]:
+    """A real-data-regime intraday close path: a near-linear drift plus a small random walk, QUANTIZED to
+    the penny tick. The discrete-cent residuals on a near-linear trend are what drive the third-moment
+    catastrophic cancellation (the cubed centered-time sums) to round differently between the whole-buffer
+    rolling form and the window-sliced live form — exactly the divergence the real ``/store`` audit found."""
+    rng = np.random.default_rng(3)
+    trend = 100.0 + 0.003 * np.arange(n)
+    walk = np.cumsum(rng.standard_normal(n)) * 0.01
+    return np.round(trend + walk, 2).tolist()
+
+
+def test_residual_skew_window_sliced_latest_matches_rolling_on_deep_buffer() -> None:
+    """PARITY: on a buffer FAR deeper than the group's window, the window-sliced ``compute_latest`` must
+    equal the backfill rolling form's last minute within the DECLARED residual_skew tolerance. The third
+    moment is catastrophic-cancellation-prone (cubed centered-time sums), so on tick-quantized real-regime
+    prices the two forms round it differently — the float-noise SKEW_TOL (0.02) bounds. This case exceeds
+    the old RUN_TOL (1e-4) on several windows, so it genuinely guards the tolerance fix; it stays well
+    within SKEW_TOL. (Discovered by the real-data parity audit, quantlib.features.parity_audit.)"""
+    ctx = BatchContext(frames={"minute_agg": _frame(_tick_quantized_closes())})
+    group = REGISTRY.get_group("momentum_run")
+    latest = group.compute(ctx)["minute"].max()
+    rolling = group.compute(ctx).filter(pl.col("minute") == latest).sort("symbol")
+    live = group.compute_latest(ctx).filter(pl.col("minute") == latest).sort("symbol").select(rolling.columns)
+    exceeds_old_tol = False
+    for col in SKEW_COLS:
+        back, real = rolling[col][0], live[col][0]
+        assert (back is None) == (real is None), f"{col}: null-vs-value parity break ({back} vs {real})"
+        if back is not None:
+            assert abs(back - real) <= 1e-9 + SKEW_TOL * abs(back), (
+                f"{col}: window-sliced live {real} != rolling backfill {back} beyond SKEW_TOL={SKEW_TOL}"
+            )
+            if abs(back - real) > 1e-9 + RUN_TOL * abs(back):
+                exceeds_old_tol = True
+    assert exceeds_old_tol, "test no longer exercises the third-moment cancellation it guards (would pass at old RUN_TOL)"

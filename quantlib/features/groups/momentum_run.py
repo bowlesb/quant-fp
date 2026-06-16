@@ -33,6 +33,14 @@ from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
 RUN_TOL = 1e-4
+# residual_skew is a THIRD moment (m3/m2**1.5) built from centered third-order power sums — each a
+# catastrophic-cancellation difference (sxxx_c = sxxx - 3·mx·sxx + 3·mx²·sx - n·mx³). The whole-buffer
+# rolling form and the window-sliced live form sum those huge pre-cubed columns in a different ORDER, so
+# they round a near-zero skew differently: bounded but real float noise (measured on real /store data: max
+# |Δ| ~5e-4, blowing up to ~1.8e-2 RELATIVE only where skew itself is ~0). The window-sliced live path IS
+# the better-conditioned form; this tolerance reflects the third-moment cancellation the same way
+# realized_vol (a second-moment) declares 0.02. longest_streak is an EXACT run length and keeps RUN_TOL.
+SKEW_TOL = 0.02
 
 # Live ``compute_latest`` slices the buffer to this trailing depth before running the SAME ``compute()``.
 # The deepest declared window is ``max(WINDOWS)``; +15m of slack covers the 1-bar lag the per-minute return
@@ -116,7 +124,7 @@ class MomentumRunGroup(FeatureGroup):
         for w in WINDOWS:
             specs.append(
                 FeatureSpec(name=f"residual_skew_{w}m", description=f"Skewness of the OLS trend residuals over {w} minutes: positive = price spends more time below the line then snaps up; asymmetry of the deviations.",
-                            dtype="Float64", valid_range=(-20.0, 20.0), nan_policy="warmup", layer="A", tolerance=RUN_TOL)
+                            dtype="Float64", valid_range=(-20.0, 20.0), nan_policy="warmup", layer="A", tolerance=SKEW_TOL)
             )
             specs.append(
                 FeatureSpec(name=f"longest_streak_{w}m", description=f"Longest run of consecutive same-direction one-minute returns over {w} minutes, normalized by the window; high = a sustained one-way push.",
