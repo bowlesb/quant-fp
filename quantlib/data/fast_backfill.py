@@ -68,20 +68,41 @@ def _worker_client() -> httpx.Client:
     return _WORKER_CLIENT
 
 
-def _fetch_one(
-    store: str, tier: str, symbol: str, day_iso: str, threads_per_process: int
-) -> FetchResult:
-    """Fetch+write ONE symbol-day. Runs inside a worker process; uses that process's pooled client.
-
-    ``threads_per_process`` is unused here (each unit is one symbol-day); it is threaded through so the
-    submit site can document the effective concurrency. Pagination is inherently sequential per unit.
-    """
+def _fetch_write_unit(store: str, tier: str, symbol: str, day_iso: str) -> FetchResult:
+    """Fetch+write ONE symbol-day using this process's pooled (thread-safe) httpx client."""
     day = dt.date.fromisoformat(day_iso)
     client = _worker_client()
     fetcher = fetch_trades_day_fast if tier == "trades" else fetch_quotes_day_fast
     frame = fetcher(client, symbol, day)
     size = write_partition(store, tier, symbol, day, frame)
     return FetchResult(symbol=symbol, date=day_iso, rows=frame.height, bytes=size)
+
+
+def _fetch_batch(
+    store: str, tier: str, units: list[tuple[str, str]], threads_per_process: int
+) -> list[FetchResult]:
+    """Worker: fetch+write a BATCH of symbol-days with an inner THREAD pool, so each process runs
+    ``threads_per_process`` concurrent downloads. Download releases the GIL (so threads overlap on the
+    network — the real bottleneck); the columnar parse is per-process serialized, which is fine because
+    we are network-bound. A failed unit is skipped (unrecorded -> a resume retries it), never aborting
+    the batch. httpx.Client is thread-safe and shares the process's connection pool across the threads."""
+    results: list[FetchResult] = []
+    with ThreadPoolExecutor(max_workers=threads_per_process) as pool:
+        futures = {
+            pool.submit(_fetch_write_unit, store, tier, symbol, day_iso): (symbol, day_iso)
+            for symbol, day_iso in units
+        }
+        for future in as_completed(futures):
+            symbol, day_iso = futures[future]
+            try:
+                results.append(future.result())
+            except (httpx.HTTPError, KeyError, OSError, pl.exceptions.PolarsError) as error:
+                logger.warning("tier=%s %s %s: fetch failed, skipping: %s", tier, symbol, day_iso, error)
+    return results
+
+
+def _chunk(items: list, size: int) -> list[list]:
+    return [items[i : i + size] for i in range(0, len(items), max(1, size))]
 
 
 def _pending_units(
@@ -122,9 +143,14 @@ def run_tier_fast(
 
     written = 0
     bytes_written = 0
-    failed = 0
     buffer: list[dict] = []
     part_seq = 0
+
+    # Effective concurrency = processes x threads_per_process: each of `processes` workers runs an inner
+    # thread pool over a BATCH of symbol-days. Downloads release the GIL so the threads overlap on the
+    # network (the bottleneck); the per-process parse stays GIL-serialized, which is fine when network-
+    # bound. Batches are sized to keep the threads fed while leaving many batches so the pool load-balances.
+    batches = _chunk(units, max(1, threads_per_process * 8))
 
     # SPAWN, not fork: this engine is launched from a parent that has already run thread pools (the bars
     # tier) and logs heavily, so a forked worker inherits the logging/alloc locks in a HELD state and
@@ -132,52 +158,38 @@ def run_tier_fast(
     # starts each worker from a clean interpreter, so no parent lock is inherited.
     with ProcessPoolExecutor(max_workers=processes, mp_context=mp.get_context("spawn")) as executor:
         futures = {
-            executor.submit(_fetch_one, store, tier, symbol, day_iso, threads_per_process): (
-                symbol,
-                day_iso,
-            )
-            for symbol, day_iso in units
+            executor.submit(_fetch_batch, store, tier, batch, threads_per_process): index
+            for index, batch in enumerate(batches)
         }
         for future in as_completed(futures):
-            symbol, day_iso = futures[future]
             try:
-                result = future.result()
+                results = future.result()
             except BrokenProcessPool:
                 logger.error(
                     "tier=%s: worker pool broke (a worker process died); ending tier — resume re-runs the rest",
                     tier,
                 )
                 break
-            except (httpx.HTTPError, KeyError, OSError, pl.exceptions.PolarsError) as error:
-                # One bad symbol-day must not abort the tier: skip it (unrecorded -> a resume retries it).
-                failed += 1
-                logger.warning("tier=%s %s %s: fetch failed, skipping: %s", tier, symbol, day_iso, error)
-                continue
-            written += 1
-            bytes_written += result.bytes
-            buffer.append(
-                {
-                    "tier": tier,
-                    "symbol": result.symbol,
-                    "date": result.date,
-                    "rows": result.rows,
-                    "bytes": result.bytes,
-                    "fetched_at": dt.datetime.now(dt.timezone.utc),
-                }
-            )
-            if len(buffer) >= MANIFEST_FLUSH_EVERY:
-                part_seq += 1
-                write_manifest_part(store, tier, buffer, part_seq)
-                buffer = []
-            if written % 100 == 0:
-                logger.info(
-                    "tier=%s progress: %d/%d units, %.3fGB, %d failed",
-                    tier,
-                    written,
-                    len(units),
-                    bytes_written / 1024**3,
-                    failed,
+            for result in results:
+                written += 1
+                bytes_written += result.bytes
+                buffer.append(
+                    {
+                        "tier": tier,
+                        "symbol": result.symbol,
+                        "date": result.date,
+                        "rows": result.rows,
+                        "bytes": result.bytes,
+                        "fetched_at": dt.datetime.now(dt.timezone.utc),
+                    }
                 )
+                if len(buffer) >= MANIFEST_FLUSH_EVERY:
+                    part_seq += 1
+                    write_manifest_part(store, tier, buffer, part_seq)
+                    buffer = []
+            logger.info(
+                "tier=%s progress: %d/%d units, %.3fGB", tier, written, len(units), bytes_written / 1024**3
+            )
 
     if buffer:
         part_seq += 1
