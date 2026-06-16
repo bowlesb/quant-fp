@@ -291,5 +291,28 @@ def test_rank_by_dollar_volume_reads_bars(tmp_path) -> None:
     assert ranked == ["HIGH", "LOW"]
 
 
+def test_rank_sampling_uses_recent_days(tmp_path) -> None:
+    """Recent-day sampling ranks by recent liquidity; sample_days=0 scores the full history."""
+    store = str(tmp_path)
+    days = [DAY, DAY + dt.timedelta(days=1), DAY + dt.timedelta(days=2)]
+
+    def _write(symbol: str, day: dt.date, close: float, volume: int) -> None:
+        out_dir = raw_backfill.partition_dir(store, "bars", symbol, day)
+        os.makedirs(out_dir, exist_ok=True)
+        pl.DataFrame({"close": [close], "volume": [volume]}).write_parquet(
+            os.path.join(out_dir, "data.parquet")
+        )
+
+    _write("OLD_HEAVY", days[0], 100.0, 1_000_000)  # huge, only on the OLDEST day
+    _write("RECENT", days[2], 10.0, 1000)  # small, only on the MOST RECENT day
+
+    # sample only the most recent day -> RECENT wins (OLD_HEAVY scores 0 in-window)
+    ranked_recent = raw_backfill.rank_by_dollar_volume(store, ["OLD_HEAVY", "RECENT"], days, sample_days=1)
+    assert ranked_recent == ["RECENT", "OLD_HEAVY"]
+    # score the full history -> OLD_HEAVY's old volume dominates
+    ranked_all = raw_backfill.rank_by_dollar_volume(store, ["OLD_HEAVY", "RECENT"], days, sample_days=0)
+    assert ranked_all == ["OLD_HEAVY", "RECENT"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
