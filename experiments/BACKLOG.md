@@ -46,11 +46,23 @@ Every item carries: idea · prior · test · cost gate · KILL. Single-writer = 
   (gross −12.7 to −33.7 bps, t −1.75 to −2.58); turnover stays ~0.90 so the cost-amortization never engages;
   net@6bps −18 to −39 bps. **vwap_dev reversion is DEAD at ALL tradeable horizons (15–120 min). The PRICE +
   microstructure branch (H1–H3, H9) is CLOSED.**
+- **H11 (longer-horizon MOMENTUM, the H9 sign-flip): AMBIGUOUS → effectively KILL at pre-registered scope.**
+  ⚠️ FIRST RUN INVALIDATED by an off-by-240 timezone bug (bars `ts` is UTC, script treated it as ET → entry
+  grid on the 09:30 open print, ≥09:35 gate a no-op; the v1 +28 bps was a 2–3× inflation). CORRECTED v2:
+  momentum survives demean + is open-print-clean, but gross only +3 to +16 bps, best demeaned W30/H120 net@6
+  +9.1 bps at **t=1.51 < 2**; W60 fails canary. Marginal, not a KEEP. One POST-HOC anomaly (mid-session
+  W60/H120 t=3.27) → **H12 (pre-registered, HOLD-OUT design)** to test it honestly. Lesson captured in
+  `RESEARCH_PITFALLS.md` (the UTC/ET off-by-240 trap). H9's magnitudes were similarly inflated (KILL stands).
+- **EVENT-FAMILY DATA HAS LANDED (backfill agent):** `corporate_actions_pit` view ready — 36,240 actions,
+  **244 splits in the 6-month bars window** (NOT underpowered) + 35,713 cash dividends; ONLY `ex_date` is
+  look-ahead-safe (Alpaca carries no declaration date → ANTICIPATION/days-to-ex features unsupported; only
+  REALIZED/post-ex). EDGAR `filings` backfilling (920k+ rows, 135k 8-Ks; queryable now; NO item_codes yet).
 - **PIVOT (pre-registered `2026-06-16-event-families-pivot/`): LOW-TURNOVER NON-PRICE event families** —
   re-priced over DAYS so the fixed ~6 bps cost is a tiny fraction of the move. Working order: **H10 (EDGAR
-  8-K/Form-4 multi-day drift — collector LIVE; data ask routed to the Lead) → H5 (dividend timing) →
-  H4 (splits).** H6/H7 (price-conditioner / rank-space) DE-PRIORITIZED to near-dead. All pre-registered;
-  cost gate honest. NO further price-reversion variant is worth running.
+  8-K/Form-4 multi-day drift — RUNNING, data ready) → H5 (dividend post-ex drift — data ready, ex-date-only) →
+  H4 (split post-ex drift — data ready, 244 splits) → H12 (mid-session momentum hold-out — low prior).**
+  H6/H7 DE-PRIORITIZED to near-dead. All pre-registered; cost gate + survivorship-demean honest. NO further
+  full-session price-reversion variant is worth running.
 
 ## ★★★ STATUS (2026-06-16, after the depth-baseline cycle) [SUPERSEDED by the block above]
 - **`/store/raw` has BARS (629 names × 126 days, 2025-12→2026-06) but NOT trades/quotes yet.** So
