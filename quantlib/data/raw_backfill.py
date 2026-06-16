@@ -451,10 +451,11 @@ def run(config: BackfillConfig) -> None:
     os.makedirs(os.path.join(config.store, "raw"), exist_ok=True)
 
     # Reconcile FIRST: an OOM/crash can lose a worker's unflushed manifest buffer even though its
-    # partitions were already written to disk, so a naive resume re-fetches >100k complete tick units
-    # (observed after two quotes-tier OOMs). Recording the orphaned on-disk partitions into the manifest
-    # makes the resume skip them. Idempotent + cheap relative to fetching, so it runs every time.
-    for tier in ("trades", "quotes"):
+    # partitions were already written to disk, so a naive resume re-fetches complete units (observed:
+    # >100k after two quotes-tier OOMs). Recording the orphaned on-disk partitions into the manifest makes
+    # the resume skip them. All three tiers write the partition before the manifest record, so all three
+    # can orphan. Idempotent + cheap relative to fetching, so it runs every time.
+    for tier in TIERS:
         reconcile_manifest_from_disk(config.store, tier)
 
     trade_client = trading_client()
