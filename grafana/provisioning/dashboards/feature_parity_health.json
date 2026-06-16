@@ -1,0 +1,93 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 0,
+  "schemaVersion": 39,
+  "tags": ["quant", "features", "parity"],
+  "title": "Feature & parity health",
+  "uid": "feature-parity-health",
+  "timezone": "",
+  "refresh": "5m",
+  "time": {"from": "now-30d", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "title": "Open parity defects (DIVERGENT features)",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT count(*)::int AS value FROM feature_parity_defect WHERE status='open'"}
+      ]
+    },
+    {
+      "title": "Features by value grade",
+      "type": "piechart",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+      "options": {"legend": {"displayMode": "table", "values": ["value"]}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT COALESCE(value_grade,'(none)') AS grade, count(*)::int AS n FROM feature_trust GROUP BY 1 ORDER BY 1"}
+      ]
+    },
+    {
+      "title": "Grade A (certified parity) feature count",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "yellow", "value": null}, {"color": "green", "value": 50}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT count(*)::int AS value FROM feature_trust WHERE value_grade='A'"}
+      ]
+    },
+    {
+      "title": "Grade F / U (failing or unvalidated)",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT count(*)::int AS value FROM feature_trust WHERE value_grade IN ('F','U') OR value_grade IS NULL"}
+      ]
+    },
+    {
+      "title": "Worst features by lifetime value-rate (lowest parity match)",
+      "type": "table",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT feature, version, value_grade, round(lifetime_value_rate::numeric,5) AS lifetime_value_rate, n_days_validated, last_validated_day FROM feature_trust WHERE lifetime_compared > 0 ORDER BY lifetime_value_rate ASC NULLS LAST LIMIT 25"}
+      ]
+    },
+    {
+      "title": "Daily parity value-rate (avg across features)",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0.99, "max": 1.0, "custom": {"drawStyle": "line", "fillOpacity": 10}}},
+      "targets": [
+        {"refId": "A", "format": "time_series", "rawSql": "SELECT day::timestamptz AS time, avg(value_rate) AS \"avg value-rate\", min(value_rate) AS \"worst value-rate\" FROM feature_validation_day GROUP BY day ORDER BY day"}
+      ]
+    },
+    {
+      "title": "Recent validation exceptions (diverging cells, last 14d)",
+      "type": "table",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 17},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT day, feature, symbol, status, round(abs_err::numeric,6) AS abs_err, round(rel_err::numeric,6) AS rel_err, stream_value, backfill_value FROM feature_validation_exception WHERE day >= (now() AT TIME ZONE 'UTC')::date - 14 ORDER BY rel_err DESC NULLS LAST LIMIT 50"}
+      ]
+    },
+    {
+      "title": "Live incremental-vs-batch parity breaches (Prometheus)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 25},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars"}, "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}},
+      "targets": [
+        {"refId": "A", "expr": "sum by (reduce_input) (increase(feature_incremental_parity_breach_total[10m]))", "legendFormat": "{{reduce_input}}"}
+      ]
+    }
+  ]
+}

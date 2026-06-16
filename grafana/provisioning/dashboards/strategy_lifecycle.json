@@ -1,0 +1,104 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 0,
+  "schemaVersion": 39,
+  "tags": ["quant", "strategy", "bets"],
+  "title": "Strategy / bet lifecycle (smoke + reversion)",
+  "uid": "strat-lifecycle",
+  "timezone": "",
+  "refresh": "30s",
+  "time": {"from": "now-12h", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "title": "Open bets (now)",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT 'smoke' AS metric, count(*)::int AS value FROM strat_smoke.bets WHERE status='open' UNION ALL SELECT 'reversion', count(*)::int FROM strat_reversion.bets WHERE status='open'"}
+      ]
+    },
+    {
+      "title": "Open notional ($)",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "blue", "value": null}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT 'smoke' AS metric, COALESCE(sum(entry_notional),0)::float AS value FROM strat_smoke.bets WHERE status='open' UNION ALL SELECT 'reversion', COALESCE(sum(entry_notional),0)::float FROM strat_reversion.bets WHERE status='open'"}
+      ]
+    },
+    {
+      "title": "Realized PnL today ($)",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT 'smoke' AS metric, COALESCE(sum(realized_pnl),0)::float AS value FROM strat_smoke.bets WHERE exit_ts::date = (now() AT TIME ZONE 'UTC')::date UNION ALL SELECT 'reversion', COALESCE(sum(realized_pnl),0)::float FROM strat_reversion.bets WHERE exit_ts::date = (now() AT TIME ZONE 'UTC')::date"}
+      ]
+    },
+    {
+      "title": "Closed bets today",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}]}}},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT 'smoke' AS metric, count(*)::int AS value FROM strat_smoke.bets WHERE status<>'open' AND exit_ts::date=(now() AT TIME ZONE 'UTC')::date UNION ALL SELECT 'reversion', count(*)::int FROM strat_reversion.bets WHERE status<>'open' AND exit_ts::date=(now() AT TIME ZONE 'UTC')::date"}
+      ]
+    },
+    {
+      "title": "Cumulative realized PnL over time",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10}}},
+      "targets": [
+        {"refId": "smoke", "format": "time_series", "rawSql": "SELECT exit_ts AS time, sum(realized_pnl) OVER (ORDER BY exit_ts) AS \"smoke\" FROM strat_smoke.bets WHERE realized_pnl IS NOT NULL AND $__timeFilter(exit_ts) ORDER BY exit_ts"},
+        {"refId": "reversion", "format": "time_series", "rawSql": "SELECT exit_ts AS time, sum(realized_pnl) OVER (ORDER BY exit_ts) AS \"reversion\" FROM strat_reversion.bets WHERE realized_pnl IS NOT NULL AND $__timeFilter(exit_ts) ORDER BY exit_ts"}
+      ]
+    },
+    {
+      "title": "Bets placed / closed per 15m",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 60}}},
+      "targets": [
+        {"refId": "placed_smoke", "format": "time_series", "rawSql": "SELECT date_bin('15 minutes', entry_ts, TIMESTAMPTZ '2026-01-01') AS time, count(*)::int AS \"smoke placed\" FROM strat_smoke.bets WHERE $__timeFilter(entry_ts) GROUP BY 1 ORDER BY 1"},
+        {"refId": "placed_rev", "format": "time_series", "rawSql": "SELECT date_bin('15 minutes', entry_ts, TIMESTAMPTZ '2026-01-01') AS time, count(*)::int AS \"reversion placed\" FROM strat_reversion.bets WHERE $__timeFilter(entry_ts) GROUP BY 1 ORDER BY 1"}
+      ]
+    },
+    {
+      "title": "Recent bets (last 50) — smoke",
+      "type": "table",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 12},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT entry_ts, symbol, side, round(entry_notional::numeric,0) AS notional, status, round(realized_pnl::numeric,2) AS pnl, exit_ts FROM strat_smoke.bets ORDER BY entry_ts DESC LIMIT 50"}
+      ]
+    },
+    {
+      "title": "Recent bets (last 50) — reversion",
+      "type": "table",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 12},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT entry_ts, symbol, side, round(entry_notional::numeric,0) AS notional, round(signal::numeric,3) AS signal, status, round(realized_pnl::numeric,2) AS pnl, exit_ts FROM strat_reversion.bets ORDER BY entry_ts DESC LIMIT 50"}
+      ]
+    },
+    {
+      "title": "Win rate & avg PnL per bet (closed, today)",
+      "type": "table",
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 21},
+      "targets": [
+        {"refId": "A", "format": "table", "rawSql": "SELECT 'smoke' AS strategy, count(*) AS closed, count(*) FILTER (WHERE realized_pnl > 0) AS wins, round(100.0*count(*) FILTER (WHERE realized_pnl>0)/NULLIF(count(*),0),1) AS win_pct, round(avg(realized_pnl)::numeric,3) AS avg_pnl, round(sum(realized_pnl)::numeric,2) AS total_pnl FROM strat_smoke.bets WHERE realized_pnl IS NOT NULL AND exit_ts::date=(now() AT TIME ZONE 'UTC')::date UNION ALL SELECT 'reversion', count(*), count(*) FILTER (WHERE realized_pnl>0), round(100.0*count(*) FILTER (WHERE realized_pnl>0)/NULLIF(count(*),0),1), round(avg(realized_pnl)::numeric,3), round(sum(realized_pnl)::numeric,2) FROM strat_reversion.bets WHERE realized_pnl IS NOT NULL AND exit_ts::date=(now() AT TIME ZONE 'UTC')::date"}
+      ]
+    }
+  ]
+}
