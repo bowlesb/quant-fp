@@ -128,6 +128,21 @@ class BetStore:
             (exit_order_id, entry_order_id),
         )
 
+    def update_exit_coid(self, entry_order_id: str, exit_order_id: str) -> None:
+        """Rewrite the exit ``client_order_id`` of a bet already in 'closing'.
+
+        Used when a previously-recorded exit order never reached the broker (e.g. the SELL submit hit
+        an Alpaca 5xx after the row was marked 'closing') and must be RE-SUBMITTED under a fresh coid.
+        The bet stays 'closing' (the position is still open); only the order handle is replaced so the
+        next manage cycle reads the NEW order's fill instead of looping on the lost one.
+        """
+        self._store.execute(
+            f"""UPDATE {self._schema}.bets
+                   SET exit_order_id = %s
+                 WHERE entry_order_id = %s AND status = 'closing'""",
+            (exit_order_id, entry_order_id),
+        )
+
     def record_close(
         self,
         entry_order_id: str,

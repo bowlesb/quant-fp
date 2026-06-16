@@ -51,6 +51,38 @@ DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "SPY", "AMD"]
 SAMPLE_FEATURES = ["ret_1m", "volume_zscore_5m"]
 MODEL_FOLD_FEATURES = ["ret_1m", "volume_zscore_5m"]
 COID_PREFIX = "smoke_"
+EXIT_SUFFIX = "_exit"
+ORDER_NOT_FOUND_CODE = 40410000
+
+
+def exit_coid_for(entry_order_id: str, retry: int = 0) -> str:
+    """The close order's client_order_id for a bet's entry. ``retry`` > 0 appends ``_rN`` so a
+    re-submitted exit (after the prior one was lost at the broker) gets a FRESH, unique coid and can
+    never collide with the dead order in the broker's idempotency history."""
+    if retry <= 0:
+        return f"{entry_order_id}{EXIT_SUFFIX}"
+    return f"{entry_order_id}{EXIT_SUFFIX}_r{retry}"
+
+
+def exit_retry_count(exit_order_id: str) -> int:
+    """Parse the retry generation from an exit coid (0 for the base ``..._exit``, N for ``..._exit_rN``)."""
+    marker = f"{EXIT_SUFFIX}_r"
+    if marker in exit_order_id:
+        return int(exit_order_id.rsplit("_r", 1)[1])
+    return 0
+
+
+def is_order_not_found(exc: APIError) -> bool:
+    """True iff this APIError is Alpaca's "order not found for <coid>" (code 40410000).
+
+    Distinguishes "the broker has never heard of this order" (our recorded exit SELL never actually
+    landed — e.g. its submit hit a 5xx AFTER we marked the bet 'closing') from a transient lookup
+    failure. We read the structured ``code`` and fall back to the message text if it is unparseable.
+    """
+    try:
+        return int(exc.code) == ORDER_NOT_FOUND_CODE
+    except (ValueError, KeyError, TypeError):
+        return "order not found" in str(exc).lower()
 
 
 def _env_symbols() -> list[str]:
@@ -200,6 +232,22 @@ class SmokeStrategy:
             logger.warning("reconcile: order %s not found at broker (%s)", client_order_id, exc)
             return None
 
+    def _lookup_exit_order(self, exit_coid: str) -> tuple[Order | None, bool]:
+        """Look up a close order by coid, distinguishing "not yet visible" from "does not exist".
+
+        Returns ``(order, missing)``. ``missing`` is True only for an explicit order-not-found
+        (code 40410000) — i.e. the broker has NO such order, so the SELL never landed and the bet is
+        stuck. Any other APIError is a transient lookup failure and returns ``(None, False)`` so we
+        simply retry next cycle rather than wrongly re-submitting.
+        """
+        try:
+            return cast(Order, self._trading.get_order_by_client_id(exit_coid)), False
+        except APIError as exc:
+            if is_order_not_found(exc):
+                return None, True
+            logger.warning("exit lookup transient error for %s (%s)", exit_coid, exc)
+            return None, False
+
     def consume_and_sample(self) -> None:
         """Poll the bus and log a sample of real features for the latest vector per symbol."""
         vectors = self._consumer.poll(block_ms=self._config.loop_block_ms, count=200)
@@ -321,10 +369,53 @@ class SmokeStrategy:
         bet["qty"] = filled_qty
         return entry_price_value, filled_qty
 
+    def _submit_exit(self, symbol: str, qty: float, entry_order_id: str, exit_coid: str) -> None:
+        """Submit the closing SELL for ``qty`` shares under ``exit_coid``. A coid collision means the
+        close is already in flight at the broker, so we swallow it and read the fill next; any other
+        APIError (e.g. a 5xx) propagates — the bet stays 'closing' with this coid recorded, and the
+        not-found resolver re-submits a fresh exit on a later cycle rather than looping forever."""
+        try:
+            self._trading.submit_order(
+                MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                    client_order_id=exit_coid,
+                )
+            )
+            logger.info("CLOSE submitted: SELL %g %s coid=%s", qty, symbol, exit_coid)
+        except APIError as exc:
+            if "client_order_id" not in str(exc) and "unique" not in str(exc).lower():
+                raise
+            logger.warning("CLOSE coid %s already submitted; reading its fill", exit_coid)
+
+    def _resubmit_lost_exit(
+        self, bet: dict[str, object], symbol: str, qty: float
+    ) -> tuple[Order | None, str]:
+        """Recover a bet whose recorded exit order does NOT exist at the broker (the SELL never landed,
+        e.g. its submit hit an Alpaca 5xx after we marked the bet 'closing'). The position is still
+        open, so we re-submit a FRESH exit (new coid, next retry generation), persist the new handle,
+        and return its (as-yet-unfilled) order so the close resolves on the next cycle instead of
+        looping on the lost order forever. Returns ``(order, exit_coid)``."""
+        entry_order_id = str(bet["entry_order_id"])
+        previous_exit = str(bet["exit_order_id"])
+        retry = exit_retry_count(previous_exit) + 1
+        new_coid = exit_coid_for(entry_order_id, retry)
+        logger.warning(
+            "CLOSE exit %s not found at broker; re-submitting fresh exit %s for %s",
+            previous_exit, new_coid, symbol,
+        )
+        self._store.update_exit_coid(entry_order_id, new_coid)
+        bet["exit_order_id"] = new_coid
+        self._submit_exit(symbol, qty, entry_order_id, new_coid)
+        return self._fetch_order_by_coid(new_coid), new_coid
+
     def _close_bet(self, bet: dict[str, object]) -> None:
         """Submit the closing sell (idempotent coid), capture the exit fill, compute realized PnL,
         and move the bet to CLOSED. Re-runs safely: a coid collision means the close is already in
-        flight, so we just try to read its fill.
+        flight, so we just try to read its fill. If a previously-recorded exit order is NOT FOUND at
+        the broker (the SELL never landed), we re-submit a fresh exit rather than loop on the lost one.
 
         The close sells the actual filled (fractional) ``qty`` of the notional entry, so we only
         proceed once that quantity is known — otherwise we wait for the entry to fill."""
@@ -335,28 +426,16 @@ class SmokeStrategy:
             logger.info("CLOSE deferred: entry not yet filled for %s (coid=%s)", symbol, entry_order_id)
             return
         entry_price_value, qty = filled
-        exit_coid = f"{entry_order_id}_exit"
         existing_exit = bet["exit_order_id"]
         if existing_exit is None:
+            exit_coid = exit_coid_for(entry_order_id)
             self._store.mark_closing(entry_order_id, exit_coid)
-            try:
-                self._trading.submit_order(
-                    MarketOrderRequest(
-                        symbol=symbol,
-                        qty=qty,
-                        side=OrderSide.SELL,
-                        time_in_force=TimeInForce.DAY,
-                        client_order_id=exit_coid,
-                    )
-                )
-                logger.info("CLOSE submitted: SELL %g %s coid=%s", qty, symbol, exit_coid)
-            except APIError as exc:
-                if "client_order_id" not in str(exc) and "unique" not in str(exc).lower():
-                    raise
-                logger.warning("CLOSE coid %s already submitted; reading its fill", exit_coid)
+            self._submit_exit(symbol, qty, entry_order_id, exit_coid)
         else:
             exit_coid = str(existing_exit)
-        exit_order = self._fetch_order_by_coid(exit_coid)
+        exit_order, missing = self._lookup_exit_order(exit_coid)
+        if missing:
+            exit_order, exit_coid = self._resubmit_lost_exit(bet, symbol, qty)
         if exit_order is None or not exit_order.filled_avg_price:
             logger.info("CLOSE pending fill for %s (coid=%s)", symbol, exit_coid)
             return

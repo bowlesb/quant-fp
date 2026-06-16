@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 import pytest
 import redis
 
+from alpaca.common.exceptions import APIError
+
 from quantlib.bus.consumer import BusConsumer
 from quantlib.bus.publisher import BusPublisher
 from quantlib.bus.schema import default_schema
@@ -23,9 +25,15 @@ from strategies.smoke.strategy import (
     SmokeConfig,
     SmokeStrategy,
     evaluate_bet_gate,
+    exit_coid_for,
+    exit_retry_count,
+    is_order_not_found,
     order_filled_qty,
     sample_features,
 )
+
+NOT_FOUND_BODY = '{"code":40410000,"message":"order not found for %s"}'
+SERVER_ERROR_BODY = '{"code":50010000,"message":"internal server error occurred"}'
 
 URL = os.environ.get("BUS_REDIS_URL", "redis://quant-redis:6379/0")
 NOW = dt.datetime(2026, 6, 15, 14, 30, tzinfo=dt.timezone.utc)
@@ -177,6 +185,12 @@ class FakeTradingClient:
     fill_price: float = 190.0
     submitted: list[FakeOrder] = field(default_factory=list)
     _by_coid: dict[str, FakeOrder] = field(default_factory=dict)
+    # Coids the broker has "lost": get_order_by_client_id raises order-not-found (40410000) for these,
+    # mirroring an exit SELL whose submit never actually landed.
+    not_found_coids: set[str] = field(default_factory=set)
+    # Substrings of coids whose FIRST submit raises an Alpaca 5xx (then succeeds on re-submit).
+    fail_submit_once: set[str] = field(default_factory=set)
+    _failed_once: set[str] = field(default_factory=set)
 
     def get_clock(self) -> FakeClock:
         return FakeClock(is_open=True)
@@ -185,6 +199,9 @@ class FakeTradingClient:
         coid = request.client_order_id  # type: ignore[attr-defined]
         notional = request.notional  # type: ignore[attr-defined]
         qty = request.qty  # type: ignore[attr-defined]
+        if coid in self.fail_submit_once and coid not in self._failed_once:
+            self._failed_once.add(coid)
+            raise APIError(SERVER_ERROR_BODY)
         if notional is not None:
             filled_qty = float(notional) / self.fill_price
         else:
@@ -201,6 +218,8 @@ class FakeTradingClient:
         return order
 
     def get_order_by_client_id(self, client_order_id: str) -> FakeOrder:
+        if client_order_id in self.not_found_coids or client_order_id not in self._by_coid:
+            raise APIError(NOT_FOUND_BODY % client_order_id)
         return self._by_coid[client_order_id]
 
 
@@ -238,6 +257,11 @@ class InMemoryStore:
         bet = self._bets[entry_order_id]
         bet["exit_order_id"] = exit_order_id
         bet["status"] = "closing"
+
+    def update_exit_coid(self, entry_order_id: str, exit_order_id: str) -> None:
+        bet = self._bets[entry_order_id]
+        if bet["status"] == "closing":
+            bet["exit_order_id"] = exit_order_id
 
     def record_close(
         self, entry_order_id: str, exit_ts: dt.datetime, exit_price: float, realized_pnl: float
@@ -308,6 +332,83 @@ def test_place_then_manage_finalizes_bet() -> None:
     assert len(trading.submitted) == 2  # BUY + SELL
     sell = trading.submitted[1]
     assert sell.filled_qty == pytest.approx(expected_qty)  # sells exactly the filled qty
+
+
+def test_is_order_not_found_detects_code() -> None:
+    assert is_order_not_found(APIError(NOT_FOUND_BODY % "smoke_X_exit"))
+    assert not is_order_not_found(APIError(SERVER_ERROR_BODY))
+    assert not is_order_not_found(APIError("not even json"))
+    # Falls back to message text when the body has no parseable code.
+    assert is_order_not_found(APIError("order not found for smoke_X_exit"))
+
+
+def test_exit_coid_helpers_roundtrip() -> None:
+    base = exit_coid_for("smoke_SPY_T1")
+    assert base == "smoke_SPY_T1_exit"
+    assert exit_retry_count(base) == 0
+    retry1 = exit_coid_for("smoke_SPY_T1", retry=1)
+    assert retry1 == "smoke_SPY_T1_exit_r1"
+    assert exit_retry_count(retry1) == 1
+    assert exit_retry_count(exit_coid_for("smoke_SPY_T1", retry=2)) == 2
+
+
+def test_close_resubmits_when_recorded_exit_not_found_at_broker() -> None:
+    # The live SPY bug: bet is 'closing' with an exit_order_id the broker has NEVER heard of (the SELL
+    # never landed — 5xx after mark_closing). Old code looped "CLOSE pending fill" forever; now we must
+    # re-submit a FRESH exit and finalize.
+    config = _config(hold_sec=900)
+    trading = FakeTradingClient(fill_price=751.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+    strategy._last_symbol = "SPY"  # type: ignore[attr-defined]
+
+    entry_coid = "smoke_SPY_stuck"
+    qty = 50.0 / 751.0
+    store.record_open("SPY", "buy", 50.0, entry_coid, NOW, NOW - dt.timedelta(seconds=1))
+    store.mark_filled(entry_coid, 751.0, qty)
+    # Simulate the stuck state: marked closing with a base exit coid that does NOT exist at the broker.
+    lost_exit = exit_coid_for(entry_coid)
+    store.mark_closing(entry_coid, lost_exit)
+    trading.not_found_coids.add(lost_exit)
+
+    trading.fill_price = 752.0  # the re-submitted close fills here
+    bet = store.list_open()[0]
+    strategy._close_bet(bet)  # type: ignore[attr-defined]
+
+    assert store.count_open() == 0  # finalized, not looping
+    closed = store._bets[entry_coid]
+    assert closed["status"] == "closed"
+    assert closed["exit_order_id"] == exit_coid_for(entry_coid, retry=1)  # fresh retry coid
+    assert closed["realized_pnl"] == pytest.approx((752.0 - 751.0) * qty)
+    # Exactly one SELL was actually placed (the re-submit); the lost one never landed.
+    sells = [order for order in trading.submitted if order.client_order_id.endswith("_r1")]
+    assert len(sells) == 1
+
+
+def test_close_propagates_then_resubmits_on_server_error() -> None:
+    # End-to-end of the real failure mode: the FIRST exit submit hits a 5xx (propagates), the bet is
+    # left 'closing' with an order the broker lacks; the NEXT close cycle re-submits and finalizes.
+    config = _config(hold_sec=900)
+    trading = FakeTradingClient(fill_price=751.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+    strategy._last_symbol = "SPY"  # type: ignore[attr-defined]
+
+    entry_coid = "smoke_SPY_5xx"
+    qty = 50.0 / 751.0
+    store.record_open("SPY", "buy", 50.0, entry_coid, NOW, NOW - dt.timedelta(seconds=1))
+    store.mark_filled(entry_coid, 751.0, qty)
+    base_exit = exit_coid_for(entry_coid)
+    trading.fail_submit_once.add(base_exit)  # first SELL submit 5xx-es
+
+    bet = store.list_open()[0]
+    with pytest.raises(APIError):  # the 5xx propagates to the loop's handler
+        strategy._close_bet(bet)  # type: ignore[attr-defined]
+    assert store.list_open()[0]["status"] == "closing"  # left mid-close, exit recorded
+
+    strategy._close_bet(store.list_open()[0])  # type: ignore[attr-defined]  # next cycle resolves it
+    assert store.count_open() == 0
+    assert store._bets[entry_coid]["status"] == "closed"
 
 
 def test_high_priced_symbol_sized_to_notional_not_whole_share() -> None:
