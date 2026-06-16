@@ -32,7 +32,17 @@ Every item carries: idea · prior · test · cost gate · KILL. Single-writer = 
 
 ---
 
-## RANKED HYPOTHESES
+## ★ REPRIORITIZATION (2026-06-15, after the H1 proof)
+H1's proof-of-loop probe KILLED its core thesis: the vwap_dev reversion carrier is concentrated in
+ILLIQUID names (illiq/liq |IC| ratio 2.06× at H5, 4.01× at H15 on a live session — see
+`2026-06-15-vwap-reversion-cost-conditioning/`), so liquidity-gating gates AWAY the signal and cost-
+conditioning is structurally doomed. **New top priority = the better-data microstructure bets (H2, H3)**
+and the low-turnover event families (H4, H5), which attack the cost wall by DESIGN rather than by gating an
+illiquid-concentrated signal. H1 drops to the bottom. The new working order: **H2 → H3 → H5 → H4 → H6 →
+H7 → H1 → H8** (H8 is a data-acquisition ask, not CPU). All microstructure work is BLOCKED until the
+microstructure subscription covers the full universe AND a settled multi-day panel exists (see report).
+
+## RANKED HYPOTHESES (original numbering; current order in the reprioritization note above)
 
 ### H1 — vwap_dev reversion, COST-CONDITIONED to beat the turnover wall  ★ top / proof-of-loop
 - **Idea:** Keep the only proven carrier (vwap_dev mean-reversion) but attack the thing that kills it —
