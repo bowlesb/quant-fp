@@ -69,6 +69,8 @@ TRADES_CHUNK_DAYS = 5  # trading days per single-symbol trades request
 # run container has the RAM headroom (each concurrent worker holds one chunk).
 QUOTES_CHUNK_DAYS = 1
 MANIFEST_FLUSH_EVERY = 500  # buffer this many manifest entries before writing one append-only part file
+RANK_SAMPLE_DAYS = 20  # rank dollar-volume on the most recent N days (liquidity tiering is day-stable)
+RANK_WORKERS = 16  # concurrent symbol reads when ranking (IO-bound over many tiny parquet files)
 
 MANIFEST_SCHEMA: dict[str, pl.DataType] = {
     "tier": pl.String,
@@ -421,24 +423,38 @@ def fetch_ticks_tier(
     return progress.written, progress.bytes_written
 
 
-def rank_by_dollar_volume(store: str, symbols: list[str], days: list[dt.date]) -> list[str]:
-    """Rank symbols by total dollar-volume from the already-fetched BARS partitions (close*volume).
+def _symbol_dollar_volume(store: str, symbol: str, days: list[dt.date]) -> float:
+    """Total close*volume for one symbol across `days`, reading its on-disk bars partitions."""
+    total = 0.0
+    for day in days:
+        path = os.path.join(partition_dir(store, "bars", symbol, day), "data.parquet")
+        if not os.path.exists(path):
+            continue
+        frame = pl.read_parquet(path, columns=["close", "volume"])
+        if frame.height:
+            total += float((frame["close"] * frame["volume"]).sum())
+    return total
 
-    Bars are fetched first for the whole universe, so this reads the on-disk bars manifest's
-    partitions rather than re-hitting the API. Symbols with no bars sort last."""
-    scores: dict[str, float] = {symbol: 0.0 for symbol in symbols}
-    for symbol in symbols:
-        for day in days:
-            path = os.path.join(
-                partition_dir(store, "bars", symbol, day), "data.parquet"
-            )
-            if not os.path.exists(path):
-                continue
-            frame = pl.read_parquet(path, columns=["close", "volume"])
-            if frame.height:
-                scores[symbol] += float(
-                    (frame["close"] * frame["volume"]).sum()
-                )
+
+def rank_by_dollar_volume(
+    store: str,
+    symbols: list[str],
+    days: list[dt.date],
+    sample_days: int = RANK_SAMPLE_DAYS,
+    max_workers: int = RANK_WORKERS,
+) -> list[str]:
+    """Rank symbols by dollar-volume (close*volume) from the already-fetched BARS partitions.
+
+    Two ranking-stable speedups over the naive serial scan of every (symbol, day) file (the universe is
+    ~7.6k symbols x 126 days ~ 960k tiny reads, slow single-threaded on a cold cache): (1) score only the
+    most RECENT `sample_days` trading days — liquidity tiering (top-N for trades/quotes) is stable across
+    days, so a recent window picks the same liquid names at a fraction of the I/O; (2) read symbols
+    CONCURRENTLY across a thread pool (the work is IO-bound). Symbols with no bars score 0 and sort last.
+    `sample_days <= 0` scores all days (the exact, slower form)."""
+    scored_days = days[-sample_days:] if sample_days > 0 else days
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+        totals = executor.map(lambda symbol: _symbol_dollar_volume(store, symbol, scored_days), symbols)
+        scores = dict(zip(symbols, totals))
     return sorted(symbols, key=lambda symbol: scores[symbol], reverse=True)
 
 
