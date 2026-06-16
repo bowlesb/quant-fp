@@ -1,0 +1,106 @@
+{
+  "uid": "feature-latency-v2",
+  "title": "Feature latency v2 — dispatch-independent compute + feed delivery",
+  "tags": ["features", "latency"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Shard pure compute p50/p99 (ms) — dispatch-independent, never saturates",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1000 * histogram_quantile(0.99, sum by (le, shard) (rate(feature_shard_compute_seconds_bucket[5m])))",
+          "legendFormat": "p99 shard {{shard}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1000 * histogram_quantile(0.50, sum by (le, shard) (rate(feature_shard_compute_seconds_bucket[5m])))",
+          "legendFormat": "p50 shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Alpaca feed delivery p50/p99 (s) — provider lag from minute close to first bar",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le, shard) (rate(feature_feed_delivery_seconds_bucket[5m])))",
+          "legendFormat": "p99 shard {{shard}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le, shard) (rate(feature_feed_delivery_seconds_bucket[5m])))",
+          "legendFormat": "p50 shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "End-to-end (gated) p99 (s) — feature_vector_latency / feature_assemble (saturate in sparse hours)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(feature_vector_latency_seconds_bucket[5m])))",
+          "legendFormat": "bar_to_vector (first-bar, end-to-end)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(feature_assemble_seconds_bucket[5m])))",
+          "legendFormat": "assemble (last-bar)"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Ingestion rate (msgs/s) — bars/trades/quotes off the websocket (reference)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(feature_bars_ingested_total[1m])",
+          "legendFormat": "bars/s"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(feature_trades_ingested_total[1m])",
+          "legendFormat": "trades/s"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(feature_quotes_ingested_total[1m])",
+          "legendFormat": "quotes/s"
+        }
+      ]
+    }
+  ]
+}

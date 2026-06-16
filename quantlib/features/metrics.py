@@ -32,10 +32,19 @@ GROUP_COMPUTE_SECONDS = Histogram(
 #
 # NOTE: Prometheus histograms cannot change buckets without recreating the metric, so this bucket change
 # only takes effect after a CAPTURE PROCESS RESTART.
+#
+# SATURATION CAVEAT: the minute's batch is DISPATCHED to the workers only when the NEXT minute's first bar
+# arrives (real_capture.on_bar), so ``ready_wallclock`` — and therefore this end-to-end number — is GATED
+# on the next-minute-bar dispatch trigger. In sparse / extended hours, where the next bar can be a minute
+# or more away, this SATURATES at the top (~60s) bucket and stops reflecting our pipeline at all. For a
+# dispatch-INDEPENDENT view use feature_shard_compute_seconds (pure queue-pickup->assemble compute) and
+# feature_feed_delivery_seconds (provider-only delivery lag); both are below and never saturate this way.
 BAR_TO_VECTOR_SECONDS = Histogram(
     "feature_vector_latency_seconds",
     "Bar-arrival(FIRST bar of minute) -> vector-ready wall time per shard (end-to-end incl. Alpaca "
-    "delivery spread; excludes the post-bet parquet write)",
+    "delivery spread; excludes the post-bet parquet write). GATED on the next-minute-bar dispatch "
+    "trigger, so it SATURATES (~60s) in sparse/extended hours — read feature_shard_compute_seconds + "
+    "feature_feed_delivery_seconds for the dispatch-independent breakdown",
     ["shard"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0),
 )
@@ -49,10 +58,49 @@ BAR_TO_VECTOR_SECONDS = Histogram(
 # pipeline". Same bucket range as above so the two are directly comparable.
 #
 # NOTE: same bucket-change-needs-restart caveat as above.
+#
+# SAME SATURATION CAVEAT as feature_vector_latency_seconds: this still ends at ``ready_wallclock``, which is
+# GATED on the next-minute-bar dispatch trigger (real_capture.on_bar dispatches a minute only once the next
+# minute's first bar arrives). So in sparse / extended hours it ALSO saturates (~60s) despite being the
+# "pure compute" anchor — the wait between the last bar landing and the dispatch firing is counted here. For
+# a dispatch-INDEPENDENT compute number that never saturates use feature_shard_compute_seconds below
+# (measured from queue-pickup, after dispatch); use feature_feed_delivery_seconds to isolate provider lag.
 ASSEMBLE_SECONDS = Histogram(
     "feature_assemble_seconds",
     "Bar-arrival(LAST bar of minute) -> vector-ready wall time per shard (pure compute, excludes both "
-    "Alpaca delivery spread and the post-bet parquet write)",
+    "Alpaca delivery spread and the post-bet parquet write). GATED on the next-minute-bar dispatch "
+    "trigger, so it SATURATES (~60s) in sparse/extended hours — read feature_shard_compute_seconds for "
+    "the dispatch-independent compute and feature_feed_delivery_seconds for provider lag",
+    ["shard"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0),
+)
+
+
+# Dispatch-INDEPENDENT pure compute, per shard. The wall-clock from the instant THIS worker PICKED the
+# minute's batch off its queue (``start = time.perf_counter()``, sharded_capture.worker_main) to the
+# instant the vector is assembled, with the post-bet parquet write subtracted. Because the timer starts at
+# queue-pickup — AFTER the reader's next-minute-bar dispatch already fired — it measures only the worker's
+# map step (tick aggregation + process_shard), with ZERO of the dispatch wait that saturates
+# feature_vector_latency_seconds / feature_assemble_seconds. This is the honest "how long does OUR compute
+# take" number that stays meaningful in sparse / extended hours. perf_counter is per-process, which is fine:
+# both endpoints live in the same worker process.
+SHARD_COMPUTE_SECONDS = Histogram(
+    "feature_shard_compute_seconds",
+    "Per-shard pure compute time (queue-pickup -> vector assembled, write excluded); dispatch-INDEPENDENT "
+    "so it never saturates, unlike feature_assemble_seconds",
+    ["shard"],
+    buckets=(0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+)
+
+# Provider-only feed-delivery lag, per shard. The wall-clock from the bar-minute's CLOSE (minute boundary +
+# 60s) to the instant that minute's FIRST bar arrived off the Alpaca websocket. This isolates Alpaca's feed
+# latency — how long AFTER a minute closes before its first bar even reaches us — from anything in our
+# pipeline. Large values here mean "the provider delivered late", not "our compute is slow", which the
+# end-to-end feature_vector_latency_seconds alone cannot distinguish.
+FEED_DELIVERY_SECONDS = Histogram(
+    "feature_feed_delivery_seconds",
+    "Alpaca delivery lag: wall-clock from bar-minute CLOSE to the minute's first bar arriving off the "
+    "websocket, per shard (provider-bound, isolates feed latency from our compute)",
     ["shard"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 45.0, 60.0),
 )
@@ -120,6 +168,29 @@ def record_assemble(shard_id: int, seconds: float) -> None:
     computes ``time.time() - last_bar_arrival_wallclock`` after the vector is assembled and subtracts the
     write time."""
     ASSEMBLE_SECONDS.labels(shard=str(shard_id)).observe(seconds)
+
+
+def record_shard_compute(shard_id: int, seconds: float) -> None:
+    """Observe one minute's DISPATCH-INDEPENDENT pure compute time for ``shard_id`` (seconds, write
+    excluded). Unlike record_bar_to_vector / record_assemble — both of which end at ``ready_wallclock``
+    and are therefore gated on the reader's next-minute-bar dispatch trigger and SATURATE in sparse hours
+    — this is measured from the worker's queue-pickup (``time.perf_counter()`` at the top of the dispatched
+    minute, after dispatch already fired) to the assemble, so it carries none of the dispatch wait and stays
+    meaningful in sparse / extended hours.
+
+    ``seconds`` is a within-process ``perf_counter`` delta (both endpoints in the same worker), so
+    perf_counter is correct here — NOT the cross-process ``time.time()`` the other two require. The caller
+    computes ``(time.perf_counter() - start) - write_seconds`` after the vector is assembled."""
+    SHARD_COMPUTE_SECONDS.labels(shard=str(shard_id)).observe(seconds)
+
+
+def record_feed_delivery(shard_id: int, seconds: float) -> None:
+    """Observe one minute's PROVIDER-ONLY feed-delivery lag for ``shard_id`` (seconds): the wall-clock from
+    the bar-minute's CLOSE (minute boundary + 60s) to the minute's first bar arriving off the Alpaca
+    websocket. Isolates Alpaca's feed latency from our compute. The caller computes
+    ``first_arrival - (minute_boundary_epoch + 60.0)`` (clamped at 0) — ``first_arrival`` is the
+    cross-process ``time.time()`` stamp of the minute's first bar landing."""
+    FEED_DELIVERY_SECONDS.labels(shard=str(shard_id)).observe(seconds)
 
 
 def start_metrics_server(port: int) -> None:

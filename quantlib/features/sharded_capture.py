@@ -284,9 +284,16 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         write_seconds = state.last_write_ms / 1000.0
         metrics.record_bar_to_vector(shard_id, max(0.0, ready_wallclock - first_arrival - write_seconds))
         metrics.record_assemble(shard_id, max(0.0, ready_wallclock - last_arrival - write_seconds))
+        # Dispatch-INDEPENDENT views (never saturate, unlike the two above which are gated on the reader's
+        # next-minute-bar dispatch trigger). feed_delivery = provider lag from the minute's CLOSE (boundary +
+        # 60s) to its first bar landing; shard_compute = pure worker compute from queue-pickup (``start``)
+        # to assemble with the post-bet write subtracted.
+        minute_boundary_epoch = minute.timestamp()
+        bar_close_epoch = minute_boundary_epoch + 60.0
+        metrics.record_feed_delivery(shard_id, max(0.0, first_arrival - bar_close_epoch))
+        metrics.record_shard_compute(shard_id, max(0.0, (time.perf_counter() - start) - write_seconds))
         # Drill-down (best-effort, fault-isolated, off the hot path): top-K slowest symbols this minute ->
         # latency_slow_symbols. A DB error logs a warning and continues — it must never stall capture.
-        minute_boundary_epoch = minute.timestamp()
         slow_rows = latency_drilldown.top_k_slow_symbols(symbol_arrivals, ready_wallclock, minute_boundary_epoch)
         latency_drilldown.write_slow_symbols(minute, shard_id, slow_rows)
         if bench_log is not None:
