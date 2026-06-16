@@ -11,6 +11,7 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import Iterator
+from typing import cast
 
 import psycopg
 import pytest
@@ -55,27 +56,32 @@ def test_open_fill_close_lifecycle(throwaway_store: BetStore) -> None:
     now = dt.datetime(2026, 6, 15, 14, 30, tzinfo=dt.timezone.utc)
     hold_until = now + dt.timedelta(seconds=900)
 
-    bet_id = store.record_open("AAPL", "buy", 2, "smoke_AAPL_x", now, hold_until)
+    bet_id = store.record_open("AAPL", "buy", 50.0, "smoke_AAPL_x", now, hold_until)
     assert bet_id > 0
     assert store.count_open() == 1
-    assert store.open_notional() == 0.0  # not filled yet -> no realized notional
+    # unfilled -> counted at its entry_notional ($50) so it can't escape the cap
+    assert store.open_notional() == pytest.approx(50.0)
 
     open_bets = store.list_open()
     assert len(open_bets) == 1
     assert open_bets[0]["symbol"] == "AAPL"
     assert open_bets[0]["status"] == "open"
     assert open_bets[0]["entry_price"] is None
+    assert float(cast(float, open_bets[0]["entry_notional"])) == pytest.approx(50.0)
+    assert open_bets[0]["qty"] is None
 
-    store.mark_filled("smoke_AAPL_x", 190.0)
-    assert store.open_notional() == pytest.approx(380.0)  # 2 * 190
+    filled_qty = 50.0 / 190.0  # ~0.263 fractional shares for a $50 notional buy
+    store.mark_filled("smoke_AAPL_x", 190.0, filled_qty)
+    assert store.open_notional() == pytest.approx(50.0)  # qty * entry_price ~ $50
     assert store.list_open()[0]["status"] == "filled"
+    assert float(cast(float, store.list_open()[0]["qty"])) == pytest.approx(filled_qty)
 
     store.mark_closing("smoke_AAPL_x", "smoke_AAPL_x_exit")
     assert store.list_open()[0]["status"] == "closing"
     assert store.list_open()[0]["exit_order_id"] == "smoke_AAPL_x_exit"
 
     exit_ts = now + dt.timedelta(seconds=900)
-    store.record_close("smoke_AAPL_x", exit_ts, 191.5, (191.5 - 190.0) * 2)
+    store.record_close("smoke_AAPL_x", exit_ts, 191.5, (191.5 - 190.0) * filled_qty)
     assert store.count_open() == 0
     assert store.list_open() == []
 
@@ -84,8 +90,8 @@ def test_record_open_idempotent(throwaway_store: BetStore) -> None:
     store = throwaway_store
     now = dt.datetime(2026, 6, 15, 15, 0, tzinfo=dt.timezone.utc)
     hold_until = now + dt.timedelta(seconds=600)
-    first = store.record_open("MSFT", "buy", 1, "smoke_MSFT_dup", now, hold_until)
-    second = store.record_open("MSFT", "buy", 1, "smoke_MSFT_dup", now, hold_until)
+    first = store.record_open("MSFT", "buy", 50.0, "smoke_MSFT_dup", now, hold_until)
+    second = store.record_open("MSFT", "buy", 50.0, "smoke_MSFT_dup", now, hold_until)
     assert first == second  # same coid -> same row, no duplicate
     assert store.count_open() == 1
 
@@ -94,10 +100,10 @@ def test_list_open_excludes_closed(throwaway_store: BetStore) -> None:
     store = throwaway_store
     now = dt.datetime(2026, 6, 15, 16, 0, tzinfo=dt.timezone.utc)
     hold = now + dt.timedelta(seconds=300)
-    store.record_open("NVDA", "buy", 1, "smoke_NVDA_a", now, hold)
-    store.record_open("SPY", "buy", 1, "smoke_SPY_b", now, hold)
-    store.mark_filled("smoke_NVDA_a", 1000.0)
-    store.record_close("smoke_NVDA_a", now, 1001.0, 1.0)
+    store.record_open("NVDA", "buy", 50.0, "smoke_NVDA_a", now, hold)
+    store.record_open("SPY", "buy", 50.0, "smoke_SPY_b", now, hold)
+    store.mark_filled("smoke_NVDA_a", 1000.0, 0.05)
+    store.record_close("smoke_NVDA_a", now, 1001.0, 0.05)
     open_symbols = {bet["symbol"] for bet in store.list_open()}
     assert open_symbols == {"SPY"}
     assert store.count_open() == 1

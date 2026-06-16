@@ -4,16 +4,19 @@ its job is to PROVE the operational apparatus end-to-end before we add real edge
 What it does each loop:
   1. ``BusConsumer.poll()`` for its declared liquid symbols; log a "sample" of a couple real features
      so we can eyeball that live data flows (``ret_1m``, ``volume_zscore_5m``).
-  2. On a fixed cadence, during market hours, under the risk caps, place ONE tiny PAPER market buy
-     (whole shares ~ SMOKE_NOTIONAL_USD) on the most-recently-seen symbol, ``client_order_id`` prefixed
-     ``smoke_`` (namespacing for the shared paper account / a future allocation layer).
+  2. On a fixed cadence, during market hours, under the risk caps, place ONE tiny PAPER NOTIONAL market
+     buy (``notional`` = SMOKE_NOTIONAL_USD, so a $50 bet costs ~$50 regardless of share price — not a
+     whole share) on the most-recently-seen symbol, ``client_order_id`` prefixed ``smoke_`` (namespacing
+     for the shared paper account / a future allocation layer).
   3. MANAGE + FINALIZE: when a bet's hold expires, submit the closing sell, capture fills, compute
      realized PnL, move it OPEN -> CLOSED in the bet store.
   4. SELF-MAINTAIN: on startup, reconcile the bet store against the broker and resume managing open
      bets (closing any already past their hold) — so it survives restarts idempotently.
 
-Risk caps (fail-safe, all enforced before any order): max concurrent bets, max total open notional,
-a hard kill switch (SMOKE_ENABLED=0 -> consume + log but place NO orders), and market-hours-only.
+Risk caps (fail-safe, all enforced before any order): max concurrent bets, max total open notional
+(bounding ACTUAL dollar exposure — sum of open bets' real entry cost plus the prospective bet, so a
+high-priced symbol can never blow the cap), a hard kill switch (SMOKE_ENABLED=0 -> consume + log but
+place NO orders), and market-hours-only.
 
 Transient bus/broker/db errors must NOT crash the loop: we catch the SPECIFIC client exceptions and
 continue. We never catch bare Exception.
@@ -22,7 +25,6 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import math
 import os
 import time
 from dataclasses import dataclass
@@ -32,8 +34,6 @@ import redis
 from typing import cast
 
 from alpaca.common.exceptions import APIError
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockLatestTradeRequest
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.models import Clock, Order
@@ -132,12 +132,17 @@ def sample_features(vector: object) -> dict[str, float]:
     return {name: vector.value(name) for name in SAMPLE_FEATURES}  # type: ignore[attr-defined]
 
 
-def compute_qty(notional_usd: float, price: float) -> int:
-    """Whole-share quantity for a target notional. Always >= 1 (a tiny smoke bet is never zero
-    shares); whole shares keep the exit + per-fill PnL clean (no fractional close bookkeeping)."""
-    if price <= 0:
-        raise ValueError(f"non-positive price {price}")
-    return max(1, math.floor(notional_usd / price))
+def order_filled_qty(order: Order) -> float | None:
+    """The actual (fractional) share count an order filled, or None if not yet filled.
+
+    A notional BUY fills an unknown fractional quantity; we read it from ``filled_qty`` so the close
+    can sell exactly that many shares. A zero/blank fill is treated as not-yet-filled.
+    """
+    filled_qty = order.filled_qty
+    if filled_qty is None:
+        return None
+    qty = float(filled_qty)
+    return qty if qty > 0 else None
 
 
 class SmokeStrategy:
@@ -148,14 +153,12 @@ class SmokeStrategy:
         config: SmokeConfig,
         consumer: BusConsumer,
         trading: TradingClient,
-        data_client: StockHistoricalDataClient,
         store: BetStore,
         model: Model | None = None,
     ) -> None:
         self._config = config
         self._consumer = consumer
         self._trading = trading
-        self._data = data_client
         self._store = store
         self._model = model if model is not None else MockMLModel(MODEL_FOLD_FEATURES)
         self._last_symbol: str | None = None
@@ -166,11 +169,6 @@ class SmokeStrategy:
         """Broker clock — only trade during regular hours; outside, consume + log only."""
         clock = cast(Clock, self._trading.get_clock())
         return bool(clock.is_open)
-
-    def _latest_price(self, symbol: str) -> float:
-        request = StockLatestTradeRequest(symbol_or_symbols=symbol)
-        trades = self._data.get_stock_latest_trade(request)
-        return float(trades[symbol].price)
 
     def reconcile_on_startup(self) -> None:
         """Resume managing bets left open by a prior run: for each store-open bet, pull its broker
@@ -185,8 +183,12 @@ class SmokeStrategy:
         for bet in open_bets:
             entry_order_id = str(bet["entry_order_id"])
             order = self._fetch_order_by_coid(entry_order_id)
-            if order is not None and order.filled_avg_price and bet["entry_price"] is None:
-                self._store.mark_filled(entry_order_id, float(order.filled_avg_price))
+            if order is not None and bet["entry_price"] is None:
+                filled_qty = order_filled_qty(order)
+                if order.filled_avg_price and filled_qty is not None:
+                    self._store.mark_filled(entry_order_id, float(order.filled_avg_price), filled_qty)
+                    bet["entry_price"] = float(order.filled_avg_price)
+                    bet["qty"] = filled_qty
             hold_until = bet["hold_until"]
             if isinstance(hold_until, dt.datetime) and now >= hold_until:
                 self._close_bet(bet)
@@ -258,17 +260,16 @@ class SmokeStrategy:
         if not self._model_allows():
             return
         symbol = str(self._last_symbol)
-        price = self._latest_price(symbol)
-        qty = compute_qty(self._config.notional_usd, price)
+        notional = self._config.notional_usd
         coid = f"{COID_PREFIX}{symbol}_{now.strftime('%Y%m%dT%H%M%S')}"
         hold_until = now + dt.timedelta(seconds=self._config.hold_sec)
-        self._store.record_open(symbol, "buy", qty, coid, now, hold_until)
+        self._store.record_open(symbol, "buy", notional, coid, now, hold_until)
         order = cast(
             Order,
             self._trading.submit_order(
                 MarketOrderRequest(
                     symbol=symbol,
-                    qty=qty,
+                    notional=notional,
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.DAY,
                     client_order_id=coid,
@@ -277,8 +278,8 @@ class SmokeStrategy:
         )
         self._last_bet_ts = now
         logger.info(
-            "BET placed: BUY %d %s (~$%.0f) coid=%s broker_id=%s hold=%ds",
-            qty, symbol, qty * price, coid, str(order.id), self._config.hold_sec,
+            "BET placed: BUY $%.2f notional %s coid=%s broker_id=%s hold=%ds",
+            notional, symbol, coid, str(order.id), self._config.hold_sec,
         )
 
     def manage_open_bets(self) -> None:
@@ -289,20 +290,51 @@ class SmokeStrategy:
             if bet["entry_price"] is None:
                 order = self._fetch_order_by_coid(entry_order_id)
                 if order is not None and order.filled_avg_price:
-                    filled_price = float(order.filled_avg_price)
-                    self._store.mark_filled(entry_order_id, filled_price)
-                    bet["entry_price"] = filled_price
+                    filled_qty = order_filled_qty(order)
+                    if filled_qty is not None:
+                        filled_price = float(order.filled_avg_price)
+                        self._store.mark_filled(entry_order_id, filled_price, filled_qty)
+                        bet["entry_price"] = filled_price
+                        bet["qty"] = filled_qty
             hold_until = bet["hold_until"]
             if isinstance(hold_until, dt.datetime) and now >= hold_until:
                 self._close_bet(bet)
 
+    def _ensure_entry_filled(self, bet: dict[str, object]) -> tuple[float, float] | None:
+        """Return (entry_price, filled_qty) for a bet's open, capturing the fill into the store if it
+        landed since we last looked. Returns None if the notional entry has not filled yet — we must
+        NOT submit the close until we know how many (fractional) shares we actually hold."""
+        entry_order_id = str(bet["entry_order_id"])
+        entry_price = bet["entry_price"]
+        qty = bet["qty"]
+        if entry_price is not None and qty is not None:
+            return float(cast(float, entry_price)), float(cast(float, qty))
+        entry_order = self._fetch_order_by_coid(entry_order_id)
+        if entry_order is None or not entry_order.filled_avg_price:
+            return None
+        filled_qty = order_filled_qty(entry_order)
+        if filled_qty is None:
+            return None
+        entry_price_value = float(entry_order.filled_avg_price)
+        self._store.mark_filled(entry_order_id, entry_price_value, filled_qty)
+        bet["entry_price"] = entry_price_value
+        bet["qty"] = filled_qty
+        return entry_price_value, filled_qty
+
     def _close_bet(self, bet: dict[str, object]) -> None:
         """Submit the closing sell (idempotent coid), capture the exit fill, compute realized PnL,
         and move the bet to CLOSED. Re-runs safely: a coid collision means the close is already in
-        flight, so we just try to read its fill."""
+        flight, so we just try to read its fill.
+
+        The close sells the actual filled (fractional) ``qty`` of the notional entry, so we only
+        proceed once that quantity is known — otherwise we wait for the entry to fill."""
         entry_order_id = str(bet["entry_order_id"])
         symbol = str(bet["symbol"])
-        qty = float(cast(float, bet["qty"]))
+        filled = self._ensure_entry_filled(bet)
+        if filled is None:
+            logger.info("CLOSE deferred: entry not yet filled for %s (coid=%s)", symbol, entry_order_id)
+            return
+        entry_price_value, qty = filled
         exit_coid = f"{entry_order_id}_exit"
         existing_exit = bet["exit_order_id"]
         if existing_exit is None:
@@ -329,17 +361,6 @@ class SmokeStrategy:
             logger.info("CLOSE pending fill for %s (coid=%s)", symbol, exit_coid)
             return
         exit_price = float(exit_order.filled_avg_price)
-        entry_price = bet["entry_price"]
-        if entry_price is None:
-            entry_order = self._fetch_order_by_coid(entry_order_id)
-            if entry_order is None or not entry_order.filled_avg_price:
-                logger.warning("CLOSE: no entry fill for %s; recording exit only", symbol)
-                entry_price_value = exit_price
-            else:
-                entry_price_value = float(entry_order.filled_avg_price)
-                self._store.mark_filled(entry_order_id, entry_price_value)
-        else:
-            entry_price_value = float(cast(float, entry_price))
         realized = (exit_price - entry_price_value) * qty
         exit_ts = exit_order.filled_at or dt.datetime.now(dt.timezone.utc)
         self._store.record_close(entry_order_id, exit_ts, exit_price, realized)

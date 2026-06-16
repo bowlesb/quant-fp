@@ -112,7 +112,9 @@ One table, `strat_smoke.bets`, status-partitioned by the `status` column
 | column | meaning |
 |---|---|
 | `id` | bigserial PK |
-| `symbol`, `side`, `qty` | the long whole-share paper bet |
+| `symbol`, `side` | the long paper bet |
+| `entry_notional` | target dollar size of the open (`SMOKE_NOTIONAL_USD`) — the bet is a NOTIONAL buy |
+| `qty` | filled (fractional) shares of the open (NULL until filled) |
 | `entry_order_id` (UNIQUE) | Alpaca `client_order_id`, prefix `smoke_` — the idempotency key |
 | `entry_ts`, `entry_price` | submit time / avg fill (NULL until filled) |
 | `hold_until` | when the time-based exit fires |
@@ -150,13 +152,16 @@ The smoke loop (`strategies/smoke/strategy.py`) is the template:
 - **maybe place** — a **pure** safety gate (`evaluate_bet_gate`, unit-testable, no I/O) enforces, in
   order: kill switch (`SMOKE_ENABLED=0`), market-hours-only (broker clock), cadence
   (`SMOKE_BET_INTERVAL_SEC`), max concurrent (`SMOKE_MAX_CONCURRENT`), and max total open notional
-  (`SMOKE_MAX_TOTAL_NOTIONAL_USD`, checked inclusive of the prospective bet). All bets are **paper only**
-  and tiny (`SMOKE_NOTIONAL_USD`, whole shares ≥ 1).
+  (`SMOKE_MAX_TOTAL_NOTIONAL_USD`, checked against ACTUAL open dollar exposure inclusive of the
+  prospective bet, so a high-priced symbol can never blow the cap). All bets are **paper only** and
+  tiny: a **NOTIONAL** market buy for `SMOKE_NOTIONAL_USD` dollars (fractional shares), so a $50 bet
+  costs ~$50 regardless of share price — never a whole share.
 - **reconcile on startup** — resume managing store-open bets against the broker, closing any past their
   hold; idempotent so restarts converge.
 
 **Cadence + types:** smoke places at most **one** bet every `SMOKE_BET_INTERVAL_SEC` (default 300s),
-market-buy long entry → time-based market-sell exit after `SMOKE_HOLD_SEC` (default 900s). It only goes
+notional market-buy long entry (`notional=SMOKE_NOTIONAL_USD`) → time-based market-sell exit of the
+filled fractional `qty` after `SMOKE_HOLD_SEC` (default 900s). It only goes
 long. Transient bus/broker/db errors are caught specifically and the loop continues; bare `except` is
 never used.
 
