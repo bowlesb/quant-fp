@@ -132,7 +132,7 @@ def test_empty_response_yields_typed_empty_frame() -> None:
     assert frame.schema == TRADES_SCHEMA
 
 
-def _config(tmp_path, budget_bytes: int) -> raw_backfill.BackfillConfig:
+def _config(tmp_path, budget_bytes: int, max_workers: int = 1) -> raw_backfill.BackfillConfig:
     return raw_backfill.BackfillConfig(
         store=str(tmp_path),
         months=6,
@@ -141,6 +141,7 @@ def _config(tmp_path, budget_bytes: int) -> raw_backfill.BackfillConfig:
         budget_bytes=budget_bytes,
         symbols=["AAPL"],
         days=2,
+        max_workers=max_workers,
     )
 
 
@@ -169,6 +170,62 @@ def test_budget_stop_prevents_writes(tmp_path) -> None:
     config = _config(tmp_path, budget_bytes=0)  # zero budget -> immediate STOP
     client = MockDataClient()
     written, _bytes = raw_backfill.fetch_tier(config, client, "trades", ["AAPL"], [DAY])
+    assert written == 0
+
+
+class MultiSymbolBarsClient:
+    """Returns a one-row bar frame for ANY requested symbol; used for concurrency tests."""
+
+    def get_stock_bars(self, request):  # type: ignore[no-untyped-def]
+        symbol = request.symbol_or_symbols
+        ts = dt.datetime(2026, 6, 12, 14, 30, tzinfo=dt.timezone.utc)
+        return FakeSet({symbol: [FakeBar(ts, 1.0, 2.0, 0.5, 1.5, 100, 1.4, 9)]})
+
+
+def test_parallel_fetch_no_duplicate_manifest_rows(tmp_path) -> None:
+    symbols = [f"SYM{i:02d}" for i in range(15)]
+    days = [DAY, DAY + dt.timedelta(days=1), DAY + dt.timedelta(days=2)]
+    config = raw_backfill.BackfillConfig(
+        store=str(tmp_path),
+        months=6,
+        top_trades=2,
+        top_quotes=1,
+        budget_bytes=10**12,
+        symbols=symbols,
+        days=len(days),
+        max_workers=8,
+    )
+    written, _bytes = raw_backfill.fetch_tier(
+        config, MultiSymbolBarsClient(), "bars", symbols, days
+    )
+    assert written == len(symbols) * len(days)
+    manifest = raw_backfill.load_manifest(str(tmp_path), "bars")
+    assert manifest.height == len(symbols) * len(days)
+    dupes = manifest.group_by(["tier", "symbol", "date"]).len().filter(pl.col("len") > 1)
+    assert dupes.height == 0
+    # idempotent re-run under concurrency fetches nothing new
+    rewritten, _ = raw_backfill.fetch_tier(
+        config, MultiSymbolBarsClient(), "bars", symbols, days
+    )
+    assert rewritten == 0
+
+
+def test_parallel_budget_stop_halts(tmp_path) -> None:
+    symbols = [f"SYM{i:02d}" for i in range(15)]
+    days = [DAY, DAY + dt.timedelta(days=1)]
+    config = raw_backfill.BackfillConfig(
+        store=str(tmp_path),
+        months=6,
+        top_trades=2,
+        top_quotes=1,
+        budget_bytes=0,  # zero budget -> immediate STOP, even with many workers
+        symbols=symbols,
+        days=len(days),
+        max_workers=8,
+    )
+    written, _bytes = raw_backfill.fetch_tier(
+        config, MultiSymbolBarsClient(), "bars", symbols, days
+    )
     assert written == 0
 
 

@@ -25,6 +25,8 @@ import datetime as dt
 import logging
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import polars as pl
@@ -49,6 +51,7 @@ TIERS = ("bars", "trades", "quotes")
 DEFAULT_STORE = "/store"
 SAFETY_HEADROOM_BYTES = 50 * 1024**3  # never fill the last 50 GB of the budget
 BYTES_PER_TB = 1024**4
+DEFAULT_MAX_WORKERS = 12
 
 MANIFEST_SCHEMA: dict[str, pl.DataType] = {
     "tier": pl.String,
@@ -75,6 +78,7 @@ class BackfillConfig:
     budget_bytes: int
     symbols: list[str] | None  # explicit sample set; None => full universe
     days: int | None  # explicit day count for sample mode; None => `months` of trading days
+    max_workers: int  # thread-pool size for concurrent per-symbol-day fetching
 
 
 def trading_client() -> TradingClient:
@@ -163,6 +167,86 @@ def write_partition(store: str, tier: str, symbol: str, day: dt.date, frame: pl.
     return os.path.getsize(out_path)
 
 
+class _TierProgress:
+    """Thread-safe shared state for a tier's concurrent fetch.
+
+    All mutation of the manifest, the done-key set, the running byte total and the stop flag happens
+    under a SINGLE lock so that workers fetching different symbols cannot: (a) double-fetch the same
+    (symbol, date), (b) corrupt the manifest parquet on append, or (c) overshoot the disk budget. The
+    fetch + parquet write themselves run OUTSIDE the lock (the slow, IO-bound part) so threads make
+    real concurrent progress; only the small book-keeping critical sections serialize.
+    """
+
+    def __init__(self, store: str, tier: str, budget_bytes: int) -> None:
+        self.store = store
+        self.tier = tier
+        self.budget_bytes = budget_bytes
+        self.lock = threading.Lock()
+        self.manifest = load_manifest(store, tier)
+        self.done = done_keys(self.manifest)
+        self.written = 0
+        self.bytes_written = 0
+        self.budget_used = int(self.manifest["bytes"].sum()) if self.manifest.height else 0
+        self.stopped = False
+
+    def claim(self, key: tuple[str, str]) -> bool:
+        """Atomically reserve a (symbol, date) for fetching. Returns False if already done, if the
+        budget/headroom STOP has tripped, or if another worker just claimed it — the caller then
+        skips. Marking the key here (before the slow fetch) prevents two threads claiming the same
+        pair; a fetch failure would leave it claimed, which is acceptable (a re-run re-fetches only
+        pairs missing from the persisted manifest, not the in-memory claim set)."""
+        with self.lock:
+            if self.stopped or key in self.done:
+                return False
+            disk_free = free_bytes(self.store)
+            if disk_free <= SAFETY_HEADROOM_BYTES or self.budget_used >= self.budget_bytes:
+                if not self.stopped:
+                    self.stopped = True
+                    logger.warning(
+                        "tier=%s STOP: budget/headroom reached (free=%.1fGB, used=%.2fTB/%.2fTB)",
+                        self.tier,
+                        disk_free / 1024**3,
+                        self.budget_used / BYTES_PER_TB,
+                        self.budget_bytes / BYTES_PER_TB,
+                    )
+                return False
+            self.done.add(key)
+            return True
+
+    def record(self, entry: dict, size: int) -> None:
+        """Atomically persist a fetched partition's manifest entry and update the byte totals."""
+        with self.lock:
+            self.manifest = append_manifest(self.store, self.tier, self.manifest, entry)
+            self.written += 1
+            self.bytes_written += size
+            self.budget_used += size
+
+
+def _fetch_one(
+    progress: _TierProgress,
+    client: StockHistoricalDataClient,
+    tier: str,
+    symbol: str,
+    day: dt.date,
+) -> None:
+    """Worker: claim, fetch and persist a single (symbol, day) partition if not already done/stopped."""
+    key = (symbol, day.isoformat())
+    if not progress.claim(key):
+        return
+    fetcher = _FETCHERS[tier]
+    frame = fetcher(client, symbol, day)
+    size = write_partition(progress.store, tier, symbol, day, frame)
+    entry = {
+        "tier": tier,
+        "symbol": symbol,
+        "date": day.isoformat(),
+        "rows": frame.height,
+        "bytes": size,
+        "fetched_at": dt.datetime.now(dt.timezone.utc),
+    }
+    progress.record(entry, size)
+
+
 def fetch_tier(
     config: BackfillConfig,
     client: StockHistoricalDataClient,
@@ -170,52 +254,32 @@ def fetch_tier(
     symbols: list[str],
     days: list[dt.date],
 ) -> tuple[int, int]:
-    """Fetch every (symbol, day) for a tier, liquid-first, skipping manifest-done pairs and stopping
-    when free space drops below the budget headroom. Returns (partitions_written, bytes_written)."""
-    fetcher = _FETCHERS[tier]
-    manifest = load_manifest(config.store, tier)
-    done = done_keys(manifest)
-    written = 0
-    bytes_written = 0
-    budget_used = int(manifest["bytes"].sum()) if manifest.height else 0
-    for symbol in symbols:
-        for day in days:
-            key = (symbol, day.isoformat())
-            if key in done:
-                continue
-            disk_free = free_bytes(config.store)
-            if disk_free <= SAFETY_HEADROOM_BYTES or budget_used >= config.budget_bytes:
-                logger.warning(
-                    "tier=%s STOP: budget/headroom reached (free=%.1fGB, used=%.2fTB/%.2fTB)",
-                    tier,
-                    disk_free / 1024**3,
-                    budget_used / BYTES_PER_TB,
-                    config.budget_bytes / BYTES_PER_TB,
-                )
-                return written, bytes_written
-            frame = fetcher(client, symbol, day)
-            size = write_partition(config.store, tier, symbol, day, frame)
-            entry = {
-                "tier": tier,
-                "symbol": symbol,
-                "date": day.isoformat(),
-                "rows": frame.height,
-                "bytes": size,
-                "fetched_at": dt.datetime.now(dt.timezone.utc),
-            }
-            manifest = append_manifest(config.store, tier, manifest, entry)
-            done.add(key)
-            written += 1
-            bytes_written += size
-            budget_used += size
-        logger.info(
-            "tier=%s symbol=%s done (%d partitions, %.3fGB this run)",
-            tier,
-            symbol,
-            written,
-            bytes_written / 1024**3,
-        )
-    return written, bytes_written
+    """Fetch every (symbol, day) for a tier across a thread pool, liquid-first, skipping manifest-done
+    pairs and stopping when free space drops below the budget headroom. Returns
+    (partitions_written, bytes_written).
+
+    Concurrency is bounded by `config.max_workers` (default 12); the per-call `_with_retry` back-off in
+    the fetchers still handles 429/5xx so rate-limit pushback is respected even when many symbols are
+    in flight. Work is submitted symbol-major (liquid-first) so the highest-value symbols are claimed
+    first; once the disk-budget STOP trips, in-flight tasks finish and all remaining ones no-op via the
+    `claim` guard, so the tier winds down cleanly."""
+    progress = _TierProgress(config.store, tier, config.budget_bytes)
+    pairs = [(symbol, day) for symbol in symbols for day in days]
+    with ThreadPoolExecutor(max_workers=max(1, config.max_workers)) as executor:
+        futures = [
+            executor.submit(_fetch_one, progress, client, tier, symbol, day)
+            for symbol, day in pairs
+        ]
+        for future in as_completed(futures):
+            future.result()
+    logger.info(
+        "tier=%s done (%d partitions, %.3fGB this run, %d workers)",
+        tier,
+        progress.written,
+        progress.bytes_written / 1024**3,
+        config.max_workers,
+    )
+    return progress.written, progress.bytes_written
 
 
 def rank_by_dollar_volume(store: str, symbols: list[str], days: list[dt.date]) -> list[str]:
@@ -295,6 +359,12 @@ def parse_args(argv: list[str]) -> BackfillConfig:
     parser.add_argument("--budget-tb", type=float, default=1.8)
     parser.add_argument("--symbols", default=None, help="comma list => SAMPLE mode")
     parser.add_argument("--days", type=int, default=None, help="recent trading days for SAMPLE mode")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=int(os.environ.get("RAW_BACKFILL_WORKERS", DEFAULT_MAX_WORKERS)),
+        help="thread-pool size for concurrent per-symbol-day fetching (env RAW_BACKFILL_WORKERS)",
+    )
     args = parser.parse_args(argv)
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     return BackfillConfig(
@@ -305,6 +375,7 @@ def parse_args(argv: list[str]) -> BackfillConfig:
         budget_bytes=int(args.budget_tb * BYTES_PER_TB),
         symbols=symbols,
         days=args.days,
+        max_workers=args.max_workers,
     )
 
 
