@@ -136,3 +136,21 @@ conservative. (The KILL was unchanged either way, but the honest number is the l
 - General principle (applies beyond makers): anchor every realized-P&L reference to the ACTUAL execution
   timestamp and the price AT that instant — any stale/earlier reference silently books price moves you did
   not capture and inflates the edge.
+
+## 9. Forward-return ML — label-horizon EMBARGO + bounce-immune entry; a non-zero shuffle canary = leakage (2026-06-16, W7)
+
+Training a model to predict an H-day forward return has two leakage traps a label-shuffle canary alone does
+NOT catch:
+- **Overlapping-label leakage.** If train and predict windows are adjacent, the H-day labels OVERLAP across
+  the boundary — the model sees (part of) the test labels in training. MANDATORY: a full-LABEL-HORIZON
+  EMBARGO (gap ≥ H) between the last train date and the first predict date. W7: the embargo cut the apparent
+  edge ~50–60% (pre-embargo +884 bps → +465; an early run was +1534 bps).
+- **Entry-price bid-ask-bounce look-ahead.** If features are computed as-of close[t] and entry is also
+  booked at close[t], the bounce in close[t] is in both → fake edge. Use a BOUNCE-IMMUNE entry: features
+  as-of close[t], ENTER at close[t+1]. The label-shuffle canary does NOT catch this (it permutes the label,
+  not the entry timing).
+- **A non-zero shuffled-label canary is itself a red flag.** Shuffling the label should give OOS net ≈ 0; if
+  it's significantly non-zero (W7 liquid500-H10 canary −148 bps, CI excludes 0), the bootstrap carries
+  small-sample bias / residual leakage and the headline CI is UNTRUSTWORTHY — treat as KILL, not KEEP.
+- And the megacap check: a real cross-sectional ML edge is STRONGEST in the cleanest (megacap) universe; if
+  it only appears in the broad universe and vanishes/flips in megacaps, it's broad-universe overfit.
