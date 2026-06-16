@@ -60,16 +60,23 @@ def demean_within_symbol(frame: pl.DataFrame, ret_col: str) -> pl.DataFrame:
 
 
 def per_symbol_day_ics(frame: pl.DataFrame, col: str, target: str) -> list[float]:
-    """IC per (symbol, date) cell, never one giant cross-symbol pool — so one symbol's clock can't corrupt
-    the rank-IC. A cell needs >=10 finite obs (spearman_ic guards it). Returns the list of cell ICs."""
-    ics: list[float] = []
+    """DAY-CLUSTERED ICs (one IC per DATE), null-safe per-(symbol,date) computation underneath.
+
+    Two-stage to be BOTH null-safe AND correctly day-clustered:
+      1. compute the rank-IC per (symbol, date) cell (so one symbol's clock can't corrupt the pooled rank,
+         which was HF01's NaN bug), then
+      2. AVERAGE those cell-ICs WITHIN each date to one IC per day.
+    The returned list has one entry per DATE — the correct clustering unit for ``day_clustered_tstat`` (each
+    trading day is one independent observation). Returning per-(symbol,date) CELLS instead (the earlier
+    version) treated ~n_symbols×n_days correlated cells as independent and inflated the t-stat by
+    ~sqrt(n_symbols) (the HF02 t=9.41 artifact). Day-clustering is the honest denominator.
+    """
+    per_date: dict[object, list[float]] = {}
     for (sym, date), cell in frame.group_by(["symbol", "date"]):
-        x = cell[col].to_numpy()
-        y = cell[target].to_numpy()
-        ic = spearman_ic(x, y)
+        ic = spearman_ic(cell[col].to_numpy(), cell[target].to_numpy())
         if np.isfinite(ic):
-            ics.append(ic)
-    return ics
+            per_date.setdefault(date, []).append(ic)
+    return [float(np.mean(cell_ics)) for cell_ics in per_date.values() if cell_ics]
 
 
 def compute_demean_ic(pooled: pl.DataFrame, signals: list[str], windows: list[int], horizons: list[int]) -> list[dict]:
@@ -92,7 +99,7 @@ def compute_demean_ic(pooled: pl.DataFrame, signals: list[str], windows: list[in
                     "signal": sig, "w": w, "h_min": h_min,
                     "mean_ic_dm": round(mean_dm, 5) if np.isfinite(mean_dm) else None,
                     "t_dm": round(t_dm, 2) if np.isfinite(t_dm) else None,
-                    "n_cells": len(ics),
+                    "n_days": len(ics),
                 })
     return rows
 
@@ -119,6 +126,6 @@ def compute_oos_ic(pooled: pl.DataFrame, oos_dates: set, signals: list[str], win
                     "signal": sig, "w": w, "h_min": h_min,
                     "mean_ic_oos": round(mean_oos, 5) if np.isfinite(mean_oos) else None,
                     "t_oos": round(t_oos, 2) if np.isfinite(t_oos) else None,
-                    "n_cells": len(ics), "n_obs": sub.height,
+                    "n_days": len(ics), "n_obs": sub.height,
                 })
     return rows
