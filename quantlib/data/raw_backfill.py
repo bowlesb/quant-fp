@@ -144,7 +144,10 @@ def append_manifest(store: str, tier: str, manifest: pl.DataFrame, entry: dict) 
     row = pl.DataFrame([entry], schema=MANIFEST_SCHEMA)
     updated = pl.concat([manifest, row], how="vertical") if manifest.height else row
     path = manifest_path(store, tier)
-    tmp_path = f"{path}.tmp"
+    # Per-process unique tmp name: within a process the lock serializes this, and a per-pid tmp keeps a
+    # transient cross-process overlap (e.g. an old run still winding down while a new one starts) from
+    # racing on a shared tmp -> rename (each process renames only its OWN tmp; no FileNotFoundError).
+    tmp_path = f"{path}.{os.getpid()}.tmp"
     updated.write_parquet(tmp_path)
     os.replace(tmp_path, path)
     return updated
