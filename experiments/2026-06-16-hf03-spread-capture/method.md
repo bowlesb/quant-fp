@@ -29,20 +29,28 @@ the ask (trade prints strictly above the ask).
   filled" is FORBIDDEN and not used.
 
 ## Post-fill MARK-OUT (the decisive metric — second way maker backtests lie)
-After each fill we MARK OUT the resulting position at the prevailing **mid** at **+1s/+5s/+30s/+60s**
-(mid = last quote at-or-before the mark-out instant; mark-out anchored at the resting-window open, a
-slightly conservative — longer — adverse-selection exposure).
-- Bid fill => we are **long** at post_bid. `net_passive(s) = (mid_at_s - post_bid)/post_mid`. Equivalently
-  this already nets the earned half-spread (post_mid - post_bid) against the adverse mid drift
-  (mid_at_s - post_mid). Reported in bps of mid.
+Anchored at the **ACTUAL fill timestamp** — the first trade-through inside the resting window — NOT the
+window edge. `fill_mid` = the prevailing quote mid at that fill instant (the honest reference; `post_mid`
+is up to 10s stale by the time the fill prints). After each fill we MARK OUT at the prevailing **mid** at
+**fill_ts + {1s, 5s, 30s, 60s}**.
+- Bid fill => we are **long** at post_bid. `markout_net(s) = (mid_at_s - post_bid)/post_mid`
+  = `earned_spread (fill_mid - post_bid)` + `adverse_drift (mid_at_s - fill_mid)`. Reported in bps of mid.
 - Ask fill => we are **short** at post_ask, symmetric.
 - **cross exit** variant: also pay the half-spread to flatten at the horizon (pessimistic exit bound).
-- **adverse-selection magnitude** = mean (mid_at_s - fill_price) in bps: how far the mid moved against the
-  fill on average (the cost the earned spread must overcome).
+- **adverse-selection magnitude** = the `adverse_drift` term: how far the mid moved against the fill over
+  the hold (the cost the earned spread must overcome).
 
-**HEADLINE = the per-FILL mark-out-net distribution with a per-fill bootstrap 95% CI (10k resamples,
-memory-bounded exact resampling).** KEEP only if that CI excludes zero **above** at the conservative
-trade-through fill, OOS, AND the qimb overlay beats the no-overlay baseline.
+**Note on anchoring.** An earlier pass anchored the mark-out at the resting-window OPEN (post_ts+10s) and
+referenced the stale post_mid, which over-counted the earned spread (~1.05 bps). The corrected fill-time
+anchoring measures the spread we actually captured at the fill instant (~0.87 bps trade_through / 0.65 bps
+queue_proxy) and the post-fill drift over the TRUE hold. The corrected numbers are more conservative and do
+not change the verdict.
+
+**HEADLINE = the per-FILL mark-out-net mean with a per-fill 95% CI.** At n_fills ≈ 0.5–1.5M per cell the
+CI half-width is set by the standard error (≈ 1.96·sd/√n) and is razor-thin, so the reported analytic CI is
+identical in conclusion to a per-fill bootstrap (the early window-edge run used a 2000-resample
+memory-bounded bootstrap and gave the same intervals). KEEP only if that CI excludes zero **above** at the
+conservative trade-through fill, OOS, AND the qimb overlay beats the no-overlay baseline.
 
 ## qimb overlay
 - No-overlay **baseline**: post both sides always.

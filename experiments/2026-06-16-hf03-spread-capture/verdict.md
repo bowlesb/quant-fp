@@ -4,31 +4,32 @@
 optimistic-fill artifact the pre-registration committed against. The honest verdict is KILL.**
 
 ## Why the auto-KEEP is an artifact
-The auto-rule fired because the per-fill mark-out-net under the **trade_through** fill model is positive
-with a tight CI (OOS +30s baseline = +0.785 [0.769, 0.800] bps; qimb thr=0.1 = +0.801 [0.784, 0.818]),
-and the overlay's mean nudged baseline at one horizon. But the headline metric BUNDLES the earned
-half-spread (~1.05 bps) with the adverse drift, and the +CI lives ENTIRELY on the most optimistic fill
-assumption. The pre-registration is explicit that "touched/traded-through => filled" is an upper bound and a
-positive result there alone is AMBIGUOUS at best, not a KEEP.
+The mechanical rule fired because the per-fill mark-out-net under the **trade_through** fill model is
+positive with a razor-thin CI (fill-time-anchored OOS +30s baseline = +0.676 [0.665, 0.688] bps; qimb
+thr=0.1 = +0.685 [0.673, 0.698]). But the headline BUNDLES the earned half-spread (~0.87 bps at the fill
+instant) with the adverse drift, and the +CI lives ENTIRELY on the most optimistic fill assumption. The
+pre-registration is explicit that "touched/traded-through => filled" is an upper bound and a positive result
+there alone is AMBIGUOUS at best, not a KEEP.
 
 ## The three things that kill it
 1. **Stricter fill model flips it negative.** Under the queue_proxy fill (printed size through the level must
-   exceed the resting queue — still optimistic, no real queue position), OOS +30s baseline mark-out-net is
-   **−0.052 bps**. Real queue position is worse than this proxy, so the true number is more negative. The
-   edge does not survive any honest fill model.
+   exceed the resting queue — still optimistic, no real queue position), OOS +30s mark-out-net is
+   **−0.067 bps** (baseline) and **−0.077 bps** (qimb thr=0.1); the earned spread itself drops to ~0.65 bps
+   while adverse drift grows to −0.71 bps. Real queue position is worse than this proxy, so the true number
+   is more negative. The edge does not survive any honest fill model.
 2. **Real exit is always negative.** Paying the half-spread to flatten (`cross`) is negative in EVERY cell:
-   −0.08 → −0.38 bps (trade_through) and **−1.05 bps** (queue_proxy +30s). The strategy is positive only
+   −0.31 → −0.35 bps (trade_through) and **−1.05 bps** (queue_proxy +30s). The strategy is positive only
    under the passive-mid-exit fantasy (always exit at mid, never cross), which is itself optimistic.
 3. **qimb fails the canary at the decisive horizons.** At +30s and +60s, the qimb overlay does NOT beat a
-   within-day shuffle of qimb at ANY threshold — random posting is statistically as good. qimb does not
-   reduce adverse selection; the overlay's micro-edge over baseline is fill-selection noise. The one
-   pre-registered requirement for a KEEP ("qimb overlay BEATS the no-overlay baseline" in a way that
-   survives the canary) FAILS.
+   within-day shuffle of qimb at ANY threshold — random posting is statistically as good, and the overlay's
+   mark-out-net is within ~0.01 bps of baseline. qimb does not reduce adverse selection; its micro-edge over
+   baseline is fill-selection noise. The pre-registered KEEP requirement ("qimb overlay BEATS the no-overlay
+   baseline" surviving the canary) FAILS.
 
 ## Adverse-selection signature (textbook)
-Win rate decays 0.81 (+1s) → 0.53 (+60s); adverse drift given back grows 0.07 → 0.36 bps monotonically with
-the hold. We are filled preferentially right before the mid moves against us — exactly the mechanism that
-dominates naive retail market-making.
+Win rate decays 0.66 (+1s) → 0.53 (+60s); adverse drift given back grows 0.16 → 0.20 bps (trade_through) and
+0.31 → 0.72 bps (queue_proxy) monotonically with the hold. We are filled preferentially right before the mid
+moves against us — exactly the mechanism that dominates naive retail market-making.
 
 ## Conclusion
 Naive passive liquidity provision on megacaps is dominated by adverse selection and (modeled-away) queue
