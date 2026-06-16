@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 import polars as pl
 from alpaca.data.historical import StockHistoricalDataClient
+from requests.adapters import HTTPAdapter
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest, GetCalendarRequest
@@ -52,6 +53,7 @@ DEFAULT_STORE = "/store"
 SAFETY_HEADROOM_BYTES = 50 * 1024**3  # never fill the last 50 GB of the budget
 BYTES_PER_TB = 1024**4
 DEFAULT_MAX_WORKERS = 12
+HTTP_POOL_SIZE = 64  # HTTP connection pool >> worker count so parallel fetches reuse, not churn, connections
 
 MANIFEST_SCHEMA: dict[str, pl.DataType] = {
     "tier": pl.String,
@@ -88,9 +90,19 @@ def trading_client() -> TradingClient:
 
 
 def data_client() -> StockHistoricalDataClient:
-    return StockHistoricalDataClient(
+    client = StockHistoricalDataClient(
         os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"]
     )
+    # Size the HTTP connection pool to the concurrent worker count so parallel fetches REUSE connections
+    # instead of churning ("connection pool is full, discarding connection") — that churn serializes/stalls
+    # the threads (observed: 0 progress at 10 workers on the default pool of 10). alpaca-py keeps a
+    # requests.Session at ``_session``; mount a bigger pool on it (defensive getattr if the attr moves).
+    session = getattr(client, "_session", None)
+    if session is not None:
+        adapter = HTTPAdapter(pool_connections=HTTP_POOL_SIZE, pool_maxsize=HTTP_POOL_SIZE)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+    return client
 
 
 def trading_days(client: TradingClient, start: dt.date, end: dt.date) -> list[dt.date]:
