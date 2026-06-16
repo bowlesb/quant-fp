@@ -8,20 +8,30 @@ legitimately diverges — not because the feature logic is wrong, but because th
 Grading that day as a parity FAILURE would condemn a correct feature. So we must first decide, per
 (symbol, day), whether the live capture for that symbol-day is CLEAN enough to be a fair parity test.
 
-THE HEURISTIC (documented in docs/PARITY_LIFECYCLE.md). A stream symbol-day is CLEAN iff, over the
-regular session (09:30–16:00 ET = ``SESSION_MINUTES`` distinct minutes):
+SESSION SCOPE — EXTENDED HOURS ARE NOT A CONTAMINATION SIGNAL. We capture pre-market (~08:00 UTC / 04:00
+ET), the regular session (13:30–20:00 UTC / 09:30–16:00 ET), and post-market (to ~24:00 UTC). A full
+liquid-name day is ~850+ minutes, NOT 390 — and extended-hours minutes are legitimately SPARSE: an
+illiquid name may print few or zero pre/post-market bars, and a minute with no trade has no bar (normal,
+not a gap). Requiring full-day contiguous coverage would wrongly flag almost every symbol-day. So the
+cleanliness check is scoped to the REGULAR SESSION ONLY (``rth_mask``), which IS dense for any actively
+traded name; extended-hours coverage is bonus, never a contamination signal.
 
-  1. COVERAGE: the count of distinct RTH stream minutes is >= ``MIN_COVERAGE_FRAC`` of the minutes the
-     BACKFILL side actually produced for that symbol-day (we compare against backfill-present minutes,
-     not a flat 390, because a thin/halted name legitimately prints fewer bars — a fair denominator is
-     "the minutes truth had", so a sparse-but-complete name is still clean).
-  2. NO INTERNAL GAP: between the first and last stream minute, the largest gap in the stream's distinct
-     RTH minutes is <= ``MAX_GAP_MINUTES``. A capture restart leaves a multi-minute hole that breaks any
-     window reaching across it; a single missed print (<= the threshold) does not.
+THE HEURISTIC (documented in docs/PARITY_LIFECYCLE.md). Within the regular session, a capture restart is
+what we must catch: the live stream loses an INTERNAL BLOCK of minutes that backfill (the complete tape)
+had, so post-gap windows legitimately diverge. We measure that block directly:
 
-A symbol-day failing EITHER test is CONTAMINATED: its per-cell comparisons are recorded but marked
-"skipped: contaminated" and EXCLUDED from the trust grade. A feature is only condemned by failures on
-CLEAN symbol-days — which is exactly the ``compute_latest != compute`` bug we want to catch.
+  1. NO INTERNAL MISSING RUN (the primary signal): the longest contiguous run of regular-session minutes
+     that BACKFILL produced but the STREAM did NOT must be <= ``MAX_GAP_MINUTES``. A restart leaves a
+     multi-minute hole > this; a single missed print does not. A thin name that prints few bars passes
+     trivially — it has no internal hole RELATIVE TO BACKFILL, the only fair reference.
+  2. COVERAGE FLOOR (a permissive secondary signal): distinct regular-session stream minutes >=
+     ``MIN_COVERAGE_FRAC`` of the minutes backfill produced — catches a stream that is sparse EVERYWHERE
+     vs a dense backfill (e.g. capture started late and never caught up) without one long internal run.
+     The denominator is backfill-present minutes, never a flat 390, so a thin name is not penalised.
+
+A symbol-day failing EITHER test is CONTAMINATED: its per-cell comparisons are recorded but EXCLUDED from
+the trust grade. A feature is only condemned by failures on CLEAN symbol-days — exactly the
+``compute_latest != compute`` bug we want to catch.
 
 Pure polars over the joined verdict long-frame; no I/O, no wall-clock — unit-testable in isolation.
 """
@@ -32,19 +42,23 @@ import polars as pl
 
 from quantlib.features.session import et_minute_of_day, rth_mask
 
-SESSION_MINUTES = 390  # 09:30–16:00 ET distinct RTH minutes (the full-session denominator ceiling)
-MIN_COVERAGE_FRAC = 0.95  # >= 95% of backfill-present RTH minutes must be present live to be clean
-MAX_GAP_MINUTES = 5  # the largest tolerated internal hole in the stream's RTH minutes (a restart > this)
+SESSION_MINUTES = 390  # 09:30–16:00 ET distinct REGULAR-session minutes (extended hours are NOT counted)
+MIN_COVERAGE_FRAC = 0.90  # permissive floor: >= 90% of backfill-present regular-session minutes present live
+MAX_GAP_MINUTES = 5  # longest tolerated internal run of backfill-had-but-stream-missing minutes (restart > this)
 
 
 def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
     """Per-symbol CLEAN/contaminated decision for one day from a joined live+backfill verdict frame.
 
     ``joined`` must carry ``symbol``, ``minute``, a live column and its ``_bk`` backfill twin for at
-    least one feature — but we only need the KEY columns plus a per-row "live present" / "backfill
-    present" signal, which we derive structurally: a minute is present-live if ANY feature's live value
-    is non-null there, present-backfill if ANY ``_bk`` value is non-null. (We pass the already-RTH-masked,
-    universe-pinned join from ``validate`` so the session scoping/membership are consistent with grading.)
+    least one feature — we derive a per-row "live present" / "backfill present" signal structurally: a
+    minute is present-live if ANY feature's live value is non-null there, present-backfill if ANY ``_bk``
+    value is non-null. (We pass the already-RTH-masked, universe-pinned join from the sweep so the session
+    scoping/membership are consistent with grading.)
+
+    The contamination signal is measured RELATIVE TO BACKFILL within the regular session: the longest
+    contiguous run of minutes backfill produced but the stream lacked (a capture restart), plus a
+    permissive coverage floor. Extended-hours minutes are excluded entirely (``rth_mask``).
 
     Returns one row per symbol: (symbol, n_stream_minutes, n_backfill_minutes, coverage_frac,
     max_gap_minutes, is_clean, reason).
@@ -54,7 +68,7 @@ def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
     if not live_cols or not back_cols:
         raise ValueError("cleanliness needs at least one live feature column and its _bk twin in the join")
 
-    rth = joined.filter(rth_mask(pl.col("minute")))
+    rth = joined.filter(rth_mask(pl.col("minute")))  # REGULAR SESSION ONLY — extended hours never counted
     live_present = pl.any_horizontal([pl.col(col).is_not_null() for col in live_cols])
     back_present = pl.any_horizontal([pl.col(col).is_not_null() for col in back_cols])
     marked = rth.with_columns(
@@ -62,8 +76,15 @@ def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
         back_present.alias("_back_present"),
         et_minute_of_day(pl.col("minute")).alias("_etm"),
     )
-    stream = marked.filter(pl.col("_live_present")).select("symbol", "_etm").unique()
+    # Backfill is the reference (the complete tape). A regular-session minute is a "miss" when backfill
+    # produced it but the stream did not — what a capture restart leaves behind. We measure the LONGEST
+    # CONTIGUOUS run of such misses over backfill's minutes (sparse extended-hours minutes are already
+    # excluded; a thin name with few-but-fully-matched backfill minutes has no miss run, so it passes).
     backfill = marked.filter(pl.col("_back_present")).select("symbol", "_etm").unique()
+    stream = marked.filter(pl.col("_live_present")).select("symbol", "_etm").unique()
+    aligned = backfill.join(
+        stream.with_columns(pl.lit(True).alias("_in_stream")), on=["symbol", "_etm"], how="left"
+    ).with_columns(pl.col("_in_stream").fill_null(False))
 
     per_symbol = (
         backfill.group_by("symbol")
@@ -75,13 +96,22 @@ def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
         )
         .with_columns(pl.col("n_stream_minutes").fill_null(0))
     )
-    gaps = (
-        stream.sort("symbol", "_etm")
-        .group_by("symbol")
-        .agg((pl.col("_etm").diff().fill_null(1)).max().alias("max_gap_minutes"))
+    miss_runs = aligned.sort("symbol", "_etm").with_columns(
+        # a new run starts whenever the miss-state flips; a cumulative sum per symbol labels each run.
+        (pl.col("_in_stream") != pl.col("_in_stream").shift(1).over("symbol"))
+        .cum_sum()
+        .over("symbol")
+        .alias("_run_id")
     )
-    result = per_symbol.join(gaps, on="symbol", how="left").with_columns(
-        pl.col("max_gap_minutes").fill_null(SESSION_MINUTES)
+    longest_miss = (
+        miss_runs.filter(~pl.col("_in_stream"))
+        .group_by("symbol", "_run_id")
+        .agg(pl.len().alias("_run_len"))
+        .group_by("symbol")
+        .agg(pl.col("_run_len").max().alias("max_gap_minutes"))
+    )
+    result = per_symbol.join(longest_miss, on="symbol", how="left").with_columns(
+        pl.col("max_gap_minutes").fill_null(0)  # no miss run at all -> contiguous w.r.t. backfill
     )
     coverage = (
         pl.when(pl.col("n_backfill_minutes") > 0)
@@ -91,10 +121,10 @@ def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
     result = result.with_columns(coverage.alias("coverage_frac"))
     is_clean = (pl.col("coverage_frac") >= MIN_COVERAGE_FRAC) & (pl.col("max_gap_minutes") <= MAX_GAP_MINUTES)
     reason = (
-        pl.when(pl.col("coverage_frac") < MIN_COVERAGE_FRAC)
-        .then(pl.lit("low_coverage"))
-        .when(pl.col("max_gap_minutes") > MAX_GAP_MINUTES)
+        pl.when(pl.col("max_gap_minutes") > MAX_GAP_MINUTES)
         .then(pl.lit("internal_gap"))
+        .when(pl.col("coverage_frac") < MIN_COVERAGE_FRAC)
+        .then(pl.lit("low_coverage"))
         .otherwise(pl.lit("clean"))
     )
     return result.with_columns(is_clean.alias("is_clean"), reason.alias("reason")).sort("symbol")

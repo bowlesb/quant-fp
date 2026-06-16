@@ -49,6 +49,12 @@ from quantlib.data.raw_backfill import trading_client, trading_days
 # their per-minute presence is the minute-coverage signal the cleanliness heuristic reads.
 COVERAGE_FEATURES = ["ret_1m"]
 DEFAULT_CHUNK = 200
+# A day must have at least this many CLEAN symbols to contribute a clean-day grade. Grading off one or two
+# marginal survivors of a contaminated day is noise (a single thin name's near-zero-denominator rel-errors
+# masquerade as failures); below the floor the day yields NO clean comparison and every feature stays
+# PENDING for it — exactly "not enough clean comparisons" in the lifecycle. A normal day has thousands of
+# clean liquid names, so this only ever suppresses pathologically contaminated days.
+MIN_CLEAN_SYMBOLS = 20
 
 
 def last_market_day(today: dt.date | None = None) -> str:
@@ -136,17 +142,35 @@ def sweep_day(
     cell = validation_store.read_cell(val_root, day)
     exceptions = validation_store.read_exceptions(val_root, day)
     cleanliness = day_cleanliness(feature_root, day, discovered)
-    clean_history_today = _build_clean_history(cell, cleanliness, day)
+    clean_count = int(cleanliness["is_clean"].sum()) if cleanliness.height else 0
+    contaminated = (cleanliness.height - clean_count) if cleanliness.height else 0
 
+    # Insufficient clean breadth -> the day is too contaminated to be a fair parity test. Record the
+    # per-symbol cleanliness (the audit trail) but contribute NO clean-day grade, so no feature is condemned
+    # off a handful of marginal survivors. Features simply stay PENDING for this day.
+    group_of, version_of = _registry_maps()
+    if clean_count < MIN_CLEAN_SYMBOLS:
+        trust_lifecycle.write_lifecycle(pl.DataFrame(), [], cleanliness, version_of, day)
+        return {
+            "day": day,
+            "discovered": len(discovered),
+            "materialized": len(materialized),
+            "no_raw_skipped": len(no_raw),
+            "no_raw_examples": no_raw[:10],
+            "clean_symbols": clean_count,
+            "contaminated_symbols": contaminated,
+            "features_graded": 0,
+            "note": f"clean breadth {clean_count} < MIN_CLEAN_SYMBOLS {MIN_CLEAN_SYMBOLS} — day too "
+            "contaminated to grade; features stay PENDING (no defects filed)",
+        }
+
+    clean_history_today = _build_clean_history(cell, cleanliness, day)
     history = validation_store.read_feature_day(val_root)  # for cross-day context (legacy trust source)
     states = lifecycle_state(clean_history_today, retired_features())
-    group_of, version_of = _registry_maps()
     defects = defect_rows(states, clean_history_today, exceptions, group_of, version_of)
     trust_lifecycle.write_lifecycle(states, defects, cleanliness, version_of, day)
 
     state_counts = states.group_by("lifecycle_state").len().sort("lifecycle_state").to_dicts() if states.height else []
-    clean_count = int(cleanliness["is_clean"].sum()) if cleanliness.height else 0
-    contaminated = (cleanliness.height - clean_count) if cleanliness.height else 0
     return {
         "day": day,
         "discovered": len(discovered),
