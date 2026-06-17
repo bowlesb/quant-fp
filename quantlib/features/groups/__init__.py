@@ -12,6 +12,7 @@ from quantlib.features.groups import (  # noqa: F401
     clean_momentum,
     cross_sectional_rank,
     daily_beta,
+    daily_vol_term_structure,
     distribution,
     dumper_state,
     efficiency,
