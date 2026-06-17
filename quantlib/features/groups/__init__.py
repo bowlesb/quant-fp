@@ -37,6 +37,7 @@ from quantlib.features.groups import (  # noqa: F401
     technical,
     tick_runlength,
     trade_flow,
+    trade_freq_z,
     trend_quality,
     volatility,
     volume,
