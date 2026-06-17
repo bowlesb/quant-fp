@@ -13,8 +13,11 @@ from typing import Any
 
 import markdown
 import psycopg
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+
+from feature_grid import CACHE, STORE_ROOT
+from feature_grid_page import FEATURE_GRID_HTML
 
 app = FastAPI(title="Quant Dashboard")
 
@@ -151,6 +154,44 @@ def status_json() -> JSONResponse:
     return JSONResponse(collect_metrics())
 
 
+@app.get("/api/feature-grid")
+def feature_grid_json(refresh: bool = False) -> JSONResponse:
+    """The full coverage + trust grid as JSON — the SAME data the /feature-grid UI renders.
+
+    Shape (see docs/FEATURE_DASHBOARD.md):
+      {generated_at, store_root, anchor_date, earliest_date,
+       periods: [{key, label, lookback_days}],
+       groups:  [{group, version, layer, n_features}],
+       cells:   [{group, period, coverage_pct, stream_pct, backfill_pct, n_features,
+                  n_symbols, n_dates, trust_state, trust_pct, n_trusted, n_validating, n_ungraded}],
+       summary: {n_groups, n_features, n_trusted, trusted_pct, mean_coverage_pct,
+                 fully_validated_groups, days_needed_for_trust}}
+    ``refresh=1`` bypasses the TTL cache and re-aggregates.
+    """
+    return JSONResponse(CACHE.grid(STORE_ROOT, force=refresh))
+
+
+@app.get("/api/feature-grid/{group}")
+def feature_grid_group_json(group: str, refresh: bool = False) -> JSONResponse:
+    """Per-feature detail for one group (the expanded view) as JSON.
+
+    Shape: {group, version, n_features, stream_dates, backfill_dates, stream_first/last,
+            backfill_first/last, stream_only_dates, backfill_only_dates,
+            features: [{feature, description, layer, parity_method, trust_state, clean_days,
+                        days_needed, progress_to_trusted_pct, clean_value_rate, last_validated_day}]}
+    """
+    try:
+        return JSONResponse(CACHE.detail(group, STORE_ROOT, force=refresh))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown group '{group}'") from exc
+
+
+@app.get("/feature-grid", response_class=HTMLResponse)
+def feature_grid_page() -> str:
+    """The visual coverage + trust grid (vanilla HTML/JS; fetches /api/feature-grid client-side)."""
+    return FEATURE_GRID_HTML
+
+
 PROGRESS_STYLE = """
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background:#0f1115; color:#d7dce2; }
@@ -266,7 +307,8 @@ def dashboard() -> str:
 </style></head>
 <body>
 <header><h1>Quant Trading System &nbsp; {db_badge} &nbsp;
-<a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a></h1>
+<a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
+<a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
   <div class="grid" style="margin-bottom:24px;">

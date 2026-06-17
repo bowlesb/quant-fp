@@ -1,4 +1,10 @@
+# Web layer
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-psycopg[binary]==3.2.3
 markdown==3.7
+# Trust DB + feature-store / registry introspection (quantlib.features import chain).
+# quant_tick (the compiled Rust kernel two feature groups import) is installed from a wheel in the
+# Dockerfile's build stage, not from PyPI.
+psycopg[binary]==3.2.3
+polars
+numpy

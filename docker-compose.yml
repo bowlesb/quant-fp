@@ -130,8 +130,14 @@ services:
         condition: service_healthy
 
   dashboard:
-    build: ./services/dashboard
+    build:
+      # Repo-root context so the image can COPY the shared quantlib package + rust/ source
+      # (the feature-coverage grid imports the live feature registry / store introspection).
+      context: .
+      dockerfile: services/dashboard/Dockerfile
     <<: *common
+    environment:
+      STORE_ROOT: /store
     ports:
       - "0.0.0.0:8088:8000"     # LAN-accessible: http://192.168.1.32:8088
     volumes:
@@ -141,6 +147,9 @@ services:
       # 8-hour progress reports rendered by the /progress page. Dir mount (not a
       # rebuild) so a new report .md is served immediately — content, not code.
       - ./docs/progress:/docs/progress:ro
+      # Feature store (read-only): the /feature-grid coverage surface reads partition
+      # dates + per-date symbol counts from here. RO so the dashboard can never write.
+      - fp_store_real:/store:ro
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -170,5 +179,9 @@ services:
       - prometheus
 
 volumes:
+  # The real feature store, created by the capture/backfill runs. External so the dashboard mounts the
+  # SAME volume the feature pipeline writes (read-only) without owning its lifecycle.
+  fp_store_real:
+    external: true
   prom_data:
   grafana_data:
