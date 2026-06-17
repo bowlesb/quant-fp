@@ -1,7 +1,8 @@
 """Small-cap morning DUMPERS — the mirror of R1 runners. $2-20 names that DROP -30%+ in the
 first 30 min on a volume surge: do they BOUNCE (symmetric reversal) or continue down?
-Reuses the R1 machinery. Bars only. Parallel-free (serial; pool deadlocks under the cgroup)."""
+Reuses the R1 machinery. Bars only. Parallelized over symbols (same pattern as R1)."""
 import os, glob
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import polars as pl
 
@@ -64,12 +65,15 @@ def scan_symbol(symbol):
 def main():
     os.makedirs(OUT, exist_ok=True)
     syms = [d.split("=")[1] for d in os.listdir(BARS) if d.startswith("symbol=")]
-    print(f"scanning {len(syms)} symbols (serial)...", flush=True)
+    print(f"scanning {len(syms)} symbols (parallel)...", flush=True)
     rows = []
-    for i, s in enumerate(syms):
-        rows.extend(scan_symbol(s))
-        if (i+1) % 1500 == 0:
-            print(f"  {i+1}/{len(syms)} (events {len(rows)})", flush=True)
+    done = 0
+    with ProcessPoolExecutor(max_workers=8) as ex:
+        for result in ex.map(scan_symbol, syms, chunksize=20):
+            rows.extend(result)
+            done += 1
+            if done % 1500 == 0:
+                print(f"  {done}/{len(syms)} (events {len(rows)})", flush=True)
     ev = pl.DataFrame(rows)
     print(f"\n=== DUMPER EVENTS (drop>=0.30, surge>=2): {ev.height} rows, {ev['symbol'].n_unique()} syms ===")
     ev.write_parquet(f"{OUT}/dumper_events.parquet")
