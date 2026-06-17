@@ -34,9 +34,15 @@ from typing import Callable
 import polars as pl
 
 from quantlib.features import store, trust_lifecycle, validate as validate_mod, validation_store
+from quantlib.features.base import FeatureType
 from quantlib.features.cleanliness import clean_symbols, symbol_day_cleanliness
 from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
-from quantlib.features.materialize import DEFAULT_RAW_ROOT, materialize_from_raw, materialize_from_raw_full
+from quantlib.features.materialize import (
+    DEFAULT_RAW_ROOT,
+    materialize_from_raw,
+    materialize_from_raw_bar_groups,
+    materialize_from_raw_full,
+)
 from quantlib.features.registry import REGISTRY
 from quantlib.features.session import rth_mask
 from quantlib.features.trust_lifecycle import (
@@ -64,6 +70,35 @@ MARKET_TICKERS: tuple[str, ...] = tuple(sorted(set(MARKET_INDICES.values())))
 # PENDING for it — exactly "not enough clean comparisons" in the lifecycle. A normal day has thousands of
 # clean liquid names, so this only ever suppresses pathologically contaminated days.
 MIN_CLEAN_SYMBOLS = 20
+
+# UNIVERSE-REDUCE (cross-sectional) groups: a symbol's value is a reduction over the WHOLE universe present
+# that minute (a breadth fraction, a percentile rank, a dispersion stat, a peer demean), so it can ONLY be
+# reproduced when the SAME symbol set is present both sides. The gradable-set PASS-2 backfill is a ~92-symbol
+# subset of the full-universe live stream, so these mis-grade as ~0.000 DIVERGENT there — a SCOPE artifact,
+# not a real divergence. They are validated against the FULL-UNIVERSE PASS-1 (bar-only) backfill instead,
+# where the present-set matches the stream by construction. They need only bars (close/volume), never ticks,
+# so PASS 1 already produces everything they require.
+#
+# The structural signal is FeatureType.CROSS_SECTIONAL — but that family ALSO contains the REFERENCE-relative
+# groups (market_context, market_beta), whose values regress each symbol against a FIXED reference (SPY/QQQ)
+# and are INVARIANT to which OTHER universe symbols are present. Those already validate on the gradable set
+# (the MARKET_TICKERS pin supplies their reference) and are deep-window — NOT universe-reduce — so they are
+# excluded here. This exclusion list is the one piece that isn't purely structural (the enum cannot tell a
+# universe reduce from a reference regression); kept explicit and documented per the parity-trust playbook.
+REFERENCE_RELATIVE_GROUPS: frozenset[str] = frozenset({"market_context", "market_beta"})
+
+
+def cross_sectional_groups() -> list[str]:
+    """The universe-reduce group names: every FeatureType.CROSS_SECTIONAL group MINUS the reference-relative
+    ones (see REFERENCE_RELATIVE_GROUPS). Derived from the registry so a NEW universe-reduce group is picked
+    up automatically by declaring ``type = FeatureType.CROSS_SECTIONAL`` (and, if it is reference-relative
+    rather than a universe reduce, by adding its name to REFERENCE_RELATIVE_GROUPS)."""
+    return [
+        group.name
+        for group in REGISTRY.groups()
+        if group.type == FeatureType.CROSS_SECTIONAL and group.name not in REFERENCE_RELATIVE_GROUPS
+    ]
+
 
 # A from-raw materialize: (feature_root, raw_root, day, symbols, shard) -> symbols materialized. Both
 # materialize_from_raw (bar-only, cheap) and materialize_from_raw_full (full tick tape) match this shape.
@@ -177,14 +212,22 @@ def sweep_day(
     which ~6k are capture-contaminated and ~3.6k have no raw) wastes the bulk of the sweep on symbols whose
     backfill never enters a grade. So we split the work:
       PASS 1 (cheap, bar-only, ALL symbols): materialize only the bar features (``materialize_from_raw``)
-        — enough to compute ``ret_1m`` minute coverage and therefore cleanliness. No per-chunk validate.
-        A symbol with no raw bars is simply absent (no_raw). This decides the gradable set.
+        — enough to compute ``ret_1m`` minute coverage and therefore cleanliness. This decides the gradable
+        set. A symbol with no raw bars is simply absent (no_raw).
+      CROSS-SECTIONAL grade (full-universe, off pass 1): the universe-reduce groups (breadth_* / *_rank /
+        dispersion / peer — see ``cross_sectional_groups``) value a symbol by a reduction over the WHOLE
+        present universe, so they only reproduce the live stream when the SAME symbols are present both
+        sides. They are graded against the FULL-UNIVERSE pass-1 bar-only backfill (where the present-set
+        matches the stream); the gradable subset would mis-grade them ~0.000 (a SCOPE artifact). They need
+        only bars, so pass 1 already produced everything they require.
       PASS 2 (full tape, GRADABLE SET ONLY): clear the day, re-materialize the clean symbols from the FULL
-        tick tape (``materialize_from_raw_full`` when with_ticks) and validate them. The order-flow groups
-        get their backfill side for exactly the symbols that will be graded.
-    Parity is unchanged: the same clean symbols are validated against the same full-tape backfill they
-    always were; only the never-graded contaminated/no-raw symbols are spared the expensive tick read. On a
-    too-contaminated day (clean breadth < MIN_CLEAN_SYMBOLS) pass 2 is skipped entirely.
+        tick tape (``materialize_from_raw_full`` when with_ticks) and grade the PER-SYMBOL + tick groups
+        (everything except the cross-sectional groups). The order-flow groups get their backfill side for
+        exactly the symbols that will be graded.
+    The two group sets are disjoint; their results are merged and persisted ONCE. Parity is unchanged: the
+    same clean symbols are graded against the same backfill scope that makes each comparison fair; only the
+    never-graded contaminated/no-raw symbols are spared the expensive tick read. On a too-contaminated day
+    (clean breadth < MIN_CLEAN_SYMBOLS) pass 2 is skipped entirely (and so is the cross-sectional grade).
     """
     validate_mod.assert_settled(day, allow_today)
     full_materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
@@ -206,8 +249,8 @@ def sweep_day(
 
     # Insufficient clean breadth -> the day is too contaminated to be a fair parity test. Record the
     # per-symbol cleanliness (the audit trail) but contribute NO clean-day grade, so no feature is condemned
-    # off a handful of marginal survivors. Features simply stay PENDING for this day. Pass 2 is skipped —
-    # the expensive full-tape materialize never runs on a day that can't grade.
+    # off a handful of marginal survivors. Features simply stay PENDING for this day. Both the cross-sectional
+    # grade and the expensive full-tape PASS 2 are skipped — neither runs on a day that can't grade.
     group_of, version_of = _registry_maps()
     if clean_count < MIN_CLEAN_SYMBOLS:
         trust_lifecycle.write_lifecycle(pl.DataFrame(), [], cleanliness, version_of, day)
@@ -224,19 +267,47 @@ def sweep_day(
             "contaminated to grade; features stay PENDING (no defects filed)",
         }
 
-    # PASS 2 — full-tape materialize over the GRADABLE SET ONLY, then validate the whole set in ONE call.
-    # Re-clear the day so the cheap bar-only pass-1 files are replaced by the full-tick backfill for the
-    # clean symbols (the order-flow groups need the tick tape). The clean symbols all have raw bars by
-    # construction (cleanliness requires backfill-present minutes), so this pass produces no further no_raw.
+    # CROSS-SECTIONAL grade — graded against a FULL-UNIVERSE, SINGLE-COMPUTE backfill, BEFORE pass 2 clears
+    # the day. Universe-reduce features (breadth_* / *_rank / dispersion / peer) value a symbol by a reduction
+    # over the whole present universe, so the backfill compute MUST see EVERY symbol at once — pass 1's CHUNKED
+    # materialize computes a separate partial-universe reduction per 500-symbol chunk (a 500-name breadth, not
+    # a full-universe one), which the full-universe live gather can never match. So re-materialize JUST these
+    # groups, bar-only and UN-CHUNKED, over the full discovered universe, clearing their chunked pass-1
+    # partitions first so the single-file write is a clean replace (not a union with the chunk shards). They
+    # read only bars, so this skips the tick tape. The clean-symbol grade is taken later from the clean cells.
+    xsec_groups = cross_sectional_groups()
+    store.clear_backfill_groups_day(feature_root, day, xsec_groups)
+    xsec_scope, xsec_tiers = validate_mod.scoped_tiers(day, discovered)
+    materialize_from_raw_bar_groups(feature_root, raw_root, day, xsec_scope, only_groups=xsec_groups)
+    xsec_result = validate_mod.compare_groups(
+        feature_root, day, xsec_scope, xsec_tiers, groups=xsec_groups
+    )
+
+    # PASS 2 — full-tape materialize over the GRADABLE SET ONLY, then validate the PER-SYMBOL + tick groups
+    # (everything EXCEPT the cross-sectional groups already graded full-universe above). Re-clear the day so
+    # the cheap bar-only pass-1 files are replaced by the full-tick backfill for the clean symbols (the
+    # order-flow groups need the tick tape). The clean symbols all have raw bars by construction (cleanliness
+    # requires backfill-present minutes), so this pass produces no further no_raw.
     store.clear_backfill_day(feature_root, day)
     materialized, _ = _materialize_chunks(full_materialize, feature_root, raw_root, day, gradable, chunk)
-    # ONE validate over the full gradable scope: ``write_cell`` / ``upsert_feature_day`` are whole-day
-    # replaces, so a per-chunk validate would leave only the LAST chunk's symbols in the cell store and cap
-    # the grade. Validating the union once writes the complete cell file; the per-group read inside
-    # ``validate`` (one group's features at a time, symbol-filter pushed down) keeps it memory-bounded. The
-    # market tickers are pinned so the cross-sectional features resolve their reference.
+    # ONE compare over the full gradable scope: a per-chunk validate would only retain the last chunk in the
+    # whole-day-replace cell store and cap the grade. Comparing the union once builds the complete cell rows;
+    # the per-group read inside ``compare_groups`` (one group's features at a time, symbol-filter pushed
+    # down) keeps it memory-bounded. The market tickers are pinned so the reference-relative features resolve
+    # their SPY/QQQ reference. The cross-sectional groups are EXCLUDED here (graded full-universe in pass 1).
     grade_scope = gradable + [ticker for ticker in MARKET_TICKERS if ticker not in gradable]
-    validate_mod.validate(feature_root, day, val_root, allow_today=allow_today, symbols=grade_scope)
+    per_symbol_groups = [group.name for group in REGISTRY.groups() if group.name not in set(xsec_groups)]
+    per_symbol_scope, per_symbol_tiers = validate_mod.scoped_tiers(day, grade_scope)
+    per_symbol_result = validate_mod.compare_groups(
+        feature_root, day, per_symbol_scope, per_symbol_tiers, groups=per_symbol_groups
+    )
+
+    # Merge the full-universe cross-sectional grade with the gradable-set per-symbol/tick grade and persist
+    # ONCE — the two group sets are disjoint, so each feature is graded against the backfill scope that makes
+    # its comparison fair, with no feature double-counted.
+    validate_mod.persist_validation(
+        val_root, day, validate_mod.merge_results([xsec_result, per_symbol_result])
+    )
 
     cell = validation_store.read_cell(val_root, day)
     exceptions = validation_store.read_exceptions(val_root, day)

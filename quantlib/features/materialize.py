@@ -109,6 +109,24 @@ def materialize_from_raw_full(
     return _write_all(root, day, "backfill", frames, shard=shard)
 
 
+def materialize_from_raw_bar_groups(
+    root: str, raw_root: str, day: str, symbols: list[str], only_groups: list[str]
+) -> int:
+    """Bar-only from-raw materialize for ``only_groups`` over ALL ``symbols`` in a SINGLE compute (no
+    chunking, no tick read). This is the materialize the cross-sectional UNIVERSE-REDUCE groups (breadth,
+    cross_sectional_rank, ...) need: their per-minute value is a reduction over the WHOLE symbol set present
+    that minute, so the compute MUST see every symbol at once — a chunked materialize would compute a
+    SEPARATE partial-universe reduction per chunk (a 500-symbol breadth, not a full-universe one) and the
+    full-universe live stream could never match it. Bars-only (close/volume) is all these groups read, so
+    this skips the expensive trades/quotes tape. Returns the symbol count materialized."""
+    frames = {
+        "minute_agg": load_raw_minute_agg(raw_root, day, symbols),
+        "daily": backfill_daily(day, symbols),
+        "reference": load_reference(),
+    }
+    return _write_all(root, day, "backfill", frames, only_groups=only_groups)
+
+
 def materialize_from_raw_groups(
     root: str, raw_root: str, day: str, symbols: list[str], only_groups: list[str]
 ) -> int:

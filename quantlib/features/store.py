@@ -258,3 +258,18 @@ def clear_backfill_day(root: str | Path, day: str) -> list[Path]:
         file.unlink()
         removed.append(file)
     return removed
+
+
+def clear_backfill_groups_day(root: str | Path, day: str, groups: list[str]) -> list[Path]:
+    """Delete the ``source=backfill`` ``data*.parquet`` for ``day`` for ONLY the named ``groups`` (all
+    versions). Used when a subset of groups is re-materialized differently from the rest of the day — e.g.
+    the cross-sectional groups are re-materialized full-universe un-chunked (single ``data.parquet``) over a
+    day whose other groups stay chunk-sharded (``data-<chunk>.parquet``). Clearing just those groups first
+    keeps the un-chunked write a clean replace instead of unioning with the prior chunked files. Removes
+    only the leaf parquet files; the directory tree is left in place. Returns the files removed."""
+    removed = []
+    for group in groups:
+        for file in Path(root).glob(f"group={group}/v=*/source=backfill/date={day}/data*.parquet"):
+            file.unlink()
+            removed.append(file)
+    return removed
