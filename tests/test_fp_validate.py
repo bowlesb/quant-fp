@@ -15,6 +15,7 @@ import pytest
 from quantlib.features import validation_db, validation_store
 from quantlib.features.base import FeatureSpec
 from quantlib.features.validate import (
+    CompareResult,
     _assemble_feature_day,
     _cell_rollup,
     _exceptions,
@@ -22,6 +23,7 @@ from quantlib.features.validate import (
     _long_verdicts,
     assert_settled,
     grade_for,
+    merge_results,
     recompute_trust,
 )
 
@@ -251,3 +253,23 @@ def test_upsert_feature_day_is_idempotent(tmp_path) -> None:
     stored = validation_store.read_feature_day(tmp_path)
     assert stored.height == 1  # replaced, not double-counted
     assert stored["n_match"][0] == 1000
+
+
+def test_merge_results_concatenates_disjoint_scopes() -> None:
+    """The split sweep grades cross-sectional groups (one scope) and per-symbol groups (another); their
+    results merge by concatenation so each feature appears once with no double-counting. Empty frames in a
+    result (e.g. no exceptions, or a pass that produced nothing) are dropped, not vstacked as empties."""
+    xsec = CompareResult(
+        feature_day=pl.DataFrame({"feature": ["breadth_up_5m"], "n_match": [10]}),
+        cell=pl.DataFrame({"feature": ["breadth_up_5m"], "symbol": ["AAPL"]}),
+        exceptions=pl.DataFrame(),  # no diverging cells for the cross-sectional pass
+    )
+    per_symbol = CompareResult(
+        feature_day=pl.DataFrame({"feature": ["gap_open"], "n_match": [20]}),
+        cell=pl.DataFrame({"feature": ["gap_open"], "symbol": ["MSFT"]}),
+        exceptions=pl.DataFrame({"feature": ["gap_open"], "symbol": ["MSFT"]}),
+    )
+    merged = merge_results([xsec, per_symbol])
+    assert set(merged.feature_day["feature"].to_list()) == {"breadth_up_5m", "gap_open"}
+    assert merged.cell.height == 2
+    assert merged.exceptions.height == 1  # only the per-symbol pass had exceptions

@@ -33,6 +33,8 @@ from quantlib.features.trust_lifecycle import (
     lifecycle_state,
 )
 from quantlib.features import validation_sweep
+from quantlib.features.base import FeatureType
+from quantlib.features.registry import REGISTRY
 from quantlib.features.validation_sweep import MARKET_TICKERS, MIN_CLEAN_SYMBOLS
 
 OPEN_ET = dt.datetime(2026, 6, 12, 13, 30, tzinfo=dt.timezone.utc)  # 09:30 ET (June -> EDT, UTC-4)
@@ -166,20 +168,54 @@ def _clean_cleanliness(symbols: list[str]) -> pl.DataFrame:
     return pl.DataFrame({"symbol": symbols, "is_clean": [True] * len(symbols)})
 
 
+def test_cross_sectional_groups_are_universe_reduce_only() -> None:
+    """The discriminator selects the universe-REDUCE groups (a symbol's value depends on the whole present
+    universe) and EXCLUDES the reference-relative ones (regress each symbol against a fixed SPY/QQQ, invariant
+    to which other symbols are present). The universe-reduce groups are the ones that mis-grade ~0.000 on a
+    gradable-subset backfill — the bug this split fixes. Reference-relative groups validate fine on the
+    gradable set (the MARKET_TICKERS pin supplies their reference), so they must NOT be diverted."""
+    selected = set(validation_sweep.cross_sectional_groups())
+    cross_sectional_typed = {g.name for g in REGISTRY.groups() if g.type == FeatureType.CROSS_SECTIONAL}
+    # Every selected group is structurally CROSS_SECTIONAL ...
+    assert selected.issubset(cross_sectional_typed)
+    # ... and the ONLY exclusions from that family are the documented reference-relative groups.
+    assert cross_sectional_typed - selected == validation_sweep.REFERENCE_RELATIVE_GROUPS
+    # The known universe-reduce groups are all present; the reference-relative ones are all absent.
+    assert {"breadth", "cross_sectional_rank", "return_dispersion", "peer_relative"}.issubset(selected)
+    assert not ({"market_context", "market_beta"} & selected)
+
+
+def _stub_split_validation(monkeypatch, compare_calls: list[dict]) -> None:
+    """Stub the split-validation surface (``scoped_tiers``/``compare_groups``/``persist_validation``) so a
+    sweep test can run without a store, capturing the groups+scope each ``compare_groups`` call received."""
+
+    def _scoped_tiers(day, symbols=None):  # noqa: ANN001,ANN202
+        scope = list(symbols) if symbols is not None else []
+        return scope, pl.DataFrame({"symbol": scope})
+
+    def _compare(feature_root, day, scope_symbols, tiers, groups=None):  # noqa: ANN001,ANN202
+        compare_calls.append({"scope": list(scope_symbols), "groups": groups})
+        return validation_sweep.validate_mod.CompareResult(pl.DataFrame(), pl.DataFrame(), pl.DataFrame())
+
+    monkeypatch.setattr(validation_sweep.validate_mod, "scoped_tiers", _scoped_tiers)
+    monkeypatch.setattr(validation_sweep.validate_mod, "compare_groups", _compare)
+    monkeypatch.setattr(validation_sweep.validate_mod, "persist_validation", lambda *a, **k: pl.DataFrame())
+
+
 def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
-    """The cross-sectional features (market_beta/idio_vol/market_return/...) regress against SPY/QQQ, which
-    are ETF-screened out of the raw universe. The sweep MUST pin the market tickers into every materialize
-    scope and the validate scope so the backfill side resolves its market reference — otherwise those
-    features are all extra_live (backfill produced nothing) and can never validate. We capture the scope
-    each stage receives and assert the market tickers are always present, even though they were never
-    'discovered' as stream symbols."""
+    """The reference-relative features (market_beta/idio_vol/market_return/...) regress against SPY/QQQ,
+    which are ETF-screened out of the raw universe. The sweep MUST pin the market tickers into every
+    materialize scope and the per-symbol validate scope so the backfill side resolves its market reference —
+    otherwise those features are all extra_live (backfill produced nothing) and can never validate. We
+    capture the scope each stage receives and assert the market tickers are always present, even though they
+    were never 'discovered' as stream symbols."""
     assert set(MARKET_TICKERS) == {"QQQ", "SPY"}
     discovered = ["AAPL", "MSFT", "NVDA"]  # none of these is a market ticker
     bar_scopes: list[list[str]] = []
     full_scopes: list[list[str]] = []
     bar_shards: list[int | None] = []
     full_shards: list[int | None] = []
-    validate_scopes: list[list[str]] = []
+    compare_calls: list[dict] = []
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
@@ -196,14 +232,11 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     # PASS 1 is bar-only (materialize_from_raw); PASS 2 is the tick-aware materialize (materialize_from_raw_full).
     monkeypatch.setattr(validation_sweep, "materialize_from_raw", _capture_bar)
     monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _capture_full)
-    monkeypatch.setattr(
-        validation_sweep.validate_mod, "validate",
-        lambda feature_root, day, val_root, allow_today, symbols: validate_scopes.append(list(symbols)),
-    )
+    _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
-    # All three discovered names are clean -> a gradable day that runs PASS 2 + the single validate.
+    # All three discovered names are clean -> a gradable day that runs PASS 2 + the split validate.
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(discovered))
     monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
     monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
@@ -214,17 +247,26 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
 
     validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=2, allow_today=True)
 
-    # The market tickers are pinned into every materialize scope (both passes) AND the validate scope.
-    assert bar_scopes and full_scopes and validate_scopes
-    for scope in bar_scopes + full_scopes + validate_scopes:
+    # The market tickers are pinned into every materialize scope (both passes).
+    assert bar_scopes and full_scopes
+    for scope in bar_scopes + full_scopes:
         for ticker in MARKET_TICKERS:
-            assert ticker in scope, f"{ticker} must be pinned into every scope"
+            assert ticker in scope, f"{ticker} must be pinned into every materialize scope"
         assert scope.count("SPY") == 1  # deduped, not double-added when already discovered
     # 3 symbols, chunk=2 -> 2 chunks per pass, each written to a DISTINCT shard so they union on disk.
     assert bar_shards == [0, 1]
     assert full_shards == [0, 1]
-    # validate runs ONCE over the whole gradable scope (per-chunk validate would clobber the cell store).
-    assert len(validate_scopes) == 1
+    # TWO compares: cross-sectional (full universe) + per-symbol (gradable scope, market tickers pinned).
+    xsec_groups = validation_sweep.cross_sectional_groups()
+    assert len(compare_calls) == 2
+    xsec_call = next(call for call in compare_calls if call["groups"] == xsec_groups)
+    per_symbol_call = next(call for call in compare_calls if call is not xsec_call)
+    assert set(discovered).issubset(xsec_call["scope"])  # cross-sectional graded over the full universe
+    for ticker in MARKET_TICKERS:  # per-symbol scope pins the market reference
+        assert ticker in per_symbol_call["scope"]
+    # The discriminator: a universe-reduce group is in, the reference-relative groups are out.
+    assert "breadth" in xsec_groups
+    assert "market_context" not in xsec_groups and "market_beta" not in xsec_groups
 
 
 def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
@@ -236,6 +278,7 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
     clean = discovered[:3]  # only half the day is clean
     bar_seen: set[str] = set()
     full_seen: set[str] = set()
+    compare_calls: list[dict] = []
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
@@ -248,7 +291,7 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
         validation_sweep, "materialize_from_raw_full",
         lambda fr, rr, day, symbols, shard=None: full_seen.update(symbols),
     )
-    monkeypatch.setattr(validation_sweep.validate_mod, "validate", lambda *a, **k: None)
+    _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
@@ -266,14 +309,23 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
     assert set(discovered).issubset(bar_seen)
     assert full_seen - set(MARKET_TICKERS) == set(clean)
     assert not (set(discovered) - set(clean)) & full_seen  # no contaminated symbol hit the tick read
+    # The cross-sectional compare is graded over the FULL universe (not just the gradable subset) — the fix.
+    xsec_groups = validation_sweep.cross_sectional_groups()
+    xsec_call = next(call for call in compare_calls if call["groups"] == xsec_groups)
+    assert set(discovered).issubset(xsec_call["scope"])
+    # The per-symbol compare is scoped to the gradable subset (plus the pinned market reference).
+    per_symbol_call = next(call for call in compare_calls if call is not xsec_call)
+    assert set(per_symbol_call["scope"]) - set(MARKET_TICKERS) == set(clean)
 
 
 def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
-    """When clean breadth is below MIN_CLEAN_SYMBOLS the day cannot grade — the expensive full-tick PASS 2
-    and validate must NOT run at all (the contaminated-day fast exit)."""
+    """When clean breadth is below MIN_CLEAN_SYMBOLS the day cannot grade — the expensive full-tick PASS 2,
+    the cross-sectional compare, and the per-symbol compare must NOT run at all (the contaminated-day fast
+    exit, BEFORE any compare is attempted)."""
     discovered = [f"SYM{i}" for i in range(6)]
     full_called = {"n": 0}
-    validate_called = {"n": 0}
+    compare_calls: list[dict] = []
+    persist_called = {"n": 0}
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
@@ -283,11 +335,12 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
     def _full(*a, **k):  # noqa: ANN002,ANN003,ANN202
         full_called["n"] += 1
 
-    def _validate(*a, **k):  # noqa: ANN002,ANN003,ANN202
-        validate_called["n"] += 1
-
     monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _full)
-    monkeypatch.setattr(validation_sweep.validate_mod, "validate", _validate)
+    _stub_split_validation(monkeypatch, compare_calls)
+    monkeypatch.setattr(
+        validation_sweep.validate_mod, "persist_validation",
+        lambda *a, **k: persist_called.__setitem__("n", persist_called["n"] + 1) or pl.DataFrame(),
+    )
     # only one clean symbol -> below the floor (MIN_CLEAN_SYMBOLS=20)
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(["SYM0"]))
     monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
@@ -295,7 +348,8 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
     summary = validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", allow_today=True)
 
     assert full_called["n"] == 0  # the costly tick materialize never ran
-    assert validate_called["n"] == 0  # nor did validate
+    assert compare_calls == []  # neither the cross-sectional nor the per-symbol compare ran
+    assert persist_called["n"] == 0  # nothing was persisted
     assert summary["features_graded"] == 0
     assert summary["clean_symbols"] == 1
 
