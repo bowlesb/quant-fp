@@ -22,12 +22,33 @@ until enough RTH elapses. See the doc for the breadth-over-depth rationale for a
 """
 from __future__ import annotations
 
+import datetime as dt
+
 import polars as pl
 
 OPEN_MINUTE = 570  # 09:30 ET, minutes since ET midnight
 CLOSE_MINUTE = 960  # 16:00 ET
 WARMUP_MINUTES_BEFORE_OPEN = 90  # 1.5h: live capture AND backfill both anchor lookback here (08:00 ET)
 WARMUP_START_MINUTE = OPEN_MINUTE - WARMUP_MINUTES_BEFORE_OPEN  # 480 = 08:00 ET
+EXT_CLOSE_MINUTE = 1200  # 20:00 ET — post-market close; the late edge of the extended capture session
+ET_ZONE = "America/New_York"
+
+
+def ext_session_minutes_utc(day: str) -> pl.Series:
+    """Every extended-session minute of a trading ``day`` as UTC timestamps (DST-correct).
+
+    The grid spans the warmup anchor (08:00 ET) through post-market close (20:00 ET) at 1-minute
+    resolution — the window live capture covers, so the calendar/time-of-day features computed over it
+    are exactly those the stream/raw path produces on the minutes a bar happened to print. Built in
+    ET-local time then converted to UTC, so the absolute instants are correct across the DST boundary
+    (the same conversion ``et_minute_of_day`` uses on read)."""
+    date = dt.date.fromisoformat(day)
+    start_et = dt.datetime.combine(date, dt.time(WARMUP_START_MINUTE // 60, WARMUP_START_MINUTE % 60))
+    end_et = dt.datetime.combine(date, dt.time(EXT_CLOSE_MINUTE // 60, EXT_CLOSE_MINUTE % 60))
+    et_local = pl.datetime_range(
+        start_et, end_et, interval="1m", closed="left", time_zone=ET_ZONE, eager=True
+    )
+    return et_local.dt.convert_time_zone("UTC")
 
 
 def et_minute_of_day(minute: pl.Expr) -> pl.Expr:
