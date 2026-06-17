@@ -1,0 +1,70 @@
+{
+  "data": {
+    "profiles": "experiments/gpu_repr2/out/profiles.npz",
+    "n_symbols": 2722,
+    "n_days_total": 377,
+    "train_days": 263,
+    "test_days": 114,
+    "channels": [
+      "overnight",
+      "intraday",
+      "c2c",
+      "logdvol",
+      "dvol_chg"
+    ],
+    "n_summary_features": 40
+  },
+  "embed_dim": 16,
+  "n_clusters": 11,
+  "arms": {
+    "A_baseline_c2c_svd": {
+      "heldout_cohesion": 0.1188,
+      "random_label_cohesion": -0.0,
+      "silhouette": 0.136,
+      "ratio_vs_random": 1188.1
+    },
+    "B_multichannel_pca": {
+      "heldout_cohesion": 0.0913,
+      "random_label_cohesion": -0.0,
+      "silhouette": 0.105,
+      "ratio_vs_random": 913.4
+    },
+    "C_multichannel_contrastive_ae": {
+      "heldout_cohesion": 0.1293,
+      "random_label_cohesion": -0.0,
+      "silhouette": 0.1173,
+      "ratio_vs_random": 1293.3,
+      "train": {
+        "loss_curve": [
+          1.5136,
+          1.0359,
+          0.9084,
+          0.8435,
+          0.8075,
+          0.7841,
+          0.7773,
+          0.7554,
+          0.7532,
+          0.7439,
+          0.7427,
+          0.7349,
+          0.7301,
+          0.7315,
+          0.7262,
+          0.7232,
+          0.7257,
+          0.724,
+          0.723,
+          0.7167,
+          0.7213
+        ]
+      }
+    }
+  },
+  "verdict": {
+    "baseline_c2c_cohesion": 0.1188,
+    "best_arm": "C_multichannel_contrastive_ae",
+    "ae_beats_baseline": true,
+    "ae_beats_linear_multichannel": true
+  }
+}
