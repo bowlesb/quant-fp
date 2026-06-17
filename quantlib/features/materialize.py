@@ -6,12 +6,17 @@ Same code serves the backfill write (``source=backfill``) and, fed live frames, 
 
 Usage: python -m quantlib.features.materialize <root> <YYYY-MM-DD> <stream|backfill>
 """
+
 from __future__ import annotations
 
 import sys
 
 from quantlib.features import store
-from quantlib.features.backfill_bars import backfill_bars, backfill_daily, tradable_universe
+from quantlib.features.backfill_bars import (
+    backfill_bars,
+    backfill_daily,
+    tradable_universe,
+)
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
@@ -25,13 +30,23 @@ from quantlib.features.raw_loaders import (
 DEFAULT_RAW_ROOT = "/store"
 
 
-def _write_all(root: str, day: str, source: str, frames: dict) -> int:
+def _write_all(
+    root: str, day: str, source: str, frames: dict, only_groups: list[str] | None = None
+) -> int:
+    """Compute + write every runnable group for ``day``. ``only_groups`` scopes the write to a subset (the
+    selective-backfill path: build the raw frames once, materialize JUST the requested groups) — None writes
+    all runnable groups (the full materialize). Each (group, source, date) partition is written atomically.
+    """
     ctx = BatchContext(frames=frames)
     for group in runnable(frames):
+        if only_groups is not None and group.name not in only_groups:
+            continue
         out = run_group(group, ctx, validate=False)
         store.write_group(root, group.name, group.version, source, day, out)
         print(f"wrote group={group.name} source={source} date={day}: {out.height} rows")
-    return frames["minute_agg"]["symbol"].n_unique() if frames["minute_agg"].height else 0
+    return (
+        frames["minute_agg"]["symbol"].n_unique() if frames["minute_agg"].height else 0
+    )
 
 
 def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
@@ -60,13 +75,16 @@ def materialize_from_raw(root: str, raw_root: str, day: str, symbols: list[str])
     return _write_all(root, day, "backfill", frames)
 
 
-def materialize_from_raw_full(root: str, raw_root: str, day: str, symbols: list[str]) -> int:
+def materialize_from_raw_full(
+    root: str, raw_root: str, day: str, symbols: list[str]
+) -> int:
     """Like ``materialize_from_raw`` but ALSO reads ``/store/raw/trades`` + ``/store/raw/quotes`` and
     enriches ``minute_agg`` with the per-minute tick columns (n_trades, signed_volume, spread, imbalance,
     book sizes) and supplies the per-trade ``trades`` frame — so the ORDER-FLOW groups (trade_flow,
     quote_spread, liquidity, signed_trade_ratio, tick_runlength, microstructure_burst) become runnable and
     write a backfill side. This is the materialize the parity sweep needs to validate the tick/quote
-    features; the bar-only ``materialize_from_raw`` cannot produce them. Returns the symbol count."""
+    features; the bar-only ``materialize_from_raw`` cannot produce them. Returns the symbol count.
+    """
     bars = load_raw_minute_agg(raw_root, day, symbols)
     frames = {
         "minute_agg": load_raw_tick_enriched_minute_agg(raw_root, day, symbols, bars),
@@ -77,14 +95,37 @@ def materialize_from_raw_full(root: str, raw_root: str, day: str, symbols: list[
     return _write_all(root, day, "backfill", frames)
 
 
-def materialize_minute(root: str, day: str, source: str, only_groups: list[str] | None = None) -> None:
+def materialize_from_raw_groups(
+    root: str, raw_root: str, day: str, symbols: list[str], only_groups: list[str]
+) -> int:
+    """Selective from-raw materialize: build the SAME full-tick ``/store/raw`` frames as
+    ``materialize_from_raw_full`` (so bar AND order-flow groups are runnable), but WRITE only the partitions
+    for ``only_groups``. This is the per-group on-ramp for the findings->features loop — give a NEW feature's
+    group historical coverage without recomputing the other ~600 features. Returns the symbol count.
+    """
+    bars = load_raw_minute_agg(raw_root, day, symbols)
+    frames = {
+        "minute_agg": load_raw_tick_enriched_minute_agg(raw_root, day, symbols, bars),
+        "trades": load_raw_trades(raw_root, day, symbols),
+        "daily": backfill_daily(day, symbols),
+        "reference": load_reference(),
+    }
+    return _write_all(root, day, "backfill", frames, only_groups=only_groups)
+
+
+def materialize_minute(
+    root: str, day: str, source: str, only_groups: list[str] | None = None
+) -> None:
     """Compute and write minute-aggregate groups for a day + source. ``only_groups`` scopes the work
     to specific groups — the REPAIR path: fix feature Y over period X by re-materializing only its
     group for those dates. Each (group, source, date) partition is independent, so a repair fans out
-    in parallel across dates/groups with no contention and no global lock (atomic per partition)."""
+    in parallel across dates/groups with no contention and no global lock (atomic per partition).
+    """
     frames = {"minute_agg": load_minute_agg(day, source), "reference": load_reference()}
     ctx = BatchContext(frames=frames)
-    groups = [g for g in runnable(frames) if only_groups is None or g.name in only_groups]
+    groups = [
+        g for g in runnable(frames) if only_groups is None or g.name in only_groups
+    ]
     for group in groups:
         out = run_group(group, ctx, validate=False)
         store.write_group(root, group.name, group.version, source, day, out)
@@ -98,7 +139,9 @@ def main() -> None:
         root, day, n = args[1], args[2], int(args[3])
         symbols = tradable_universe(limit=n)
         count = materialize_alpaca_bars(root, day, symbols)
-        print(f"materialized {count} symbols from Alpaca for {day} (requested {len(symbols)})")
+        print(
+            f"materialized {count} symbols from Alpaca for {day} (requested {len(symbols)})"
+        )
         return
     if args and args[0] == "raw":
         # raw <root> <day> <n_symbols> [raw_root]: read /store/raw minute bars (download-once) and write
@@ -106,7 +149,9 @@ def main() -> None:
         raw_root = args[4] if len(args) > 4 else DEFAULT_RAW_ROOT
         symbols = tradable_universe(limit=n)
         count = materialize_from_raw(root, raw_root, day, symbols)
-        print(f"materialized {count} symbols from {raw_root}/raw for {day} (requested {len(symbols)})")
+        print(
+            f"materialized {count} symbols from {raw_root}/raw for {day} (requested {len(symbols)})"
+        )
         return
     if len(args) < 3:
         raise SystemExit(
