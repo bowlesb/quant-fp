@@ -11,6 +11,11 @@ Single 3090 (24GB). Serialize on `~/.quant-gpu.lock`. Images: `fp-torch-gpu` (to
 
 ## STATUS (2026-06-16)
 - GPU FREE (0% util, lock absent). `fp-torch-gpu` built ~14 min ago by embeddings agent a2a58dd2.
+- **DATA-COVERAGE UNBLOCK for job 1:** `/store/raw/trades` covers **7,671 symbols × ~63 days
+  (2026-03-18 → 2026-06-16)**; `/store/raw/bars` covers **7,682 symbols × ~379 days
+  (2024-12-11 → 2026-06-17)**. ⇒ NO separate selective tick-backfill needed for any runner-day
+  inside the 63-day trade window — ticks already present. Job 1 reads ticks directly. Runner-days
+  OLDER than 2026-03-18 are bars-only (sequence model restricted to the 63-day tick window).
 - **a2a58dd2 autoencoder run: NO durable artifact found** in experiments/ or /tmp. Result UNVERIFIED
   — nothing to review. Treat as not-done until an artifact lands. (MA does not credit claimed-but-
   unsaved compute.)
