@@ -276,6 +276,14 @@ class CompareResult:
     exceptions: pl.DataFrame
 
 
+def empty_result() -> CompareResult:
+    """A no-comparison result (all three frames empty). The sweep uses it to SKIP a scope's grade — e.g. the
+    cross-sectional groups on a gather-fragmented day — so those features contribute no clean comparison
+    (they stay PENDING) rather than being graded against a backfill scope the contaminated stream can't
+    match. ``merge_results`` drops empty frames, so this merges in as a no-op."""
+    return CompareResult(feature_day=pl.DataFrame(), cell=pl.DataFrame(), exceptions=pl.DataFrame())
+
+
 def scoped_tiers(day: str, symbols: list[str] | None = None) -> tuple[list[str], pl.DataFrame]:
     """The day's universe membership pinned to ``symbols`` (None = full universe), returning
     ``(scope_symbols, tiers)`` for ``compare_groups``. Centralizes the membership pin both the sweep

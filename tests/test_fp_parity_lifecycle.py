@@ -18,8 +18,10 @@ import polars as pl
 import pytest
 
 from quantlib.features.cleanliness import (
+    MAX_INCOHERENT_FRAC,
     MIN_COVERAGE_FRAC,
     clean_symbols,
+    gather_coherence,
     symbol_day_cleanliness,
 )
 from quantlib.features.trust_lifecycle import (
@@ -168,6 +170,11 @@ def _clean_cleanliness(symbols: list[str]) -> pl.DataFrame:
     return pl.DataFrame({"symbol": symbols, "is_clean": [True] * len(symbols)})
 
 
+def _coherent() -> dict[str, float | int | bool]:
+    """A coherent gather verdict (single-gather day) — the sweep then runs the cross-sectional grade."""
+    return {"rth_minutes": 390, "incoherent_minutes": 0, "incoherent_frac": 0.0, "is_coherent": True}
+
+
 def test_cross_sectional_groups_are_universe_reduce_only() -> None:
     """The discriminator selects the universe-REDUCE groups (a symbol's value depends on the whole present
     universe) and EXCLUDES the reference-relative ones (regress each symbol against a fixed SPY/QQQ, invariant
@@ -246,6 +253,7 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
     # All three discovered names are clean -> a gradable day that runs PASS 2 + the split validate.
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(discovered))
+    monkeypatch.setattr(validation_sweep, "day_gather_coherence", lambda *a, **k: _coherent())
     monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
     monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
     monkeypatch.setattr(validation_sweep, "lifecycle_state", lambda *a, **k: pl.DataFrame())
@@ -313,6 +321,7 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(clean))
+    monkeypatch.setattr(validation_sweep, "day_gather_coherence", lambda *a, **k: _coherent())
     monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
     monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
     monkeypatch.setattr(validation_sweep, "lifecycle_state", lambda *a, **k: pl.DataFrame())
@@ -369,6 +378,62 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
     assert persist_called["n"] == 0  # nothing was persisted
     assert summary["features_graded"] == 0
     assert summary["clean_symbols"] == 1
+
+
+def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> None:
+    """A gather-fragmented day (the live universe-wide gather split into concurrent partial-universe
+    reductions — a restart / SIP-contention day) must SKIP the cross-sectional grade: those features would
+    mis-grade against the single full-universe backfill the contaminated stream can't match. The per-symbol /
+    tick PASS 2 still runs (the well-behaved per-symbol features still earn their grade). So exactly ONE
+    compare (per-symbol) runs, NOT two, and the cross-sectional groups are NOT re-materialized."""
+    discovered = [f"SYM{i}" for i in range(6)]
+    clean = discovered[:4]
+    full_seen: set[str] = set()
+    xsec_materialized = {"n": 0}
+    compare_calls: list[dict] = []
+
+    monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
+    monkeypatch.setattr(
+        validation_sweep, "materialize_from_raw_full",
+        lambda fr, rr, day, symbols, shard=None: full_seen.update(symbols),
+    )
+
+    def _xsec(*a, **k):  # noqa: ANN002,ANN003,ANN202
+        xsec_materialized["n"] += 1
+
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw_bar_groups", _xsec)
+    _stub_split_validation(monkeypatch, compare_calls)
+    monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(clean))
+    # FRAGMENTED gather: the cross-sectional grade must be skipped.
+    monkeypatch.setattr(
+        validation_sweep, "day_gather_coherence",
+        lambda *a, **k: {"rth_minutes": 364, "incoherent_minutes": 322, "incoherent_frac": 0.885, "is_coherent": False},
+    )
+    monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
+    monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
+    monkeypatch.setattr(validation_sweep, "lifecycle_state", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep, "defect_rows", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "_build_clean_history", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
+
+    summary = validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=10, allow_today=True)
+
+    xsec_groups = set(validation_sweep.cross_sectional_groups())
+    assert xsec_materialized["n"] == 0  # the cross-sectional backfill was NOT re-materialized
+    # Exactly one compare ran, and it is the PER-SYMBOL one (its groups exclude the cross-sectional set).
+    assert len(compare_calls) == 1
+    assert not (set(compare_calls[0]["groups"]) & xsec_groups)
+    assert summary["gather_coherent"] is False
+    assert summary["cross_sectional_graded"] is False
+    # PASS 2 still graded the per-symbol features over the clean gradable set.
+    assert full_seen - set(MARKET_TICKERS) == set(clean)
 
 
 def _cell(feature: str, symbol: str, n_match: int, n_mismatch: int) -> dict:
@@ -532,3 +597,73 @@ def test_no_defect_when_no_divergent() -> None:
     )
     states = lifecycle_state(history, retired=set())
     assert defect_rows(states, history, pl.DataFrame(), group_of={"feat": "g"}, version_of={"feat": "1"}) == []
+
+
+def _broadcast_breadth(n_symbols: int, per_minute_values: list[list[float]]) -> pl.DataFrame:
+    """A stream frame for one broadcast cross-sectional scalar. ``per_minute_values[m]`` is the list of
+    distinct scalar values present at RTH minute ``m`` — a clean minute lists ONE value (shared by every
+    symbol), a fragmented minute lists several (the partial-universe gathers). The symbols are partitioned
+    across the listed values so each value appears on some symbols' rows."""
+    symbols, minutes, values = [], [], []
+    for minute_index, distinct_values in enumerate(per_minute_values):
+        for symbol_index in range(n_symbols):
+            symbols.append(f"S{symbol_index:04d}")
+            minutes.append(_minute(minute_index))
+            values.append(distinct_values[symbol_index % len(distinct_values)])
+    return pl.DataFrame({"symbol": symbols, "minute": minutes, "breadth_up_5m": values})
+
+
+def test_gather_coherence_clean_single_gather() -> None:
+    """A clean single-gather day: every RTH minute has ONE distinct broadcast value -> coherent."""
+    frame = _broadcast_breadth(50, [[0.5 + 0.001 * m] for m in range(120)])  # one value per minute
+    verdict = gather_coherence(frame, "breadth_up_5m")
+    assert verdict["rth_minutes"] == 120
+    assert verdict["incoherent_minutes"] == 0
+    assert verdict["incoherent_frac"] == 0.0
+    assert verdict["is_coherent"] is True
+
+
+def test_gather_coherence_fragmented_day_flagged() -> None:
+    """A capture-restart / contention day: most RTH minutes carry SEVERAL distinct breadth values (the
+    concurrent partial-universe gathers) -> incoherent_frac high -> flagged NOT coherent. This is the
+    2026-06-15 signature (322/364 minutes multi-valued) the per-symbol coverage check cannot see."""
+    per_minute = [[0.4, 0.5, 0.6, 0.7] for _ in range(110)] + [[0.5] for _ in range(10)]  # 110/120 fragmented
+    frame = _broadcast_breadth(50, per_minute)
+    verdict = gather_coherence(frame, "breadth_up_5m")
+    assert verdict["incoherent_minutes"] == 110
+    assert verdict["incoherent_frac"] > MAX_INCOHERENT_FRAC
+    assert verdict["is_coherent"] is False
+
+
+def test_gather_coherence_tolerates_rare_blips() -> None:
+    """A handful of incoherent minutes (below MAX_INCOHERENT_FRAC) does NOT condemn an otherwise clean day —
+    the gate flags systematic fragmentation, not isolated single-minute noise."""
+    blips = max(1, int(120 * MAX_INCOHERENT_FRAC))  # within tolerance
+    per_minute = [[0.4, 0.6] for _ in range(blips)] + [[0.5] for _ in range(120 - blips)]
+    frame = _broadcast_breadth(50, per_minute)
+    verdict = gather_coherence(frame, "breadth_up_5m")
+    assert verdict["incoherent_minutes"] == blips
+    assert verdict["is_coherent"] is True
+
+
+def test_gather_coherence_excludes_extended_hours() -> None:
+    """Extended-hours minutes are never counted — only the regular session is checked. A pre-market minute
+    (before 09:30 ET) with multiple values must not register as incoherent."""
+    pre = pl.DataFrame(
+        {
+            "symbol": ["A", "B", "A", "B"],
+            "minute": [_minute(-30), _minute(-30), _minute(0), _minute(0)],
+            "breadth_up_5m": [0.1, 0.9, 0.5, 0.5],  # pre-market disagrees; RTH minute 0 agrees
+        }
+    )
+    verdict = gather_coherence(pre, "breadth_up_5m")
+    assert verdict["rth_minutes"] == 1  # only minute 0 (RTH); the -30 pre-market minute excluded
+    assert verdict["incoherent_minutes"] == 0
+    assert verdict["is_coherent"] is True
+
+
+def test_gather_coherence_empty_is_vacuously_coherent() -> None:
+    """No breadth captured -> nothing to certify here (the per-symbol checks still gate grading)."""
+    verdict = gather_coherence(pl.DataFrame({"symbol": [], "minute": [], "breadth_up_5m": []}), "breadth_up_5m")
+    assert verdict["rth_minutes"] == 0
+    assert verdict["is_coherent"] is True
