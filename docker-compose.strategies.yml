@@ -9,6 +9,7 @@ name: quant
 
 services:
   smoke-strategy:
+    container_name: smoke-strategy
     build:
       context: .
       dockerfile: strategies/smoke/Dockerfile
@@ -47,6 +48,7 @@ services:
   #
   #   docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --build reversion-strategy
   reversion-strategy:
+    container_name: reversion-strategy
     build:
       context: .
       dockerfile: strategies/reversion/Dockerfile
