@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+from typing import Callable
 
 import polars as pl
 
@@ -49,7 +50,7 @@ from quantlib.data.raw_backfill import trading_client, trading_days
 # Bar features that are non-null at every minute a bar printed (present in BOTH stream and backfill) —
 # their per-minute presence is the minute-coverage signal the cleanliness heuristic reads.
 COVERAGE_FEATURES = ["ret_1m"]
-DEFAULT_CHUNK = 200
+DEFAULT_CHUNK = 500
 # The market-context tickers (SPY/QQQ) the cross-sectional features regress against. They are screened out
 # of the raw-backfill UNIVERSE (is_etf_like), so a materialize chunk that lacks them produces a NULL market
 # return for the whole chunk and every market-relative feature (market_beta/market_corr/idio_vol/
@@ -63,6 +64,10 @@ MARKET_TICKERS: tuple[str, ...] = tuple(sorted(set(MARKET_INDICES.values())))
 # PENDING for it — exactly "not enough clean comparisons" in the lifecycle. A normal day has thousands of
 # clean liquid names, so this only ever suppresses pathologically contaminated days.
 MIN_CLEAN_SYMBOLS = 20
+
+# A from-raw materialize: (feature_root, raw_root, day, symbols, shard) -> symbols materialized. Both
+# materialize_from_raw (bar-only, cheap) and materialize_from_raw_full (full tick tape) match this shape.
+MaterializeFn = Callable[..., int]
 
 
 def last_market_day(today: dt.date | None = None) -> str:
@@ -116,6 +121,37 @@ def _build_clean_history(cell: pl.DataFrame, cleanliness: pl.DataFrame, day: str
     return clean_feature_day(cell, clean_symbols(cleanliness), day)
 
 
+def _materialize_chunks(
+    materialize: MaterializeFn,
+    feature_root: str,
+    raw_root: str,
+    day: str,
+    symbols: list[str],
+    chunk: int,
+) -> tuple[list[str], list[str]]:
+    """Materialize the backfill side for ``symbols`` in CHUNKS (sharded so disjoint chunks union on read),
+    pinning the market reference tickers into every chunk. The caller clears the day's backfill side BEFORE
+    calling (clean replace), then validates the union once (see ``sweep_day``).
+
+    Returns ``(materialized, no_raw)`` — which requested symbols produced a backfill side vs had no
+    ``/store/raw`` partition. Chunking bounds peak memory (a ~10k-symbol day never loads at once); the
+    per-file shard (``data-<chunk>.parquet``) makes the chunks union on read instead of clobbering.
+    """
+    materialized: list[str] = []
+    no_raw: list[str] = []
+    for chunk_index, batch in enumerate(_chunks(symbols, chunk)):
+        # PIN the market tickers into the materialize scope so the cross-sectional features have their
+        # backfill market reference (see MARKET_TICKERS). They are deduped against the batch and only the
+        # requested symbols are accounted in materialized/no_raw — the market tickers are reference symbols,
+        # not part of the universe being certified.
+        scope = batch + [ticker for ticker in MARKET_TICKERS if ticker not in batch]
+        materialize(feature_root, raw_root, day, scope, shard=chunk_index)
+        present_set = set(store.stream_symbols_on(feature_root, day, source="backfill"))
+        materialized.extend([symbol for symbol in batch if symbol in present_set])
+        no_raw.extend([symbol for symbol in batch if symbol not in present_set])
+    return materialized, no_raw
+
+
 def sweep_day(
     feature_root: str,
     val_root: str,
@@ -135,51 +171,50 @@ def sweep_day(
     quotes), so the order-flow groups (trade_flow / quote_spread / liquidity / signed_trade_ratio /
     tick_runlength / microstructure_burst) get a backfill side and their features are validated. Set False
     for a bar-only sweep (faster, but the tick/quote features stay PENDING — no backfill to compare).
+
+    GRADABLE-SET TWO-PASS (the speedup). Grading only ever consults symbols that are BOTH clean-streamed
+    AND have raw — the "gradable set". Materializing the full tick tape for all ~10k discovered symbols (of
+    which ~6k are capture-contaminated and ~3.6k have no raw) wastes the bulk of the sweep on symbols whose
+    backfill never enters a grade. So we split the work:
+      PASS 1 (cheap, bar-only, ALL symbols): materialize only the bar features (``materialize_from_raw``)
+        — enough to compute ``ret_1m`` minute coverage and therefore cleanliness. No per-chunk validate.
+        A symbol with no raw bars is simply absent (no_raw). This decides the gradable set.
+      PASS 2 (full tape, GRADABLE SET ONLY): clear the day, re-materialize the clean symbols from the FULL
+        tick tape (``materialize_from_raw_full`` when with_ticks) and validate them. The order-flow groups
+        get their backfill side for exactly the symbols that will be graded.
+    Parity is unchanged: the same clean symbols are validated against the same full-tape backfill they
+    always were; only the never-graded contaminated/no-raw symbols are spared the expensive tick read. On a
+    too-contaminated day (clean breadth < MIN_CLEAN_SYMBOLS) pass 2 is skipped entirely.
     """
     validate_mod.assert_settled(day, allow_today)
-    materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
+    full_materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
     discovered = store.stream_symbols_on(feature_root, day)
     if max_symbols is not None:
         discovered = discovered[:max_symbols]
     if not discovered:
         return {"day": day, "discovered": 0, "note": "no source=stream symbols collected — nothing to sweep"}
 
-    # Clear the day's backfill side before rewriting it: each chunk writes its OWN sharded file
-    # (data-<chunk>.parquet) so disjoint chunks UNION on read instead of clobbering a shared data.parquet.
-    # Without this clear-then-shard, only the last chunk's symbols survived on disk — collapsing the clean
-    # breadth the cleanliness/grading step reads at end-of-day and starving the whole trust frontier.
+    # PASS 1 — cheap bar-only materialize over ALL discovered symbols to determine the gradable set. Clear
+    # the day's backfill side first so each chunk's sharded file (data-<chunk>.parquet) unions cleanly on
+    # read instead of colliding with a prior run's files.
     store.clear_backfill_day(feature_root, day)
-    materialized: list[str] = []
-    no_raw: list[str] = []
-    for chunk_index, batch in enumerate(_chunks(discovered, chunk)):
-        # PIN the market tickers into the materialize+validate scope so the cross-sectional features have
-        # their backfill market reference (see MARKET_TICKERS). They are deduped against the batch and only
-        # the DISCOVERED symbols are accounted in materialized/no_raw — the market tickers are reference
-        # symbols, not part of the day's collected universe being certified.
-        scope = batch + [ticker for ticker in MARKET_TICKERS if ticker not in batch]
-        materialize(feature_root, raw_root, day, scope, shard=chunk_index)
-        present = store.stream_symbols_on(feature_root, day, source="backfill")
-        present_set = set(present)
-        materialized.extend([symbol for symbol in batch if symbol in present_set])
-        no_raw.extend([symbol for symbol in batch if symbol not in present_set])
-        validate_mod.validate(feature_root, day, val_root, allow_today=allow_today, symbols=scope)
-
-    cell = validation_store.read_cell(val_root, day)
-    exceptions = validation_store.read_exceptions(val_root, day)
+    _, no_raw = _materialize_chunks(materialize_from_raw, feature_root, raw_root, day, discovered, chunk)
     cleanliness = day_cleanliness(feature_root, day, discovered)
     clean_count = int(cleanliness["is_clean"].sum()) if cleanliness.height else 0
     contaminated = (cleanliness.height - clean_count) if cleanliness.height else 0
+    gradable = clean_symbols(cleanliness)
 
     # Insufficient clean breadth -> the day is too contaminated to be a fair parity test. Record the
     # per-symbol cleanliness (the audit trail) but contribute NO clean-day grade, so no feature is condemned
-    # off a handful of marginal survivors. Features simply stay PENDING for this day.
+    # off a handful of marginal survivors. Features simply stay PENDING for this day. Pass 2 is skipped —
+    # the expensive full-tape materialize never runs on a day that can't grade.
     group_of, version_of = _registry_maps()
     if clean_count < MIN_CLEAN_SYMBOLS:
         trust_lifecycle.write_lifecycle(pl.DataFrame(), [], cleanliness, version_of, day)
         return {
             "day": day,
             "discovered": len(discovered),
-            "materialized": len(materialized),
+            "materialized": 0,
             "no_raw_skipped": len(no_raw),
             "no_raw_examples": no_raw[:10],
             "clean_symbols": clean_count,
@@ -189,6 +224,22 @@ def sweep_day(
             "contaminated to grade; features stay PENDING (no defects filed)",
         }
 
+    # PASS 2 — full-tape materialize over the GRADABLE SET ONLY, then validate the whole set in ONE call.
+    # Re-clear the day so the cheap bar-only pass-1 files are replaced by the full-tick backfill for the
+    # clean symbols (the order-flow groups need the tick tape). The clean symbols all have raw bars by
+    # construction (cleanliness requires backfill-present minutes), so this pass produces no further no_raw.
+    store.clear_backfill_day(feature_root, day)
+    materialized, _ = _materialize_chunks(full_materialize, feature_root, raw_root, day, gradable, chunk)
+    # ONE validate over the full gradable scope: ``write_cell`` / ``upsert_feature_day`` are whole-day
+    # replaces, so a per-chunk validate would leave only the LAST chunk's symbols in the cell store and cap
+    # the grade. Validating the union once writes the complete cell file; the per-group read inside
+    # ``validate`` (one group's features at a time, symbol-filter pushed down) keeps it memory-bounded. The
+    # market tickers are pinned so the cross-sectional features resolve their reference.
+    grade_scope = gradable + [ticker for ticker in MARKET_TICKERS if ticker not in gradable]
+    validate_mod.validate(feature_root, day, val_root, allow_today=allow_today, symbols=grade_scope)
+
+    cell = validation_store.read_cell(val_root, day)
+    exceptions = validation_store.read_exceptions(val_root, day)
     clean_history_today = _build_clean_history(cell, cleanliness, day)
     history = validation_store.read_feature_day(val_root)  # for cross-day context (legacy trust source)
     states = lifecycle_state(clean_history_today, retired_features())

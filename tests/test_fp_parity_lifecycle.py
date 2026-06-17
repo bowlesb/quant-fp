@@ -159,50 +159,143 @@ def test_clean_breadth_floor_suppresses_grading_on_contaminated_day() -> None:
     assert clean_count < MIN_CLEAN_SYMBOLS  # the sweep would skip grading and leave features PENDING
 
 
+def _clean_cleanliness(symbols: list[str]) -> pl.DataFrame:
+    """A cleanliness frame marking exactly ``symbols`` clean (the gradable set the grading pass uses)."""
+    return pl.DataFrame({"symbol": symbols, "is_clean": [True] * len(symbols)})
+
+
 def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     """The cross-sectional features (market_beta/idio_vol/market_return/...) regress against SPY/QQQ, which
-    are ETF-screened out of the raw universe. The sweep MUST pin the market tickers into every materialize +
-    validate chunk so the backfill side resolves its market reference — otherwise those features are all
-    extra_live (backfill produced nothing) and can never validate. We capture the scope each stage receives
-    and assert the market tickers are always present, even though they were never 'discovered' as stream
-    symbols."""
+    are ETF-screened out of the raw universe. The sweep MUST pin the market tickers into every materialize
+    scope and the validate scope so the backfill side resolves its market reference — otherwise those
+    features are all extra_live (backfill produced nothing) and can never validate. We capture the scope
+    each stage receives and assert the market tickers are always present, even though they were never
+    'discovered' as stream symbols."""
     assert set(MARKET_TICKERS) == {"QQQ", "SPY"}
     discovered = ["AAPL", "MSFT", "NVDA"]  # none of these is a market ticker
-    materialize_scopes: list[list[str]] = []
-    materialize_shards: list[int | None] = []
+    bar_scopes: list[list[str]] = []
+    full_scopes: list[list[str]] = []
+    bar_shards: list[int | None] = []
+    full_shards: list[int | None] = []
     validate_scopes: list[list[str]] = []
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
-    # The sweep defaults to the tick-aware materialize (materialize_from_raw_full) so the order-flow groups
-    # get a backfill side; patch that (and the bar-only variant, for a --no-ticks sweep) to capture scope.
-    # Each chunk is written as its OWN shard so disjoint chunks union on read — capture the shard too.
-    def _capture(feature_root, raw_root, day, symbols, shard=None):  # noqa: ANN001,ANN202
-        materialize_scopes.append(list(symbols))
-        materialize_shards.append(shard)
 
-    monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _capture)
-    monkeypatch.setattr(validation_sweep, "materialize_from_raw", _capture)
+    def _capture_bar(feature_root, raw_root, day, symbols, shard=None):  # noqa: ANN001,ANN202
+        bar_scopes.append(list(symbols))
+        bar_shards.append(shard)
+
+    def _capture_full(feature_root, raw_root, day, symbols, shard=None):  # noqa: ANN001,ANN202
+        full_scopes.append(list(symbols))
+        full_shards.append(shard)
+
+    # PASS 1 is bar-only (materialize_from_raw); PASS 2 is the tick-aware materialize (materialize_from_raw_full).
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw", _capture_bar)
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _capture_full)
     monkeypatch.setattr(
         validation_sweep.validate_mod, "validate",
         lambda feature_root, day, val_root, allow_today, symbols: validate_scopes.append(list(symbols)),
     )
-    # short-circuit everything after the chunk loop: no cell/cleanliness -> the breadth-floor early return.
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
+    # All three discovered names are clean -> a gradable day that runs PASS 2 + the single validate.
+    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(discovered))
+    monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
+    monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
+    monkeypatch.setattr(validation_sweep, "lifecycle_state", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep, "defect_rows", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "_build_clean_history", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
 
     validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=2, allow_today=True)
 
-    assert materialize_scopes and validate_scopes
-    for scope in materialize_scopes + validate_scopes:
+    # The market tickers are pinned into every materialize scope (both passes) AND the validate scope.
+    assert bar_scopes and full_scopes and validate_scopes
+    for scope in bar_scopes + full_scopes + validate_scopes:
         for ticker in MARKET_TICKERS:
-            assert ticker in scope, f"{ticker} must be pinned into every chunk scope"
+            assert ticker in scope, f"{ticker} must be pinned into every scope"
         assert scope.count("SPY") == 1  # deduped, not double-added when already discovered
-    # 3 discovered symbols, chunk=2 -> 2 chunks, each written to a DISTINCT shard so they union on disk.
-    assert materialize_shards == list(range(len(materialize_scopes)))
+    # 3 symbols, chunk=2 -> 2 chunks per pass, each written to a DISTINCT shard so they union on disk.
+    assert bar_shards == [0, 1]
+    assert full_shards == [0, 1]
+    # validate runs ONCE over the whole gradable scope (per-chunk validate would clobber the cell store).
+    assert len(validate_scopes) == 1
+
+
+def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
+    """The speedup: PASS 1 materializes the BAR features for ALL discovered symbols (to decide cleanliness),
+    but the expensive full-tick PASS 2 materializes ONLY the clean 'gradable' subset — the contaminated
+    symbols never reach the costly tick read. We mark a subset clean and assert the two passes see the
+    right scopes."""
+    discovered = [f"SYM{i}" for i in range(6)]
+    clean = discovered[:3]  # only half the day is clean
+    bar_seen: set[str] = set()
+    full_seen: set[str] = set()
+
+    monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
+    monkeypatch.setattr(
+        validation_sweep, "materialize_from_raw",
+        lambda fr, rr, day, symbols, shard=None: bar_seen.update(symbols),
+    )
+    monkeypatch.setattr(
+        validation_sweep, "materialize_from_raw_full",
+        lambda fr, rr, day, symbols, shard=None: full_seen.update(symbols),
+    )
+    monkeypatch.setattr(validation_sweep.validate_mod, "validate", lambda *a, **k: None)
+    monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(clean))
+    monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
+    monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
+    monkeypatch.setattr(validation_sweep, "lifecycle_state", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep, "defect_rows", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "_build_clean_history", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
+
+    validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=10, allow_today=True)
+
+    # PASS 1 (bar-only) saw every discovered symbol; PASS 2 (full tick) saw ONLY the clean gradable subset.
+    assert set(discovered).issubset(bar_seen)
+    assert full_seen - set(MARKET_TICKERS) == set(clean)
+    assert not (set(discovered) - set(clean)) & full_seen  # no contaminated symbol hit the tick read
+
+
+def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
+    """When clean breadth is below MIN_CLEAN_SYMBOLS the day cannot grade — the expensive full-tick PASS 2
+    and validate must NOT run at all (the contaminated-day fast exit)."""
+    discovered = [f"SYM{i}" for i in range(6)]
+    full_called = {"n": 0}
+    validate_called = {"n": 0}
+
+    monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
+
+    def _full(*a, **k):  # noqa: ANN002,ANN003,ANN202
+        full_called["n"] += 1
+
+    def _validate(*a, **k):  # noqa: ANN002,ANN003,ANN202
+        validate_called["n"] += 1
+
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _full)
+    monkeypatch.setattr(validation_sweep.validate_mod, "validate", _validate)
+    # only one clean symbol -> below the floor (MIN_CLEAN_SYMBOLS=20)
+    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(["SYM0"]))
+    monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
+
+    summary = validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", allow_today=True)
+
+    assert full_called["n"] == 0  # the costly tick materialize never ran
+    assert validate_called["n"] == 0  # nor did validate
+    assert summary["features_graded"] == 0
+    assert summary["clean_symbols"] == 1
 
 
 def _cell(feature: str, symbol: str, n_match: int, n_mismatch: int) -> dict:
