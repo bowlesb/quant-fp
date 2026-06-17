@@ -84,13 +84,29 @@ def test_low_coverage_symbol_is_contaminated() -> None:
     assert row["is_clean"] is False
 
 
-def test_sparse_but_complete_thin_name_is_clean() -> None:
-    """A thin name that legitimately prints few bars is CLEAN: coverage is vs backfill-present minutes, not
-    a flat 390, and it has no internal miss run relative to backfill."""
-    back = list(range(0, 60))  # truth only had 60 contiguous minutes (a thin/halted name)
+def test_thin_session_name_is_not_a_fair_parity_test() -> None:
+    """A name that printed only a few dozen minutes (a thin/halted/illiquid ticker) trivially passes the
+    gap + coverage checks — it has no internal hole because it barely traded — but its windowed features
+    are DEGENERATE (near-zero denominators), so its cells produce false parity failures. Below
+    MIN_BACKFILL_MINUTES it is excluded from grading (reason thin_session), contributing no clean
+    comparison rather than a false one. (Root-caused 2026-06-15: a capture-restart day whose only
+    gap-surviving symbols were ~47-minute thin names -> 383 spurious DIVERGENT defects.)"""
+    back = list(range(0, 60))  # truth only had 60 contiguous minutes -> below the 120-minute floor
     stream = list(range(0, 60))
-    cleanliness = symbol_day_cleanliness(_coverage_frame("THIN", stream, back))
-    assert cleanliness.row(0, named=True)["is_clean"] is True
+    row = symbol_day_cleanliness(_coverage_frame("THIN", stream, back)).row(0, named=True)
+    assert row["is_clean"] is False
+    assert row["reason"] == "thin_session"
+
+
+def test_substantial_partial_session_is_clean() -> None:
+    """A name with a substantial-but-partial session (>= MIN_BACKFILL_MINUTES, fully captured, no internal
+    gap) IS a fair parity test — the floor admits a real partial session, only excluding the degenerate
+    thin tail."""
+    back = list(range(0, 150))  # 150 contiguous minutes, above the 120-minute floor
+    stream = list(range(0, 150))
+    row = symbol_day_cleanliness(_coverage_frame("PARTIAL", stream, back)).row(0, named=True)
+    assert row["is_clean"] is True
+    assert row["reason"] == "clean"
 
 
 def test_extended_hours_sparsity_is_not_contamination() -> None:
