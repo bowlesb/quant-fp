@@ -11,6 +11,8 @@ three correctness points of docs/PARITY_LIFECYCLE.md:
 from __future__ import annotations
 
 import datetime as dt
+import json
+import math
 
 import polars as pl
 import pytest
@@ -416,6 +418,41 @@ def test_defect_rows_built_for_divergent_with_exemplars() -> None:
     assert (first_seen, last_seen, days_failed) == ("2026-06-10", "2026-06-11", 2)
     assert worst_rel == pytest.approx(8.0)
     assert '"symbol":' in exemplars_json and "AAA" in exemplars_json
+
+
+def test_defect_rows_sanitize_non_finite_exemplar_values() -> None:
+    """A stream feature can emit a non-finite value (Infinity / -Infinity / NaN) — a real mismatch to
+    record, not a crash. ``json.dumps(inf)`` emits the bare token ``Infinity`` which the exemplars jsonb
+    column rejects, so the defect-row builder must NULL non-finite values before serialize. The resulting
+    JSON must be STRICTLY valid (no Infinity/NaN tokens) and the non-finite values become null."""
+    history = pl.DataFrame([_clean_day_row("feat", "2026-06-15", passed=False)])
+    states = lifecycle_state(history, retired=set())
+    exceptions = pl.DataFrame(
+        {
+            "feature": ["feat", "feat", "feat"],
+            "symbol": ["INF", "NEGINF", "NAN"],
+            "minute": [_minute(0), _minute(1), _minute(2)],
+            "stream_value": [math.inf, -math.inf, math.nan],
+            "backfill_value": [1.0, 1.0, 1.0],
+            "rel_err": [math.inf, math.inf, math.nan],
+        }
+    )
+    rows = defect_rows(states, history, exceptions, group_of={"feat": "grp"}, version_of={"feat": "1.0.0"})
+    assert len(rows) == 1
+    worst_rel, exemplars_json = rows[0][6], rows[0][7]
+    assert worst_rel is None  # max rel_err was Infinity -> NULLed
+
+    # STRICT JSON parse (Python's json ACCEPTS Infinity/NaN by default; force the standard so a leaked
+    # non-finite token raises — exactly what Postgres jsonb would reject).
+    parsed = json.loads(exemplars_json, parse_constant=_reject_non_finite)
+    assert len(parsed) == 3
+    assert [cell["stream_value"] for cell in parsed] == [None, None, None]  # inf/-inf/nan -> null
+    assert all(cell["backfill_value"] == 1.0 for cell in parsed)  # finite values preserved
+    assert [cell["rel_err"] for cell in parsed] == [None, None, None]
+
+
+def _reject_non_finite(token: str) -> float:
+    raise ValueError(f"non-finite JSON token leaked into exemplars: {token}")
 
 
 def test_no_defect_when_no_divergent() -> None:
