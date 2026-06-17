@@ -1,0 +1,6 @@
+# Commit durable artifacts (small .npz weights/embeddings + result JSONs = the findings).
+# Exclude only logs and caches.
+out/*.log
+out/__pycache__/
+__pycache__/
+models/__pycache__/

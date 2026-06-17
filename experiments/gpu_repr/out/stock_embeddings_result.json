@@ -1,0 +1,112 @@
+{
+  "data": {
+    "bars": "/home/ben/quant-fp/experiments/2026-06-16-w11-overnight-beta/certify300_daily.parquet",
+    "n_symbols": 2722,
+    "n_days_total": 377,
+    "train_days": 263,
+    "test_days": 114,
+    "min_days_filter": 250
+  },
+  "embedding": {
+    "dim": 16,
+    "top8_explained_var_ratio": [
+      0.2123,
+      0.0445,
+      0.0252,
+      0.0202,
+      0.0168,
+      0.0116,
+      0.0113,
+      0.0097
+    ]
+  },
+  "clusters": {
+    "k": 11,
+    "sizes": [
+      228,
+      454,
+      220,
+      426,
+      252,
+      125,
+      51,
+      219,
+      119,
+      345,
+      283
+    ],
+    "silhouette": 0.1489
+  },
+  "cohesion_within_minus_across_corr": {
+    "train": 0.0917,
+    "heldout_time": 0.0921,
+    "random_labels_heldout_time": 0.0003,
+    "structure_is_real_oos": true
+  },
+  "example_behavioral_neighbours": {
+    "AAPL": [
+      "FOXA",
+      "FOX",
+      "QRVO",
+      "NFJ",
+      "LOGI",
+      "UNP"
+    ],
+    "JPM": [
+      "GS",
+      "SCHW",
+      "MS",
+      "C",
+      "RJF",
+      "WFC"
+    ],
+    "XOM": [
+      "CVX",
+      "OXY",
+      "IMO",
+      "MGY",
+      "KRP",
+      "COP"
+    ],
+    "NVDA": [
+      "VRT",
+      "TSM",
+      "CRDO",
+      "ETN",
+      "AVGO",
+      "ORCL"
+    ],
+    "PG": [
+      "KMB",
+      "CHD",
+      "CL",
+      "CLX",
+      "KO",
+      "XLP"
+    ],
+    "JNJ": [
+      "KMB",
+      "MDLZ",
+      "PG",
+      "PEP",
+      "CL",
+      "KHC"
+    ],
+    "TSLA": [
+      "QQQ",
+      "NBXG",
+      "BST",
+      "CDNS",
+      "BTX",
+      "HOOD"
+    ],
+    "WMT": [
+      "PRDO",
+      "COST",
+      "CLH",
+      "GSHD",
+      "NGVC",
+      "TJX"
+    ]
+  }
+}
