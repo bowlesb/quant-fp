@@ -57,6 +57,50 @@ MAX_GAP_MINUTES = 5  # longest tolerated internal run of backfill-had-but-stream
 # thin_session), so it contributes no clean comparison rather than a false failure.
 MIN_BACKFILL_MINUTES = 120  # >= ~1/3 of a regular session of printed minutes to be a fair parity test
 
+# GATHER-COHERENCE (the cross-sectional contamination dimension the per-symbol check above cannot see).
+# A market-wide breadth scalar (breadth_up_5m, ...) is broadcast IDENTICALLY to every symbol's row at a
+# given minute: in a clean single-gather capture there is EXACTLY ONE distinct value per minute. When the
+# universe-wide gather FRAGMENTS — a capture restart / SIP-contention day spins up several concurrent gather
+# processes, each reducing over a PARTIAL universe — each writes its own partial breadth scalar, so that
+# minute carries >1 distinct value. This is invisible to symbol_day_cleanliness (every symbol still HAS a
+# row with a non-null ret_1m, just a wrong cold-ring / partial-universe value), so a fragmented day passes
+# the per-symbol coverage+gap checks yet mis-grades EVERY cross-sectional and deep-window feature. We detect
+# it directly: the fraction of regular-session minutes whose broadcast scalar is incoherent (>1 distinct
+# value). Above MAX_INCOHERENT_FRAC the day's gather is fragmented and the day is NOT a fair parity test for
+# the universe-reduce / deep-window cohort. (2026-06-15: 322/364 RTH minutes carried up to 8 distinct
+# breadth values — the ~8 concurrent partial-universe gathers the restart spawned.)
+MAX_INCOHERENT_FRAC = 0.05  # > this fraction of RTH minutes with a multi-valued broadcast scalar = fragmented
+
+
+def gather_coherence(stream_broadcast: pl.DataFrame, value_col: str) -> dict[str, float | int | bool]:
+    """Day-level GATHER-COHERENCE verdict from a stream frame of a broadcast cross-sectional scalar.
+
+    ``stream_broadcast`` is the live (source=stream) rows for ONE broadcast cross-sectional feature
+    (e.g. breadth_up_5m) over the day — columns (symbol, minute, ``value_col``). The feature is the SAME
+    scalar for every symbol at a minute, so a CLEAN single-gather capture has exactly one distinct value per
+    regular-session minute. We count the regular-session minutes carrying >1 distinct value (the
+    partial-universe fragments a restart/contention day produces) and flag the day fragmented when their
+    fraction exceeds ``MAX_INCOHERENT_FRAC``.
+
+    Returns ``rth_minutes`` / ``incoherent_minutes`` / ``incoherent_frac`` / ``is_coherent`` (a single
+    distinct value almost everywhere). An empty frame is vacuously coherent (no breadth captured -> nothing
+    to certify here; the per-symbol checks still gate grading)."""
+    if stream_broadcast.height == 0:
+        return {"rth_minutes": 0, "incoherent_minutes": 0, "incoherent_frac": 0.0, "is_coherent": True}
+    rth = stream_broadcast.filter(rth_mask(pl.col("minute")))
+    if rth.height == 0:
+        return {"rth_minutes": 0, "incoherent_minutes": 0, "incoherent_frac": 0.0, "is_coherent": True}
+    per_minute = rth.group_by("minute").agg(pl.col(value_col).n_unique().alias("_distinct"))
+    rth_minutes = per_minute.height
+    incoherent_minutes = int(per_minute.filter(pl.col("_distinct") > 1).height)
+    incoherent_frac = incoherent_minutes / rth_minutes
+    return {
+        "rth_minutes": rth_minutes,
+        "incoherent_minutes": incoherent_minutes,
+        "incoherent_frac": incoherent_frac,
+        "is_coherent": incoherent_frac <= MAX_INCOHERENT_FRAC,
+    }
+
 
 def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
     """Per-symbol CLEAN/contaminated decision for one day from a joined live+backfill verdict frame.
