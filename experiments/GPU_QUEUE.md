@@ -43,19 +43,31 @@ Single 3090 (24GB). Serialize on `~/.quant-gpu.lock`. Images: `fp-torch-gpu` (to
 - **REFINED STRATEGIC PRIOR (three cycles):** the GPU's representation edge is for RELATIONAL structure
   (peer/co-movement clusters simple per-symbol features can't express — repr-2's win), NOT for predicting
   per-symbol SCALAR targets a single trailing statistic already captures (day-ahead vol) or that are simply
-  null (returns). Future GPU jobs → RELATIONAL structure, not scalar prediction.
+  null (returns).
+- **day-ahead spin-off RESOLVED:** the platform ALREADY has `daily_vol_5d/10d/20d/30d/60d` live — NO new simple
+  feature to ship. The study CONFIRMED the existing daily-vol features capture the predictable next-day vol
+  (IC ~0.32) and a GPU embedding adds nothing. A validation, not a gap.
+- **peer-GRAPH relational demean — DONE, DECISIVE NULL (no feature).** Graph-WEIGHTED demean vs uniform v1
+  cluster demean on tradeable forward returns (9.6M rows, 18 OOS days): **graph LOSES to uniform 4/4 cells**
+  (beats only its shuffle 3/4). Concentrating the demean on similar peers REMOVES forward signal vs flat broad
+  neutralization → `peer_relative`'s value IS the demean MECHANICS (neutralization breadth), not relational
+  structure. Artifacts: `experiments/gpu_peergraph/` (`gate_result.json`, `results.md`, `prereg.md`).
+- **EXHAUSTION SYNTHESIS (5 cycles) — the GPU-embedding-as-FEATURE hunt is DONE.** repr-2 (cohesion ↑, IC
+  flat) · day-ahead (predictable but already captured) · D3 + lead-lag (minute returns null both ways) ·
+  peer-graph (relational demean loses to uniform). Across DIRECT prediction AND RELATIONAL representation, no
+  GPU embedding beats simple features on forward-IC. **No shippable GPU feature in this space**; priors banked.
+- **STRATEGIC PIVOT (Lead): exploration PAUSED.** The GPU's near-term value is the eventual MODEL —
+  lightGBM/NN on the full TRUSTED feature set once the first trusted cohort grades (imminent, 06-17/06-18).
+  Stand by to build the model when the trusted feature set lands; stop mining exhausted wells.
 - **a2a58dd2 autoencoder run: still NO durable artifact** — UNVERIFIED, not-done.
 
-## RANKED QUEUE (representation = RELATIONAL structure; scalar-prediction targets retired)
+## RANKED QUEUE — feature-embedding exploration PAUSED (wells exhausted); the live job is the MODEL
 | # | Job | Image | Input | Output artifact (REQUIRED) | Rank rationale |
 |---|-----|-------|-------|----------------------------|----------------|
-| ~~R1 / D3 / lead-lag~~ DONE | minute-return prediction (3 variants) | — | — | their `*_result.json` | ALL NULL. Retired. |
-| ~~day-ahead embedding~~ DONE | per-symbol scalar day-ahead prediction | — | — | `gpu_dayahead/dayahead_result.json` | Embedding redundant vs simple trailing-vol; scalar-prediction is not the GPU's edge. |
-| 1 | **Coordinator: swap `behavioral_clusters_v1`→`v2` behind `peer_relative`; OOS-IC gate** | fp-ml (CPU) | `behavioral_clusters_v2.parquet` + labels | `peer_relative_v2_oos_ic.json` | repr-2 cohesion win is necessary not sufficient; OOS-IC decides. No GPU. |
-| 2 | **Coordinator/CPU: ship a daily TRAILING-REALIZED-VOL feature IF absent** (frozen nightly per-symbol static lookup; trailing `intraday_std`/`c2c_std`). | fp-ml (CPU) | daily panel | feature PR + held-out IC ~0.32 | The real day-ahead deliverable — simple, parity-trivial, predicts a real target. Check the feature set first; no GPU. |
-| 3 | **Sector/peer-GRAPH embedding** (GNN / contrastive over the co-movement graph) → an even-better cluster map than v2, same `peer_relative` slot. | fp-torch-gpu | daily co-movement matrix | `graph_embed_result.json` + held-out cohesion vs v2 | RELATIONAL structure = the GPU's actual edge. Ships into the existing parity-true slot (zero new columns), like v2. **Top GPU job.** |
-| 4 | **repr-2 channel ablation** (drop/add channels) → attribute + try to push the AE's +0.017 cohesion lift. | fp-torch-gpu | `experiments/gpu_repr2/out/profiles.npz` | `channel_ablation.json` | Cheap (<2 min), strengthens the one real GPU win. |
-| 5 | lightGBM-on-trusted (once first clean RTH day fills trusted_features) | fp-ml | trusted_features view | gbm_trusted_oos.json | waits on a clean day; CPU-ok, visibility. |
+| ~~minute / daily / relational embeddings~~ ALL DONE | 5 cycles | — | — | their `*_result.json` | Exhausted: no GPU embedding beats simple features on forward-IC. Retired. |
+| **1 (PRIMARY, waiting)** | **GPU MODEL: lightGBM/NN on the full TRUSTED feature set** | fp-ml / fp-torch-gpu | `trusted_features` view (first cohort grading 06-17/06-18) | `model_trusted_oos.json` + held-out IC/PnL | Where the 3090 actually earns its keep. BLOCKED on the trusted cohort; Lead re-engages MA when it lands. |
+| 2 | Coordinator (CPU, no GPU): repr-2 v1→v2 swap is DECLINED (v2-gate); keep v1. | — | — | (closed) | Recorded; not a GPU job. |
+| — | (Speculative feature-embedding jobs paused. Propose only a genuinely DIFFERENT GPU direction with a real prior — not prediction, not relational demean.) | | | | |
 
 ## Notes
 - No GPU job runs without committing a saved artifact path here. "Ran on the 3090" with no file = not done.
