@@ -75,3 +75,50 @@ def test_store_auto_prefers_backfill_then_stream(tmp_path: Path) -> None:
 def test_store_unknown_feature_raises(tmp_path: Path) -> None:
     with pytest.raises(KeyError):
         store.get_features(["does_not_exist"], "universe", BASE_MINUTE, BASE_MINUTE, tmp_path)
+
+
+def _ret1m_for(symbol: str, value: float, n: int = 5) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * n,
+            "minute": [BASE_MINUTE + timedelta(minutes=i) for i in range(n)],
+            "ret_1m": [value] * n,
+        }
+    )
+
+
+def test_sharded_backfill_chunks_union_not_clobber(tmp_path: Path) -> None:
+    """The chunked-sweep regression: writing DISJOINT symbol batches as separate shards into the same
+    (group, source=backfill, date) partition must UNION on read, not clobber. With the pre-fix single
+    ``data.parquet`` write, the second chunk overwrote the first and only its symbols survived — the bug
+    that collapsed the backfill side of every multi-chunk day to its last chunk."""
+    store.write_group(tmp_path, "price_returns", "1.0.0", "backfill", "2026-06-12", _ret1m_for("AAA", 1.0), shard=0)
+    store.write_group(tmp_path, "price_returns", "1.0.0", "backfill", "2026-06-12", _ret1m_for("BBB", 2.0), shard=1)
+    got = store.get_features(
+        ["ret_1m"], "universe", BASE_MINUTE, BASE_MINUTE + timedelta(minutes=4), tmp_path, source="backfill"
+    )
+    assert sorted(got["symbol"].unique().to_list()) == ["AAA", "BBB"]  # both chunks survive
+    assert got.height == 10  # 2 symbols x 5 minutes, neither chunk clobbered
+
+
+def test_clear_backfill_day_removes_only_that_day_and_source(tmp_path: Path) -> None:
+    """``clear_backfill_day`` deletes the day's backfill data files (all groups) so a re-sweep is a clean
+    replace, while leaving the STREAM side and OTHER days untouched."""
+    store.write_group(tmp_path, "price_returns", "1.0.0", "backfill", "2026-06-12", _ret1m_for("AAA", 1.0), shard=0)
+    store.write_group(tmp_path, "price_returns", "1.0.0", "backfill", "2026-06-12", _ret1m_for("BBB", 2.0), shard=1)
+    store.write_group(tmp_path, "price_returns", "1.0.0", "stream", "2026-06-12", _ret1m_for("CCC", 3.0))
+    store.write_group(tmp_path, "price_returns", "1.0.0", "backfill", "2026-06-13", _ret1m_for("DDD", 4.0))
+
+    removed = store.clear_backfill_day(tmp_path, "2026-06-12")
+    assert len(removed) == 2  # the two backfill shards for 06-12 only
+
+    after_bf = store.get_features(
+        ["ret_1m"], "universe", BASE_MINUTE, BASE_MINUTE + timedelta(minutes=4), tmp_path, source="backfill"
+    )
+    assert after_bf.filter(pl.col("symbol").is_in(["AAA", "BBB"]) & (pl.col("minute") < BASE_MINUTE + timedelta(days=1))).height == 0
+    # stream 06-12 and backfill 06-13 are untouched
+    stream = store.get_features(
+        ["ret_1m"], ["CCC"], BASE_MINUTE, BASE_MINUTE + timedelta(minutes=4), tmp_path, source="stream"
+    )
+    assert stream.height == 5
+    assert "DDD" in store.stream_symbols_on(tmp_path, "2026-06-13", source="backfill")

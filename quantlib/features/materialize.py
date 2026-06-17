@@ -31,18 +31,28 @@ DEFAULT_RAW_ROOT = "/store"
 
 
 def _write_all(
-    root: str, day: str, source: str, frames: dict, only_groups: list[str] | None = None
+    root: str,
+    day: str,
+    source: str,
+    frames: dict,
+    only_groups: list[str] | None = None,
+    shard: int | None = None,
 ) -> int:
     """Compute + write every runnable group for ``day``. ``only_groups`` scopes the write to a subset (the
     selective-backfill path: build the raw frames once, materialize JUST the requested groups) — None writes
     all runnable groups (the full materialize). Each (group, source, date) partition is written atomically.
+
+    ``shard`` names the output file ``data-<shard>.parquet`` instead of the single ``data.parquet``, so
+    DISJOINT symbol batches written to the SAME (group, source, date) partition UNION on read instead of
+    clobbering each other (the chunked-sweep path: each 200-symbol chunk is a shard). ``shard=None`` writes
+    the single ``data.parquet`` (whole-partition backfill / repair) — unchanged behaviour.
     """
     ctx = BatchContext(frames=frames)
     for group in runnable(frames):
         if only_groups is not None and group.name not in only_groups:
             continue
         out = run_group(group, ctx, validate=False)
-        store.write_group(root, group.name, group.version, source, day, out)
+        store.write_group(root, group.name, group.version, source, day, out, shard=shard)
         print(f"wrote group={group.name} source={source} date={day}: {out.height} rows")
     return (
         frames["minute_agg"]["symbol"].n_unique() if frames["minute_agg"].height else 0
@@ -61,29 +71,33 @@ def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
     return _write_all(root, day, "backfill", frames)
 
 
-def materialize_from_raw(root: str, raw_root: str, day: str, symbols: list[str]) -> int:
+def materialize_from_raw(
+    root: str, raw_root: str, day: str, symbols: list[str], shard: int | None = None
+) -> int:
     """Materialize bar features by READING the already-downloaded ``/store/raw`` minute bars instead of
     re-fetching them from Alpaca — the MATERIALIZE stage of the acquire/materialize segregation. The
     raw minute bars come from ``load_raw_minute_agg`` (download-once); ``daily`` still comes from
-    ``backfill_daily`` (daily history is NOT in ``/store/raw``) and ``reference`` from the DB. Returns
-    the symbol count materialized."""
+    ``backfill_daily`` (daily history is NOT in ``/store/raw``) and ``reference`` from the DB. ``shard``
+    (the chunked-sweep batch index) writes ``data-<shard>.parquet`` so disjoint chunks union on read.
+    Returns the symbol count materialized."""
     frames = {
         "minute_agg": load_raw_minute_agg(raw_root, day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
     }
-    return _write_all(root, day, "backfill", frames)
+    return _write_all(root, day, "backfill", frames, shard=shard)
 
 
 def materialize_from_raw_full(
-    root: str, raw_root: str, day: str, symbols: list[str]
+    root: str, raw_root: str, day: str, symbols: list[str], shard: int | None = None
 ) -> int:
     """Like ``materialize_from_raw`` but ALSO reads ``/store/raw/trades`` + ``/store/raw/quotes`` and
     enriches ``minute_agg`` with the per-minute tick columns (n_trades, signed_volume, spread, imbalance,
     book sizes) and supplies the per-trade ``trades`` frame — so the ORDER-FLOW groups (trade_flow,
     quote_spread, liquidity, signed_trade_ratio, tick_runlength, microstructure_burst) become runnable and
     write a backfill side. This is the materialize the parity sweep needs to validate the tick/quote
-    features; the bar-only ``materialize_from_raw`` cannot produce them. Returns the symbol count.
+    features; the bar-only ``materialize_from_raw`` cannot produce them. ``shard`` (the chunked-sweep batch
+    index) writes ``data-<shard>.parquet`` so disjoint chunks union on read. Returns the symbol count.
     """
     bars = load_raw_minute_agg(raw_root, day, symbols)
     frames = {
@@ -92,7 +106,7 @@ def materialize_from_raw_full(
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
     }
-    return _write_all(root, day, "backfill", frames)
+    return _write_all(root, day, "backfill", frames, shard=shard)
 
 
 def materialize_from_raw_groups(

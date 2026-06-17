@@ -144,15 +144,20 @@ def sweep_day(
     if not discovered:
         return {"day": day, "discovered": 0, "note": "no source=stream symbols collected — nothing to sweep"}
 
+    # Clear the day's backfill side before rewriting it: each chunk writes its OWN sharded file
+    # (data-<chunk>.parquet) so disjoint chunks UNION on read instead of clobbering a shared data.parquet.
+    # Without this clear-then-shard, only the last chunk's symbols survived on disk — collapsing the clean
+    # breadth the cleanliness/grading step reads at end-of-day and starving the whole trust frontier.
+    store.clear_backfill_day(feature_root, day)
     materialized: list[str] = []
     no_raw: list[str] = []
-    for batch in _chunks(discovered, chunk):
+    for chunk_index, batch in enumerate(_chunks(discovered, chunk)):
         # PIN the market tickers into the materialize+validate scope so the cross-sectional features have
         # their backfill market reference (see MARKET_TICKERS). They are deduped against the batch and only
         # the DISCOVERED symbols are accounted in materialized/no_raw — the market tickers are reference
         # symbols, not part of the day's collected universe being certified.
         scope = batch + [ticker for ticker in MARKET_TICKERS if ticker not in batch]
-        materialize(feature_root, raw_root, day, scope)
+        materialize(feature_root, raw_root, day, scope, shard=chunk_index)
         present = store.stream_symbols_on(feature_root, day, source="backfill")
         present_set = set(present)
         materialized.extend([symbol for symbol in batch if symbol in present_set])
