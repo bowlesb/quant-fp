@@ -154,3 +154,19 @@ NOT catch:
   small-sample bias / residual leakage and the headline CI is UNTRUSTWORTHY — treat as KILL, not KEEP.
 - And the megacap check: a real cross-sectional ML edge is STRONGEST in the cleanest (megacap) universe; if
   it only appears in the broad universe and vanishes/flips in megacaps, it's broad-universe overfit.
+
+## 10. polars `drop_nulls` does NOT drop NaN — guard forward-return panels (2026-06-16, W14)
+
+Forward returns are NaN for the last H rows of each symbol (no future bar). In polars, `null` and `NaN` are
+DISTINCT: `.drop_nulls()` removes nulls but KEEPS NaN. So a panel filtered with `.drop_nulls(["fwd_ret"])`
+can still carry NaN forward returns, which then silently corrupt means / ICs / bootstraps (NaN propagates or
+gets mis-handled). Caught in W14 (it would have biased the burst-drift numbers).
+
+**The rule.** When a column can be NaN (any forward/lagged return computed by shift + divide), filter with an
+EXPLICIT finite check, not just drop_nulls:
+- `frame.filter(pl.col("fwd_ret").is_finite())` (is_finite is False for both NaN and inf), OR
+- `frame.filter(pl.col("fwd_ret").is_not_null() & pl.col("fwd_ret").is_not_nan())`.
+And the numpy-side metric helpers must mask `np.isfinite` (the hf_metrics_fixed spearman/bootstrap already do).
+Pair this with pitfall #1 (the Int8 `hour*60` RTH-filter overflow — also re-caught in W13 and W14): both are
+silent-corruption traps in the bars→panel step that every explorer hits. Cast minute math to Int32 and
+finite-filter every return column before scoring.
