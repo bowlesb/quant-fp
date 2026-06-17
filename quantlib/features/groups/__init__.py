@@ -26,6 +26,7 @@ from quantlib.features.groups import (  # noqa: F401
     multi_day,
     multi_day_vwap,
     ohlc_vol,
+    overnight_beta,
     overnight_intraday_split,
     peer_relative,
     price_levels,
