@@ -1,0 +1,49 @@
+{
+  "test_cut": "2026-05-21",
+  "cells": [
+    {
+      "ret_window": 5,
+      "fwd_horizon": 5,
+      "n": 1819041,
+      "uniform_ic": -0.01986,
+      "graph_ic": -0.01503,
+      "shuffle_ic": -0.01567,
+      "graph_beats_uniform": false,
+      "graph_beats_shuffle": false
+    },
+    {
+      "ret_window": 5,
+      "fwd_horizon": 30,
+      "n": 1666173,
+      "uniform_ic": -0.00992,
+      "graph_ic": -0.00721,
+      "shuffle_ic": -0.0068,
+      "graph_beats_uniform": false,
+      "graph_beats_shuffle": true
+    },
+    {
+      "ret_window": 30,
+      "fwd_horizon": 5,
+      "n": 1666173,
+      "uniform_ic": -0.00853,
+      "graph_ic": -0.00571,
+      "shuffle_ic": -0.00511,
+      "graph_beats_uniform": false,
+      "graph_beats_shuffle": true
+    },
+    {
+      "ret_window": 30,
+      "fwd_horizon": 30,
+      "n": 1513543,
+      "uniform_ic": -0.00672,
+      "graph_ic": -0.00378,
+      "shuffle_ic": -0.00136,
+      "graph_beats_uniform": false,
+      "graph_beats_shuffle": true
+    }
+  ],
+  "graph_beats_uniform_cells": "0/4",
+  "graph_beats_shuffle_cells": "3/4",
+  "ship_graph_feature": false,
+  "verdict": "NO SHIP \u2014 graph weighting adds no forward-IC beyond uniform/shuffle (decisive negative)"
+}
