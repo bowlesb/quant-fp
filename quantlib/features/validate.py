@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import polars as pl
@@ -262,28 +263,55 @@ def _scope_tiers(tiers: pl.DataFrame, scope_symbols: list[str] | None) -> pl.Dat
     return scoped
 
 
-def validate(
-    feature_root: str,
-    day: str,
-    val_root: str,
-    allow_today: bool = False,
-    symbols: list[str] | None = None,
-) -> pl.DataFrame:
-    """Validate one settled day's stored stream vs backfill, write the ledger, recompute trust, return it.
+@dataclass
+class CompareResult:
+    """The three durable frames a comparison pass produces, BEFORE persistence: the per-(version,
+    feature, day) trust rollup, the per-(feature, symbol) cell rollup, and the diverging-cell
+    exceptions. A split sweep (cross-sectional groups full-universe + per-symbol groups gradable-set)
+    produces one of these per scope and CONCATENATES them, so each feature is graded against the
+    backfill scope that makes its comparison fair — then persisted once."""
 
-    ``symbols`` restricts the comparison to a small SCOPE of symbols (e.g. ~10 liquid names) — the
-    symbol filter is pushed into the store reads, so only those partitions are loaded (the full-root
-    load is the OOM the scope avoids). ``None`` keeps the full-universe run. A scoped run still PINS to
-    the day's tier membership, just over the scoped subset."""
-    assert_settled(day, allow_today)
-    specs = {spec.name: spec for _, spec in REGISTRY.feature_specs()}
-    version_of = {spec.name: group.version for group, spec in REGISTRY.feature_specs()}
-    nan_policy_of = {name: spec.nan_policy for name, spec in specs.items()}
+    feature_day: pl.DataFrame
+    cell: pl.DataFrame
+    exceptions: pl.DataFrame
+
+
+def empty_result() -> CompareResult:
+    """A no-comparison result (all three frames empty). The sweep uses it to SKIP a scope's grade — e.g. the
+    cross-sectional groups on a gather-fragmented day — so those features contribute no clean comparison
+    (they stay PENDING) rather than being graded against a backfill scope the contaminated stream can't
+    match. ``merge_results`` drops empty frames, so this merges in as a no-op."""
+    return CompareResult(feature_day=pl.DataFrame(), cell=pl.DataFrame(), exceptions=pl.DataFrame())
+
+
+def scoped_tiers(day: str, symbols: list[str] | None = None) -> tuple[list[str], pl.DataFrame]:
+    """The day's universe membership pinned to ``symbols`` (None = full universe), returning
+    ``(scope_symbols, tiers)`` for ``compare_groups``. Centralizes the membership pin both the sweep
+    (cross-sectional full-universe + gradable-set scopes) and ``validate`` use."""
     tiers = load_tiers(day)
     if tiers.height == 0:
         raise ValueError(f"no universe membership for {day} — cannot validate (build_universe must have run)")
     tiers = _scope_tiers(tiers, symbols)
-    scope_symbols = tiers["symbol"].to_list()  # PIN both sides to the day's universe membership (scoped)
+    return tiers["symbol"].to_list(), tiers
+
+
+def compare_groups(
+    feature_root: str,
+    day: str,
+    scope_symbols: list[str],
+    tiers: pl.DataFrame,
+    groups: list[str] | None = None,
+) -> CompareResult:
+    """Compare stream vs backfill for ``groups`` (None = all registered groups) over ``scope_symbols``,
+    returning the durable rollup/cell/exceptions frames WITHOUT persisting them.
+
+    Splitting compute from persistence lets the sweep grade cross-sectional (universe-reduce) groups
+    against a FULL-UNIVERSE backfill while grading per-symbol/tick groups against the gradable set, then
+    union the two results into one set of writes. ``tiers`` is the day's universe membership (already
+    scoped to ``scope_symbols`` by the caller); both sides are pinned to it."""
+    specs = {spec.name: spec for _, spec in REGISTRY.feature_specs()}
+    version_of = {spec.name: group.version for group, spec in REGISTRY.feature_specs()}
+    nan_policy_of = {name: spec.nan_policy for name, spec in specs.items()}
     start = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), tzinfo=timezone.utc)
     end = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), 23, 59, 59, tzinfo=timezone.utc)
 
@@ -292,6 +320,8 @@ def validate(
     cell_blocks: list[pl.DataFrame] = []
     exception_blocks: list[pl.DataFrame] = []
     for group in REGISTRY.groups():
+        if groups is not None and group.name not in groups:
+            continue
         feats = [spec.name for spec in group.declare()]
         backfill = store.get_features(feats, scope_symbols, start, end, feature_root, source="backfill")
         if backfill.height == 0:
@@ -320,20 +350,66 @@ def validate(
             )
 
     feature_day = _assemble_feature_day(feature_day_rows, dist_rows)
-    if feature_day.height == 0:
-        raise ValueError(f"no group had settled backfill for {day} — nothing validated")
-
-    if cell_blocks:
-        validation_store.write_cell(val_root, day, pl.concat(cell_blocks))
+    cell = pl.concat(cell_blocks) if cell_blocks else pl.DataFrame()
     non_empty_exc = [block for block in exception_blocks if block.height]
     exceptions = pl.concat(non_empty_exc) if non_empty_exc else pl.DataFrame()
-    if exceptions.height:
-        validation_store.write_exceptions(val_root, day, exceptions)
-    validation_store.upsert_feature_day(val_root, feature_day)  # parquet: cross-day accumulation source
+    return CompareResult(feature_day=feature_day, cell=cell, exceptions=exceptions)
+
+
+def merge_results(results: list[CompareResult]) -> CompareResult:
+    """Concatenate disjoint-group comparison results into one. The sweep grades cross-sectional groups in
+    one pass (full-universe scope) and the rest in another (gradable-set scope); the group sets are
+    disjoint, so concatenating their frames yields the complete day with no feature double-counted."""
+    non_empty = lambda frames: [frame for frame in frames if frame.height]  # noqa: E731
+    feature_day = non_empty([result.feature_day for result in results])
+    cell = non_empty([result.cell for result in results])
+    exceptions = non_empty([result.exceptions for result in results])
+    return CompareResult(
+        feature_day=pl.concat(feature_day) if feature_day else pl.DataFrame(),
+        cell=pl.concat(cell) if cell else pl.DataFrame(),
+        exceptions=pl.concat(exceptions) if exceptions else pl.DataFrame(),
+    )
+
+
+def persist_validation(
+    val_root: str, day: str, result: CompareResult
+) -> pl.DataFrame:
+    """Persist a (possibly merged) comparison result: write the cell + exceptions layers, upsert the
+    per-feature-day rollup, recompute + write trust, and write the canonical Postgres record. Returns the
+    recomputed trust frame. ``write_cell``/``upsert_feature_day`` are whole-day replaces, so the caller
+    must pass the COMPLETE day's result (the union of every scope) in ONE call."""
+    if result.feature_day.height == 0:
+        raise ValueError(f"no group had settled backfill for {day} — nothing validated")
+    if result.cell.height:
+        validation_store.write_cell(val_root, day, result.cell)
+    if result.exceptions.height:
+        validation_store.write_exceptions(val_root, day, result.exceptions)
+    validation_store.upsert_feature_day(val_root, result.feature_day)  # parquet: cross-day accumulation source
     trust = recompute_trust(validation_store.read_feature_day(val_root))
     validation_store.write_trust(val_root, trust)
-    validation_db.write_validation(feature_day, trust, exceptions, day)  # Postgres: canonical record store
+    validation_db.write_validation(result.feature_day, trust, result.exceptions, day)  # Postgres canonical record
     return trust
+
+
+def validate(
+    feature_root: str,
+    day: str,
+    val_root: str,
+    allow_today: bool = False,
+    symbols: list[str] | None = None,
+    groups: list[str] | None = None,
+) -> pl.DataFrame:
+    """Validate one settled day's stored stream vs backfill, write the ledger, recompute trust, return it.
+
+    ``symbols`` restricts the comparison to a small SCOPE of symbols (e.g. ~10 liquid names) — the
+    symbol filter is pushed into the store reads, so only those partitions are loaded (the full-root
+    load is the OOM the scope avoids). ``None`` keeps the full-universe run. A scoped run still PINS to
+    the day's tier membership, just over the scoped subset. ``groups`` restricts the comparison to a
+    subset of registered groups (None = all)."""
+    assert_settled(day, allow_today)
+    scope_symbols, tiers = scoped_tiers(day, symbols)  # PIN both sides to the day's universe membership
+    result = compare_groups(feature_root, day, scope_symbols, tiers, groups=groups)
+    return persist_validation(val_root, day, result)
 
 
 _COUNT_COLUMNS = ("n_compared", "n_match", "n_mismatch", "n_extra_live", "n_missing_live")

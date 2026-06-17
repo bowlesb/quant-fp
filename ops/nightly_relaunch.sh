@@ -87,8 +87,14 @@ build_run_cmd() {
   [ -n "$restart" ] || restart="unless-stopped"
   [ -n "$workdir" ] || workdir="/app"
 
+  # Warm-start is OPT-IN (WARM_START=1), default OFF. Reason: warm_start_ring seeds a BAR-ONLY (7-col) ring
+  # but live capture is TICK-ENRICHED (13-col), so FP_WARM_START=1 currently crashes the shard workers
+  # (ShapeError) and silently drops all per-symbol capture (2026-06-17). Until the ring-schema bug is fixed,
+  # the cron relaunches WITHOUT warm-start (cold ring, but capture WORKS); re-enable with WARM_START=1 once
+  # the schema fix lands. Cross-sectional + daily-frame features are clean from minute one either way.
   local cmd=(docker run -d --name "$CONTAINER" --restart "$restart" --network "$network"
-             --env-file "$ENV_FILE" -e FP_WARM_START=1 -w "$workdir")
+             --env-file "$ENV_FILE" -w "$workdir")
+  [ "${WARM_START:-0}" = "1" ] && cmd+=(-e FP_WARM_START=1)
   if docker inspect "$CONTAINER" >/dev/null 2>&1; then
     # Reproduce each mount (bind: host path; volume: volume name) -> destination, preserving ro/rw.
     while IFS=$'\t' read -r mtype source dest rw; do

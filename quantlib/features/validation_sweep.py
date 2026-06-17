@@ -29,13 +29,24 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+from typing import Callable
 
 import polars as pl
 
 from quantlib.features import store, trust_lifecycle, validate as validate_mod, validation_store
-from quantlib.features.cleanliness import clean_symbols, symbol_day_cleanliness
+from quantlib.features.base import FeatureType
+from quantlib.features.cleanliness import (
+    clean_symbols,
+    gather_coherence,
+    symbol_day_cleanliness,
+)
 from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
-from quantlib.features.materialize import DEFAULT_RAW_ROOT, materialize_from_raw, materialize_from_raw_full
+from quantlib.features.materialize import (
+    DEFAULT_RAW_ROOT,
+    materialize_from_raw,
+    materialize_from_raw_bar_groups,
+    materialize_from_raw_full,
+)
 from quantlib.features.registry import REGISTRY
 from quantlib.features.session import rth_mask
 from quantlib.features.trust_lifecycle import (
@@ -49,7 +60,12 @@ from quantlib.data.raw_backfill import trading_client, trading_days
 # Bar features that are non-null at every minute a bar printed (present in BOTH stream and backfill) —
 # their per-minute presence is the minute-coverage signal the cleanliness heuristic reads.
 COVERAGE_FEATURES = ["ret_1m"]
-DEFAULT_CHUNK = 200
+DEFAULT_CHUNK = 500
+# A market-wide breadth scalar broadcast IDENTICALLY to every symbol's row each minute — the gather-coherence
+# probe. One distinct value per minute in a clean single-gather capture; >1 means the universe-wide gather
+# fragmented (a restart / SIP-contention day's concurrent partial-universe gathers). Read from the live
+# stream over the whole universe and fed to ``cleanliness.gather_coherence``.
+GATHER_COHERENCE_FEATURE = "breadth_up_5m"
 # The market-context tickers (SPY/QQQ) the cross-sectional features regress against. They are screened out
 # of the raw-backfill UNIVERSE (is_etf_like), so a materialize chunk that lacks them produces a NULL market
 # return for the whole chunk and every market-relative feature (market_beta/market_corr/idio_vol/
@@ -63,6 +79,39 @@ MARKET_TICKERS: tuple[str, ...] = tuple(sorted(set(MARKET_INDICES.values())))
 # PENDING for it — exactly "not enough clean comparisons" in the lifecycle. A normal day has thousands of
 # clean liquid names, so this only ever suppresses pathologically contaminated days.
 MIN_CLEAN_SYMBOLS = 20
+
+# UNIVERSE-REDUCE (cross-sectional) groups: a symbol's value is a reduction over the WHOLE universe present
+# that minute (a breadth fraction, a percentile rank, a dispersion stat, a peer demean), so it can ONLY be
+# reproduced when the SAME symbol set is present both sides. The gradable-set PASS-2 backfill is a ~92-symbol
+# subset of the full-universe live stream, so these mis-grade as ~0.000 DIVERGENT there — a SCOPE artifact,
+# not a real divergence. They are validated against the FULL-UNIVERSE PASS-1 (bar-only) backfill instead,
+# where the present-set matches the stream by construction. They need only bars (close/volume), never ticks,
+# so PASS 1 already produces everything they require.
+#
+# The structural signal is FeatureType.CROSS_SECTIONAL — but that family ALSO contains the REFERENCE-relative
+# groups (market_context, market_beta), whose values regress each symbol against a FIXED reference (SPY/QQQ)
+# and are INVARIANT to which OTHER universe symbols are present. Those already validate on the gradable set
+# (the MARKET_TICKERS pin supplies their reference) and are deep-window — NOT universe-reduce — so they are
+# excluded here. This exclusion list is the one piece that isn't purely structural (the enum cannot tell a
+# universe reduce from a reference regression); kept explicit and documented per the parity-trust playbook.
+REFERENCE_RELATIVE_GROUPS: frozenset[str] = frozenset({"market_context", "market_beta"})
+
+
+def cross_sectional_groups() -> list[str]:
+    """The universe-reduce group names: every FeatureType.CROSS_SECTIONAL group MINUS the reference-relative
+    ones (see REFERENCE_RELATIVE_GROUPS). Derived from the registry so a NEW universe-reduce group is picked
+    up automatically by declaring ``type = FeatureType.CROSS_SECTIONAL`` (and, if it is reference-relative
+    rather than a universe reduce, by adding its name to REFERENCE_RELATIVE_GROUPS)."""
+    return [
+        group.name
+        for group in REGISTRY.groups()
+        if group.type == FeatureType.CROSS_SECTIONAL and group.name not in REFERENCE_RELATIVE_GROUPS
+    ]
+
+
+# A from-raw materialize: (feature_root, raw_root, day, symbols, shard) -> symbols materialized. Both
+# materialize_from_raw (bar-only, cheap) and materialize_from_raw_full (full tick tape) match this shape.
+MaterializeFn = Callable[..., int]
 
 
 def last_market_day(today: dt.date | None = None) -> str:
@@ -105,6 +154,18 @@ def day_cleanliness(feature_root: str, day: str, symbols: list[str]) -> pl.DataF
     return symbol_day_cleanliness(joined)
 
 
+def day_gather_coherence(feature_root: str, day: str, symbols: list[str]) -> dict[str, float | int | bool]:
+    """Day-level GATHER-COHERENCE verdict from the live broadcast breadth scalar (see
+    ``cleanliness.gather_coherence``). Reads ONLY the one ``GATHER_COHERENCE_FEATURE`` column over the
+    discovered universe (the broadcast scalar is one number per minute, so this is small), RTH-masked by the
+    coherence check itself. A fragmented day (>1 distinct broadcast value across many minutes) cannot fairly
+    grade the universe-reduce features — the gate uses ``is_coherent``. Empty (no breadth captured) is
+    vacuously coherent — the per-symbol cleanliness still gates grading."""
+    start, end = _day_bounds(day)
+    stream = store.get_features([GATHER_COHERENCE_FEATURE], symbols, start, end, feature_root, source="stream")
+    return gather_coherence(stream, GATHER_COHERENCE_FEATURE)
+
+
 def _registry_maps() -> tuple[dict[str, str], dict[str, str]]:
     group_of = {spec.name: group.name for group, spec in REGISTRY.feature_specs()}
     version_of = {spec.name: group.version for group, spec in REGISTRY.feature_specs()}
@@ -114,6 +175,37 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, str]]:
 def _build_clean_history(cell: pl.DataFrame, cleanliness: pl.DataFrame, day: str) -> pl.DataFrame:
     """The CLEAN per-(feature, day) comparison rows for one day from its cell rollup + cleanliness."""
     return clean_feature_day(cell, clean_symbols(cleanliness), day)
+
+
+def _materialize_chunks(
+    materialize: MaterializeFn,
+    feature_root: str,
+    raw_root: str,
+    day: str,
+    symbols: list[str],
+    chunk: int,
+) -> tuple[list[str], list[str]]:
+    """Materialize the backfill side for ``symbols`` in CHUNKS (sharded so disjoint chunks union on read),
+    pinning the market reference tickers into every chunk. The caller clears the day's backfill side BEFORE
+    calling (clean replace), then validates the union once (see ``sweep_day``).
+
+    Returns ``(materialized, no_raw)`` — which requested symbols produced a backfill side vs had no
+    ``/store/raw`` partition. Chunking bounds peak memory (a ~10k-symbol day never loads at once); the
+    per-file shard (``data-<chunk>.parquet``) makes the chunks union on read instead of clobbering.
+    """
+    materialized: list[str] = []
+    no_raw: list[str] = []
+    for chunk_index, batch in enumerate(_chunks(symbols, chunk)):
+        # PIN the market tickers into the materialize scope so the cross-sectional features have their
+        # backfill market reference (see MARKET_TICKERS). They are deduped against the batch and only the
+        # requested symbols are accounted in materialized/no_raw — the market tickers are reference symbols,
+        # not part of the universe being certified.
+        scope = batch + [ticker for ticker in MARKET_TICKERS if ticker not in batch]
+        materialize(feature_root, raw_root, day, scope, shard=chunk_index)
+        present_set = set(store.stream_symbols_on(feature_root, day, source="backfill"))
+        materialized.extend([symbol for symbol in batch if symbol in present_set])
+        no_raw.extend([symbol for symbol in batch if symbol not in present_set])
+    return materialized, no_raw
 
 
 def sweep_day(
@@ -135,51 +227,58 @@ def sweep_day(
     quotes), so the order-flow groups (trade_flow / quote_spread / liquidity / signed_trade_ratio /
     tick_runlength / microstructure_burst) get a backfill side and their features are validated. Set False
     for a bar-only sweep (faster, but the tick/quote features stay PENDING — no backfill to compare).
+
+    GRADABLE-SET TWO-PASS (the speedup). Grading only ever consults symbols that are BOTH clean-streamed
+    AND have raw — the "gradable set". Materializing the full tick tape for all ~10k discovered symbols (of
+    which ~6k are capture-contaminated and ~3.6k have no raw) wastes the bulk of the sweep on symbols whose
+    backfill never enters a grade. So we split the work:
+      PASS 1 (cheap, bar-only, ALL symbols): materialize only the bar features (``materialize_from_raw``)
+        — enough to compute ``ret_1m`` minute coverage and therefore cleanliness. This decides the gradable
+        set. A symbol with no raw bars is simply absent (no_raw).
+      CROSS-SECTIONAL grade (full-universe, off pass 1): the universe-reduce groups (breadth_* / *_rank /
+        dispersion / peer — see ``cross_sectional_groups``) value a symbol by a reduction over the WHOLE
+        present universe, so they only reproduce the live stream when the SAME symbols are present both
+        sides. They are graded against the FULL-UNIVERSE pass-1 bar-only backfill (where the present-set
+        matches the stream); the gradable subset would mis-grade them ~0.000 (a SCOPE artifact). They need
+        only bars, so pass 1 already produced everything they require.
+      PASS 2 (full tape, GRADABLE SET ONLY): clear the day, re-materialize the clean symbols from the FULL
+        tick tape (``materialize_from_raw_full`` when with_ticks) and grade the PER-SYMBOL + tick groups
+        (everything except the cross-sectional groups). The order-flow groups get their backfill side for
+        exactly the symbols that will be graded.
+    The two group sets are disjoint; their results are merged and persisted ONCE. Parity is unchanged: the
+    same clean symbols are graded against the same backfill scope that makes each comparison fair; only the
+    never-graded contaminated/no-raw symbols are spared the expensive tick read. On a too-contaminated day
+    (clean breadth < MIN_CLEAN_SYMBOLS) pass 2 is skipped entirely (and so is the cross-sectional grade).
     """
     validate_mod.assert_settled(day, allow_today)
-    materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
+    full_materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
     discovered = store.stream_symbols_on(feature_root, day)
     if max_symbols is not None:
         discovered = discovered[:max_symbols]
     if not discovered:
         return {"day": day, "discovered": 0, "note": "no source=stream symbols collected — nothing to sweep"}
 
-    # Clear the day's backfill side before rewriting it: each chunk writes its OWN sharded file
-    # (data-<chunk>.parquet) so disjoint chunks UNION on read instead of clobbering a shared data.parquet.
-    # Without this clear-then-shard, only the last chunk's symbols survived on disk — collapsing the clean
-    # breadth the cleanliness/grading step reads at end-of-day and starving the whole trust frontier.
+    # PASS 1 — cheap bar-only materialize over ALL discovered symbols to determine the gradable set. Clear
+    # the day's backfill side first so each chunk's sharded file (data-<chunk>.parquet) unions cleanly on
+    # read instead of colliding with a prior run's files.
     store.clear_backfill_day(feature_root, day)
-    materialized: list[str] = []
-    no_raw: list[str] = []
-    for chunk_index, batch in enumerate(_chunks(discovered, chunk)):
-        # PIN the market tickers into the materialize+validate scope so the cross-sectional features have
-        # their backfill market reference (see MARKET_TICKERS). They are deduped against the batch and only
-        # the DISCOVERED symbols are accounted in materialized/no_raw — the market tickers are reference
-        # symbols, not part of the day's collected universe being certified.
-        scope = batch + [ticker for ticker in MARKET_TICKERS if ticker not in batch]
-        materialize(feature_root, raw_root, day, scope, shard=chunk_index)
-        present = store.stream_symbols_on(feature_root, day, source="backfill")
-        present_set = set(present)
-        materialized.extend([symbol for symbol in batch if symbol in present_set])
-        no_raw.extend([symbol for symbol in batch if symbol not in present_set])
-        validate_mod.validate(feature_root, day, val_root, allow_today=allow_today, symbols=scope)
-
-    cell = validation_store.read_cell(val_root, day)
-    exceptions = validation_store.read_exceptions(val_root, day)
+    _, no_raw = _materialize_chunks(materialize_from_raw, feature_root, raw_root, day, discovered, chunk)
     cleanliness = day_cleanliness(feature_root, day, discovered)
     clean_count = int(cleanliness["is_clean"].sum()) if cleanliness.height else 0
     contaminated = (cleanliness.height - clean_count) if cleanliness.height else 0
+    gradable = clean_symbols(cleanliness)
 
     # Insufficient clean breadth -> the day is too contaminated to be a fair parity test. Record the
     # per-symbol cleanliness (the audit trail) but contribute NO clean-day grade, so no feature is condemned
-    # off a handful of marginal survivors. Features simply stay PENDING for this day.
+    # off a handful of marginal survivors. Features simply stay PENDING for this day. Both the cross-sectional
+    # grade and the expensive full-tape PASS 2 are skipped — neither runs on a day that can't grade.
     group_of, version_of = _registry_maps()
     if clean_count < MIN_CLEAN_SYMBOLS:
         trust_lifecycle.write_lifecycle(pl.DataFrame(), [], cleanliness, version_of, day)
         return {
             "day": day,
             "discovered": len(discovered),
-            "materialized": len(materialized),
+            "materialized": 0,
             "no_raw_skipped": len(no_raw),
             "no_raw_examples": no_raw[:10],
             "clean_symbols": clean_count,
@@ -189,6 +288,63 @@ def sweep_day(
             "contaminated to grade; features stay PENDING (no defects filed)",
         }
 
+    # GATHER-COHERENCE gate — is the live universe-wide gather coherent (one breadth scalar per minute), or
+    # did it FRAGMENT into concurrent partial-universe gathers (a restart / SIP-contention day)? On a
+    # fragmented day the live cross-sectional values are partial-universe reductions the single full-universe
+    # backfill can never match, so grading them manufactures false DIVERGENT verdicts — the exact 2026-06-15
+    # failure the per-symbol coverage check cannot see (every symbol still has a row, just a partial value).
+    # When fragmented we SKIP the cross-sectional grade entirely: those features stay PENDING for the day
+    # (no clean comparison) rather than being condemned. The per-symbol / tick PASS 2 still runs — the
+    # well-behaved per-symbol features (daily_return, sector flags) earn their clean-day grade regardless.
+    coherence = day_gather_coherence(feature_root, day, discovered)
+    xsec_groups = cross_sectional_groups()
+    if coherence["is_coherent"]:
+        # CROSS-SECTIONAL grade — graded against a FULL-UNIVERSE, SINGLE-COMPUTE backfill, BEFORE pass 2 clears
+        # the day. Universe-reduce features (breadth_* / *_rank / dispersion / peer) value a symbol by a
+        # reduction over the whole present universe, so the backfill compute MUST see EVERY symbol at once —
+        # pass 1's CHUNKED materialize computes a separate partial-universe reduction per 500-symbol chunk (a
+        # 500-name breadth, not a full-universe one), which the full-universe live gather can never match. So
+        # re-materialize JUST these groups, bar-only and UN-CHUNKED, over the full discovered universe, clearing
+        # their chunked pass-1 partitions first so the single-file write is a clean replace (not a union with
+        # the chunk shards). They read only bars, so this skips the tick tape. The clean-symbol grade is taken
+        # later from the clean cells.
+        store.clear_backfill_groups_day(feature_root, day, xsec_groups)
+        xsec_scope, xsec_tiers = validate_mod.scoped_tiers(day, discovered)
+        materialize_from_raw_bar_groups(feature_root, raw_root, day, xsec_scope, only_groups=xsec_groups)
+        xsec_result = validate_mod.compare_groups(
+            feature_root, day, xsec_scope, xsec_tiers, groups=xsec_groups
+        )
+    else:
+        xsec_result = validate_mod.empty_result()
+
+    # PASS 2 — full-tape materialize over the GRADABLE SET ONLY, then validate the PER-SYMBOL + tick groups
+    # (everything EXCEPT the cross-sectional groups already graded full-universe above). Re-clear the day so
+    # the cheap bar-only pass-1 files are replaced by the full-tick backfill for the clean symbols (the
+    # order-flow groups need the tick tape). The clean symbols all have raw bars by construction (cleanliness
+    # requires backfill-present minutes), so this pass produces no further no_raw.
+    store.clear_backfill_day(feature_root, day)
+    materialized, _ = _materialize_chunks(full_materialize, feature_root, raw_root, day, gradable, chunk)
+    # ONE compare over the full gradable scope: a per-chunk validate would only retain the last chunk in the
+    # whole-day-replace cell store and cap the grade. Comparing the union once builds the complete cell rows;
+    # the per-group read inside ``compare_groups`` (one group's features at a time, symbol-filter pushed
+    # down) keeps it memory-bounded. The market tickers are pinned so the reference-relative features resolve
+    # their SPY/QQQ reference. The cross-sectional groups are EXCLUDED here (graded full-universe in pass 1).
+    grade_scope = gradable + [ticker for ticker in MARKET_TICKERS if ticker not in gradable]
+    per_symbol_groups = [group.name for group in REGISTRY.groups() if group.name not in set(xsec_groups)]
+    per_symbol_scope, per_symbol_tiers = validate_mod.scoped_tiers(day, grade_scope)
+    per_symbol_result = validate_mod.compare_groups(
+        feature_root, day, per_symbol_scope, per_symbol_tiers, groups=per_symbol_groups
+    )
+
+    # Merge the full-universe cross-sectional grade with the gradable-set per-symbol/tick grade and persist
+    # ONCE — the two group sets are disjoint, so each feature is graded against the backfill scope that makes
+    # its comparison fair, with no feature double-counted.
+    validate_mod.persist_validation(
+        val_root, day, validate_mod.merge_results([xsec_result, per_symbol_result])
+    )
+
+    cell = validation_store.read_cell(val_root, day)
+    exceptions = validation_store.read_exceptions(val_root, day)
     clean_history_today = _build_clean_history(cell, cleanliness, day)
     history = validation_store.read_feature_day(val_root)  # for cross-day context (legacy trust source)
     states = lifecycle_state(clean_history_today, retired_features())
@@ -204,6 +360,9 @@ def sweep_day(
         "no_raw_examples": no_raw[:10],
         "clean_symbols": clean_count,
         "contaminated_symbols": contaminated,
+        "gather_coherent": bool(coherence["is_coherent"]),
+        "gather_incoherent_frac": round(float(coherence["incoherent_frac"]), 3),
+        "cross_sectional_graded": bool(coherence["is_coherent"]),
         "features_graded": states.height,
         "state_counts": {row["lifecycle_state"]: row["len"] for row in state_counts},
         "new_or_updated_defects": len(defects),

@@ -35,7 +35,7 @@ import json
 import polars as pl
 import psycopg
 
-from quantlib.features.validation_db import DB_KWARGS
+from quantlib.features.validation_db import DB_KWARGS, finite_or_none
 
 MIN_CLEAN_DAYS = 2  # clean days of parity needed to move PENDING -> VALIDATED
 CLEAN_PASS_RATE = 0.999  # a clean (feature,symbol,day) "passes" parity at >= this match rate (B-grade floor)
@@ -165,14 +165,17 @@ def defect_rows(
             if exceptions.height
             else exceptions
         )
-        worst_rel_err = float(feat_exc["rel_err"].max()) if feat_exc.height else None
+        worst_rel_err = finite_or_none(feat_exc["rel_err"].max()) if feat_exc.height else None
+        # NULL non-finite cell values (Infinity/-Infinity/NaN) before json.dumps — json.dumps(inf) emits
+        # the bare token "Infinity", which the exemplars jsonb column rejects (it is invalid JSON). The
+        # non-finite value is still RECORDED as a diverging exemplar, just with a null value.
         exemplars = [
             {
                 "symbol": row["symbol"],
                 "ts": str(row[ts_col]),
-                "stream_value": row["stream_value"],
-                "backfill_value": row["backfill_value"],
-                "rel_err": row["rel_err"],
+                "stream_value": finite_or_none(row["stream_value"]),
+                "backfill_value": finite_or_none(row["backfill_value"]),
+                "rel_err": finite_or_none(row["rel_err"]),
             }
             for row in feat_exc.head(MAX_EXEMPLARS).to_dicts()
         ]

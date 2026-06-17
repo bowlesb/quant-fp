@@ -18,11 +18,24 @@ note() { ACTIONS="${ACTIONS:+$ACTIONS,}\"$1\""; }
 state_of() { docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo missing; }
 
 # --- 1. critical infra: restart anything not running (same container preserves config/env) ---
+# feature-computer's session date is a hardcoded launch arg (see docs/OPERATIONS.md). If it merely STOPPED
+# the same container is the current-day one (the pre-market relaunch cron keeps its date fresh), so a
+# `docker start` is correct. But if it is MISSING (e.g. nightly_relaunch did rm -f then failed to recreate),
+# `docker start` cannot bring back a removed container — so REBUILD it for today via nightly_relaunch. This
+# is the recovery path for the one destructive cron (the rm-f-then-recreate guardrail).
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for svc in quant-redis quant-timescaledb-1 smoke-strategy reversion-strategy overnight-beta-strategy feature-computer; do
   st=$(state_of "$svc")
-  if [ "$st" != "running" ]; then
-    if docker start "$svc" >/dev/null 2>&1; then note "restarted:$svc(was:$st)"; else note "FAILED-restart:$svc(was:$st)"; fi
+  [ "$st" = "running" ] && continue
+  if [ "$svc" = "feature-computer" ] && [ "$st" = "missing" ]; then
+    if (cd "$REPO_DIR" && ENV_FILE="$REPO_DIR/.env" STORE_ROOT=/store ops/nightly_relaunch.sh "$(date -u +%F)" >/dev/null 2>&1); then
+      note "relaunched:feature-computer(was:missing)"
+    else
+      note "FAILED-relaunch:feature-computer(was:missing)"
+    fi
+    continue
   fi
+  if docker start "$svc" >/dev/null 2>&1; then note "restarted:$svc(was:$st)"; else note "FAILED-restart:$svc(was:$st)"; fi
 done
 
 # --- 2. host-memory guard: if free RAM < 8%, pause the backfill so it can't OOM the live capture ---

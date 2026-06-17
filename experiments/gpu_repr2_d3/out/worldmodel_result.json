@@ -1,0 +1,63 @@
+{
+  "data": {
+    "sessions": 104176,
+    "seq_len": 390,
+    "features": [
+      "logret",
+      "range",
+      "close_loc",
+      "signed_logvol",
+      "log_tradecount",
+      "minute_frac"
+    ],
+    "n_symbols": 300,
+    "date_range": [
+      "2024-12-11",
+      "2026-06-16"
+    ]
+  },
+  "model": {
+    "hidden_dim": 64,
+    "epochs": 30,
+    "loss_curve": [
+      0.81779,
+      0.7612,
+      0.75783,
+      0.75546,
+      0.75385,
+      0.75323,
+      0.75213
+    ]
+  },
+  "next_step_skill": {
+    "train": {
+      "lstm_next_step_mse": 0.75253,
+      "persistence_mse": 1.50676,
+      "lstm_beats_persistence": true,
+      "skill_vs_persistence_pct": 50.06
+    },
+    "heldout_time": {
+      "lstm_next_step_mse": 0.73263,
+      "persistence_mse": 1.46074,
+      "lstm_beats_persistence": true,
+      "skill_vs_persistence_pct": 49.85
+    },
+    "heldout_symbol": {
+      "lstm_next_step_mse": 0.74556,
+      "persistence_mse": 1.4915,
+      "lstm_beats_persistence": true,
+      "skill_vs_persistence_pct": 50.01
+    }
+  },
+  "surprise_redundancy_heldout_time": {
+    "corr_surprise_vs_range": 0.663,
+    "corr_surprise_vs_absret": 0.751,
+    "redundant_with_range": false
+  },
+  "verdict": {
+    "beats_persistence_heldout_time": true,
+    "beats_persistence_heldout_symbol": true,
+    "surprise_redundant_with_range": false,
+    "ship_d3_feature": true
+  }
+}

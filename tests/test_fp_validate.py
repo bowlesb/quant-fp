@@ -7,6 +7,7 @@ DB/store I/O (load_tiers, get_features) is exercised by the integration path; he
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 import polars as pl
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from quantlib.features import validation_db, validation_store
 from quantlib.features.base import FeatureSpec
 from quantlib.features.validate import (
+    CompareResult,
     _assemble_feature_day,
     _cell_rollup,
     _exceptions,
@@ -21,6 +23,7 @@ from quantlib.features.validate import (
     _long_verdicts,
     assert_settled,
     grade_for,
+    merge_results,
     recompute_trust,
 )
 
@@ -179,6 +182,43 @@ def test_db_rows_empty_frames_yield_no_rows() -> None:
     assert validation_db._rows_exceptions(pl.DataFrame()) == []
 
 
+def test_finite_or_none_normalises_non_finite() -> None:
+    assert validation_db.finite_or_none(1.5) == 1.5
+    assert validation_db.finite_or_none(0.0) == 0.0
+    assert validation_db.finite_or_none(None) is None
+    assert validation_db.finite_or_none(math.inf) is None
+    assert validation_db.finite_or_none(-math.inf) is None
+    assert validation_db.finite_or_none(math.nan) is None
+
+
+def test_db_rows_exceptions_null_non_finite_values() -> None:
+    """A non-finite stream/backfill value (Infinity/-Infinity/NaN) is a real mismatch to record, not a
+    crash — the exception rows must carry it as NULL so the double-precision insert never sees a token the
+    persist boundary can choke on. Finite values pass through unchanged."""
+    exceptions = pl.DataFrame(
+        {
+            "feature": ["feat", "feat", "feat"],
+            "symbol": ["INF", "NEGINF", "FINITE"],
+            "minute": [M0, M1, M0],
+            "day": ["2026-06-15"] * 3,
+            "tier": [1, 1, 1],
+            "status": ["mismatch"] * 3,
+            "stream_value": [math.inf, -math.inf, 3.0],
+            "backfill_value": [1.0, math.nan, 2.0],
+            "abs_err": [math.inf, math.inf, 1.0],
+            "rel_err": [math.inf, math.nan, 0.5],
+        }
+    )
+    rows = validation_db._rows_exceptions(exceptions)
+    # column order from _EXC_COLUMNS: ..., stream_value(6), backfill_value(7), abs_err(8), rel_err(9)
+    by_symbol = {row[1]: row for row in rows}
+    assert by_symbol["INF"][6] is None and by_symbol["INF"][8] is None and by_symbol["INF"][9] is None
+    assert by_symbol["NEGINF"][6] is None and by_symbol["NEGINF"][7] is None and by_symbol["NEGINF"][9] is None
+    # the finite row is untouched
+    assert by_symbol["FINITE"][6] == 3.0 and by_symbol["FINITE"][7] == 2.0
+    assert by_symbol["FINITE"][8] == 1.0 and by_symbol["FINITE"][9] == 0.5
+
+
 def test_assemble_feature_day_mixes_tolerance_and_distributional_dtypes() -> None:
     """A tolerance block (counts UInt32 from polars aggs) and a distributional dict row (counts Python
     int -> Int64) must vstack cleanly — the order-flow groups (tick_runlength / microstructure_burst,
@@ -213,3 +253,23 @@ def test_upsert_feature_day_is_idempotent(tmp_path) -> None:
     stored = validation_store.read_feature_day(tmp_path)
     assert stored.height == 1  # replaced, not double-counted
     assert stored["n_match"][0] == 1000
+
+
+def test_merge_results_concatenates_disjoint_scopes() -> None:
+    """The split sweep grades cross-sectional groups (one scope) and per-symbol groups (another); their
+    results merge by concatenation so each feature appears once with no double-counting. Empty frames in a
+    result (e.g. no exceptions, or a pass that produced nothing) are dropped, not vstacked as empties."""
+    xsec = CompareResult(
+        feature_day=pl.DataFrame({"feature": ["breadth_up_5m"], "n_match": [10]}),
+        cell=pl.DataFrame({"feature": ["breadth_up_5m"], "symbol": ["AAPL"]}),
+        exceptions=pl.DataFrame(),  # no diverging cells for the cross-sectional pass
+    )
+    per_symbol = CompareResult(
+        feature_day=pl.DataFrame({"feature": ["gap_open"], "n_match": [20]}),
+        cell=pl.DataFrame({"feature": ["gap_open"], "symbol": ["MSFT"]}),
+        exceptions=pl.DataFrame({"feature": ["gap_open"], "symbol": ["MSFT"]}),
+    )
+    merged = merge_results([xsec, per_symbol])
+    assert set(merged.feature_day["feature"].to_list()) == {"breadth_up_5m", "gap_open"}
+    assert merged.cell.height == 2
+    assert merged.exceptions.height == 1  # only the per-symbol pass had exceptions

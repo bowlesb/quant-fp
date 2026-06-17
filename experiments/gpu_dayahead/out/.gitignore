@@ -1,0 +1,2 @@
+# The 51 MB day-ahead profile/target dataset is regenerable from build_dayahead.py + the daily panel.
+dayahead.npz

@@ -4,6 +4,7 @@ Migrated to the declarative reduction engine: it declares ``reduced``/``points``
 engine generates both the rolling backfill form and the at-T live form (parity by construction). See
 quantlib/features/declarative.py.
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -18,14 +19,21 @@ from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
 
+# A volume std below this fraction of the window mean is a degenerate constant-volume window where the
+# z-score is undefined (and a bare `std > 0` / exact `std == 0` guard diverges stream-vs-backfill on
+# float rounding); we emit NULL there so both paths agree (parity).
+_VOL_STD_REL_EPS = 1e-9
+
 
 @register
 class VolumeGroup(ReductionGroup):
     name = "volume"
-    version = "1.0.0"
+    version = "1.1.0"
     owner = "modeller"
     type = FeatureType.VOLUME
-    inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),)
+    inputs = (
+        InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),
+    )
     windows = WINDOWS
 
     def declare(self) -> list[FeatureSpec]:
@@ -71,15 +79,17 @@ class VolumeGroup(ReductionGroup):
         feats: dict[str, pl.Expr] = {"dollar_volume_1m": pt_("dv")}
         for w in WINDOWS:
             std = std_("volume", w)
-            zscore = (pt_("volT") - mean_("volume", w)) / std
-            # std is null during warmup (<2 samples) -> keep null; std == 0 is a degenerate
-            # constant-volume window (0/0), NOT warmup -> emit 0.0 instead of leaking NaN.
+            mean_w = mean_("volume", w)
+            zscore = (pt_("volT") - mean_w) / std
+            # std is null during warmup (<2 samples) -> keep null. A bare `std > 0` guard is too LOOSE:
+            # a near-constant-volume window gives std ~1e-9 (passes) and either blows the z-score up or,
+            # via the EXACT `std == 0` branch, diverges when one path's std rounds to 1e-15 and the
+            # other to exactly 0. Guard on a RELATIVE threshold (std a non-trivial fraction of the mean)
+            # and emit NULL on the degenerate constant-volume window so stream and backfill agree.
             feats[f"volume_zscore_{w}m"] = (
-                pl.when(std > 0)
+                pl.when(std > _VOL_STD_REL_EPS * mean_w.abs())
                 .then(zscore)
-                .when(std == 0)
-                .then(pl.lit(0.0))
                 .otherwise(pl.lit(None, dtype=pl.Float64))
             )
-            feats[f"volume_ratio_{w}m"] = pt_("volT") / mean_("volume", w)
+            feats[f"volume_ratio_{w}m"] = pt_("volT") / mean_w
         return feats
