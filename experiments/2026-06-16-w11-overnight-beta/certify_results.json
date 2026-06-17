@@ -1,0 +1,414 @@
+{
+  "config": {
+    "n_liquid": 300,
+    "min_days": 350,
+    "beta_window": 60,
+    "rebal_every": 21,
+    "n_quintiles": 5,
+    "spread_bps_per_side": 3.0,
+    "auction_slip_bps_per_side": 5.0,
+    "market": "SPY",
+    "n_speculation_in_universe": 14,
+    "speculation_names_removed": [
+      "AFRM",
+      "APLD",
+      "APP",
+      "ASTS",
+      "BBAI",
+      "CCJ",
+      "CEG",
+      "CIFR",
+      "CLSK",
+      "COIN",
+      "GEV",
+      "HOOD",
+      "IONQ",
+      "MARA"
+    ]
+  },
+  "full_universe": {
+    "label": "FULL_UNIVERSE",
+    "exclude_speculation": false,
+    "n_universe": 300,
+    "n_rebalances": 15,
+    "q_size": 60,
+    "avg_turnover": 0.18928571428571428,
+    "mean_overnight_gross_bps": 36.795849858811174,
+    "mean_intraday_gross_bps": -3.003065337700259,
+    "mean_24h_gross_bps": 33.00398895497539,
+    "split_predicted_direction": true,
+    "overnight_pos_frac": 0.8,
+    "mean_overnight_net_spread_bps": 35.335849858811166,
+    "mean_overnight_net_full_bps": 25.33584985881117,
+    "bootstrap": {
+      "overnight_gross": [
+        0.0036795849858811173,
+        0.0014507011687296923,
+        0.00581766744769191
+      ],
+      "overnight_net_spread": [
+        0.0035335849858811165,
+        0.001273859225292194,
+        0.005694397868871064
+      ],
+      "overnight_net_full_auction": [
+        0.002533584985881117,
+        0.00027385922529219397,
+        0.004694397868871064
+      ],
+      "overnight_oos_net_full": [
+        0.0020622038335951316,
+        -0.0008234984650982335,
+        0.004733009078938907
+      ],
+      "intraday_gross": [
+        -0.0003003065337700259,
+        -0.001673928853481099,
+        0.0010657216211467412
+      ],
+      "canary_overnight_gross": [
+        -0.0004602502420682286,
+        -0.0015660820780412342,
+        0.0002878327522212509
+      ]
+    },
+    "subperiods": {
+      "2025-H1": {
+        "n": 4,
+        "overnight_bps": 24.987692080195618,
+        "intraday_bps": 24.938232458174735,
+        "split_ok": true,
+        "overnight_pos_frac": 0.75
+      },
+      "2025-H2": {
+        "n": 6,
+        "overnight_bps": 53.971077775235166,
+        "intraday_bps": -17.125358185199204,
+        "split_ok": true,
+        "overnight_pos_frac": 1.0
+      },
+      "2026-H1": {
+        "n": 5,
+        "overnight_bps": 25.632102581994808,
+        "intraday_bps": -8.409352157401527,
+        "split_ok": true,
+        "overnight_pos_frac": 0.6
+      }
+    },
+    "per_rebal": [
+      {
+        "est_date": "2025-03-13",
+        "overnight_bps": -38.05,
+        "intraday_bps": 8.86,
+        "ret24_bps": -32.21,
+        "mean_high_beta": 2.977,
+        "mean_low_beta": 0.038
+      },
+      {
+        "est_date": "2025-04-11",
+        "overnight_bps": 99.69,
+        "intraday_bps": 21.92,
+        "ret24_bps": 119.58,
+        "mean_high_beta": 2.181,
+        "mean_low_beta": 0.334
+      },
+      {
+        "est_date": "2025-05-13",
+        "overnight_bps": 10.43,
+        "intraday_bps": 43.44,
+        "ret24_bps": 53.28,
+        "mean_high_beta": 2.046,
+        "mean_low_beta": 0.32
+      },
+      {
+        "est_date": "2025-06-12",
+        "overnight_bps": 27.88,
+        "intraday_bps": 25.53,
+        "ret24_bps": 52.8,
+        "mean_high_beta": 1.873,
+        "mean_low_beta": 0.386
+      },
+      {
+        "est_date": "2025-07-15",
+        "overnight_bps": 36.64,
+        "intraday_bps": -17.34,
+        "ret24_bps": 18.66,
+        "mean_high_beta": 2.147,
+        "mean_low_beta": -0.02
+      },
+      {
+        "est_date": "2025-08-13",
+        "overnight_bps": 96.25,
+        "intraday_bps": 0.66,
+        "ret24_bps": 92.8,
+        "mean_high_beta": 2.527,
+        "mean_low_beta": 0.031
+      },
+      {
+        "est_date": "2025-09-12",
+        "overnight_bps": 64.87,
+        "intraday_bps": -15.5,
+        "ret24_bps": 48.82,
+        "mean_high_beta": 2.429,
+        "mean_low_beta": -0.892
+      },
+      {
+        "est_date": "2025-10-13",
+        "overnight_bps": 38.73,
+        "intraday_bps": -24.78,
+        "ret24_bps": 14.13,
+        "mean_high_beta": 2.459,
+        "mean_low_beta": -0.876
+      },
+      {
+        "est_date": "2025-11-11",
+        "overnight_bps": 30.48,
+        "intraday_bps": -16.49,
+        "ret24_bps": 14.4,
+        "mean_high_beta": 3.056,
+        "mean_low_beta": -0.912
+      },
+      {
+        "est_date": "2025-12-11",
+        "overnight_bps": 56.86,
+        "intraday_bps": -29.31,
+        "ret24_bps": 27.49,
+        "mean_high_beta": 3.263,
+        "mean_low_beta": -0.079
+      },
+      {
+        "est_date": "2026-01-13",
+        "overnight_bps": -27.95,
+        "intraday_bps": -50.63,
+        "ret24_bps": -78.72,
+        "mean_high_beta": 3.281,
+        "mean_low_beta": -0.104
+      },
+      {
+        "est_date": "2026-02-12",
+        "overnight_bps": -29.72,
+        "intraday_bps": 38.35,
+        "ret24_bps": 8.26,
+        "mean_high_beta": 3.164,
+        "mean_low_beta": -0.089
+      },
+      {
+        "est_date": "2026-03-16",
+        "overnight_bps": 60.85,
+        "intraday_bps": 22.44,
+        "ret24_bps": 81.63,
+        "mean_high_beta": 2.983,
+        "mean_low_beta": -0.164
+      },
+      {
+        "est_date": "2026-04-15",
+        "overnight_bps": 95.46,
+        "intraday_bps": -31.33,
+        "ret24_bps": 65.32,
+        "mean_high_beta": 2.693,
+        "mean_low_beta": -0.23
+      },
+      {
+        "est_date": "2026-05-14",
+        "overnight_bps": 29.52,
+        "intraday_bps": -20.87,
+        "ret24_bps": 8.81,
+        "mean_high_beta": 2.83,
+        "mean_low_beta": -0.361
+      }
+    ]
+  },
+  "speculation_excluded": {
+    "label": "SPECULATION_EXCLUDED",
+    "exclude_speculation": true,
+    "n_universe": 300,
+    "n_rebalances": 15,
+    "q_size": 60,
+    "avg_turnover": 0.19880952380952377,
+    "mean_overnight_gross_bps": 33.40601984125953,
+    "mean_intraday_gross_bps": -2.7960306492013514,
+    "mean_24h_gross_bps": 29.90832781467706,
+    "split_predicted_direction": true,
+    "overnight_pos_frac": 0.7333333333333333,
+    "mean_overnight_net_spread_bps": 31.892686507926193,
+    "mean_overnight_net_full_bps": 21.892686507926197,
+    "bootstrap": {
+      "overnight_gross": [
+        0.0033406019841259525,
+        0.0014548927297109119,
+        0.0051821598133169906
+      ],
+      "overnight_net_spread": [
+        0.0031892686507926193,
+        0.0012643769309847715,
+        0.005039484636567089
+      ],
+      "overnight_net_full_auction": [
+        0.0021892686507926197,
+        0.00026437693098477146,
+        0.00403948463656709
+      ],
+      "overnight_oos_net_full": [
+        0.002203447996786856,
+        -0.00010655178208944154,
+        0.00434694045538811
+      ],
+      "intraday_gross": [
+        -0.00027960306492013514,
+        -0.0014862334514617775,
+        0.0008951943757828946
+      ],
+      "canary_overnight_gross": [
+        0.0005434541926370789,
+        0.0002283963309303874,
+        0.0008654084871131782
+      ]
+    },
+    "subperiods": {
+      "2025-H1": {
+        "n": 4,
+        "overnight_bps": 13.959768044620139,
+        "intraday_bps": 23.15841736355001,
+        "split_ok": false,
+        "overnight_pos_frac": 0.5
+      },
+      "2025-H2": {
+        "n": 6,
+        "overnight_bps": 49.65092262340266,
+        "intraday_bps": -14.082660621829696,
+        "split_ok": true,
+        "overnight_pos_frac": 1.0
+      },
+      "2026-H1": {
+        "n": 5,
+        "overnight_bps": 29.46913793999928,
+        "intraday_bps": -10.015633092248432,
+        "split_ok": true,
+        "overnight_pos_frac": 0.6
+      }
+    },
+    "per_rebal": [
+      {
+        "est_date": "2025-03-13",
+        "overnight_bps": -32.6,
+        "intraday_bps": 3.18,
+        "ret24_bps": -31.24,
+        "mean_high_beta": 2.344,
+        "mean_low_beta": 0.014
+      },
+      {
+        "est_date": "2025-04-11",
+        "overnight_bps": 79.18,
+        "intraday_bps": 28.52,
+        "ret24_bps": 106.16,
+        "mean_high_beta": 1.91,
+        "mean_low_beta": 0.305
+      },
+      {
+        "est_date": "2025-05-13",
+        "overnight_bps": -3.59,
+        "intraday_bps": 29.85,
+        "ret24_bps": 25.67,
+        "mean_high_beta": 1.839,
+        "mean_low_beta": 0.288
+      },
+      {
+        "est_date": "2025-06-12",
+        "overnight_bps": 12.84,
+        "intraday_bps": 31.09,
+        "ret24_bps": 43.78,
+        "mean_high_beta": 1.716,
+        "mean_low_beta": 0.353
+      },
+      {
+        "est_date": "2025-07-15",
+        "overnight_bps": 43.02,
+        "intraday_bps": -16.97,
+        "ret24_bps": 25.76,
+        "mean_high_beta": 1.927,
+        "mean_low_beta": -0.053
+      },
+      {
+        "est_date": "2025-08-13",
+        "overnight_bps": 95.42,
+        "intraday_bps": 2.56,
+        "ret24_bps": 93.7,
+        "mean_high_beta": 2.188,
+        "mean_low_beta": 0.009
+      },
+      {
+        "est_date": "2025-09-12",
+        "overnight_bps": 40.83,
+        "intraday_bps": -25.61,
+        "ret24_bps": 14.66,
+        "mean_high_beta": 2.15,
+        "mean_low_beta": -0.918
+      },
+      {
+        "est_date": "2025-10-13",
+        "overnight_bps": 39.89,
+        "intraday_bps": -9.39,
+        "ret24_bps": 30.85,
+        "mean_high_beta": 2.297,
+        "mean_low_beta": -0.922
+      },
+      {
+        "est_date": "2025-11-11",
+        "overnight_bps": 22.67,
+        "intraday_bps": -2.72,
+        "ret24_bps": 20.23,
+        "mean_high_beta": 2.648,
+        "mean_low_beta": -0.953
+      },
+      {
+        "est_date": "2025-12-11",
+        "overnight_bps": 56.06,
+        "intraday_bps": -32.36,
+        "ret24_bps": 23.5,
+        "mean_high_beta": 2.699,
+        "mean_low_beta": -0.107
+      },
+      {
+        "est_date": "2026-01-13",
+        "overnight_bps": -5.75,
+        "intraday_bps": -39.54,
+        "ret24_bps": -45.96,
+        "mean_high_beta": 2.669,
+        "mean_low_beta": -0.129
+      },
+      {
+        "est_date": "2026-02-12",
+        "overnight_bps": -20.55,
+        "intraday_bps": 24.04,
+        "ret24_bps": 3.32,
+        "mean_high_beta": 2.677,
+        "mean_low_beta": -0.134
+      },
+      {
+        "est_date": "2026-03-16",
+        "overnight_bps": 62.21,
+        "intraday_bps": 18.69,
+        "ret24_bps": 79.45,
+        "mean_high_beta": 2.719,
+        "mean_low_beta": -0.199
+      },
+      {
+        "est_date": "2026-04-15",
+        "overnight_bps": 81.59,
+        "intraday_bps": -32.65,
+        "ret24_bps": 49.68,
+        "mean_high_beta": 2.376,
+        "mean_low_beta": -0.273
+      },
+      {
+        "est_date": "2026-05-14",
+        "overnight_bps": 29.85,
+        "intraday_bps": -20.62,
+        "ret24_bps": 9.05,
+        "mean_high_beta": 2.513,
+        "mean_low_beta": -0.403
+      }
+    ]
+  },
+  "sensitivity_note": "Robust across N_LIQUID in {150,200,300}: overnight L/S +33..+41 bps, intraday ~0..-3 bps, split survives speculation exclusion in all cases. canary clean except mild +5bps residual at N=300 spec-excluded."
+}
