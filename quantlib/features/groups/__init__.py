@@ -33,6 +33,7 @@ from quantlib.features.groups import (  # noqa: F401
     return_dispersion,
     return_dynamics,
     round_levels,
+    runner_state,
     sector,
     signed_trade_ratio,
     swing,
