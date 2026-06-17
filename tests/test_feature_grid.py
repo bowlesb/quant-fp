@@ -46,11 +46,14 @@ def test_coverage_for_source_empty_window() -> None:
     assert cov.expected_symbol_days == 0
 
 
-def test_period_window_clamps_to_floor() -> None:
+def test_period_window_fixed_unclamped_all_clamps_to_floor() -> None:
     anchor = dt.date(2026, 6, 16)
     floor = dt.date(2026, 6, 15)
+    # FIXED lookback is NOT clamped to floor: it uses the true window edge so a long row over a short store
+    # reads near-empty (temporal depth), instead of collapsing onto the same captured days as shorter rows.
     start, end = fg.period_window("12m", 365, anchor, floor)
-    assert (start, end) == (floor, anchor)  # clamped: store only goes back to floor
+    assert (start, end) == (anchor - dt.timedelta(days=364), anchor)
+    # "all history" clamps to floor (earliest captured date) — pre-capture days are not "missing".
     start, end = fg.period_window("all", None, anchor, floor)
     assert (start, end) == (floor, anchor)
     start, end = fg.period_window("1d", 1, anchor, floor)

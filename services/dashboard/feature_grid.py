@@ -24,9 +24,11 @@ actually present and divide by ``n_trading_days_in_period * expected_universe``,
 universe is the group's OWN peak distinct-symbol count on any single date in the window. So a group that
 peaks at 135 symbols but only captured 135 on one of two days reads ~50%, which is the honest answer for
 sparse data. ``n_trading_days_in_period`` is the weekday count of the period window (a local Mon-Fri
-calendar — we never call the network / Alpaca here so the page stays fast and secret-free), clamped to the
-days actually spanned by the store so an "all-history" period over a 2-day store is not penalised for
-calendar days that predate any capture.
+calendar — we never call the network / Alpaca here so the page stays fast and secret-free). A FIXED-lookback
+window ("last week / month / 6 months") uses its TRUE span, so a 6-month cell over a 2-day store correctly
+reads near-empty — the row axis conveys temporal DEPTH rather than collapsing every multi-day row onto the
+same captured days. Only the "all-history" row clamps its start to the earliest captured date, where
+pre-capture calendar days should not count as missing.
 
 The full grid is computed in one pass over the store directory tree (no parquet bodies read for the
 group-level grid — only ``symbol`` columns are read, and only when per-date symbol counts are needed),
@@ -205,14 +207,18 @@ def period_window(
     anchor: dt.date,
     floor: dt.date,
 ) -> tuple[dt.date, dt.date]:
-    """[start, end] dates for a period: ends at ``anchor`` (latest store date), starts ``lookback_days``
-    before it (or at ``floor`` = earliest store date for "all"). The start is clamped to ``floor`` so a long
-    period over a short store never invents pre-history."""
+    """[start, end] dates for a period: ends at ``anchor`` (latest store date). For a FIXED lookback the
+    start is the TRUE window edge (``anchor - lookback_days + 1``) and is NOT clamped to ``floor`` — so a
+    "last 6 months" cell divides by the window's full ~130 trading days and honestly reads near-empty until
+    that history is backfilled. The row axis must convey temporal DEPTH; clamping every window to ``floor``
+    would collapse every multi-day row onto the same handful of captured days (identical numbers). Only the
+    "all-history" row (``lookback_days is None``) starts at ``floor`` — there the intent IS "all the history
+    we have", so pre-capture calendar days should not count as missing."""
     end = anchor
     if lookback_days is None:
         start = floor
     else:
-        start = max(floor, anchor - dt.timedelta(days=lookback_days - 1))
+        start = anchor - dt.timedelta(days=lookback_days - 1)
     return start, end
 
 
