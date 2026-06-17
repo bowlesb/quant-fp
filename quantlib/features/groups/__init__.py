@@ -17,6 +17,7 @@ from quantlib.features.groups import (  # noqa: F401
     efficiency,
     gap_fill_state,
     liquidity,
+    liquidity_rank,
     market_beta,
     market_context,
     microstructure_burst,
