@@ -8,6 +8,7 @@ SAME high/low columns with ``rolling_max_by`` / ``rolling_min_by``. Both evaluat
 (position-in-range and distance-from-high/low from the current close), so live and backfill are
 cell-for-cell identical — parity by construction, guarded by tests/test_fp_rest_kinds.py.
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -22,14 +23,22 @@ from quantlib.features.stateful import ExtremaSpec, StatefulGroup
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 30, 60, 120, 240)
 
+# A trailing high-low band below this fraction of the price level is a numerically-flat window where
+# (close - low)/(high - low) overflows to NaN; we emit NULL there so stream and backfill agree (parity).
+_RANGE_REL_EPS = 1e-9
+
 
 @register
 class PriceLevelGroup(StatefulGroup):
     name = "price_levels"
-    version = "1.0.0"
+    version = "1.1.0"
     owner = "modeller"
     type = FeatureType.PRICE
-    inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "high", "low")),)
+    inputs = (
+        InputSpec(
+            name="minute_agg", columns=("symbol", "minute", "close", "high", "low")
+        ),
+    )
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
@@ -73,15 +82,31 @@ class PriceLevelGroup(StatefulGroup):
     def extrema_specs(self) -> list[ExtremaSpec]:
         specs: list[ExtremaSpec] = []
         for w in WINDOWS:
-            specs.append(ExtremaSpec(alias=f"_hi_{w}", source="high", window=w, op="max"))
-            specs.append(ExtremaSpec(alias=f"_lo_{w}", source="low", window=w, op="min"))
+            specs.append(
+                ExtremaSpec(alias=f"_hi_{w}", source="high", window=w, op="max")
+            )
+            specs.append(
+                ExtremaSpec(alias=f"_lo_{w}", source="low", window=w, op="min")
+            )
         return specs
 
     def assemble(self) -> dict[str, pl.Expr]:
         feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
-            high_w, low_w, close_t = pl.col(f"_hi_{w}"), pl.col(f"_lo_{w}"), pl.col("close")
-            feats[f"position_in_range_{w}m"] = (close_t - low_w) / (high_w - low_w)
+            high_w, low_w, close_t = (
+                pl.col(f"_hi_{w}"),
+                pl.col(f"_lo_{w}"),
+                pl.col("close"),
+            )
+            band = high_w - low_w
+            # A flat window (high == low, or numerically high-low ~ a tiny fraction of the price) makes
+            # (close - low)/(high - low) = 0/0 NaN. Guard on a RELATIVE band width and emit NULL so the
+            # stream and backfill paths agree on degenerate flat/illiquid windows (parity-true).
+            feats[f"position_in_range_{w}m"] = (
+                pl.when(band > _RANGE_REL_EPS * high_w.abs())
+                .then((close_t - low_w) / band)
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+            )
             feats[f"dist_from_high_{w}m"] = close_t / high_w - 1.0
             feats[f"dist_from_low_{w}m"] = close_t / low_w - 1.0
         return feats
