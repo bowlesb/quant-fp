@@ -1,0 +1,57 @@
+{
+  "seeds": 5,
+  "heldout_cohesion": {
+    "baseline_c2c_svd": {
+      "mean": 0.1142,
+      "std": 0.0044,
+      "values": [
+        0.1188,
+        0.1083,
+        0.116,
+        0.1094,
+        0.1183
+      ]
+    },
+    "multichannel_pca": {
+      "mean": 0.0953,
+      "std": 0.0072,
+      "values": [
+        0.0913,
+        0.0968,
+        0.0913,
+        0.0885,
+        0.1086
+      ]
+    },
+    "contrastive_ae": {
+      "mean": 0.1313,
+      "std": 0.0017,
+      "values": [
+        0.1289,
+        0.131,
+        0.1329,
+        0.1334,
+        0.1302
+      ]
+    }
+  },
+  "ae_minus_baseline": {
+    "mean": 0.0171,
+    "min_over_seeds": 0.0101,
+    "ae_wins_all_seeds": true
+  },
+  "non_redundancy": {
+    "adjusted_rand_index_ae_vs_baseline_mean": 0.251,
+    "canonical_corrs_ae_vs_baseline": [
+      0.952,
+      0.908,
+      0.843,
+      0.699,
+      0.51,
+      0.467,
+      0.407,
+      0.315
+    ],
+    "interpretation": "ARI<<1 and canonical corrs<1 => AE carries structure beyond the linear baseline"
+  }
+}

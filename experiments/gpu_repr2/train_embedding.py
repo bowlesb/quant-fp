@@ -28,6 +28,7 @@ Run (inside fp-torch-gpu):
   python experiments/gpu_repr2/train_embedding.py --profiles experiments/gpu_repr2/out/profiles.npz \
       --out experiments/gpu_repr2/out
 """
+
 from __future__ import annotations
 
 import argparse
@@ -157,7 +158,9 @@ def build_decile_labels(panel_train_c2c: np.ndarray) -> np.ndarray:
     return deciles
 
 
-def sample_pairs(deciles: np.ndarray, rng: np.random.Generator, n_pairs: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def sample_pairs(
+    deciles: np.ndarray, rng: np.random.Generator, n_pairs: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sample (anchor, positive, negative) symbol triplets from random train days.
 
     positive = same return decile that day (co-moved); negative = a different-decile symbol that day.
@@ -284,7 +287,9 @@ def main() -> None:
     # Arm C — non-linear contrastive autoencoder on the GPU (isolates the non-linearity lift)
     deciles = build_decile_labels(panel_train_c2c)
     embed_c, train_log = train_contrastive_ae(features, deciles, device, rng)
-    results["C_multichannel_contrastive_ae"] = evaluate_embedding(embed_c, test_corr, np.random.default_rng(SEED))
+    results["C_multichannel_contrastive_ae"] = evaluate_embedding(
+        embed_c, test_corr, np.random.default_rng(SEED)
+    )
     results["C_multichannel_contrastive_ae"]["train"] = train_log
 
     summary = {

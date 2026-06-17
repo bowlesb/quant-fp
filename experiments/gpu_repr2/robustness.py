@@ -19,20 +19,25 @@ Run (inside fp-torch-gpu):
   python experiments/gpu_repr2/robustness.py --profiles experiments/gpu_repr2/out/profiles.npz \
       --out experiments/gpu_repr2/out --seeds 5
 """
+
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from sklearn.cluster import KMeans
 from sklearn.cross_decomposition import CCA
 from sklearn.decomposition import PCA
 from sklearn.metrics import adjusted_rand_score
 
-from experiments.gpu_repr2.train_embedding import (
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from train_embedding import (  # noqa: E402
     EMBED_DIM,
     N_CLUSTERS,
     TRAIN_FRAC,
@@ -47,8 +52,6 @@ from experiments.gpu_repr2.train_embedding import (
 
 def train_ae_once(features: np.ndarray, deciles: np.ndarray, device: torch.device, seed: int) -> np.ndarray:
     """Train the contrastive AE with a given seed; return the embedding. Mirrors train_embedding."""
-    import torch.nn.functional as F
-
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     features_tensor = torch.from_numpy(features).to(device)
@@ -92,7 +95,9 @@ def train_ae_once(features: np.ndarray, deciles: np.ndarray, device: torch.devic
         return model.encoder(features_tensor).cpu().numpy().astype(np.float32)
 
 
-def cohesion_for_embedding(embedding: np.ndarray, test_corr: np.ndarray, seed: int) -> tuple[float, np.ndarray]:
+def cohesion_for_embedding(
+    embedding: np.ndarray, test_corr: np.ndarray, seed: int
+) -> tuple[float, np.ndarray]:
     kmeans = KMeans(n_clusters=N_CLUSTERS, random_state=seed, n_init=10)
     labels = kmeans.fit_predict(embedding)
     return cohesion_metric(test_corr, labels), labels
@@ -128,7 +133,6 @@ def main() -> None:
     ae_cohesions: list[float] = []
     ari_ae_vs_baseline: list[float] = []
     last_ae_embed = None
-    baseline_labels_ref = None
     for seed in range(args.seeds):
         baseline_coh, baseline_labels = cohesion_for_embedding(embed_baseline, test_corr, seed)
         pca_coh, _ = cohesion_for_embedding(embed_pca, test_corr, seed)
@@ -139,9 +143,10 @@ def main() -> None:
         ae_cohesions.append(ae_coh)
         ari_ae_vs_baseline.append(float(adjusted_rand_score(baseline_labels, ae_labels)))
         last_ae_embed = ae_embed
-        baseline_labels_ref = baseline_labels
-        print(f"seed {seed}: baseline={baseline_coh:.4f} pca={pca_coh:.4f} ae={ae_coh:.4f} "
-              f"ari(ae,base)={ari_ae_vs_baseline[-1]:.3f}")
+        print(
+            f"seed {seed}: baseline={baseline_coh:.4f} pca={pca_coh:.4f} ae={ae_coh:.4f} "
+            f"ari(ae,base)={ari_ae_vs_baseline[-1]:.3f}"
+        )
 
     # Canonical correlation: is the AE embedding just a rotation of the linear baseline space?
     cca = CCA(n_components=min(8, EMBED_DIM))
@@ -177,7 +182,7 @@ def main() -> None:
         "non_redundancy": {
             "adjusted_rand_index_ae_vs_baseline_mean": round(float(np.mean(ari_ae_vs_baseline)), 3),
             "canonical_corrs_ae_vs_baseline": canonical_corrs,
-            "interpretation": "ARI<<1 and canonical corrs<1 => AE carries structure beyond the linear baseline",
+            "interpretation": "ARI<<1 and canonical corrs<1 => AE carries structure beyond linear baseline",
         },
     }
     (out_dir / "robustness_result.json").write_text(json.dumps(summary, indent=2))

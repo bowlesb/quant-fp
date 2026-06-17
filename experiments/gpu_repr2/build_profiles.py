@@ -27,6 +27,7 @@ Run:
   VENV/bin/python experiments/gpu_repr2/build_profiles.py \
       --bars <certify300_daily.parquet> --out experiments/gpu_repr2/out/profiles.npz
 """
+
 from __future__ import annotations
 
 import argparse
@@ -126,8 +127,10 @@ def main() -> None:
         dates=np.array([str(date) for date in dates]),
         channels=np.array(CHANNELS),
     )
-    print(f"profiles: {standardized.shape[0]} symbols x {standardized.shape[1]} days x "
-          f"{standardized.shape[2]} channels")
+    print(
+        f"profiles: {standardized.shape[0]} symbols x {standardized.shape[1]} days x "
+        f"{standardized.shape[2]} channels"
+    )
     print(f"date range: {dates[0]} -> {dates[-1]}")
     print(f"wrote {out_path}")
 
