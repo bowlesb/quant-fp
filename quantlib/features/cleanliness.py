@@ -45,6 +45,17 @@ from quantlib.features.session import et_minute_of_day, rth_mask
 SESSION_MINUTES = 390  # 09:30–16:00 ET distinct REGULAR-session minutes (extended hours are NOT counted)
 MIN_COVERAGE_FRAC = 0.90  # permissive floor: >= 90% of backfill-present regular-session minutes present live
 MAX_GAP_MINUTES = 5  # longest tolerated internal run of backfill-had-but-stream-missing minutes (restart > this)
+# A symbol-day must have at least this many backfill-present regular-session minutes to be a FAIR parity
+# test. A name that printed only a few dozen minutes (a thin/illiquid ticker, a preferred share, a warrant)
+# trivially passes the no-internal-gap + coverage checks — it has no internal hole because it barely traded
+# — yet its windowed features are DEGENERATE (near-zero denominators, flat near-zero values) so a tiny
+# absolute difference becomes a huge RELATIVE error and masquerades as a parity failure. Grading off such
+# names manufactures false DIVERGENT verdicts (root-caused 2026-06-15: a capture-restart day where the only
+# symbols surviving the gap check were thin names with ~47 backfill minutes -> 383 spurious defects). A
+# liquid name runs ~390; this floor admits a partial-but-substantial session while excluding the degenerate
+# thin tail. It is a SECONDARY gate: a symbol below it is "contaminated" for grading purposes (reason
+# thin_session), so it contributes no clean comparison rather than a false failure.
+MIN_BACKFILL_MINUTES = 120  # >= ~1/3 of a regular session of printed minutes to be a fair parity test
 
 
 def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
@@ -119,12 +130,18 @@ def symbol_day_cleanliness(joined: pl.DataFrame) -> pl.DataFrame:
         .otherwise(0.0)
     )
     result = result.with_columns(coverage.alias("coverage_frac"))
-    is_clean = (pl.col("coverage_frac") >= MIN_COVERAGE_FRAC) & (pl.col("max_gap_minutes") <= MAX_GAP_MINUTES)
+    is_clean = (
+        (pl.col("coverage_frac") >= MIN_COVERAGE_FRAC)
+        & (pl.col("max_gap_minutes") <= MAX_GAP_MINUTES)
+        & (pl.col("n_backfill_minutes") >= MIN_BACKFILL_MINUTES)
+    )
     reason = (
         pl.when(pl.col("max_gap_minutes") > MAX_GAP_MINUTES)
         .then(pl.lit("internal_gap"))
         .when(pl.col("coverage_frac") < MIN_COVERAGE_FRAC)
         .then(pl.lit("low_coverage"))
+        .when(pl.col("n_backfill_minutes") < MIN_BACKFILL_MINUTES)
+        .then(pl.lit("thin_session"))
         .otherwise(pl.lit("clean"))
     )
     return result.with_columns(is_clean.alias("is_clean"), reason.alias("reason")).sort("symbol")
