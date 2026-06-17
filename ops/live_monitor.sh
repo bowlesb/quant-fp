@@ -18,7 +18,7 @@ note() { ACTIONS="${ACTIONS:+$ACTIONS,}\"$1\""; }
 state_of() { docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo missing; }
 
 # --- 1. critical infra: restart anything not running (same container preserves config/env) ---
-for svc in quant-redis quant-timescaledb-1 smoke-strategy reversion-strategy feature-computer; do
+for svc in quant-redis quant-timescaledb-1 smoke-strategy reversion-strategy overnight-beta-strategy feature-computer; do
   st=$(state_of "$svc")
   if [ "$st" != "running" ]; then
     if docker start "$svc" >/dev/null 2>&1; then note "restarted:$svc(was:$st)"; else note "FAILED-restart:$svc(was:$st)"; fi

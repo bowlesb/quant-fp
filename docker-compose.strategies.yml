@@ -89,6 +89,7 @@ services:
   #
   #   docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --build overnight-beta-strategy
   overnight-beta-strategy:
+    container_name: overnight-beta-strategy
     build:
       context: .
       dockerfile: strategies/overnight_beta/Dockerfile
@@ -114,8 +115,12 @@ services:
       OBETA_NOTIONAL_USD: "100"
       OBETA_MAX_NAMES_PER_LEG: "20"
       OBETA_MAX_GROSS_NOTIONAL_USD: "5000"
-      # Kill switch: "0" = compute + log only, place NO orders (DEFAULT until reviewed); "1" = trade (paper).
-      OBETA_ENABLED: "0"
+      # Kill switch: "0" = compute + log only, place NO orders; "1" = trade (paper). Reviewed + enabled 2026-06-16.
+      OBETA_ENABLED: "1"
     depends_on:
       timescaledb:
         condition: service_healthy
+
+volumes:
+  fp_store_real:
+    external: true
