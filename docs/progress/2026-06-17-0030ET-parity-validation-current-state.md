@@ -62,7 +62,46 @@ Stream capture only started recently — only two stream-feature days exist:
 use: `export DB_PASSWORD=$(grep ^DB_PASSWORD= .env | cut -d= -f2-)` before sandbox calls. Candidate
 tooling fix (PR): have sandbox.sh source `.env`'s DB_PASSWORD as the default instead of `mock`.
 
-## Status
-- Full sweep 2026-06-16: RUNNING (`/home/ben/.quant-validation/sweep_2026-06-16.log`).
-- parity_audit 2026-06-16: RUNNING (`/home/ben/.quant-validation/parity_audit_2026-06-16.log`).
-- Next milestone report when the sweep lands its grades.
+## Milestone update — findings from the first real validation pass
+
+### NO DEPLOY REGRESSION in the 70 new features (the headline)
+`parity_audit 2026-06-16 90` (real RTH data, ~90 liquid names) over ALL 610 features:
+`MATCH=571 NEEDS_DATA=39 TOTAL DIVERGENCES: 0`, on BOTH the `compute_latest` and the
+`IncrementalEngine.step` (live production) paths. The order-flow groups that own the 70 new features
+(trade_flow / quote_spread / liquidity / signed_trade_ratio / tick_runlength / microstructure_burst)
+MATCH backfill cell-for-cell on dense RTH data. The deploy is parity-clean at the compute level.
+
+### Two tooling GATES found + fixed (the sweep literally could not validate the new features)
+1. `materialize_from_raw` reads only `/store/raw/bars` -> produced backfill for the 30 bar groups but
+   NONE for the 6 tick/quote groups -> `validate()` raised "no group had settled backfill". FIX:
+   `materialize_from_raw_full` (tick-enriched minute_agg + trades from `/store/raw/trades`+`quotes`),
+   wired into the sweep (default on). All 6 order-flow groups now write a backfill side (verified on
+   2026-06-15: trade_flow/quote_spread/liquidity/signed_trade_ratio/tick_runlength/microstructure_burst
+   all present).
+2. Once the distributional groups (tick_runlength/microstructure_burst) fed feature_day for the first
+   time, two `pl.concat` sites raised `Int64 vs UInt32 ... n_compared`. FIX: cast count columns to Int64
+   before concat (no value change). Unit-tested. (PR `feature/parity-tick-materialize`.)
+
+### Why 06-15 still cannot TRUST-validate the 70 new features (honest coverage limit, NOT a bug)
+The live capture for the order-flow features on 2026-06-15 ran POST-MARKET ONLY: every stored stream
+cell for `signed_volume_5m` (and the others) is at 20:49–23:58 UTC (16:49–19:58 ET), ZERO inside RTH.
+The sweep grades RTH only -> n_compared=0 -> grade U (correctly "not enough data to validate"), with
+`n_mismatch=0` everywhere (NO divergence). On the post-market overlap the windowed features do differ
+(signed_volume_5m 64% match, worst rel 30x) — the documented sparse/restart windowed-divergence the
+cleanliness machinery is built to EXCLUDE; it is outside the RTH grading scope and matches the live
+cold-buffer regime, not a parity defect. `signed_trade_ratio` has NO stream partition on 06-15 (genuinely
+new today). VERDICT: the 70 new features need a CLEAN FULL-RTH day (a day where live capture ran the whole
+session) to earn trust. parity_audit already proves the compute paths agree on RTH data, so this is a
+data-coverage wait, not a regression.
+
+### Data note
+2026-06-16 raw tape is INCOMPLETELY acquired (most symbols had empty bar parquets; `quant-backfill` is
+still acquiring 18mo of tape) -> 06-16 not yet sweepable; 06-15 raw tape IS complete and was used.
+
+## Status / next
+- Tooling fixes committed + pushed: branch `feature/parity-tick-materialize` (PR pending review).
+- Next: run the FULL tick-aware `sweep_day` on 2026-06-15 (all discovered symbols) to grade the 540
+  bar-derived features over a real clean day (start them earning trust); then validate the 70 new
+  features on the next CLEAN FULL-RTH day once 06-16/06-17 raw tape lands.
+- Standing: daily `ops/daily_lifecycle.sh` going forward; quarantine any real RTH divergence to
+  `feature_parity_defect` (none found so far).
