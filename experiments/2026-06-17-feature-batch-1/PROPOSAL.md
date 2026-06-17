@@ -61,3 +61,33 @@ information-event conditioning variable).
    backfill materializes historical vectors → features enter the all-features dataset.
 3. EVERY explorer now reports "feature candidate(s) this surfaced" alongside its verdict (added to the
    dispatch template) — so the feature-accumulation loop runs continuously, not just on this batch.
+
+---
+
+## UPDATE — BATCH-1 STATUS (2026-06-16)
+
+### SHIPPED (groups-only, worktree+PR #70, parity-true + tested, READY for the coordinated fingerprint bump):
+- ✅ **F4 `trade_freq_z`** (4 features: trade_freq_z_{5,15,30,60}m) — from W14.
+- ✅ **F5 `overnight_intraday_split`** (3 features: intraday_ret, overnight_minus_intraday, overnight_share) —
+  from W11/W4; the certified-edge return decomposition, non-redundant with gap_open.
+
+→ **Batch-1 is WORTHWHILE NOW: 7 new features across 2 groups, both parity-true (test_fp_latest passed) +
+unit-tested + ruff/mypy clean.** Recommend the Lead run the coordinated fingerprint bump on these 2 groups
+(merge #70 → re-cut feature-set version → restart fc → rebuild ALL strategy containers at the new fingerprint →
+validation-agent parity/trust → backfill materializes the historical vectors). More features can land in
+batch-1b or batch-2 as they're built — no need to wait for the whole pipeline.
+
+### F8 — `return_dispersion` group (GATHER) — SPEC (next groups-only feature, non-trivial)
+The cross-sectional **return DISPERSION** — the std / IQR of the universe's returns over {5,30,60}m and 1d,
+broadcast to every ticker (like breadth). Distinct from breadth (a sign-COUNT) and market_context (an index
+level): dispersion measures whether it's a stock-picking regime (high) or a macro/beta regime (low).
+**Directly captures the W11 regime-conditionality** (overnight-beta paid in 2025-H2/2026-H1, not the 2025-H1
+bull half) — the model can learn "the beta premium pays when dispersion is X." Groups-only (the breadth
+GATHER pattern: per-minute universe reduce → broadcast), but non-trivial (the universe-pin denominator +
+parity care, like breadth). NO dead-band needed (std is continuous, unlike breadth's sign-count). Next
+groups-only feature to build for batch-1b.
+
+### Specs handed to the Lead (touch infra beyond groups/):
+- F1 `beta_overnight` (SPY overnight/intraday broadcast regressors) — see INFRA_SPECS_F1_F3.md.
+- F3 `event_8k_clock`, F6 `event_13d_clock`, F7 `net_share_issuance` — the EDGAR-content family (filings +
+  XBRL-shares inputs) — see BATCH2_EDGAR_CONTENT.md.
