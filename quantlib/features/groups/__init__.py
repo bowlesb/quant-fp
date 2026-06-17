@@ -44,6 +44,7 @@ from quantlib.features.groups import (  # noqa: F401
     trade_flow,
     trade_freq_z,
     trend_quality,
+    vol_term_structure,
     volatility,
     volume,
 )
