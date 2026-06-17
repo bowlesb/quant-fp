@@ -1,0 +1,53 @@
+{
+  "data": {
+    "days": 369,
+    "minutes": 390,
+    "symbols": 300,
+    "train_days": 295,
+    "test_days": 74,
+    "date_range": [
+      "2024-12-11",
+      "2026-06-15"
+    ]
+  },
+  "model": {
+    "hidden_dim": 128,
+    "epochs": 40,
+    "loss_curve": [
+      0.0040285,
+      3.83e-05,
+      1.43e-05,
+      8.2e-06,
+      5.7e-06,
+      4.4e-06,
+      3.9e-06,
+      5e-06,
+      3.1e-06
+    ]
+  },
+  "next_minute_residual": {
+    "train": {
+      "lstm_mse": 3.1e-06,
+      "predict_zero_mse": 2.1e-06,
+      "own_lag_mse": 4.5e-06,
+      "lstm_beats_zero": false,
+      "lstm_beats_own_lag": true,
+      "skill_vs_zero_pct": -45.067,
+      "cross_sectional_ic": 0.0088
+    },
+    "heldout_time": {
+      "lstm_mse": 3.52e-05,
+      "predict_zero_mse": 2e-06,
+      "own_lag_mse": 4.2e-06,
+      "lstm_beats_zero": false,
+      "lstm_beats_own_lag": false,
+      "skill_vs_zero_pct": -1622.921,
+      "cross_sectional_ic": 0.0003
+    }
+  },
+  "verdict": {
+    "lstm_beats_zero_heldout": false,
+    "heldout_cross_sectional_ic": 0.0003,
+    "ship_leadlag_feature": false
+  }
+}
