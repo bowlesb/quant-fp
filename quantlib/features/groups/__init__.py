@@ -11,6 +11,7 @@ from quantlib.features.groups import (  # noqa: F401
     candlestick,
     clean_momentum,
     cross_sectional_rank,
+    daily_beta,
     distribution,
     dumper_state,
     efficiency,
