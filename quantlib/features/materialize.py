@@ -16,7 +16,11 @@ from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
 from quantlib.features.loaders import load_minute_agg, load_reference
-from quantlib.features.raw_loaders import load_raw_minute_agg
+from quantlib.features.raw_loaders import (
+    load_raw_minute_agg,
+    load_raw_tick_enriched_minute_agg,
+    load_raw_trades,
+)
 
 DEFAULT_RAW_ROOT = "/store"
 
@@ -50,6 +54,23 @@ def materialize_from_raw(root: str, raw_root: str, day: str, symbols: list[str])
     the symbol count materialized."""
     frames = {
         "minute_agg": load_raw_minute_agg(raw_root, day, symbols),
+        "daily": backfill_daily(day, symbols),
+        "reference": load_reference(),
+    }
+    return _write_all(root, day, "backfill", frames)
+
+
+def materialize_from_raw_full(root: str, raw_root: str, day: str, symbols: list[str]) -> int:
+    """Like ``materialize_from_raw`` but ALSO reads ``/store/raw/trades`` + ``/store/raw/quotes`` and
+    enriches ``minute_agg`` with the per-minute tick columns (n_trades, signed_volume, spread, imbalance,
+    book sizes) and supplies the per-trade ``trades`` frame — so the ORDER-FLOW groups (trade_flow,
+    quote_spread, liquidity, signed_trade_ratio, tick_runlength, microstructure_burst) become runnable and
+    write a backfill side. This is the materialize the parity sweep needs to validate the tick/quote
+    features; the bar-only ``materialize_from_raw`` cannot produce them. Returns the symbol count."""
+    bars = load_raw_minute_agg(raw_root, day, symbols)
+    frames = {
+        "minute_agg": load_raw_tick_enriched_minute_agg(raw_root, day, symbols, bars),
+        "trades": load_raw_trades(raw_root, day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
     }

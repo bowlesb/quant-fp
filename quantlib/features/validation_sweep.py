@@ -35,7 +35,7 @@ import polars as pl
 from quantlib.features import store, trust_lifecycle, validate as validate_mod, validation_store
 from quantlib.features.cleanliness import clean_symbols, symbol_day_cleanliness
 from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
-from quantlib.features.materialize import DEFAULT_RAW_ROOT, materialize_from_raw
+from quantlib.features.materialize import DEFAULT_RAW_ROOT, materialize_from_raw, materialize_from_raw_full
 from quantlib.features.registry import REGISTRY
 from quantlib.features.session import rth_mask
 from quantlib.features.trust_lifecycle import (
@@ -124,13 +124,20 @@ def sweep_day(
     chunk: int = DEFAULT_CHUNK,
     allow_today: bool = False,
     max_symbols: int | None = None,
+    with_ticks: bool = True,
 ) -> dict[str, object]:
     """Run the full nightly sweep for one day and return a summary dict.
 
     Returns counts the operator/cron logs: symbols discovered/materialized/skipped, per lifecycle-state
     feature counts, the new/total defects, and contamination stats.
+
+    ``with_ticks`` (default True) materializes the backfill side from the FULL raw tape (bars + trades +
+    quotes), so the order-flow groups (trade_flow / quote_spread / liquidity / signed_trade_ratio /
+    tick_runlength / microstructure_burst) get a backfill side and their features are validated. Set False
+    for a bar-only sweep (faster, but the tick/quote features stay PENDING — no backfill to compare).
     """
     validate_mod.assert_settled(day, allow_today)
+    materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
     discovered = store.stream_symbols_on(feature_root, day)
     if max_symbols is not None:
         discovered = discovered[:max_symbols]
@@ -145,7 +152,7 @@ def sweep_day(
         # the DISCOVERED symbols are accounted in materialized/no_raw — the market tickers are reference
         # symbols, not part of the day's collected universe being certified.
         scope = batch + [ticker for ticker in MARKET_TICKERS if ticker not in batch]
-        materialize_from_raw(feature_root, raw_root, day, scope)
+        materialize(feature_root, raw_root, day, scope)
         present = store.stream_symbols_on(feature_root, day, source="backfill")
         present_set = set(present)
         materialized.extend([symbol for symbol in batch if symbol in present_set])
@@ -202,7 +209,8 @@ def sweep_day(
 
 def _parse_args(args: list[str]) -> dict[str, object]:
     allow_today = "--allow-today" in args
-    rest = [arg for arg in args if arg != "--allow-today"]
+    with_ticks = "--no-ticks" not in args
+    rest = [arg for arg in args if arg not in ("--allow-today", "--no-ticks")]
     chunk = DEFAULT_CHUNK
     max_symbols: int | None = None
     positional: list[str] = []
@@ -221,7 +229,7 @@ def _parse_args(args: list[str]) -> dict[str, object]:
     if len(positional) < 2:
         raise SystemExit(
             "usage: python -m quantlib.features.validation_sweep [YYYY-MM-DD] <feature_root> <val_root> "
-            "[raw_root] [--chunk N] [--allow-today] [--max-symbols N]"
+            "[raw_root] [--chunk N] [--allow-today] [--max-symbols N] [--no-ticks]"
         )
     feature_root = positional[0]
     val_root = positional[1]
@@ -234,6 +242,7 @@ def _parse_args(args: list[str]) -> dict[str, object]:
         "chunk": chunk,
         "allow_today": allow_today,
         "max_symbols": max_symbols,
+        "with_ticks": with_ticks,
     }
 
 
@@ -248,6 +257,7 @@ def main() -> None:
         chunk=parsed["chunk"],  # type: ignore[arg-type]
         allow_today=parsed["allow_today"],  # type: ignore[arg-type]
         max_symbols=parsed["max_symbols"],  # type: ignore[arg-type]
+        with_ticks=parsed["with_ticks"],  # type: ignore[arg-type]
     )
     print(f"=== Parity-validation sweep summary for {day} ===")
     for key, value in summary.items():
