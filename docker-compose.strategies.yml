@@ -78,3 +78,44 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+
+  # overnight-beta-strategy is the THIRD strategy + the platform's FIRST CERTIFIED edge
+  # (experiments/2026-06-16-w11-overnight-beta/): a high-minus-low-beta L/S held OVERNIGHT (enter at the
+  # CLOSE auction via Alpaca CLS, exit at the next OPEN auction via OPG), monthly beta-quintile rebalance,
+  # liquid top-300 EXCLUDING the speculation cohort. Its PRIMARY job is a MEASUREMENT: log model-expected vs
+  # REAL auction fills -> the real MOO/MOC slippage that gates whether the certified +28-30 bps/day overnight
+  # net survives real fills (the backtest could only model 5 bps). Reads daily bars from /store mounted RO
+  # (NOT the bus). Paper-only, own strat_overnightbeta schema. OBETA_ENABLED=0 by default until reviewed.
+  #
+  #   docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --build overnight-beta-strategy
+  overnight-beta-strategy:
+    build:
+      context: .
+      dockerfile: strategies/overnight_beta/Dockerfile
+    image: overnight-beta-strategy
+    restart: unless-stopped
+    mem_limit: 1g
+    env_file: .env
+    volumes:
+      - fp_store_real:/store:ro          # daily bars for beta estimation (read-only; NOT the bus)
+    environment:
+      DB_HOST: "timescaledb"
+      DB_PORT: "5432"
+      DB_NAME: "quant"
+      DB_USER: "quant"
+      # The certified strategy params (W11): 60d beta, monthly rebalance, quintile (0.2), top-300 liquid.
+      OBETA_BETA_WINDOW: "60"
+      OBETA_REBALANCE_DAYS: "21"
+      OBETA_QUANTILE: "0.2"
+      OBETA_UNIVERSE_TOP_N: "300"
+      OBETA_PANEL_DAYS: "90"
+      OBETA_MARKET: "SPY"
+      # Risk caps (paper, tiny): $/leg-name, max names/leg, max gross notional.
+      OBETA_NOTIONAL_USD: "100"
+      OBETA_MAX_NAMES_PER_LEG: "20"
+      OBETA_MAX_GROSS_NOTIONAL_USD: "5000"
+      # Kill switch: "0" = compute + log only, place NO orders (DEFAULT until reviewed); "1" = trade (paper).
+      OBETA_ENABLED: "0"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
