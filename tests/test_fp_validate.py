@@ -14,6 +14,7 @@ import pytest
 from quantlib.features import validation_db, validation_store
 from quantlib.features.base import FeatureSpec
 from quantlib.features.validate import (
+    _assemble_feature_day,
     _cell_rollup,
     _exceptions,
     _feature_day_tolerance,
@@ -176,6 +177,33 @@ def test_db_rows_empty_frames_yield_no_rows() -> None:
     assert validation_db._rows_day(pl.DataFrame()) == []
     assert validation_db._rows_trust(pl.DataFrame()) == []
     assert validation_db._rows_exceptions(pl.DataFrame()) == []
+
+
+def test_assemble_feature_day_mixes_tolerance_and_distributional_dtypes() -> None:
+    """A tolerance block (counts UInt32 from polars aggs) and a distributional dict row (counts Python
+    int -> Int64) must vstack cleanly — the order-flow groups (tick_runlength / microstructure_burst,
+    distributional) only get a backfill side now, so the two count dtypes meet for the first time."""
+    tolerance = pl.DataFrame(
+        {
+            "version": ["v1"], "feature": ["ret_5m"], "day": ["2026-06-12"], "method": ["tolerance"],
+            "nan_policy": ["none"],
+            "n_compared": pl.Series([10], dtype=pl.UInt32),
+            "n_match": pl.Series([9], dtype=pl.UInt32),
+            "n_mismatch": pl.Series([1], dtype=pl.UInt32),
+            "n_extra_live": pl.Series([0], dtype=pl.UInt32),
+            "n_missing_live": pl.Series([0], dtype=pl.UInt32),
+            "value_rate": [0.9], "coverage_rate": [1.0], "worst_abs_err": [0.01],
+        }
+    )
+    dist_row = {
+        "version": "v1", "feature": "tick_run_up_1m", "day": "2026-06-12", "method": "distributional",
+        "nan_policy": "sparse", "n_match": 5, "n_mismatch": 0, "n_extra_live": 0, "n_missing_live": 0,
+        "n_compared": 5, "value_rate": 1.0, "coverage_rate": 1.0, "worst_abs_err": None,
+    }
+    out = _assemble_feature_day([tolerance], [dist_row])
+    assert out.height == 2
+    assert out["n_compared"].dtype == pl.Int64
+    assert set(out["feature"].to_list()) == {"ret_5m", "tick_run_up_1m"}
 
 
 def test_upsert_feature_day_is_idempotent(tmp_path) -> None:

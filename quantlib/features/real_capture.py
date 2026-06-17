@@ -8,17 +8,21 @@ minute and flush a completed minute to the core when the next minute's bars star
 from __future__ import annotations
 
 import json
+import logging
 import multiprocessing as mp
 import os
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 
 import polars as pl
+import redis
 
+from quantlib.bus.market_data import MarketDataPublisher
 from quantlib.features.backfill_bars import backfill_bars, backfill_daily
 from quantlib.features.capture import (
     DEFAULT_BUFFER_MINUTES,
@@ -64,6 +68,49 @@ def tick_symbols(universe: list[str]) -> list[str]:
         return [s.strip().upper() for s in env.split(",") if s.strip()]
     universe_set = set(universe)
     return [s for s in DEFAULT_TICK_SYMBOLS if s in universe_set]
+
+
+logger = logging.getLogger("real_capture")
+
+
+def md_publish_enabled() -> bool:
+    """``FP_PUBLISH_MD=1`` turns on the per-minute raw market-data streams (md:bar/trades/quotes).
+
+    OFF by default — the live capture path is byte-for-byte unchanged until set. Checked ONCE at
+    startup so the per-message hot path pays only a cheap boolean, never string parsing.
+    """
+    return os.environ.get("FP_PUBLISH_MD", "0") == "1"
+
+
+def tick_publish_enabled() -> bool:
+    """``FP_PUBLISH_TICKS=1`` turns on the tick-firehose streams (md:tick_trades/md:tick_quotes).
+
+    OFF by default and additionally bounded by which symbols are actually tick-subscribed; see
+    ``md_tick_symbols``. This is the heavy tier (~2-4k frames/s live) — only enable deliberately.
+    """
+    return os.environ.get("FP_PUBLISH_TICKS", "0") == "1"
+
+
+def md_tick_symbols(subscribed: set[str]) -> set[str]:
+    """Symbols to firehose individual ticks for. ``FP_TICK_SYMBOLS`` (the same allowlist that gates
+    which symbols are tick-SUBSCRIBED) doubles as the firehose allowlist; empty = all subscribed.
+
+    A firehose symbol must be tick-subscribed (we can't publish ticks we never receive), so the result
+    is always the intersection with ``subscribed``.
+    """
+    env = os.environ.get("FP_TICK_SYMBOLS", "").strip()
+    if env and env != "all":
+        wanted = {s.strip().upper() for s in env.split(",") if s.strip()}
+        return wanted & subscribed
+    return set(subscribed)
+
+
+def _group_ticks_by_symbol(ticks: list[dict]) -> dict[str, list[dict]]:
+    """Bucket a minute's flat raw-tick dicts by symbol for the per-minute md:trades/md:quotes streams."""
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for tick in ticks:
+        grouped[str(tick["S"])].append(tick)
+    return grouped
 
 
 def _shard_snapshots(snapshots: dict | None, symbols: list[str], shard_id: int, n_shards: int) -> dict | None:
@@ -209,6 +256,19 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     quote_buf: dict = {}
     stream = build_stream()
 
+    # OPT-IN raw market-data streams (md:) — a SEPARATE channel from the feature-vector bus. Both flags
+    # are checked ONCE here (cheap booleans on the hot path, no per-message string parsing) and the
+    # publisher is constructed only when something is enabled, so capture pays ZERO overhead when off.
+    md_on = md_publish_enabled()
+    ticks_on = tick_publish_enabled()
+    md_firehose_syms = md_tick_symbols(tick_syms) if ticks_on else set()
+    md_publisher = MarketDataPublisher() if (md_on or ticks_on) else None
+    if md_on:
+        print("[reader] md: per-minute raw streams ON (FP_PUBLISH_MD=1)", file=sys.stderr, flush=True)
+    if ticks_on:
+        print(f"[reader] md: tick firehose ON for {len(md_firehose_syms)} symbols (FP_PUBLISH_TICKS=1)",
+              file=sys.stderr, flush=True)
+
     bench_reader = _reader_bench_path(root)  # FP_BENCH_LOG: time the single-threaded reader (route+reduce)
 
     def dispatch(bars: list[dict], first_arrival: float, last_arrival: float,
@@ -235,6 +295,16 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
                 shard_quotes = routed_quotes[shard_id] if routed_quotes is not None else []
                 queues[shard_id].put((first_arrival, last_arrival, shard_symbol_arrivals, minute,
                                       shard_bars, shard_trades, shard_quotes))
+        # OPT-IN per-minute raw market-data publish (md:). FAULT-ISOLATED: a Redis error logs a warning
+        # and continues — it must NEVER stall or crash the capture hot path. ~1 publish/symbol/min,
+        # pipelined into one round-trip.
+        if md_publisher is not None and md_on:
+            trades_by_symbol = _group_ticks_by_symbol(minute_trades)
+            quotes_by_symbol = _group_ticks_by_symbol(minute_quotes)
+            try:
+                md_publisher.publish_minute(bars, trades_by_symbol, quotes_by_symbol, minute)
+            except redis.exceptions.RedisError as error:
+                logger.warning("md: per-minute publish failed (minute=%s): %s", minute, error)
         # gather: universe-wide reduces (cross_sectional_rank + breadth) over ALL symbols. Pass the reader's
         # FULL snapshots (reference/daily) so breadth's sector + multi-day horizons see the whole universe.
         process_reduce(reduce_state, bars, root, mode, day, window, snapshots=snapshots)
@@ -279,20 +349,30 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     async def on_trade(trade) -> None:  # type: ignore[no-untyped-def]
         metrics.TRADES_INGESTED.inc()
         minute = trade.timestamp.replace(second=0, microsecond=0)
+        record = {"S": trade.symbol, "p": float(trade.price), "s": float(trade.size),
+                  "ts_epoch": trade.timestamp.timestamp()}
         # Buffer the RAW trade dict (the reader forwards it un-aggregated; the worker aggregates per shard).
-        trade_buf.setdefault(minute, []).append(
-            {"S": trade.symbol, "p": float(trade.price), "s": float(trade.size),
-             "ts_epoch": trade.timestamp.timestamp()}
-        )
+        trade_buf.setdefault(minute, []).append(record)
+        # OPT-IN tick firehose (md:tick_trades:<symbol>). FAULT-ISOLATED + symbol-gated; bounded MAXLEN.
+        if md_publisher is not None and ticks_on and trade.symbol in md_firehose_syms:
+            try:
+                md_publisher.publish_tick(trade.symbol, minute, "trades", record)
+            except redis.exceptions.RedisError as error:
+                logger.warning("md: tick_trades publish failed (%s): %s", trade.symbol, error)
 
     async def on_quote(quote) -> None:  # type: ignore[no-untyped-def]
         metrics.QUOTES_INGESTED.inc()
         minute = quote.timestamp.replace(second=0, microsecond=0)
-        quote_buf.setdefault(minute, []).append(
-            {"S": quote.symbol, "bp": float(quote.bid_price), "ap": float(quote.ask_price),
-             "bs": float(quote.bid_size), "as": float(quote.ask_size),
-             "ts_epoch": quote.timestamp.timestamp()}
-        )
+        record = {"S": quote.symbol, "bp": float(quote.bid_price), "ap": float(quote.ask_price),
+                  "bs": float(quote.bid_size), "as": float(quote.ask_size),
+                  "ts_epoch": quote.timestamp.timestamp()}
+        quote_buf.setdefault(minute, []).append(record)
+        # OPT-IN tick firehose (md:tick_quotes:<symbol>). FAULT-ISOLATED + symbol-gated; bounded MAXLEN.
+        if md_publisher is not None and ticks_on and quote.symbol in md_firehose_syms:
+            try:
+                md_publisher.publish_tick(quote.symbol, minute, "quotes", record)
+            except redis.exceptions.RedisError as error:
+                logger.warning("md: tick_quotes publish failed (%s): %s", quote.symbol, error)
 
     # The reader exposes its own /metrics (ingestion counters) — workers own 9201..9208, reader owns 9200.
     metrics.start_metrics_server(int(os.environ.get("READER_METRICS_PORT", "9200")))

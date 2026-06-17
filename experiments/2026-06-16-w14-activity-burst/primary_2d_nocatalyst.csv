@@ -1,0 +1,4 @@
+k,n_nocat_burst_2d,diff_bps_full,diff_t_full,canary_lo,canary_hi,canary_pass,diff_bps_oos,direction,n_oos_nonoverlap_trades,gross_bps_oos,net_bps_oos,net_ci_lo,net_ci_hi,net2x_bps_oos,net2x_ci_lo,net2x_ci_hi
+k2,482,-5.81,-0.2,-50.19,19.26,false,6.17,-1.0,231,-84.85,-92.89,-159.27,-30.01,-100.93,-164.62,-40.44
+k3,284,-9.63,-0.23,-80.99,25.77,false,18.6,-1.0,146,-91.94,-99.45,-185.08,-21.79,-106.97,-192.27,-27.82
+k4,168,-5.99,-0.1,-88.14,39.23,false,15.34,-1.0,89,-94.15,-101.83,-209.47,-6.58,-109.52,-221.15,-13.47

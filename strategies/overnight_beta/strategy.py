@@ -1,0 +1,322 @@
+"""The overnight-beta strategy — the certified W11 edge, paper-only, as an auction-slippage MEASUREMENT.
+
+The certified signal (`experiments/2026-06-16-w11-overnight-beta/`): LONG the high-beta quintile, SHORT the
+low-beta quintile, held OVERNIGHT (enter at the close auction, exit at the next open auction), monthly
+beta-quintile rebalance, on the liquid universe excluding the speculation cohort. The container's PRIMARY
+purpose is to measure REAL MOO/MOC auction slippage vs the backtest's 5 bps model — the one remaining unknown
+gating the +28-30 bps/day overnight net.
+
+Daily loop (driven by the broker clock):
+  - NEAR THE CLOSE on a rebalance day: compute beta quintiles from a trailing daily-return panel, submit a
+    NOTIONAL market-on-close (Alpaca ``TimeInForce.CLS``) BUY for each high-beta name and SELL for each
+    low-beta name, sized to ``OBETA_NOTIONAL_USD`` per leg-name (dollar-neutral). Record the leg + the model
+    reference close.
+  - AT/AFTER THE OPEN: for each entered leg, submit a market-on-open (``TimeInForce.OPG``) order to FLATTEN,
+    capture both auction fills, compute realized PnL, and LOG the realized slippage (fill vs the official
+    close/open print) to ``slippage_log``.
+
+Safety (all enforced before any order): kill switch (``OBETA_ENABLED=0`` default → compute + log only, place
+NOTHING), market-hours gating, max names per leg, max total gross notional, paper-only. Transient
+bus/broker/db errors are caught specifically; bare ``except`` is never used.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import logging
+import os
+import time
+from dataclasses import dataclass
+from typing import cast
+
+import numpy as np
+import psycopg
+from alpaca.common.exceptions import APIError
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.models import Clock, Order
+from alpaca.trading.requests import MarketOrderRequest
+
+from strategies.lib.overnight_beta_model import OvernightBetaModel
+from strategies.overnight_beta.position_store import PositionStore
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("overnight-beta-strategy")
+
+# The certification's speculation cohort — excluded by default (the confound control).
+DEFAULT_EXCLUDE = (
+    "COIN MARA HOOD IONQ CLSK AFRM ASTS APP BBAI CEG GEV CCJ APLD CIFR MSTR NRG OKLO "
+    "PLTR QBTS QUBT RGTI RIOT RKLB SMCI SOFI VST WULF"
+).split()
+COID_PREFIX = "obeta_"
+
+
+@dataclass(frozen=True)
+class OvernightBetaConfig:
+    """Runtime config + risk caps, env-driven (fail-safe defaults). PAPER ONLY."""
+
+    notional_usd: float            # $ per leg-name (dollar-neutral)
+    max_names_per_leg: int
+    max_gross_notional_usd: float
+    rebalance_days: int            # rebalance the beta quintiles every N trading days (~21 = monthly)
+    beta_window: int               # trailing days for the beta OLS (60 = certified)
+    quantile: float                # leg fraction (0.2 = quintile, certified)
+    enabled: bool
+    exclude: tuple[str, ...]
+    loop_sleep_sec: int
+
+    @classmethod
+    def from_env(cls) -> OvernightBetaConfig:
+        exclude_env = os.environ.get("OBETA_EXCLUDE", "").strip()
+        exclude = tuple(s.strip().upper() for s in exclude_env.split(",") if s.strip()) or tuple(DEFAULT_EXCLUDE)
+        return cls(
+            notional_usd=float(os.environ.get("OBETA_NOTIONAL_USD", "100")),
+            max_names_per_leg=int(os.environ.get("OBETA_MAX_NAMES_PER_LEG", "20")),
+            max_gross_notional_usd=float(os.environ.get("OBETA_MAX_GROSS_NOTIONAL_USD", "5000")),
+            rebalance_days=int(os.environ.get("OBETA_REBALANCE_DAYS", "21")),
+            beta_window=int(os.environ.get("OBETA_BETA_WINDOW", "60")),
+            quantile=float(os.environ.get("OBETA_QUANTILE", "0.2")),
+            enabled=os.environ.get("OBETA_ENABLED", "0") != "0",  # OFF by default until reviewed
+            exclude=exclude,
+            loop_sleep_sec=int(os.environ.get("OBETA_LOOP_SLEEP_SEC", "60")),
+        )
+
+
+@dataclass(frozen=True)
+class EnterGate:
+    allowed: bool
+    reason: str
+
+
+def evaluate_enter_gate(
+    config: OvernightBetaConfig,
+    market_open: bool,
+    minutes_to_close: float | None,
+    n_entered: int,
+    gross_notional: float,
+    prospective_names: int,
+) -> EnterGate:
+    """Pure gate (unit-testable, no I/O): kill switch, market-hours, the close-auction window, and the
+    name/gross caps INCLUSIVE of the prospective entry. We only submit MOC orders in the last few minutes
+    before the close (``minutes_to_close`` in (0, 15]); outside that window we wait."""
+    if not config.enabled:
+        return EnterGate(False, "kill_switch_off")
+    if not market_open:
+        return EnterGate(False, "market_closed")
+    if minutes_to_close is None or not (0.0 < minutes_to_close <= 15.0):
+        return EnterGate(False, "not_close_auction_window")
+    if n_entered > 0:
+        return EnterGate(False, "already_entered_this_overnight")
+    prospective_gross = gross_notional + prospective_names * config.notional_usd
+    if prospective_gross > config.max_gross_notional_usd:
+        return EnterGate(False, "max_gross_notional")
+    return EnterGate(True, "ok")
+
+
+def order_filled(order: Order) -> tuple[float, float] | None:
+    """(avg_fill_price, filled_qty) once an order has filled, else None."""
+    price = order.filled_avg_price
+    qty = order.filled_qty
+    if price is None or qty is None:
+        return None
+    fqty = float(qty)
+    return (float(price), fqty) if fqty > 0 else None
+
+
+class OvernightBetaStrategy:
+    """Owns the close-auction-enter / open-auction-flatten loop + the slippage measurement."""
+
+    def __init__(
+        self,
+        config: OvernightBetaConfig,
+        trading: TradingClient,
+        store: PositionStore,
+        model: OvernightBetaModel,
+        panel_loader: "PanelLoader",
+    ) -> None:
+        self._config = config
+        self._trading = trading
+        self._store = store
+        self._model = model
+        self._panel = panel_loader
+        self._last_rebalance: dt.date | None = None
+
+    def _clock(self) -> Clock:
+        return cast(Clock, self._trading.get_clock())
+
+    def minutes_to_close(self, clock: Clock) -> float | None:
+        if not clock.is_open or clock.next_close is None:
+            return None
+        return (clock.next_close - dt.datetime.now(dt.timezone.utc)).total_seconds() / 60.0
+
+    def is_rebalance_day(self, today: dt.date) -> bool:
+        """Rebalance every ``rebalance_days`` trading days. First run always rebalances; thereafter gate on
+        the trading-day gap (approximated by calendar days // rebalance cadence — the broker calendar is the
+        source of truth, but a simple gap is adequate for a monthly cadence + the idempotent store)."""
+        if self._last_rebalance is None:
+            return True
+        return (today - self._last_rebalance).days >= self._config.rebalance_days
+
+    def maybe_enter_overnight(self) -> None:
+        """On a rebalance day, in the close-auction window, submit the beta-quintile L/S via MOC (CLS)."""
+        clock = self._clock()
+        mtc = self.minutes_to_close(clock)
+        today = dt.datetime.now(dt.timezone.utc).date()
+        if not self.is_rebalance_day(today):
+            return
+        legs = self._select_legs()
+        if legs is None:
+            return
+        long_names, short_names, betas = legs
+        n = len(long_names) + len(short_names)
+        gate = evaluate_enter_gate(
+            self._config, bool(clock.is_open), mtc, self._store.count_entered(),
+            self._gross_notional_estimate(), n,
+        )
+        if not gate.allowed:
+            logger.debug("no enter: %s", gate.reason)
+            return
+        ts = dt.datetime.now(dt.timezone.utc)
+        for leg, names, side in (("long", long_names, OrderSide.BUY), ("short", short_names, OrderSide.SELL)):
+            for symbol in names:
+                self._submit_close_auction(today, symbol, leg, betas.get(symbol, float("nan")), side, ts)
+        self._last_rebalance = today
+        logger.info("ENTERED overnight beta L/S: %d long / %d short via CLS auction", len(long_names), len(short_names))
+
+    def _select_legs(self) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, float]] | None:
+        returns_by_name, market_returns = self._panel.load()
+        for sym in self._config.exclude:
+            returns_by_name.pop(sym, None)
+        legs = self._model.select_legs(returns_by_name, market_returns)
+        if not legs.long or not legs.short:
+            logger.info("no legs (insufficient panel)")
+            return None
+        cap = self._config.max_names_per_leg
+        return legs.long[-cap:], legs.short[:cap], legs.betas
+
+    def _gross_notional_estimate(self) -> float:
+        return self._store.count_entered() * self._config.notional_usd
+
+    def _submit_close_auction(
+        self, today: dt.date, symbol: str, leg: str, beta: float, side: OrderSide, ts: dt.datetime
+    ) -> None:
+        coid = f"{COID_PREFIX}{today.isoformat()}_{symbol}_{leg}"
+        ref = self._panel.last_close(symbol)
+        target = self._config.notional_usd if side == OrderSide.BUY else -self._config.notional_usd
+        self._store.record_enter(today, symbol, leg, beta, target, coid, ts, ref if ref is not None else 0.0)
+        try:
+            self._trading.submit_order(
+                MarketOrderRequest(
+                    symbol=symbol, notional=self._config.notional_usd, side=side,
+                    time_in_force=TimeInForce.CLS, client_order_id=coid,
+                )
+            )
+        except APIError as exc:
+            if "client_order_id" not in str(exc) and "unique" not in str(exc).lower():
+                logger.warning("CLS submit failed for %s (%s)", symbol, exc)
+
+    def manage_and_flatten(self) -> None:
+        """Capture close-auction fills, then at/after the open submit the OPG flatten + log slippage."""
+        clock = self._clock()
+        for pos in self._store.list_entered():
+            enter_coid = str(pos["enter_order_id"])
+            symbol = str(pos["symbol"])
+            enter_order = self._fetch(enter_coid)
+            if enter_order is None:
+                continue
+            filled = order_filled(enter_order)
+            if filled is not None and pos["enter_fill_price"] is None:
+                fill_price, qty = filled
+                self._store.mark_entered_fill(enter_coid, fill_price, qty)
+                ref = float(cast(float, pos["enter_ref_price"]))
+                side = "buy" if str(pos["leg"]) == "long" else "sell"
+                self._store.log_slippage(symbol, "close", side, ref, fill_price, enter_coid)
+            # Flatten at the OPEN auction once the market is open (the OPG window).
+            if bool(clock.is_open) and pos["exit_order_id"] is None and pos["enter_fill_price"] is not None:
+                self._submit_open_auction_flatten(pos)
+            elif pos["exit_order_id"] is not None:
+                self._capture_flatten(pos)
+
+    def _submit_open_auction_flatten(self, pos: dict[str, object]) -> None:
+        symbol = str(pos["symbol"])
+        enter_coid = str(pos["enter_order_id"])
+        qty = float(cast(float, pos["enter_qty"]))
+        # Flatten: a long leg sells, a short leg buys back.
+        flatten_side = OrderSide.SELL if str(pos["leg"]) == "long" else OrderSide.BUY
+        exit_coid = f"{enter_coid}_exit"
+        ref = self._panel.last_open(symbol)
+        self._store.mark_exit_submitted(enter_coid, exit_coid, ref if ref is not None else 0.0)
+        try:
+            self._trading.submit_order(
+                MarketOrderRequest(
+                    symbol=symbol, qty=qty, side=flatten_side,
+                    time_in_force=TimeInForce.OPG, client_order_id=exit_coid,
+                )
+            )
+        except APIError as exc:
+            if "client_order_id" not in str(exc) and "unique" not in str(exc).lower():
+                logger.warning("OPG flatten failed for %s (%s)", symbol, exc)
+
+    def _capture_flatten(self, pos: dict[str, object]) -> None:
+        exit_coid = str(pos["exit_order_id"])
+        exit_order = self._fetch(exit_coid)
+        if exit_order is None:
+            return
+        filled = order_filled(exit_order)
+        if filled is None:
+            return
+        exit_fill, _ = filled
+        symbol = str(pos["symbol"])
+        enter_fill = float(cast(float, pos["enter_fill_price"]))
+        qty = float(cast(float, pos["enter_qty"]))
+        sign = 1.0 if str(pos["leg"]) == "long" else -1.0
+        realized = sign * (exit_fill - enter_fill) * qty
+        side = "sell" if str(pos["leg"]) == "long" else "buy"
+        ref = float(cast(float, pos["exit_ref_price"]))
+        self._store.log_slippage(symbol, "open", side, ref, exit_fill, exit_coid)
+        self._store.record_flatten(str(pos["enter_order_id"]), dt.datetime.now(dt.timezone.utc), exit_fill, realized)
+        logger.info(
+            "FLATTENED %s %s: enter=%.4f exit=%.4f pnl=%+.4f | mean slippage %s",
+            str(pos["leg"]), symbol, enter_fill, exit_fill, realized, self._store.mean_slippage_bps(),
+        )
+
+    def _fetch(self, coid: str) -> Order | None:
+        try:
+            return cast(Order, self._trading.get_order_by_client_id(coid))
+        except APIError:
+            return None
+
+    def cycle(self) -> None:
+        self.manage_and_flatten()
+        self.maybe_enter_overnight()
+
+    def run(self) -> None:
+        logger.info(
+            "overnight-beta starting: enabled=%s notional=$%.0f/leg max_names=%d max_gross=$%.0f "
+            "rebalance=%dd beta_window=%d quantile=%.2f excluded=%d names",
+            self._config.enabled, self._config.notional_usd, self._config.max_names_per_leg,
+            self._config.max_gross_notional_usd, self._config.rebalance_days, self._config.beta_window,
+            self._config.quantile, len(self._config.exclude),
+        )
+        while True:
+            try:
+                self.cycle()
+            except APIError as exc:
+                logger.warning("broker error (continuing): %s", exc)
+            except psycopg.Error as exc:
+                logger.warning("db error (continuing): %s", exc)
+            time.sleep(self._config.loop_sleep_sec)
+
+
+class PanelLoader:
+    """Loads the trailing daily-return panel for beta estimation. Pluggable so the strategy is testable; the
+    live impl reads recent daily bars from the feature store / raw bars. Kept minimal here — the live wiring
+    is in __main__; tests inject a fake."""
+
+    def load(self) -> tuple[dict[str, np.ndarray], np.ndarray]:
+        raise NotImplementedError
+
+    def last_close(self, symbol: str) -> float | None:
+        raise NotImplementedError
+
+    def last_open(self, symbol: str) -> float | None:
+        raise NotImplementedError
