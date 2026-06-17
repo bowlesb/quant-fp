@@ -9,27 +9,42 @@ Single 3090 (24GB). Serialize on `~/.quant-gpu.lock`. Images: `fp-torch-gpu` (to
   && trap 'rm -f ~/.quant-gpu.lock' EXIT || { echo "GPU busy:"; cat ~/.quant-gpu.lock; exit 1; }
 ```
 
-## STATUS (2026-06-16)
-- GPU FREE (0% util, lock absent). `fp-torch-gpu` built ~14 min ago by embeddings agent a2a58dd2.
-- **DATA-COVERAGE UNBLOCK for job 1:** `/store/raw/trades` covers **7,671 symbols × ~63 days
-  (2026-03-18 → 2026-06-16)**; `/store/raw/bars` covers **7,682 symbols × ~379 days
-  (2024-12-11 → 2026-06-17)**. ⇒ NO separate selective tick-backfill needed for any runner-day
-  inside the 63-day trade window — ticks already present. Job 1 reads ticks directly. Runner-days
-  OLDER than 2026-03-18 are bars-only (sequence model restricted to the 63-day tick window).
-- **a2a58dd2 autoencoder run: NO durable artifact found** in experiments/ or /tmp. Result UNVERIFIED
-  — nothing to review. Treat as not-done until an artifact lands. (MA does not credit claimed-but-
-  unsaved compute.)
+## STATUS (2026-06-17)
+- GPU FREE (0% util, lock released). `fp-torch-gpu` (torch 2.3.0, CUDA verified). `fp_store_real` volume
+  mounts read-only in the GPU container (`-v fp_store_real:/store:ro`): `/store/raw/{bars,trades,quotes}`.
+  bars = 7,682 symbols × ~379 days minute OHLCV; trades = 7,671 symbols.
+- **repr-2 (PR #97, branch research/gpu-repr2-behavioral) — DONE.** Non-linear contrastive AE behavioral
+  embedding BEAT the #76 linear c2c-SVD on held-out cohesion (0.131±0.002 vs 0.114±0.004, wins all 5 seeds,
+  non-redundant ARI 0.25). Ships `behavioral_clusters_v2.parquet` as a drop-in upgrade behind `peer_relative`
+  (zero new columns). HELD by Lead for the OOS-IC gate before the v1→v2 swap. Artifacts:
+  `experiments/gpu_repr2/`.
+- **D3 intraday SEQUENCE world-model — DONE, HONEST NULL (no feature).** LSTM next-state predictor on 104k
+  RTH minute sequences (top-300 × 379 days). Beats persistence ~50% OOS — BUT the predict-zero diagnostic
+  shows it's volatility clustering, not return prediction (logret skill vs zero = +0.77%; range = +46%).
+  Surprise feature would re-encode realized vol → REDUNDANT, and it's STATEFUL (heavy FeatureState build).
+  Do NOT ship. Useful prior: minute returns are not forecastable from price/volume path alone. Artifacts:
+  `experiments/gpu_repr2_d3/` (`worldmodel_result.json`, `diagnose_result.json` load-bearing, `results.md`).
+- **a2a58dd2 autoencoder run: still NO durable artifact** — UNVERIFIED, not-done. (MA does not credit
+  claimed-but-unsaved compute.)
 
 ## RANKED QUEUE
 | # | Job | Image | Input | Output artifact (REQUIRED) | Rank rationale |
 |---|-----|-------|-------|----------------------------|----------------|
-| ~~1~~ DEQUEUED | ~~R1 runner SEQUENCE model~~ | — | — | — | RESOLVED on CPU/bars (Stage-2a): give-back magnitude NOT forecastable (OOS R2 ~0); hard-fade direction mild (AUC 0.707) but redundant with F9. Tick model is n=137 → underpowered, low-priority exploratory only. Does NOT justify the 3090. |
-| 1 | Productionize the #76 stock embeddings as a PARITY-TRUE feature group (real-time computable per-minute, compute==compute_latest) — IF the embeddings are point-in-time and a deterministic function of the live panel | fp-torch-gpu | merged #76 embedding harness | embedding_group + test_fp_latest pass + feature-candidate writeup | #76 is merged (OOS-validated embeddings); the open question is whether they can be made parity-true live. Coordinate with the embeddings agent / Lead. |
-| 2 | lightGBM-on-trusted (once first clean RTH day fills trusted_features) | fp-ml | trusted_features view | gbm_trusted_oos.json | waits on a clean day; CPU-ok but listed for visibility |
+| ~~R1~~ DEQUEUED | ~~R1 runner SEQUENCE model~~ | — | — | — | RESOLVED (Stage-2a null). |
+| ~~D3~~ DONE | ~~intraday LSTM world-model~~ | — | — | `experiments/gpu_repr2_d3/diagnose_result.json` | NULL: edge is vol clustering (redundant), returns unpredictable. Honest no-ship. |
+| 1 | **Coordinator: swap `behavioral_clusters_v1`→`v2` behind `peer_relative`; OOS-IC gate** | fp-ml (CPU) | `behavioral_clusters_v2.parquet` + labels | `peer_relative_v2_oos_ic.json` | repr-2 cohesion win is necessary not sufficient; OOS-IC decides. No GPU. |
+| 2 | **CROSS-SECTIONAL intraday lead-lag / flow model** (the honest successor to D3's null): does symbol A's minute move predict symbol B's NEXT minute move, cross-sectionally? A graph/attention model over the live minute cross-section. NOT single-name autoregression (D3 proved that's a vol-only null). | fp-torch-gpu | `/store/raw/bars` minute cross-section | `leadlag_result.{json,npz}` + OOS held-out-time IC vs a contemporaneous-corr baseline | D3 showed single-name dynamics = vol clustering. The unexploited frontier is CROSS-symbol next-move structure (lead-lag), which simple per-symbol features can't see. Well-powered (7,682 syms). |
+| 3 | **repr-2 channel ablation** (drop overnight/intraday/logdvol/dvol_chg one at a time) → attribute the AE's +0.017 cohesion lift. | fp-torch-gpu | `experiments/gpu_repr2/out/profiles.npz` | `channel_ablation.json` | Cheap (<2 min), sharpens the repr-2 story, no new data. |
+| 4 | lightGBM-on-trusted (once first clean RTH day fills trusted_features) | fp-ml | trusted_features view | gbm_trusted_oos.json | waits on a clean day; CPU-ok, visibility. |
 
 ## Notes
-- R1 GPU job RETIRED: Stage-2a (stage2_giveback_results.md) is a clean null — bars don't forecast
-  give-back magnitude; the 137-tick refinement is underpowered and does NOT gate anything. GPU freed.
 - No GPU job runs without committing a saved artifact path here. "Ran on the 3090" with no file = not done.
-- A model on n<~200 events with walk-forward OOS is a mirage risk (RESEARCH_PITFALLS); don't burn the
-  3090 on it — use lightGBM on engineered features and report the honest OOS R2 vs 0 (not vs a shuffled canary).
+- A model on n<~200 events with walk-forward OOS is a mirage risk (RESEARCH_PITFALLS); use the well-powered
+  cross-asset data (thousands of symbols), not underpowered single-event tasks.
+- **predict-zero, not just persistence:** for z-scored / mean-0 targets, persistence is a weak baseline that
+  inflates apparent skill (the D3 trap — "50% vs persistence" was +0.77% vs predict-zero). Always include the
+  mean baseline and decompose per-channel before claiming a feature.
+- **GPU container store mount:** `docker run --gpus all -v fp_store_real:/store:ro -v <worktree>:/work -w /work
+  fp-torch-gpu ...`. The `/store` host path is NOT mounted; use the docker volume.
+- **OOM lesson:** mini-batch BOTH train AND eval; keep the full panel on CPU and move batches to the 24 GB
+  GPU per-step. A full-tensor eval forward on 100k×390 sequences tries to alloc >100 GB.
