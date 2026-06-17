@@ -37,7 +37,12 @@ from quantlib.features import store, trust_lifecycle, validate as validate_mod, 
 from quantlib.features.base import FeatureType
 from quantlib.features.cleanliness import clean_symbols, symbol_day_cleanliness
 from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
-from quantlib.features.materialize import DEFAULT_RAW_ROOT, materialize_from_raw, materialize_from_raw_full
+from quantlib.features.materialize import (
+    DEFAULT_RAW_ROOT,
+    materialize_from_raw,
+    materialize_from_raw_bar_groups,
+    materialize_from_raw_full,
+)
 from quantlib.features.registry import REGISTRY
 from quantlib.features.session import rth_mask
 from quantlib.features.trust_lifecycle import (
@@ -262,14 +267,18 @@ def sweep_day(
             "contaminated to grade; features stay PENDING (no defects filed)",
         }
 
-    # CROSS-SECTIONAL grade — captured NOW, against the PASS-1 FULL-UNIVERSE bar-only backfill, BEFORE pass 2
-    # clears it. Universe-reduce features (breadth_* / *_rank / dispersion / peer) value a symbol by a
-    # reduction over the whole present universe, so they only reproduce the live stream when the SAME symbols
-    # are present both sides; the pass-2 gradable subset would mis-grade them ~0.000 (a scope artifact). They
-    # need only bars, so pass 1 already produced everything they require. Scope is the full discovered
-    # universe (pinned to the day's membership); the clean-symbol grade is taken later from the clean cells.
+    # CROSS-SECTIONAL grade — graded against a FULL-UNIVERSE, SINGLE-COMPUTE backfill, BEFORE pass 2 clears
+    # the day. Universe-reduce features (breadth_* / *_rank / dispersion / peer) value a symbol by a reduction
+    # over the whole present universe, so the backfill compute MUST see EVERY symbol at once — pass 1's CHUNKED
+    # materialize computes a separate partial-universe reduction per 500-symbol chunk (a 500-name breadth, not
+    # a full-universe one), which the full-universe live gather can never match. So re-materialize JUST these
+    # groups, bar-only and UN-CHUNKED, over the full discovered universe, clearing their chunked pass-1
+    # partitions first so the single-file write is a clean replace (not a union with the chunk shards). They
+    # read only bars, so this skips the tick tape. The clean-symbol grade is taken later from the clean cells.
     xsec_groups = cross_sectional_groups()
+    store.clear_backfill_groups_day(feature_root, day, xsec_groups)
     xsec_scope, xsec_tiers = validate_mod.scoped_tiers(day, discovered)
+    materialize_from_raw_bar_groups(feature_root, raw_root, day, xsec_scope, only_groups=xsec_groups)
     xsec_result = validate_mod.compare_groups(
         feature_root, day, xsec_scope, xsec_tiers, groups=xsec_groups
     )

@@ -229,9 +229,17 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
         full_scopes.append(list(symbols))
         full_shards.append(shard)
 
+    xsec_bar_scopes: list[list[str]] = []
+
+    def _capture_xsec_bar(feature_root, raw_root, day, symbols, only_groups):  # noqa: ANN001,ANN202
+        xsec_bar_scopes.append(list(symbols))
+
     # PASS 1 is bar-only (materialize_from_raw); PASS 2 is the tick-aware materialize (materialize_from_raw_full).
+    # The cross-sectional groups are re-materialized full-universe un-chunked (materialize_from_raw_bar_groups).
     monkeypatch.setattr(validation_sweep, "materialize_from_raw", _capture_bar)
     monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _capture_full)
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw_bar_groups", _capture_xsec_bar)
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
     _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
@@ -264,6 +272,10 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     assert set(discovered).issubset(xsec_call["scope"])  # cross-sectional graded over the full universe
     for ticker in MARKET_TICKERS:  # per-symbol scope pins the market reference
         assert ticker in per_symbol_call["scope"]
+    # The cross-sectional backfill is re-materialized ONCE (un-chunked) over the full universe, so the
+    # universe-reduce is a single full-universe compute (not a per-chunk partial-universe one).
+    assert len(xsec_bar_scopes) == 1
+    assert set(discovered).issubset(set(xsec_bar_scopes[0]))
     # The discriminator: a universe-reduce group is in, the reference-relative groups are out.
     assert "breadth" in xsec_groups
     assert "market_context" not in xsec_groups and "market_beta" not in xsec_groups
@@ -291,6 +303,11 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
         validation_sweep, "materialize_from_raw_full",
         lambda fr, rr, day, symbols, shard=None: full_seen.update(symbols),
     )
+    monkeypatch.setattr(
+        validation_sweep, "materialize_from_raw_bar_groups",
+        lambda fr, rr, day, symbols, only_groups: None,
+    )
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
     _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
