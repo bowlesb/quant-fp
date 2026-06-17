@@ -1,0 +1,80 @@
+{
+  "data": {
+    "rows": 907027,
+    "n_symbols": 3802,
+    "train_rows": 704398,
+    "test_rows": 202629,
+    "date_cut": "2026-03-17"
+  },
+  "embed_dim": 8,
+  "simple_feature_heldout_ic": {
+    "resid_ret_next": {
+      "c2c_mean": -0.0453,
+      "c2c_std": -0.0118,
+      "overnight_mean": -0.0413,
+      "overnight_std": -0.0127,
+      "intraday_mean": -0.0062,
+      "intraday_std": -0.0076,
+      "downside_semidev": 0.0066,
+      "logdvol_mean": 0.0013,
+      "logdvol_trend": -0.0025,
+      "ret_autocorr1": 0.009,
+      "momentum": -0.0453,
+      "overnight_var_share": 0.0
+    },
+    "realized_vol_next": {
+      "c2c_mean": -0.021,
+      "c2c_std": 0.2907,
+      "overnight_mean": 0.0937,
+      "overnight_std": 0.2714,
+      "intraday_mean": -0.1612,
+      "intraday_std": 0.3235,
+      "downside_semidev": 0.2949,
+      "logdvol_mean": -0.1576,
+      "logdvol_trend": -0.0049,
+      "ret_autocorr1": 0.0241,
+      "momentum": -0.021,
+      "overnight_var_share": 0.0882
+    },
+    "overnight_gap_next": {
+      "c2c_mean": -0.0268,
+      "c2c_std": 0.2539,
+      "overnight_mean": 0.07,
+      "overnight_std": 0.2388,
+      "intraday_mean": -0.1377,
+      "intraday_std": 0.2777,
+      "downside_semidev": 0.2594,
+      "logdvol_mean": -0.1357,
+      "logdvol_trend": -0.0104,
+      "ret_autocorr1": 0.0197,
+      "momentum": -0.0268,
+      "overnight_var_share": 0.0915
+    }
+  },
+  "learned_embedding_heldout_ic": {
+    "resid_ret_next": 0.0286,
+    "realized_vol_next": 0.3166,
+    "overnight_gap_next": 0.2705
+  },
+  "verdict": {
+    "resid_ret_next": {
+      "best_simple_feature": "c2c_mean",
+      "best_simple_ic": -0.0453,
+      "learned_embedding_ic": 0.0286,
+      "embedding_beats_simple": false
+    },
+    "realized_vol_next": {
+      "best_simple_feature": "intraday_std",
+      "best_simple_ic": 0.3235,
+      "learned_embedding_ic": 0.3166,
+      "embedding_beats_simple": false
+    },
+    "overnight_gap_next": {
+      "best_simple_feature": "intraday_std",
+      "best_simple_ic": 0.2777,
+      "learned_embedding_ic": 0.2705,
+      "embedding_beats_simple": false
+    }
+  },
+  "ship_any_dayahead_feature": false
+}

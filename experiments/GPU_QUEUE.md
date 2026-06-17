@@ -33,16 +33,28 @@ Single 3090 (24GB). Serialize on `~/.quant-gpu.lock`. Images: `fp-torch-gpu` (to
   forecasting. The GPU's demonstrated edge is **REPRESENTATION** (repr-2's behavioral embedding: coherent
   clusters, +15% OOS cohesion → a parity-true static feature, the `peer_relative` pattern). Re-rank toward
   representation + DIFFERENT targets than minute returns (queue below).
+- **DAY-AHEAD embedding — DONE. Embedding REDUNDANT (no-ship), but a SIMPLE vol feature is a real deliverable.**
+  907k rows / 3,802 symbols, parity-true trailing profile → next-day target. Findings: (a) next-day realized
+  vol / overnight gap IS strongly predictable, held-out IC ~**0.32** from trailing `intraday_std` (the slower
+  target survives OOS, as the pivot predicted); (b) next-day RETURN is null (IC −0.045); (c) the learned AE
+  embedding TIES-OR-LOSES to the single best trailing feature on every target → redundant, do NOT ship the
+  embedding. Useful spin-off: if the platform lacks a daily trailing-realized-vol feature, ship the SIMPLE one
+  (CPU, parity-trivial, IC ~0.32). Artifacts: `experiments/gpu_dayahead/` (`dayahead_result.json`, `results.md`).
+- **REFINED STRATEGIC PRIOR (three cycles):** the GPU's representation edge is for RELATIONAL structure
+  (peer/co-movement clusters simple per-symbol features can't express — repr-2's win), NOT for predicting
+  per-symbol SCALAR targets a single trailing statistic already captures (day-ahead vol) or that are simply
+  null (returns). Future GPU jobs → RELATIONAL structure, not scalar prediction.
 - **a2a58dd2 autoencoder run: still NO durable artifact** — UNVERIFIED, not-done.
 
-## RANKED QUEUE (re-ranked toward representation; minute-return prediction retired as a dry well)
+## RANKED QUEUE (representation = RELATIONAL structure; scalar-prediction targets retired)
 | # | Job | Image | Input | Output artifact (REQUIRED) | Rank rationale |
 |---|-----|-------|-------|----------------------------|----------------|
-| ~~R1 / D3 / lead-lag~~ DONE | minute-return prediction (3 variants) | — | — | their `*_result.json` | ALL NULL. Minute returns not forecastable from price/volume path (single-name OR cross-sectional). Retired. |
+| ~~R1 / D3 / lead-lag~~ DONE | minute-return prediction (3 variants) | — | — | their `*_result.json` | ALL NULL. Retired. |
+| ~~day-ahead embedding~~ DONE | per-symbol scalar day-ahead prediction | — | — | `gpu_dayahead/dayahead_result.json` | Embedding redundant vs simple trailing-vol; scalar-prediction is not the GPU's edge. |
 | 1 | **Coordinator: swap `behavioral_clusters_v1`→`v2` behind `peer_relative`; OOS-IC gate** | fp-ml (CPU) | `behavioral_clusters_v2.parquet` + labels | `peer_relative_v2_oos_ic.json` | repr-2 cohesion win is necessary not sufficient; OOS-IC decides. No GPU. |
-| 2 | **DAY-AHEAD behavioral-state embedding → next-DAY (not minute) target.** Extend repr-2: a per-symbol embedding of the recent multi-day behavioral path; probe whether it carries OOS structure for a DAILY-horizon target (next-day residual return / realized-vol / overnight-gap), via cross-sectional IC. | fp-torch-gpu | daily panel + `out/profiles.npz` | `dayahead_repr_result.json` + held-out-time IC vs predict-zero | Pivot per the prior: representation (repr-2's proven edge) on a DIFFERENT, slower target where structure plausibly survives (daily vol/peer effects are real OOS; minute returns are not). |
-| 3 | **repr-2 channel ablation** (drop overnight/intraday/logdvol/dvol_chg one at a time) → attribute the AE's +0.017 cohesion lift; also test ADDING channels (realized-vol, gap, turnover-trend) to push cohesion. | fp-torch-gpu | `experiments/gpu_repr2/out/profiles.npz` | `channel_ablation.json` | Cheap (<2 min), sharpens + potentially strengthens the one real GPU win. |
-| 4 | **Sector/peer-graph embedding** (GNN/contrastive over the co-movement graph) → an even-better cluster map than v2, same `peer_relative` slot. | fp-torch-gpu | daily co-movement matrix | `graph_embed_result.json` + held-out cohesion vs v2 | Doubles down on representation; ships into the existing parity-true slot (zero new columns), like v2. |
+| 2 | **Coordinator/CPU: ship a daily TRAILING-REALIZED-VOL feature IF absent** (frozen nightly per-symbol static lookup; trailing `intraday_std`/`c2c_std`). | fp-ml (CPU) | daily panel | feature PR + held-out IC ~0.32 | The real day-ahead deliverable — simple, parity-trivial, predicts a real target. Check the feature set first; no GPU. |
+| 3 | **Sector/peer-GRAPH embedding** (GNN / contrastive over the co-movement graph) → an even-better cluster map than v2, same `peer_relative` slot. | fp-torch-gpu | daily co-movement matrix | `graph_embed_result.json` + held-out cohesion vs v2 | RELATIONAL structure = the GPU's actual edge. Ships into the existing parity-true slot (zero new columns), like v2. **Top GPU job.** |
+| 4 | **repr-2 channel ablation** (drop/add channels) → attribute + try to push the AE's +0.017 cohesion lift. | fp-torch-gpu | `experiments/gpu_repr2/out/profiles.npz` | `channel_ablation.json` | Cheap (<2 min), strengthens the one real GPU win. |
 | 5 | lightGBM-on-trusted (once first clean RTH day fills trusted_features) | fp-ml | trusted_features view | gbm_trusted_oos.json | waits on a clean day; CPU-ok, visibility. |
 
 ## Notes
