@@ -15,6 +15,7 @@ engine's ``step`` output against the batch backfill (the live production path, n
 This is a re-runnable audit, not a pytest: ``python -m quantlib.features.parity_audit [DAY] [N_SYMBOLS]``.
 It is the living source of truth behind ``docs/PARITY_COVERAGE.md``.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -41,23 +42,112 @@ INDEX_ETFS: tuple[str, ...] = ("SPY", "QQQ", "IWM", "DIA")
 # count arg slices this list.
 DEFAULT_SYMBOLS: tuple[str, ...] = INDEX_ETFS + (
     # mega-cap tech / comm
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "AVGO", "ORCL", "CRM", "ADBE", "CSCO",
-    "AMD", "INTC", "QCOM", "TXN", "MU", "AMAT", "NFLX", "DIS", "CMCSA", "T", "VZ", "TMUS",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "GOOG",
+    "AVGO",
+    "ORCL",
+    "CRM",
+    "ADBE",
+    "CSCO",
+    "AMD",
+    "INTC",
+    "QCOM",
+    "TXN",
+    "MU",
+    "AMAT",
+    "NFLX",
+    "DIS",
+    "CMCSA",
+    "T",
+    "VZ",
+    "TMUS",
     # consumer discretionary / staples
-    "TSLA", "HD", "LOW", "NKE", "MCD", "SBUX", "BKNG", "TGT", "WMT", "COST", "PG", "KO", "PEP",
-    "PM", "MDLZ",
+    "TSLA",
+    "HD",
+    "LOW",
+    "NKE",
+    "MCD",
+    "SBUX",
+    "BKNG",
+    "TGT",
+    "WMT",
+    "COST",
+    "PG",
+    "KO",
+    "PEP",
+    "PM",
+    "MDLZ",
     # financials
-    "JPM", "BAC", "WFC", "GS", "MS", "C", "SCHW", "AXP", "BLK", "SPGI", "V", "MA",
+    "JPM",
+    "BAC",
+    "WFC",
+    "GS",
+    "MS",
+    "C",
+    "SCHW",
+    "AXP",
+    "BLK",
+    "SPGI",
+    "V",
+    "MA",
     # healthcare
-    "UNH", "JNJ", "LLY", "PFE", "MRK", "ABBV", "TMO", "ABT", "DHR", "BMY", "AMGN", "GILD",
+    "UNH",
+    "JNJ",
+    "LLY",
+    "PFE",
+    "MRK",
+    "ABBV",
+    "TMO",
+    "ABT",
+    "DHR",
+    "BMY",
+    "AMGN",
+    "GILD",
     # industrials / energy / materials / utilities
-    "CAT", "BA", "HON", "GE", "UPS", "RTX", "LMT", "DE", "XOM", "CVX", "COP", "SLB",
-    "LIN", "FCX", "NEM", "NEE", "DUK", "SO",
+    "CAT",
+    "BA",
+    "HON",
+    "GE",
+    "UPS",
+    "RTX",
+    "LMT",
+    "DE",
+    "XOM",
+    "CVX",
+    "COP",
+    "SLB",
+    "LIN",
+    "FCX",
+    "NEM",
+    "NEE",
+    "DUK",
+    "SO",
     # high-volume movers
-    "PLTR", "COIN", "SOFI", "F", "GM", "UBER", "ABNB", "SHOP", "MARA", "RIOT", "SNOW",
+    "PLTR",
+    "COIN",
+    "SOFI",
+    "F",
+    "GM",
+    "UBER",
+    "ABNB",
+    "SHOP",
+    "MARA",
+    "RIOT",
+    "SNOW",
 )
 ABS_FLOOR = 1e-9  # absolute parity floor near zero (matches tests/test_fp_latest.py)
-SECTORS = ("Technology", "Communication Services", "Consumer Discretionary", "Financials", "Energy")
+SECTORS = (
+    "Technology",
+    "Communication Services",
+    "Consumer Discretionary",
+    "Financials",
+    "Energy",
+)
 
 
 @dataclass
@@ -71,7 +161,9 @@ class FeatureVerdict:
     exemplar: str  # "symbol: backfill=.. realtime=.." or a reason
 
 
-def _read_partition(raw_root: str, tier: str, symbol: str, day: dt.date) -> pl.DataFrame | None:
+def _read_partition(
+    raw_root: str, tier: str, symbol: str, day: dt.date
+) -> pl.DataFrame | None:
     path = os.path.join(partition_dir(raw_root, tier, symbol, day), "data.parquet")
     if not os.path.exists(path):
         return None
@@ -100,11 +192,15 @@ def load_bars(raw_root: str, day: str, symbols: list[str]) -> pl.DataFrame:
             )
         )
     if not frames:
-        raise SystemExit(f"no raw bars for any of {symbols} on {day} under {raw_root}/raw/bars")
+        raise SystemExit(
+            f"no raw bars for any of {symbols} on {day} under {raw_root}/raw/bars"
+        )
     return pl.concat(frames, how="vertical").sort(["symbol", "minute"])
 
 
-def _tick_columns_for_symbol(trades: pl.DataFrame, quotes: pl.DataFrame | None) -> pl.DataFrame:
+def _tick_columns_for_symbol(
+    trades: pl.DataFrame, quotes: pl.DataFrame | None
+) -> pl.DataFrame:
     """Per-(symbol, minute) tick aggregates matching ``loaders._MINUTE_AGG_SQL`` / ``tick_capture``.
 
     signed_volume uses the tick rule with the sign carried across zero-ticks (state threaded WITHIN a symbol
@@ -122,7 +218,11 @@ def _tick_columns_for_symbol(trades: pl.DataFrame, quotes: pl.DataFrame | None) 
         .otherwise(None)
         .alias("_raw_sign")
     ).with_columns(
-        pl.col("_raw_sign").fill_null(strategy="forward").over("symbol").fill_null(1).alias("_sign")
+        pl.col("_raw_sign")
+        .fill_null(strategy="forward")
+        .over("symbol")
+        .fill_null(1)
+        .alias("_sign")
     )
     trade_agg = signed.group_by(
         ["symbol", pl.col("ts").dt.truncate("1m").alias("minute")]
@@ -134,30 +234,35 @@ def _tick_columns_for_symbol(trades: pl.DataFrame, quotes: pl.DataFrame | None) 
         return trade_agg
     mid = (pl.col("bid_price") + pl.col("ask_price")) / 2.0
     depth = pl.col("bid_size") + pl.col("ask_size")
-    quote_agg = quotes.with_columns(
-        pl.when((mid > 0) & (pl.col("ask_price") >= pl.col("bid_price")))
-        .then((pl.col("ask_price") - pl.col("bid_price")) / mid * 10000.0)
-        .otherwise(None)
-        .alias("_spread_bps"),
-        pl.when(depth > 0)
-        .then((pl.col("bid_size") - pl.col("ask_size")) / depth)
-        .otherwise(None)
-        .alias("_imbalance"),
-    ).group_by(
-        ["symbol", pl.col("ts").dt.truncate("1m").alias("minute")]
-    ).agg(
-        pl.col("_spread_bps").mean().fill_null(0.0).alias("mean_spread_bps"),
-        pl.col("_imbalance").mean().fill_null(0.0).alias("quote_imbalance"),
-        pl.col("bid_size").mean().alias("mean_bid_size"),
-        pl.col("ask_size").mean().alias("mean_ask_size"),
+    quote_agg = (
+        quotes.with_columns(
+            pl.when((mid > 0) & (pl.col("ask_price") >= pl.col("bid_price")))
+            .then((pl.col("ask_price") - pl.col("bid_price")) / mid * 10000.0)
+            .otherwise(None)
+            .alias("_spread_bps"),
+            pl.when(depth > 0)
+            .then((pl.col("bid_size") - pl.col("ask_size")) / depth)
+            .otherwise(None)
+            .alias("_imbalance"),
+        )
+        .group_by(["symbol", pl.col("ts").dt.truncate("1m").alias("minute")])
+        .agg(
+            pl.col("_spread_bps").mean().fill_null(0.0).alias("mean_spread_bps"),
+            pl.col("_imbalance").mean().fill_null(0.0).alias("quote_imbalance"),
+            pl.col("bid_size").mean().alias("mean_bid_size"),
+            pl.col("ask_size").mean().alias("mean_ask_size"),
+        )
     )
     return trade_agg.join(quote_agg, on=["symbol", "minute"], how="full", coalesce=True)
 
 
-def load_tick_enriched_minute_agg(raw_root: str, day: str, symbols: list[str], bars: pl.DataFrame) -> pl.DataFrame:
+def load_tick_enriched_minute_agg(
+    raw_root: str, day: str, symbols: list[str], bars: pl.DataFrame
+) -> pl.DataFrame:
     """Enrich the bar ``minute_agg`` with the real per-minute tick columns (n_trades, signed_volume, spread,
     imbalance, sizes) aggregated from ``/store/raw/trades`` + ``/store/raw/quotes`` — so trade_flow /
-    quote_spread / liquidity run on REAL tick inputs, null where a symbol had no ticks that minute (honest)."""
+    quote_spread / liquidity run on REAL tick inputs, null where a symbol had no ticks that minute (honest).
+    """
     target = dt.date.fromisoformat(day)
     trade_frames, quote_frames = [], []
     for symbol in symbols:
@@ -166,7 +271,11 @@ def load_tick_enriched_minute_agg(raw_root: str, day: str, symbols: list[str], b
             trade_frames.append(trades.select("symbol", "ts", "price", "size"))
         quotes = _read_partition(raw_root, "quotes", symbol, target)
         if quotes is not None:
-            quote_frames.append(quotes.select("symbol", "ts", "bid_price", "ask_price", "bid_size", "ask_size"))
+            quote_frames.append(
+                quotes.select(
+                    "symbol", "ts", "bid_price", "ask_price", "bid_size", "ask_size"
+                )
+            )
     if not trade_frames:
         return bars
     trades_all = pl.concat(trade_frames, how="vertical")
@@ -177,7 +286,8 @@ def load_tick_enriched_minute_agg(raw_root: str, day: str, symbols: list[str], b
 
 def load_raw_trades_frame(raw_root: str, day: str, symbols: list[str]) -> pl.DataFrame:
     """The raw per-trade ``trades`` frame (symbol, ts, price, size) the tick_runlength / microstructure_burst
-    groups declare as input — read straight from ``/store/raw/trades``, RTH-restricted to keep it bounded."""
+    groups declare as input — read straight from ``/store/raw/trades``, RTH-restricted to keep it bounded.
+    """
     target = dt.date.fromisoformat(day)
     frames = []
     for symbol in symbols:
@@ -185,12 +295,20 @@ def load_raw_trades_frame(raw_root: str, day: str, symbols: list[str]) -> pl.Dat
         if trades is not None:
             frames.append(trades.select("symbol", "ts", "price", "size"))
     if not frames:
-        return pl.DataFrame(schema={"symbol": pl.String, "ts": pl.Datetime("us", "UTC"),
-                                    "price": pl.Float64, "size": pl.Float64})
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.String,
+                "ts": pl.Datetime("us", "UTC"),
+                "price": pl.Float64,
+                "size": pl.Float64,
+            }
+        )
     return pl.concat(frames, how="vertical").sort(["symbol", "ts"])
 
 
-def build_daily(raw_root: str, day: str, symbols: list[str], lookback_days: int = 200) -> pl.DataFrame:
+def build_daily(
+    raw_root: str, day: str, symbols: list[str], lookback_days: int = 200
+) -> pl.DataFrame:
     """A real ``daily`` history (symbol, date, open, high, low, close, vwap, volume) for the multi_day /
     prior_day groups: resample each symbol's prior-days raw minute bars to daily OHLCV. Uses whatever raw
     bar days exist under ``/store/raw/bars`` up to and INCLUDING ``day`` (the prior_day/multi_day groups
@@ -204,7 +322,7 @@ def build_daily(raw_root: str, day: str, symbols: list[str], lookback_days: int 
         for entry in sorted(os.listdir(sym_dir)):
             if not entry.startswith("date="):
                 continue
-            date = dt.date.fromisoformat(entry[len("date="):])
+            date = dt.date.fromisoformat(entry[len("date=") :])
             if date > target or (target - date).days > lookback_days:
                 continue
             path = os.path.join(sym_dir, entry, "data.parquet")
@@ -220,14 +338,25 @@ def build_daily(raw_root: str, day: str, symbols: list[str], lookback_days: int 
                 pl.col("high").max().alias("high"),
                 pl.col("low").min().alias("low"),
                 pl.col("close").last().alias("close"),
-                ((pl.col("close") * pl.col("volume")).sum() / pl.col("volume").sum()).alias("vwap"),
+                (
+                    (pl.col("close") * pl.col("volume")).sum() / pl.col("volume").sum()
+                ).alias("vwap"),
                 pl.col("volume").sum().alias("volume"),
             )
             rows.append(agg)
     if not rows:
-        return pl.DataFrame(schema={"symbol": pl.String, "date": pl.Date, "open": pl.Float64,
-                                    "high": pl.Float64, "low": pl.Float64, "close": pl.Float64,
-                                    "vwap": pl.Float64, "volume": pl.Float64})
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.String,
+                "date": pl.Date,
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "vwap": pl.Float64,
+                "volume": pl.Float64,
+            }
+        )
     return pl.concat(rows, how="vertical").sort(["symbol", "date"])
 
 
@@ -243,11 +372,14 @@ def build_reference(symbols: list[str]) -> pl.DataFrame:
             "easy_to_borrow": [i % 2 == 0 for i in range(len(symbols))],
             "marginable": [True] * len(symbols),
             "fractionable": [i % 3 == 0 for i in range(len(symbols))],
+            "cluster_id": [i % 4 for i in range(len(symbols))],
         }
     )
 
 
-def build_frames(raw_root: str, day: str, symbols: list[str]) -> dict[str, pl.DataFrame]:
+def build_frames(
+    raw_root: str, day: str, symbols: list[str]
+) -> dict[str, pl.DataFrame]:
     """The full production-shaped BatchContext frames from real ``/store/raw`` data."""
     bars = load_bars(raw_root, day, symbols)
     present = bars["symbol"].unique().to_list()
@@ -267,16 +399,22 @@ def _compare_latest_row(
 ) -> list[FeatureVerdict]:
     """Cell-for-cell compare the latest-minute row of ``live`` against ``backfill`` within each feature's
     declared tolerance (the SAME predicate as tests/test_fp_latest.py). A null-vs-value mismatch is a hard
-    DIVERGE (the most important parity break — a feature null live but real in backfill)."""
+    DIVERGE (the most important parity break — a feature null live but real in backfill).
+    """
     latest = backfill["minute"].max()
     expected = backfill.filter(pl.col("minute") == latest).sort("symbol")
-    actual = live.filter(pl.col("minute") == latest).sort("symbol").select(expected.columns)
+    actual = (
+        live.filter(pl.col("minute") == latest).sort("symbol").select(expected.columns)
+    )
     tolerances = {spec.name: spec.tolerance for spec in group.declare()}
     verdicts = []
     for feature in [c for c in expected.columns if c not in ("symbol", "minute")]:
         tol = tolerances[feature]
         joined = expected.select("symbol", feature).join(
-            actual.select("symbol", pl.col(feature).alias("_a")), on="symbol", how="full", coalesce=True
+            actual.select("symbol", pl.col(feature).alias("_a")),
+            on="symbol",
+            how="full",
+            coalesce=True,
         )
         null_mismatch = pl.col(feature).is_null() != pl.col("_a").is_null()
         both_present = pl.col(feature).is_not_null() & pl.col("_a").is_not_null()
@@ -286,27 +424,55 @@ def _compare_latest_row(
         if bad.height == 0:
             n_back = joined.select(pl.col(feature).is_not_null().sum()).item()
             status = "MATCH" if n_back else "NEEDS_DATA"
-            verdicts.append(FeatureVerdict(group.name, feature, status, 0, 0.0, 0.0,
-                                           "all-null (no backfill values)" if not n_back else ""))
+            verdicts.append(
+                FeatureVerdict(
+                    group.name,
+                    feature,
+                    status,
+                    0,
+                    0.0,
+                    0.0,
+                    "all-null (no backfill values)" if not n_back else "",
+                )
+            )
             continue
-        worst = bad.with_columns(
-            abs_diff.alias("_absd"),
-            (abs_diff / (pl.col(feature).abs() + ABS_FLOOR)).alias("_reld"),
-        ).sort("_reld", descending=True, nulls_last=True).row(0, named=True)
-        exemplar = (f"{worst['symbol']}: backfill={worst[feature]} realtime={worst['_a']}")
-        verdicts.append(FeatureVerdict(
-            group.name, feature, "DIVERGE", bad.height,
-            float(worst["_absd"] or 0.0), float(worst["_reld"] or 0.0), exemplar,
-        ))
+        worst = (
+            bad.with_columns(
+                abs_diff.alias("_absd"),
+                (abs_diff / (pl.col(feature).abs() + ABS_FLOOR)).alias("_reld"),
+            )
+            .sort("_reld", descending=True, nulls_last=True)
+            .row(0, named=True)
+        )
+        exemplar = (
+            f"{worst['symbol']}: backfill={worst[feature]} realtime={worst['_a']}"
+        )
+        verdicts.append(
+            FeatureVerdict(
+                group.name,
+                feature,
+                "DIVERGE",
+                bad.height,
+                float(worst["_absd"] or 0.0),
+                float(worst["_reld"] or 0.0),
+                exemplar,
+            )
+        )
     return verdicts
 
 
-def audit_group_compute_latest(group: FeatureGroup, ctx: BatchContext) -> list[FeatureVerdict]:
+def audit_group_compute_latest(
+    group: FeatureGroup, ctx: BatchContext
+) -> list[FeatureVerdict]:
     """compute_latest() vs compute().filter(last) for one group on the real frames."""
     backfill = group.compute(ctx)
     if backfill.height == 0:
-        return [FeatureVerdict(group.name, spec.name, "NEEDS_DATA", 0, 0.0, 0.0, "compute() empty")
-                for spec in group.declare()]
+        return [
+            FeatureVerdict(
+                group.name, spec.name, "NEEDS_DATA", 0, 0.0, 0.0, "compute() empty"
+            )
+            for spec in group.declare()
+        ]
     live = group.compute_latest(ctx)
     return _compare_latest_row(group, backfill, live)
 
@@ -319,7 +485,9 @@ def audit_group_compute_latest(group: FeatureGroup, ctx: BatchContext) -> list[F
 WARMUP_MINUTES = 260  # > the deepest reduction window (180m) + slack
 
 
-def audit_incremental(groups: list[ReductionGroup], ctx: BatchContext) -> list[FeatureVerdict]:
+def audit_incremental(
+    groups: list[ReductionGroup], ctx: BatchContext
+) -> list[FeatureVerdict]:
     """The LIVE PRODUCTION path for reduction groups: the IncrementalEngine driven minute-by-minute (exactly
     as the live capture does — seed, then ``step`` each new minute) vs the batch backfill. Steps the trailing
     ``WARMUP_MINUTES`` minutes one at a time, then compares the final minute's output cell-for-cell. This is
@@ -341,7 +509,9 @@ def audit_incremental(groups: list[ReductionGroup], ctx: BatchContext) -> list[F
     return verdicts
 
 
-def run_audit(raw_root: str, day: str, symbols: list[str]) -> tuple[list[FeatureVerdict], list[FeatureVerdict]]:
+def run_audit(
+    raw_root: str, day: str, symbols: list[str]
+) -> tuple[list[FeatureVerdict], list[FeatureVerdict]]:
     """Run the full audit. Returns (compute_latest verdicts, incremental verdicts)."""
     frames = build_frames(raw_root, day, symbols)
     ctx = BatchContext(frames=frames)
@@ -350,13 +520,23 @@ def run_audit(raw_root: str, day: str, symbols: list[str]) -> tuple[list[Feature
     for group in sorted(REGISTRY.groups(), key=lambda g: g.name):
         if group.name not in available:
             cl_verdicts.extend(
-                FeatureVerdict(group.name, spec.name, "NEEDS_DATA", 0, 0.0, 0.0, "inputs not present")
+                FeatureVerdict(
+                    group.name,
+                    spec.name,
+                    "NEEDS_DATA",
+                    0,
+                    0.0,
+                    0.0,
+                    "inputs not present",
+                )
                 for spec in group.declare()
             )
             continue
         cl_verdicts.extend(audit_group_compute_latest(group, ctx))
     reduction_groups = [
-        g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in available
+        g
+        for g in REGISTRY.groups()
+        if isinstance(g, ReductionGroup) and g.name in available
     ]
     inc_verdicts = audit_incremental(reduction_groups, ctx) if reduction_groups else []
     return cl_verdicts, inc_verdicts
@@ -367,14 +547,21 @@ def _print_report(title: str, verdicts: list[FeatureVerdict]) -> None:
     for verdict in verdicts:
         by_status[verdict.status] = by_status.get(verdict.status, 0) + 1
     print(f"\n=== {title} ===")
-    print(f"features: {len(verdicts)}  " + "  ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
+    print(
+        f"features: {len(verdicts)}  "
+        + "  ".join(f"{k}={v}" for k, v in sorted(by_status.items()))
+    )
     diverged = [verdict for verdict in verdicts if verdict.status == "DIVERGE"]
     if diverged:
         print(f"\n  DIVERGENCES ({len(diverged)}):")
         for verdict in sorted(diverged, key=lambda v: v.worst_rel, reverse=True):
-            print(f"  {verdict.group}.{verdict.feature}: n_bad={verdict.n_bad} "
-                  f"worst_abs={verdict.worst_abs:.3e} worst_rel={verdict.worst_rel:.3e} | {verdict.exemplar}")
-    needs = sorted({verdict.group for verdict in verdicts if verdict.status == "NEEDS_DATA"})
+            print(
+                f"  {verdict.group}.{verdict.feature}: n_bad={verdict.n_bad} "
+                f"worst_abs={verdict.worst_abs:.3e} worst_rel={verdict.worst_rel:.3e} | {verdict.exemplar}"
+            )
+    needs = sorted(
+        {verdict.group for verdict in verdicts if verdict.status == "NEEDS_DATA"}
+    )
     if needs:
         print(f"\n  NEEDS_DATA groups: {needs}")
 
@@ -400,7 +587,9 @@ def main() -> None:
     day = args[0] if args else "2026-06-15"
     count = int(args[1]) if len(args) > 1 else None
     symbols = select_symbols(count)
-    print(f"parity audit: day={day} n_symbols={len(symbols)} raw_root={DEFAULT_RAW_ROOT}")
+    print(
+        f"parity audit: day={day} n_symbols={len(symbols)} raw_root={DEFAULT_RAW_ROOT}"
+    )
     cl_verdicts, inc_verdicts = run_audit(DEFAULT_RAW_ROOT, day, symbols)
     _print_report("compute_latest vs compute().last (REAL data)", cl_verdicts)
     _print_report("IncrementalEngine.step vs compute().last (REAL data)", inc_verdicts)
