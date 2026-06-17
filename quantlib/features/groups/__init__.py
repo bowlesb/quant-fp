@@ -30,6 +30,7 @@ from quantlib.features.groups import (  # noqa: F401
     prior_day,
     quote_spread,
     residual_analysis,
+    return_dispersion,
     return_dynamics,
     round_levels,
     sector,
