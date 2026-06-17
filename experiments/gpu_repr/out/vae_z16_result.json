@@ -1,0 +1,50 @@
+{
+  "config": {
+    "panel": "/home/ben/quant-fp/experiments/dl_research/synth_panel.parquet",
+    "latent": 16,
+    "epochs": 30,
+    "beta": 0.0,
+    "lr": 0.001,
+    "embargo": 60,
+    "seed": 0
+  },
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "train_seconds": 72.7,
+  "n_train_rows": 616000,
+  "n_features": 519,
+  "recon_r2": {
+    "train": 0.0634,
+    "heldout_symbol": 0.0615,
+    "heldout_time": 0.0608,
+    "pca_heldout_symbol": 0.0309,
+    "pca_heldout_time": 0.0312
+  },
+  "latent": {
+    "dim": 16,
+    "active_dims_kl_gt_0.01": 16,
+    "kl_per_dim_top5": [
+      9.509,
+      9.364,
+      9.323,
+      9.218,
+      9.183
+    ]
+  },
+  "sector_structure": {},
+  "preregistered_checks": {
+    "1_heldout_symbol_pass": true,
+    "2_heldout_time_pass": true,
+    "3_beats_pca_sym": true,
+    "3_beats_pca_time": true,
+    "4_no_collapse": true,
+    "4_sector_structured": false
+  },
+  "all_checks_pass": false,
+  "final_train_loss": {
+    "total": 0.9424,
+    "recon": 0.9424,
+    "kl": 9.0245,
+    "beta_t": 0.0
+  }
+}
