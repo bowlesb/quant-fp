@@ -157,6 +157,12 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    # The sweep defaults to the tick-aware materialize (materialize_from_raw_full) so the order-flow groups
+    # get a backfill side; patch that (and the bar-only variant, for a --no-ticks sweep) to capture scope.
+    monkeypatch.setattr(
+        validation_sweep, "materialize_from_raw_full",
+        lambda feature_root, raw_root, day, symbols: materialize_scopes.append(list(symbols)),
+    )
     monkeypatch.setattr(
         validation_sweep, "materialize_from_raw",
         lambda feature_root, raw_root, day, symbols: materialize_scopes.append(list(symbols)),

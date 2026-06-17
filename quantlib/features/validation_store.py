@@ -75,7 +75,10 @@ def upsert_feature_day(root: str | Path, rows: pl.DataFrame) -> Path:
         return Path(root) / FEATURE_DAY / "data.parquet"
     existing = read_feature_day(root)
     if existing.height:
-        existing = existing.select(rows.columns)  # align column order before anti-join + concat
+        # Align column order AND dtypes: older persisted parquet may carry UInt32 count columns while a
+        # fresh rows frame carries Int64 (the distributional path builds counts from Python ints). Cast
+        # the persisted side to rows' schema so the anti-join survivors vstack cleanly.
+        existing = existing.select(rows.columns).cast(dict(rows.schema))
         kept = existing.join(rows.select(FEATURE_DAY_KEYS), on=list(FEATURE_DAY_KEYS), how="anti")
         merged = pl.concat([kept, rows])
     else:

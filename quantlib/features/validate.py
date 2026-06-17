@@ -336,13 +336,21 @@ def validate(
     return trust
 
 
+_COUNT_COLUMNS = ("n_compared", "n_match", "n_mismatch", "n_extra_live", "n_missing_live")
+
+
 def _assemble_feature_day(tolerance_blocks: list[pl.DataFrame], dist_rows: list[dict]) -> pl.DataFrame:
-    """Unify tolerance feature_day frames and distributional dict rows into one durable frame."""
+    """Unify tolerance feature_day frames and distributional dict rows into one durable frame.
+
+    The tolerance path derives its counts from polars aggregations (UInt32) while the distributional
+    path builds them from Python ints (Int64); cast the count columns to a common Int64 so the two
+    sources vstack cleanly (the DB column is BIGINT either way)."""
     columns = ["version", "feature", "day", "method", "nan_policy", "n_compared", "n_match",
                "n_mismatch", "n_extra_live", "n_missing_live", "value_rate", "coverage_rate", "worst_abs_err"]
-    blocks = [block.select(columns) for block in tolerance_blocks if block.height]
+    count_casts = [pl.col(name).cast(pl.Int64) for name in _COUNT_COLUMNS]
+    blocks = [block.select(columns).with_columns(count_casts) for block in tolerance_blocks if block.height]
     if dist_rows:
-        blocks.append(pl.DataFrame(dist_rows).select(columns))
+        blocks.append(pl.DataFrame(dist_rows).select(columns).with_columns(count_casts))
     return pl.concat(blocks) if blocks else pl.DataFrame()
 
 
