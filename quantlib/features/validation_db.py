@@ -11,10 +11,28 @@ the day's rollup/exceptions are replaced, and `feature_trust` is a full overwrit
 """
 from __future__ import annotations
 
+import math
 import os
 
 import polars as pl
 import psycopg
+
+
+def finite_or_none(value: float | int | None) -> float | None:
+    """A finite float, else None — for the value columns the validation record persists.
+
+    A stream feature can legitimately emit a NON-FINITE value (Infinity / -Infinity / NaN), e.g. a guard
+    that divided by zero. That is a real mismatch to RECORD, not a reason to crash the whole sweep — yet a
+    non-finite float breaks the persist: ``json.dumps(inf)`` emits the bare token ``Infinity`` (invalid
+    JSON, so the ``feature_parity_defect.exemplars`` jsonb column rejects it). We normalise it to NULL (a
+    documented sentinel: "a value was emitted, but it was non-finite") at the persist boundary, so the cell
+    still counts as a mismatch and the sweep completes. The PARITY VERDICT is unaffected — it was decided
+    upstream from the finite cells; this only sanitises what gets written."""
+    if value is None:
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
 
 DB_KWARGS: dict[str, str | int] = {
     "host": os.environ.get("DB_HOST", "timescaledb"),
@@ -48,11 +66,20 @@ def _rows_trust(trust: pl.DataFrame) -> list[tuple]:
     return list(trust.select(_TRUST_COLUMNS).iter_rows())
 
 
+_EXC_VALUE_COLUMNS = ("stream_value", "backfill_value", "abs_err", "rel_err")
+
+
 def _rows_exceptions(exceptions: pl.DataFrame) -> list[tuple]:
-    """feature_validation_exception rows; the ledger's per-cell `minute` becomes the table's `ts`."""
+    """feature_validation_exception rows; the ledger's per-cell `minute` becomes the table's `ts`.
+
+    The value columns are NULLed where non-finite (Infinity / -Infinity / NaN): a stream feature may
+    legitimately emit such a value, which is a mismatch to record, not a crash — see ``finite_or_none``."""
     if exceptions.height == 0:
         return []
-    frame = exceptions.rename({"minute": "ts"})
+    frame = exceptions.rename({"minute": "ts"}).with_columns(
+        pl.when(pl.col(col).is_finite()).then(pl.col(col)).otherwise(None).alias(col)
+        for col in _EXC_VALUE_COLUMNS
+    )
     return list(frame.select(_EXC_COLUMNS).iter_rows())
 
 

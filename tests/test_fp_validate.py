@@ -7,6 +7,7 @@ DB/store I/O (load_tiers, get_features) is exercised by the integration path; he
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 import polars as pl
 import pytest
@@ -177,6 +178,43 @@ def test_db_rows_empty_frames_yield_no_rows() -> None:
     assert validation_db._rows_day(pl.DataFrame()) == []
     assert validation_db._rows_trust(pl.DataFrame()) == []
     assert validation_db._rows_exceptions(pl.DataFrame()) == []
+
+
+def test_finite_or_none_normalises_non_finite() -> None:
+    assert validation_db.finite_or_none(1.5) == 1.5
+    assert validation_db.finite_or_none(0.0) == 0.0
+    assert validation_db.finite_or_none(None) is None
+    assert validation_db.finite_or_none(math.inf) is None
+    assert validation_db.finite_or_none(-math.inf) is None
+    assert validation_db.finite_or_none(math.nan) is None
+
+
+def test_db_rows_exceptions_null_non_finite_values() -> None:
+    """A non-finite stream/backfill value (Infinity/-Infinity/NaN) is a real mismatch to record, not a
+    crash — the exception rows must carry it as NULL so the double-precision insert never sees a token the
+    persist boundary can choke on. Finite values pass through unchanged."""
+    exceptions = pl.DataFrame(
+        {
+            "feature": ["feat", "feat", "feat"],
+            "symbol": ["INF", "NEGINF", "FINITE"],
+            "minute": [M0, M1, M0],
+            "day": ["2026-06-15"] * 3,
+            "tier": [1, 1, 1],
+            "status": ["mismatch"] * 3,
+            "stream_value": [math.inf, -math.inf, 3.0],
+            "backfill_value": [1.0, math.nan, 2.0],
+            "abs_err": [math.inf, math.inf, 1.0],
+            "rel_err": [math.inf, math.nan, 0.5],
+        }
+    )
+    rows = validation_db._rows_exceptions(exceptions)
+    # column order from _EXC_COLUMNS: ..., stream_value(6), backfill_value(7), abs_err(8), rel_err(9)
+    by_symbol = {row[1]: row for row in rows}
+    assert by_symbol["INF"][6] is None and by_symbol["INF"][8] is None and by_symbol["INF"][9] is None
+    assert by_symbol["NEGINF"][6] is None and by_symbol["NEGINF"][7] is None and by_symbol["NEGINF"][9] is None
+    # the finite row is untouched
+    assert by_symbol["FINITE"][6] == 3.0 and by_symbol["FINITE"][7] == 2.0
+    assert by_symbol["FINITE"][8] == 1.0 and by_symbol["FINITE"][9] == 0.5
 
 
 def test_assemble_feature_day_mixes_tolerance_and_distributional_dtypes() -> None:
