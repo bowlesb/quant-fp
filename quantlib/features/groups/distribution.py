@@ -78,6 +78,11 @@ class DistributionGroup(ReductionGroup):
             defined = (n >= 3.0) & (m2 > 1e-16)
             feats[f"ret_skew_{w}m"] = pl.when(defined).then(m3 / m2.pow(1.5)).otherwise(None)
             feats[f"ret_kurt_{w}m"] = pl.when(defined).then(m4 / (m2 * m2) - 3.0).otherwise(None)
-            feats[f"downside_vol_{w}m"] = pl.when(n >= 2.0).then((sum_("dn2", w) / n).sqrt()).otherwise(None)
-            feats[f"upside_vol_{w}m"] = pl.when(n >= 2.0).then((sum_("up2", w) / n).sqrt()).otherwise(None)
+            # sum(dn2)/sum(up2) are sums of SQUARED returns -> mathematically NON-NEGATIVE, but the live
+            # incremental running sum can drift to a tiny negative residue when a window holds only zero
+            # contributions (a sparse symbol whose in-window returns are all one-signed -> the other side is
+            # all zeros), whose sqrt is NaN while backfill's rolling sum stays exactly 0.0. Clip >=0 before
+            # the sqrt (matching ohlc_vol / volatility) so live == backfill on sparse symbols.
+            feats[f"downside_vol_{w}m"] = pl.when(n >= 2.0).then((sum_("dn2", w) / n).clip(lower_bound=0.0).sqrt()).otherwise(None)
+            feats[f"upside_vol_{w}m"] = pl.when(n >= 2.0).then((sum_("up2", w) / n).clip(lower_bound=0.0).sqrt()).otherwise(None)
         return feats
