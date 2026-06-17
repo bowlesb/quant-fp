@@ -1,0 +1,26 @@
+{
+  "heldout_time_per_channel_mse": {
+    "lstm": {
+      "logret_mse": 0.99482,
+      "range_mse": 0.47044
+    },
+    "persistence": {
+      "logret_mse": 2.06203,
+      "range_mse": 0.85946
+    },
+    "predict_zero": {
+      "logret_mse": 1.00257,
+      "range_mse": 0.87265
+    }
+  },
+  "lstm_vs_zero_skill_pct": {
+    "logret": 0.77,
+    "range": 46.09
+  },
+  "corr_surprise_vs_current_range": 0.295,
+  "honest_verdict": {
+    "predict_zero_beats_persistence": true,
+    "lstm_beats_predict_zero": true,
+    "lstm_edge_is_in_range_channel": true
+  }
+}

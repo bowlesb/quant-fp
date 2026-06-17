@@ -43,7 +43,8 @@ import torch.nn as nn
 HIDDEN_DIM = 64
 EPOCHS = 30
 LR = 1e-3
-BATCH = 256
+BATCH = 512
+EVAL_BATCH = 1024
 SEED = 0
 TARGET_IDX = (0, 1)  # logret, range — the scale-free next-state targets
 
@@ -109,15 +110,35 @@ def build_valid_mask(sequences: torch.Tensor) -> torch.Tensor:
     return (nxt.abs().sum(dim=-1) > 1e-9).float()
 
 
-def evaluate(model: IntradayLSTM, sequences: torch.Tensor, device: torch.device) -> dict:
+def _pearson_from_sums(stats: dict[str, float]) -> float:
+    """Pearson correlation from streaming sufficient statistics (sum_x, sum_y, sum_xx, sum_yy, sum_xy, n)."""
+    n = stats["n"]
+    cov = stats["sum_xy"] - stats["sum_x"] * stats["sum_y"] / n
+    var_x = stats["sum_xx"] - stats["sum_x"] ** 2 / n
+    var_y = stats["sum_yy"] - stats["sum_y"] ** 2 / n
+    denom = (var_x * var_y) ** 0.5
+    return float(cov / denom) if denom > 1e-12 else 0.0
+
+
+def evaluate(model: IntradayLSTM, sequences_cpu: torch.Tensor, device: torch.device, eval_batch: int) -> dict:
+    """Batched next-step MSE vs the persistence baseline. Batches move to GPU per-step (fits 24 GB)."""
     model.eval()
+    lstm_sq = 0.0
+    base_sq = 0.0
+    total_valid = 0.0
     with torch.no_grad():
-        target = next_step_targets(sequences)
-        valid = build_valid_mask(sequences)
-        prediction, _ = model(sequences)
-        prediction = prediction[:, :-1, :]
-        lstm_mse = float(masked_mse(prediction, target, valid).item())
-        base_mse = persistence_mse(sequences, target, valid)
+        for start in range(0, sequences_cpu.shape[0], eval_batch):
+            batch = sequences_cpu[start : start + eval_batch].to(device)
+            target = next_step_targets(batch)
+            valid = build_valid_mask(batch)
+            prediction, _ = model(batch)
+            prediction = prediction[:, :-1, :]
+            n_valid = float(valid.sum().item())
+            lstm_sq += float(masked_mse(prediction, target, valid).item()) * n_valid
+            base_sq += persistence_mse(batch, target, valid) * n_valid
+            total_valid += n_valid
+    lstm_mse = lstm_sq / max(total_valid, 1.0)
+    base_mse = base_sq / max(total_valid, 1.0)
     return {
         "lstm_next_step_mse": round(lstm_mse, 5),
         "persistence_mse": round(base_mse, 5),
@@ -126,22 +147,32 @@ def evaluate(model: IntradayLSTM, sequences: torch.Tensor, device: torch.device)
     }
 
 
-def surprise_redundancy(model: IntradayLSTM, sequences: torch.Tensor) -> dict:
-    """Is per-minute surprise just realized range? Correlate surprise with the |return| / range channels."""
+def surprise_redundancy(
+    model: IntradayLSTM, sequences_cpu: torch.Tensor, device: torch.device, eval_batch: int
+) -> dict:
+    """Is per-minute surprise just realized range? Streaming Pearson corr over minibatches."""
     model.eval()
+    range_stats = {key: 0.0 for key in ["sum_x", "sum_y", "sum_xx", "sum_yy", "sum_xy", "n"]}
+    absret_stats = {key: 0.0 for key in ["sum_x", "sum_y", "sum_xx", "sum_yy", "sum_xy", "n"]}
     with torch.no_grad():
-        target = next_step_targets(sequences)
-        valid = build_valid_mask(sequences).bool()
-        prediction, _ = model(sequences)
-        prediction = prediction[:, :-1, :]
-        surprise = ((prediction - target) ** 2).mean(dim=-1)  # B x (T-1)
-        next_range = sequences[:, 1:, 1]  # the range channel at t+1
-        next_absret = sequences[:, 1:, 0].abs()
-        flat_surprise = surprise[valid].cpu().numpy()
-        flat_range = next_range[valid].cpu().numpy()
-        flat_absret = next_absret[valid].cpu().numpy()
-    corr_range = float(np.corrcoef(flat_surprise, flat_range)[0, 1])
-    corr_absret = float(np.corrcoef(flat_surprise, flat_absret)[0, 1])
+        for start in range(0, sequences_cpu.shape[0], eval_batch):
+            batch = sequences_cpu[start : start + eval_batch].to(device)
+            target = next_step_targets(batch)
+            valid = build_valid_mask(batch).bool()
+            prediction, _ = model(batch)
+            prediction = prediction[:, :-1, :]
+            surprise = ((prediction - target) ** 2).mean(dim=-1)[valid]
+            next_range = batch[:, 1:, 1][valid]
+            next_absret = batch[:, 1:, 0].abs()[valid]
+            for stats, other in [(range_stats, next_range), (absret_stats, next_absret)]:
+                stats["sum_x"] += float(surprise.sum().item())
+                stats["sum_y"] += float(other.sum().item())
+                stats["sum_xx"] += float((surprise**2).sum().item())
+                stats["sum_yy"] += float((other**2).sum().item())
+                stats["sum_xy"] += float((surprise * other).sum().item())
+                stats["n"] += float(surprise.numel())
+    corr_range = _pearson_from_sums(range_stats)
+    corr_absret = _pearson_from_sums(absret_stats)
     return {
         "corr_surprise_vs_range": round(corr_range, 3),
         "corr_surprise_vs_absret": round(corr_absret, 3),
@@ -176,7 +207,8 @@ def main() -> None:
         f"heldout_symbol: {len(splits['heldout_symbol'])} | time_cut: {splits['time_cut']}"
     )
 
-    train_x = torch.from_numpy(sequences[splits["train"]]).to(device)
+    # Keep the full panel on CPU (104k x 390 x 6 is ~1 GB); move only minibatches to the 24 GB GPU.
+    train_x = torch.from_numpy(sequences[splits["train"]])
     model = IntradayLSTM(sequences.shape[2], HIDDEN_DIM).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
@@ -184,11 +216,11 @@ def main() -> None:
     loss_curve: list[float] = []
     for epoch in range(EPOCHS):
         model.train()
-        perm = torch.randperm(n_train, device=device)
+        perm = torch.randperm(n_train)
         epoch_loss = 0.0
         n_batches = 0
         for start in range(0, n_train, BATCH):
-            batch = train_x[perm[start : start + BATCH]]
+            batch = train_x[perm[start : start + BATCH]].to(device)
             target = next_step_targets(batch)
             valid = build_valid_mask(batch)
             prediction, _ = model(batch)
@@ -202,12 +234,12 @@ def main() -> None:
         if epoch % 5 == 0 or epoch == EPOCHS - 1:
             loss_curve.append(round(epoch_loss / n_batches, 5))
 
-    train_eval = evaluate(model, train_x, device)
-    heldout_time_x = torch.from_numpy(sequences[splits["heldout_time"]]).to(device)
-    heldout_symbol_x = torch.from_numpy(sequences[splits["heldout_symbol"]]).to(device)
-    heldout_time_eval = evaluate(model, heldout_time_x, device)
-    heldout_symbol_eval = evaluate(model, heldout_symbol_x, device)
-    redundancy = surprise_redundancy(model, heldout_time_x)
+    heldout_time_x = torch.from_numpy(sequences[splits["heldout_time"]])
+    heldout_symbol_x = torch.from_numpy(sequences[splits["heldout_symbol"]])
+    train_eval = evaluate(model, train_x, device, EVAL_BATCH)
+    heldout_time_eval = evaluate(model, heldout_time_x, device, EVAL_BATCH)
+    heldout_symbol_eval = evaluate(model, heldout_symbol_x, device, EVAL_BATCH)
+    redundancy = surprise_redundancy(model, heldout_time_x, device, EVAL_BATCH)
 
     summary = {
         "data": {

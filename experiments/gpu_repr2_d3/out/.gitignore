@@ -1,0 +1,2 @@
+# The 722 MB minute-sequence dataset is regenerable from build_sequences.py + the bars store.
+sequences.npz
