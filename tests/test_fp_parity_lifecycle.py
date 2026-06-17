@@ -169,20 +169,21 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     assert set(MARKET_TICKERS) == {"QQQ", "SPY"}
     discovered = ["AAPL", "MSFT", "NVDA"]  # none of these is a market ticker
     materialize_scopes: list[list[str]] = []
+    materialize_shards: list[int | None] = []
     validate_scopes: list[list[str]] = []
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     # The sweep defaults to the tick-aware materialize (materialize_from_raw_full) so the order-flow groups
     # get a backfill side; patch that (and the bar-only variant, for a --no-ticks sweep) to capture scope.
-    monkeypatch.setattr(
-        validation_sweep, "materialize_from_raw_full",
-        lambda feature_root, raw_root, day, symbols: materialize_scopes.append(list(symbols)),
-    )
-    monkeypatch.setattr(
-        validation_sweep, "materialize_from_raw",
-        lambda feature_root, raw_root, day, symbols: materialize_scopes.append(list(symbols)),
-    )
+    # Each chunk is written as its OWN shard so disjoint chunks union on read — capture the shard too.
+    def _capture(feature_root, raw_root, day, symbols, shard=None):  # noqa: ANN001,ANN202
+        materialize_scopes.append(list(symbols))
+        materialize_shards.append(shard)
+
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _capture)
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw", _capture)
     monkeypatch.setattr(
         validation_sweep.validate_mod, "validate",
         lambda feature_root, day, val_root, allow_today, symbols: validate_scopes.append(list(symbols)),
@@ -193,13 +194,15 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
 
-    validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=200, allow_today=True)
+    validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=2, allow_today=True)
 
     assert materialize_scopes and validate_scopes
     for scope in materialize_scopes + validate_scopes:
         for ticker in MARKET_TICKERS:
             assert ticker in scope, f"{ticker} must be pinned into every chunk scope"
         assert scope.count("SPY") == 1  # deduped, not double-added when already discovered
+    # 3 discovered symbols, chunk=2 -> 2 chunks, each written to a DISTINCT shard so they union on disk.
+    assert materialize_shards == list(range(len(materialize_scopes)))
 
 
 def _cell(feature: str, symbol: str, n_match: int, n_mismatch: int) -> dict:

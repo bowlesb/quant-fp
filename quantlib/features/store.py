@@ -243,3 +243,18 @@ def drop_before(root: str | Path, cutoff_day: str) -> list[Path]:
             shutil.rmtree(date_dir)
             removed.append(date_dir)
     return removed
+
+
+def clear_backfill_day(root: str | Path, day: str) -> list[Path]:
+    """Delete every ``source=backfill`` partition's ``data*.parquet`` for ``day`` (all groups/versions).
+
+    The chunked sweep rewrites the whole backfill side of a day from scratch across N sharded chunk files
+    (``data-<chunk>.parquet``); clearing the day first guarantees the rewrite is a clean replace, never a
+    union with a prior (differently-chunked or wider) run's files. Removes only the leaf parquet files —
+    the directory tree is left in place and re-populated by the writes. Returns the files removed.
+    """
+    removed = []
+    for file in Path(root).glob(f"group=*/v=*/source=backfill/date={day}/data*.parquet"):
+        file.unlink()
+        removed.append(file)
+    return removed
