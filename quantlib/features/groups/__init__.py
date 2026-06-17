@@ -14,6 +14,7 @@ from quantlib.features.groups import (  # noqa: F401
     distribution,
     dumper_state,
     efficiency,
+    intraday_seasonality,
     liquidity,
     market_beta,
     market_context,
