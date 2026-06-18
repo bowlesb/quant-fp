@@ -47,6 +47,7 @@ from quantlib.features.materialize import (
     materialize_from_raw_bar_groups,
     materialize_from_raw_full,
 )
+from quantlib.features.raw_loaders import load_raw_minute_agg, load_raw_trades
 from quantlib.features.registry import REGISTRY
 from quantlib.features.session import rth_mask
 from quantlib.features.trust_lifecycle import (
@@ -95,6 +96,38 @@ MIN_CLEAN_SYMBOLS = 20
 # excluded here. This exclusion list is the one piece that isn't purely structural (the enum cannot tell a
 # universe reduce from a reference regression); kept explicit and documented per the parity-trust playbook.
 REFERENCE_RELATIVE_GROUPS: frozenset[str] = frozenset({"market_context", "market_beta"})
+
+
+def assert_raw_present(day: str, raw_root: str, with_ticks: bool) -> None:
+    """Refuse to sweep a day whose ``/store/raw`` side has not SETTLED yet (empty bars/trades partitions).
+
+    ``assert_settled`` only checks the calendar date (``day >= today``); it cannot see that Alpaca historical
+    raw lands hours after the close (often ~T+1). On a closed-but-unsettled day the raw partitions exist as
+    EMPTY files, so ``load_raw_minute_agg`` returns an empty frame ("the caller never needs to special-case
+    missing raw days") — PASS 1 materializes nothing, every stream symbol reads as ``no_raw``, and the sweep
+    silently writes a wall of false ``missing_backfill`` cells that mis-grade the whole day. This probe loads
+    the pinned MARKET_TICKERS (SPY/QQQ — always acquired into raw on a settled day) via the SAME loaders the
+    sweep uses and raises an actionable error if their raw is empty, turning a silent mis-grade into a clear
+    "raw not settled, run ops/raw_backfill.sh daily" front-door failure. ``with_ticks`` sweeps additionally
+    require the TRADES tier (the order-flow groups' backfill side); a bar-only sweep needs only bars.
+    """
+    probe = list(MARKET_TICKERS)
+    bars = load_raw_minute_agg(raw_root, day, probe)
+    if bars.height == 0:
+        raise ValueError(
+            f"refusing to sweep {day}: raw BARS are empty for the pinned market tickers {probe} under "
+            f"{raw_root}/raw/bars — the day's raw has not settled yet (Alpaca historical lands hours after "
+            f"close, often ~T+1). Acquire it first: `ops/raw_backfill.sh daily` (or DAY={day}), then re-sweep."
+        )
+    if with_ticks:
+        trades = load_raw_trades(raw_root, day, probe)
+        if trades.height == 0:
+            raise ValueError(
+                f"refusing to sweep {day} with ticks: raw TRADES are empty for {probe} under "
+                f"{raw_root}/raw/trades — the tick side has not settled (bars settled but trades have not). "
+                f"Acquire trades (`ops/raw_backfill.sh daily`) and re-sweep, or run a bar-only sweep "
+                f"(--no-ticks) to grade just the bar/cross-sectional groups now."
+            )
 
 
 def cross_sectional_groups() -> list[str]:
@@ -251,6 +284,7 @@ def sweep_day(
     (clean breadth < MIN_CLEAN_SYMBOLS) pass 2 is skipped entirely (and so is the cross-sectional grade).
     """
     validate_mod.assert_settled(day, allow_today)
+    assert_raw_present(day, raw_root, with_ticks)
     full_materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
     discovered = store.stream_symbols_on(feature_root, day)
     if max_symbols is not None:
