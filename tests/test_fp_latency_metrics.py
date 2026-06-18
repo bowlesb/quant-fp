@@ -38,6 +38,25 @@ def test_new_histograms_exist() -> None:
     assert metrics.FEED_DELIVERY_SECONDS._labelnames == ("shard",)
 
 
+def test_gather_histogram_is_unlabelled() -> None:
+    """feature_gather_seconds is a single per-minute reader measurement (one gather over ALL symbols), so
+    unlike the per-shard histograms it carries NO shard label."""
+    assert metrics.GATHER_SECONDS._name == "feature_gather_seconds"
+    assert metrics.GATHER_SECONDS._labelnames == ()
+
+
+def test_record_gather_observes_value() -> None:
+    """record_gather observes one gather-phase compute time onto the unlabelled histogram; assert the
+    recorded magnitude via the _sum sample (no shard label, so read it with empty labels)."""
+    before_count = REGISTRY.get_sample_value("feature_gather_seconds_count", {}) or 0.0
+    before_sum = REGISTRY.get_sample_value("feature_gather_seconds_sum", {}) or 0.0
+    metrics.record_gather(0.487)
+    after_count = REGISTRY.get_sample_value("feature_gather_seconds_count", {}) or 0.0
+    after_sum = REGISTRY.get_sample_value("feature_gather_seconds_sum", {}) or 0.0
+    assert after_count == before_count + 1
+    assert abs((after_sum - before_sum) - 0.487) < 1e-9
+
+
 def test_record_helpers_observe_without_error() -> None:
     shard = "910"
     before_compute = _bucket_count("feature_shard_compute_seconds", shard)

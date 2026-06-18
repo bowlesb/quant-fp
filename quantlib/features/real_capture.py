@@ -307,7 +307,10 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
                 logger.warning("md: per-minute publish failed (minute=%s): %s", minute, error)
         # gather: universe-wide reduces (cross_sectional_rank + breadth) over ALL symbols. Pass the reader's
         # FULL snapshots (reference/daily) so breadth's sector + multi-day horizons see the whole universe.
+        # Time it (perf_counter, in-process) for feature_gather_seconds — the "+ gather" half of bet-latency.
+        gather_start = time.perf_counter()
         process_reduce(reduce_state, bars, root, mode, day, window, snapshots=snapshots)
+        metrics.record_gather(time.perf_counter() - gather_start)
         if bench_reader is not None:
             with bench_reader.open("a") as handle:
                 handle.write(json.dumps({"minute": max(bar["t"] for bar in bars),
