@@ -13,9 +13,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import os
 
 import polars as pl
 import pytest
+
+from quantlib.data.raw_backfill import partition_dir
 
 from quantlib.features.cleanliness import (
     MAX_INCOHERENT_FRAC,
@@ -236,6 +239,7 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     compare_calls: list[dict] = []
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
 
@@ -312,6 +316,7 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
     compare_calls: list[dict] = []
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -365,6 +370,7 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
     persist_called = {"n": 0}
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
@@ -404,6 +410,7 @@ def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> 
     compare_calls: list[dict] = []
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
@@ -678,3 +685,63 @@ def test_gather_coherence_empty_is_vacuously_coherent() -> None:
     verdict = gather_coherence(pl.DataFrame({"symbol": [], "minute": [], "breadth_up_5m": []}), "breadth_up_5m")
     assert verdict["rth_minutes"] == 0
     assert verdict["is_coherent"] is True
+
+
+def _write_raw_bar(raw_root: str, symbol: str, day: str) -> None:
+    """One settled raw BARS partition (the loader-relevant columns) for the presence probe."""
+    target = dt.date.fromisoformat(day)
+    out = partition_dir(raw_root, "bars", symbol, target)
+    os.makedirs(out, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "ts": [OPEN_ET],
+            "open": [10.0],
+            "close": [10.1],
+            "high": [10.2],
+            "low": [9.9],
+            "volume": [1000],
+        }
+    ).write_parquet(os.path.join(out, "data.parquet"))
+
+
+def _write_raw_trade(raw_root: str, symbol: str, day: str) -> None:
+    """One settled raw TRADES partition for the with-ticks presence probe."""
+    target = dt.date.fromisoformat(day)
+    out = partition_dir(raw_root, "trades", symbol, target)
+    os.makedirs(out, exist_ok=True)
+    pl.DataFrame(
+        {"symbol": [symbol], "ts": [OPEN_ET], "price": [10.05], "size": [100]}
+    ).write_parquet(os.path.join(out, "data.parquet"))
+
+
+def test_assert_raw_present_refuses_unsettled_day(tmp_path) -> None:
+    """A closed-but-unsettled day has EMPTY raw partitions (Alpaca lands ~T+1) — the sweep must refuse it
+    with an actionable error instead of silently mis-grading every symbol as no_raw."""
+    with pytest.raises(ValueError, match="raw BARS are empty"):
+        validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=True)
+
+
+def test_assert_raw_present_refuses_when_only_bars_settled_with_ticks(tmp_path) -> None:
+    """Bars can settle before trades. A WITH-TICKS sweep needs the order-flow backfill side, so empty
+    trades must still refuse (the bar/cross-sectional groups can be swept bar-only instead)."""
+    for ticker in MARKET_TICKERS:
+        _write_raw_bar(str(tmp_path), ticker, "2026-06-18")
+    with pytest.raises(ValueError, match="raw TRADES are empty"):
+        validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=True)
+
+
+def test_assert_raw_present_bar_only_sweep_ignores_missing_trades(tmp_path) -> None:
+    """A bar-only sweep (--no-ticks) grades only bar/cross-sectional groups, so it needs bars but NOT
+    trades — present bars alone must pass."""
+    for ticker in MARKET_TICKERS:
+        _write_raw_bar(str(tmp_path), ticker, "2026-06-18")
+    validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=False)
+
+
+def test_assert_raw_present_passes_when_settled(tmp_path) -> None:
+    """A fully settled day (bars AND trades present for the pinned market tickers) passes the probe."""
+    for ticker in MARKET_TICKERS:
+        _write_raw_bar(str(tmp_path), ticker, "2026-06-18")
+        _write_raw_trade(str(tmp_path), ticker, "2026-06-18")
+    validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=True)
