@@ -92,6 +92,19 @@ SHARD_COMPUTE_SECONDS = Histogram(
     buckets=(0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
 )
 
+# Gather-phase compute, single-process (reader). The wall-clock to run the universe-wide reduce groups
+# (cross_sectional_rank + breadth) over ALL symbols once per minute in the reader's dispatch. This is the
+# "+ gather" half of the bet-latency principle (the per-shard map is feature_shard_compute_seconds; the
+# gather runs ONCE over the whole universe, so it has no shard label). Like feature_shard_compute_seconds
+# it is measured inline (perf_counter around process_reduce), so it is dispatch-INDEPENDENT and never
+# saturates the way feature_vector_latency_seconds / feature_assemble_seconds do.
+GATHER_SECONDS = Histogram(
+    "feature_gather_seconds",
+    "Per-minute gather-phase compute time: the universe-wide reduce groups (cross_sectional_rank + "
+    "breadth) over ALL symbols in the reader, single-process (no shard label); dispatch-INDEPENDENT",
+    buckets=(0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+)
+
 # Provider-only feed-delivery lag, per shard. The wall-clock from the bar-minute's CLOSE (minute boundary +
 # 60s) to the instant that minute's FIRST bar arrived off the Alpaca websocket. This isolates Alpaca's feed
 # latency — how long AFTER a minute closes before its first bar even reaches us — from anything in our
@@ -182,6 +195,15 @@ def record_shard_compute(shard_id: int, seconds: float) -> None:
     perf_counter is correct here — NOT the cross-process ``time.time()`` the other two require. The caller
     computes ``(time.perf_counter() - start) - write_seconds`` after the vector is assembled."""
     SHARD_COMPUTE_SECONDS.labels(shard=str(shard_id)).observe(seconds)
+
+
+def record_gather(seconds: float) -> None:
+    """Observe one minute's gather-phase compute time (seconds): the universe-wide reduce groups
+    (cross_sectional_rank + breadth) run once over ALL symbols in the reader. Like record_shard_compute
+    this is a within-process ``perf_counter`` delta (the reader process), so it is dispatch-independent and
+    never saturates. The caller computes ``time.perf_counter() - start`` around process_reduce. Single
+    gather per minute (not per shard), so there is no shard label."""
+    GATHER_SECONDS.observe(seconds)
 
 
 def record_feed_delivery(shard_id: int, seconds: float) -> None:

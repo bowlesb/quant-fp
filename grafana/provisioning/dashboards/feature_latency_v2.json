@@ -4,7 +4,7 @@
   "tags": ["features", "latency"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "panels": [
@@ -31,11 +31,49 @@
       ]
     },
     {
+      "id": 5,
+      "title": "Gather compute p50/p99 (ms) — universe-wide reduce (cross_sectional_rank + breadth), the '+ gather' half of bet-latency",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1000 * histogram_quantile(0.99, sum by (le) (rate(feature_gather_seconds_bucket[5m])))",
+          "legendFormat": "p99 gather"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1000 * histogram_quantile(0.50, sum by (le) (rate(feature_gather_seconds_bucket[5m])))",
+          "legendFormat": "p50 gather"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Top 10 slowest feature groups p99 (ms) — isolates which group dominates compute",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "topk(10, 1000 * histogram_quantile(0.99, sum by (le, group) (rate(feature_group_compute_seconds_bucket[15m]))))",
+          "legendFormat": "{{group}}"
+        }
+      ]
+    },
+    {
       "id": 2,
       "title": "Alpaca feed delivery p50/p99 (s) — provider lag from minute close to first bar",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         {
@@ -57,7 +95,7 @@
       "title": "End-to-end (gated) p99 (s) — feature_vector_latency / feature_assemble (saturate in sparse hours)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 40 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         {
@@ -79,7 +117,7 @@
       "title": "Ingestion rate (msgs/s) — bars/trades/quotes off the websocket (reference)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 50 },
       "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
       "targets": [
         {

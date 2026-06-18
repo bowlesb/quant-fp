@@ -2,14 +2,22 @@
 Prometheus cardinality (11k symbols x per-minute series would be unbounded).
 
 The reader stamps each symbol's bar-arrival wall-clock in ``on_bar``; the worker, once its shard vector
-for the minute is assembled, computes per-symbol latency and picks the TOP-K slowest symbols, then
-best-effort writes those K rows to TimescaleDB (``latency_slow_symbols``). The pure top-K selection
-(``top_k_slow_symbols``) has NO I/O so it is unit-tested directly; ``write_slow_symbols`` is the thin,
-fault-isolated psycopg write that MUST NOT crash or stall the capture hot path.
+for the minute is assembled, picks the TOP-K LATEST-DELIVERED symbols, then best-effort writes those K
+rows to TimescaleDB (``latency_slow_symbols``). The pure top-K selection (``top_k_slow_symbols``) has NO
+I/O so it is unit-tested directly; ``write_slow_symbols`` is the thin, fault-isolated psycopg write that
+MUST NOT crash or stall the capture hot path.
 
-Two per-row numbers separate the cause of slowness:
-- ``arrival_lag_s`` = symbol-bar-arrival - minute-boundary  → how late ALPACA delivered that bar.
-- ``total_latency_s`` = vector-ready - symbol-bar-arrival   → our end-to-end for that symbol.
+RANKING — rank by ``arrival_lag_s``, the only per-symbol signal that is real:
+- ``arrival_lag_s`` = symbol-bar-arrival - minute-boundary  → how late ALPACA delivered THAT symbol's bar.
+  This is genuinely per-symbol and dispatch-independent, so "which tickers were slowest" means "which
+  tickers Alpaca delivered latest" — the actionable provider signal.
+- ``total_latency_s`` = vector-ready - symbol-bar-arrival is recorded for context but is NOT per-symbol
+  attributable and is NOT used for ranking: ``ready_wallclock`` is one shard-level instant (our compute is
+  per-SHARD, not per-symbol) AND it is gated on the reader's next-minute-bar dispatch trigger, so it
+  saturates (~60s) in sparse hours. Ranking by it is actively MISLEADING — it makes the EARLIEST-arriving
+  symbol (the one Alpaca delivered FASTEST) look slowest, since it had the longest wait to the gated ready
+  instant. The dispatch-independent per-shard compute lives in feature_shard_compute_seconds; per-symbol,
+  only arrival lag is meaningful.
 """
 from __future__ import annotations
 
@@ -59,14 +67,15 @@ def top_k_slow_symbols(
     minute_boundary_epoch: float,
     k: int = TOP_K_SLOW_SYMBOLS,
 ) -> list[SlowSymbol]:
-    """Pick the ``k`` symbols with the highest ``total_latency_s`` (vector-ready minus that symbol's
-    bar-arrival) for one (shard, minute). PURE — no I/O.
+    """Pick the ``k`` symbols with the highest ``arrival_lag_s`` (the LATEST-delivered by Alpaca) for one
+    (shard, minute). PURE — no I/O.
 
     ``symbol_arrivals`` maps symbol -> the wall-clock (``time.time()``) at which that symbol's bar for
     the minute arrived off the websocket. ``ready_wallclock`` is the wall-clock the shard vector finished
-    assembling. ``minute_boundary_epoch`` is the minute's UTC boundary as a POSIX timestamp, used to
-    derive ``arrival_lag_s`` (how late Alpaca delivered each bar). Ties are broken by symbol for a
-    deterministic result.
+    assembling (recorded into ``total_latency_s`` for context only — see the module docstring on why it is
+    NOT used for ranking). ``minute_boundary_epoch`` is the minute's UTC boundary as a POSIX timestamp,
+    used to derive ``arrival_lag_s`` (how late Alpaca delivered each bar — the ranking key). Ties are
+    broken by symbol for a deterministic result.
     """
     rows = [
         SlowSymbol(
@@ -76,7 +85,7 @@ def top_k_slow_symbols(
         )
         for symbol, arrival in symbol_arrivals.items()
     ]
-    rows.sort(key=lambda row: (-row.total_latency_s, row.symbol))
+    rows.sort(key=lambda row: (-row.arrival_lag_s, row.symbol))
     return rows[:k]
 
 
