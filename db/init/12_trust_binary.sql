@@ -60,8 +60,11 @@ CREATE INDEX IF NOT EXISTS idx_ftc_day ON feature_trust_check (checked_day);
 CREATE INDEX IF NOT EXISTS idx_ftc_kind ON feature_trust_check (check_kind);
 
 -- Re-point the consumer surfaces at the binary gate. trusted_features == the SELECTION the backfill +
--- modelling agents gate on; now a single predicate (trust_state='TRUSTED').
-CREATE OR REPLACE VIEW trusted_features AS
+-- modelling agents gate on; now a single predicate (trust_state='TRUSTED'). DROP first: the prior views
+-- (11_trusted_features.sql) selected different columns (lifecycle_state/clean_days), and CREATE OR REPLACE
+-- cannot rename/reorder existing view columns.
+DROP VIEW IF EXISTS trusted_features;
+CREATE VIEW trusted_features AS
 SELECT
     feature,
     version,
@@ -75,7 +78,8 @@ SELECT
 FROM feature_trust
 WHERE trust_state = 'TRUSTED';
 
-CREATE OR REPLACE VIEW feature_trust_summary AS
+DROP VIEW IF EXISTS feature_trust_summary;
+CREATE VIEW feature_trust_summary AS
 SELECT
     trust_state,
     count(*)                                   AS n_features,
