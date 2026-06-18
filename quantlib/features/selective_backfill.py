@@ -102,6 +102,12 @@ def materialize_day(
     """Worker: materialize ONLY the requested ``groups`` for one day from ``/store/raw`` (full tick
     enrichment so order-flow groups are runnable, but only the requested groups' partitions are written).
     Returns (day, n_symbols)."""
+    # Clear the target groups' backfill partitions for the day BEFORE the whole-partition (shard=None)
+    # write, so it is a clean replace. The read glob is ``data*.parquet``, so a stale sweep-SHARDED file
+    # (``data-<chunk>.parquet``) left from a prior nightly sweep would otherwise UNION with the new
+    # ``data.parquet`` and double-count symbols. Scoped to the requested groups so the rest of the day's
+    # partitions (other groups) are untouched.
+    store.clear_backfill_groups_day(root, day, groups)
     count = materialize_from_raw_groups(root, raw_root, day, symbols, groups)
     return day, count
 
