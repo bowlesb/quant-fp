@@ -200,13 +200,24 @@ def _stub_split_validation(monkeypatch, compare_calls: list[dict]) -> None:
         scope = list(symbols) if symbols is not None else []
         return scope, pl.DataFrame({"symbol": scope})
 
-    def _compare(feature_root, day, scope_symbols, tiers, groups=None):  # noqa: ANN001,ANN202
+    def _compare(feature_root, day, scope_symbols, tiers, groups=None, tolerance_of=None):  # noqa: ANN001,ANN202
         compare_calls.append({"scope": list(scope_symbols), "groups": groups})
         return validation_sweep.validate_mod.CompareResult(pl.DataFrame(), pl.DataFrame(), pl.DataFrame())
 
     monkeypatch.setattr(validation_sweep.validate_mod, "scoped_tiers", _scoped_tiers)
     monkeypatch.setattr(validation_sweep.validate_mod, "compare_groups", _compare)
     monkeypatch.setattr(validation_sweep.validate_mod, "persist_validation", lambda *a, **k: pl.DataFrame())
+    # Binary trust grading (docs/TRUST_REDESIGN.md) writes to the DB — stub it so the sweep tests stay
+    # network-free; the grant logic itself is covered by tests/test_trust_binary.py.
+    monkeypatch.setattr(validation_sweep.trust_binary, "deterministic_features", lambda: [])
+    monkeypatch.setattr(validation_sweep.trust_binary, "cell_tolerance_map", lambda: {})
+    monkeypatch.setattr(validation_sweep.trust_binary, "feature_policy_map", lambda: {})
+    monkeypatch.setattr(validation_sweep.trust_binary, "earned_features", lambda *a, **k: [])
+    monkeypatch.setattr(
+        validation_sweep.trust_binary,
+        "write_trust_grants",
+        lambda *a, **k: {"deterministic_trusted": 0, "earned_trusted": 0},
+    )
 
 
 def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:

@@ -33,9 +33,12 @@ ARGS+=("$FEATURE_ROOT" "$VAL_ROOT" "$RAW_ROOT" "--chunk" "$CHUNK")
 [ -n "${MAX_SYMBOLS:-}" ] && ARGS+=("--max-symbols" "$MAX_SYMBOLS")
 [ -n "${ALLOW_TODAY:-}" ] && ARGS+=("--allow-today")
 
+GIT_COMMIT="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)"
+
 docker run --rm \
   --network "$NETWORK" \
   --env-file "$ENV_FILE" \
+  -e FP_GIT_COMMIT="$GIT_COMMIT" \
   -v "$STORE_VOLUME":/store \
   -v "$REPO":/app -w /app \
   "$IMAGE" \

@@ -33,7 +33,7 @@ from typing import Callable
 
 import polars as pl
 
-from quantlib.features import store, trust_lifecycle, validate as validate_mod, validation_store
+from quantlib.features import store, trust_binary, trust_lifecycle, validate as validate_mod, validation_store
 from quantlib.features.base import FeatureType
 from quantlib.features.cleanliness import (
     clean_symbols,
@@ -273,6 +273,10 @@ def sweep_day(
     # off a handful of marginal survivors. Features simply stay PENDING for this day. Both the cross-sectional
     # grade and the expensive full-tape PASS 2 are skipped — neither runs on a day that can't grade.
     group_of, version_of = _registry_maps()
+    # Deterministic features (CALENDAR) are TRUSTED by construction — grant them on EVERY run, independent
+    # of the day's cleanliness (they need no parity day). Idempotent: already-trusted features are skipped.
+    trust_binary.write_trust_grants([], trust_binary.deterministic_features(), pl.DataFrame(), day)
+    tolerance_of = trust_binary.cell_tolerance_map()
     if clean_count < MIN_CLEAN_SYMBOLS:
         trust_lifecycle.write_lifecycle(pl.DataFrame(), [], cleanliness, version_of, day)
         return {
@@ -312,7 +316,7 @@ def sweep_day(
         xsec_scope, xsec_tiers = validate_mod.scoped_tiers(day, discovered)
         materialize_from_raw_bar_groups(feature_root, raw_root, day, xsec_scope, only_groups=xsec_groups)
         xsec_result = validate_mod.compare_groups(
-            feature_root, day, xsec_scope, xsec_tiers, groups=xsec_groups
+            feature_root, day, xsec_scope, xsec_tiers, groups=xsec_groups, tolerance_of=tolerance_of
         )
     else:
         xsec_result = validate_mod.empty_result()
@@ -333,7 +337,7 @@ def sweep_day(
     per_symbol_groups = [group.name for group in REGISTRY.groups() if group.name not in set(xsec_groups)]
     per_symbol_scope, per_symbol_tiers = validate_mod.scoped_tiers(day, grade_scope)
     per_symbol_result = validate_mod.compare_groups(
-        feature_root, day, per_symbol_scope, per_symbol_tiers, groups=per_symbol_groups
+        feature_root, day, per_symbol_scope, per_symbol_tiers, groups=per_symbol_groups, tolerance_of=tolerance_of
     )
 
     # Merge the full-universe cross-sectional grade with the gradable-set per-symbol/tick grade and persist
@@ -351,6 +355,12 @@ def sweep_day(
     defects = defect_rows(states, clean_history_today, exceptions, group_of, version_of)
     trust_lifecycle.write_lifecycle(states, defects, cleanliness, version_of, day)
 
+    # Binary trust (docs/TRUST_REDESIGN.md): features that matched backfill within their per-type tolerance
+    # on this CLEAN day earn TRUSTED — permanently, with provenance + a check-history row. Only NON_TRUSTED
+    # features move; nothing is auto-demoted (the random check is the only un-trust path).
+    earned = trust_binary.earned_features(clean_history_today, trust_binary.feature_policy_map())
+    grant_counts = trust_binary.write_trust_grants(earned, [], clean_history_today, day)
+
     state_counts = states.group_by("lifecycle_state").len().sort("lifecycle_state").to_dicts() if states.height else []
     return {
         "day": day,
@@ -364,6 +374,7 @@ def sweep_day(
         "gather_incoherent_frac": round(float(coherence["incoherent_frac"]), 3),
         "cross_sectional_graded": bool(coherence["is_coherent"]),
         "features_graded": states.height,
+        "newly_trusted": grant_counts["earned_trusted"],
         "state_counts": {row["lifecycle_state"]: row["len"] for row in state_counts},
         "new_or_updated_defects": len(defects),
         "defect_features": [row[0] for row in defects][:20],
