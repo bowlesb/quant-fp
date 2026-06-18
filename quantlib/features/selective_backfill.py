@@ -36,6 +36,7 @@ from quantlib.features.materialize import materialize_from_raw_groups
 from quantlib.features.registry import REGISTRY
 from quantlib.features.store import _resolve
 from quantlib.features.trusted_list import trusted_names
+from quantlib.features.validation_sweep import cross_sectional_groups
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -96,19 +97,41 @@ def pending_dates(
     return pending
 
 
+def _symbol_chunks(symbols: list[str], size: int) -> list[list[str]]:
+    return [symbols[i : i + size] for i in range(0, len(symbols), size)]
+
+
 def materialize_day(
-    root: str, raw_root: str, day: str, symbols: list[str], groups: list[str]
+    root: str,
+    raw_root: str,
+    day: str,
+    symbols: list[str],
+    groups: list[str],
+    symbol_shard_size: int | None = None,
 ) -> tuple[str, int]:
     """Worker: materialize ONLY the requested ``groups`` for one day from ``/store/raw`` (full tick
     enrichment so order-flow groups are runnable, but only the requested groups' partitions are written).
-    Returns (day, n_symbols)."""
-    # Clear the target groups' backfill partitions for the day BEFORE the whole-partition (shard=None)
-    # write, so it is a clean replace. The read glob is ``data*.parquet``, so a stale sweep-SHARDED file
-    # (``data-<chunk>.parquet``) left from a prior nightly sweep would otherwise UNION with the new
-    # ``data.parquet`` and double-count symbols. Scoped to the requested groups so the rest of the day's
-    # partitions (other groups) are untouched.
+    Returns (day, n_symbols).
+
+    ``symbol_shard_size`` bounds peak RAM: instead of loading the whole-universe raw frame in one shot
+    (the Cycle-7 OOM at full universe), the day is materialized in symbol chunks, each written as
+    ``data-<shard>.parquet`` so the chunks UNION on read into the complete day. The target partitions are
+    cleared ONCE up front, then chunks are written WITHOUT re-clearing (re-clearing would delete the prior
+    chunk's shard). ``None`` keeps the whole-partition write — unchanged behaviour."""
+    # Clear the target groups' backfill partitions for the day BEFORE writing, so it is a clean replace.
+    # The read glob is ``data*.parquet``, so a stale sweep-SHARDED file (``data-<chunk>.parquet``) left from
+    # a prior nightly sweep would otherwise UNION with the new data and double-count symbols. Scoped to the
+    # requested groups so the rest of the day's partitions (other groups) are untouched. Done ONCE here, so
+    # the sharded chunk writes below append shards instead of clobbering each other.
     store.clear_backfill_groups_day(root, day, groups)
-    count = materialize_from_raw_groups(root, raw_root, day, symbols, groups)
+    if symbol_shard_size is None:
+        count = materialize_from_raw_groups(root, raw_root, day, symbols, groups)
+        return day, count
+    count = 0
+    for shard, chunk in enumerate(_symbol_chunks(symbols, symbol_shard_size)):
+        count += materialize_from_raw_groups(
+            root, raw_root, day, chunk, groups, shard=shard
+        )
     return day, count
 
 
@@ -120,19 +143,34 @@ def run(
     symbols: list[str],
     processes: int,
     force: bool,
+    symbol_shard_size: int | None = None,
 ) -> None:
+    groups = sorted(group_versions)
+    if symbol_shard_size is not None:
+        # Symbol-sharding computes each chunk's groups over only that chunk's symbols. That is exact for
+        # per-symbol / reference-relative groups (each symbol's value depends only on itself + a fixed
+        # market reference), but WRONG for universe-reduce groups (breadth/rank): their per-minute value is
+        # a reduction over the WHOLE symbol set, so a chunk would write a partial-universe reduction. Refuse
+        # rather than silently corrupt — those groups need the un-chunked materialize_from_raw_bar_groups.
+        reduce_targets = sorted(set(groups) & set(cross_sectional_groups()))
+        if reduce_targets:
+            raise SystemExit(
+                "--symbol-shard-size cannot be used with universe-reduce groups "
+                f"{reduce_targets}: their value reduces over the full universe, so a symbol chunk "
+                "would write a partial-universe reduction. Backfill those un-sharded (full universe)."
+            )
     pending = pending_dates(root, group_versions, days, force)
     all_pending_dates = sorted(
         {date_iso for dates in pending.values() for date_iso in dates}
     )
-    groups = sorted(group_versions)
     logger.info(
-        "selective backfill: groups=%s, %d symbols, %d/%d dates pending (force=%s)",
+        "selective backfill: groups=%s, %d symbols, %d/%d dates pending (force=%s, symbol_shard_size=%s)",
         groups,
         len(symbols),
         len(all_pending_dates),
         len(days),
         force,
+        symbol_shard_size,
     )
     if not all_pending_dates:
         logger.info(
@@ -143,7 +181,9 @@ def run(
     written_days = 0
     with ProcessPoolExecutor(max_workers=max(1, processes)) as executor:
         futures = {
-            executor.submit(materialize_day, root, raw_root, day, symbols, groups): day
+            executor.submit(
+                materialize_day, root, raw_root, day, symbols, groups, symbol_shard_size
+            ): day
             for day in all_pending_dates
         }
         for future in as_completed(futures):
@@ -207,6 +247,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--raw-root", default=DEFAULT_RAW_ROOT, help="raw /store root")
     parser.add_argument("--processes", type=int, default=8, help="parallel day workers")
     parser.add_argument(
+        "--symbol-shard-size",
+        type=int,
+        default=None,
+        help=(
+            "materialize each day in symbol chunks of this size (written as data-<shard>.parquet, "
+            "union on read) to BOUND peak RAM for a full-universe run — the whole-universe raw frame is "
+            "never loaded at once. Per-symbol/reference-relative groups only; refused for universe-reduce "
+            "groups (breadth/rank). Default None = whole-partition write."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="recompute even if the partition already exists",
@@ -241,6 +292,7 @@ def main() -> None:
         symbols,
         args.processes,
         args.force,
+        args.symbol_shard_size,
     )
 
 

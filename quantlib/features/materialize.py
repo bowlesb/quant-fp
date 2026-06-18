@@ -128,12 +128,24 @@ def materialize_from_raw_bar_groups(
 
 
 def materialize_from_raw_groups(
-    root: str, raw_root: str, day: str, symbols: list[str], only_groups: list[str]
+    root: str,
+    raw_root: str,
+    day: str,
+    symbols: list[str],
+    only_groups: list[str],
+    shard: int | None = None,
 ) -> int:
     """Selective from-raw materialize: build the SAME full-tick ``/store/raw`` frames as
     ``materialize_from_raw_full`` (so bar AND order-flow groups are runnable), but WRITE only the partitions
     for ``only_groups``. This is the per-group on-ramp for the findings->features loop — give a NEW feature's
     group historical coverage without recomputing the other ~600 features. Returns the symbol count.
+
+    ``shard`` (a symbol-batch index) writes ``data-<shard>.parquet`` so disjoint symbol chunks UNION on read
+    instead of clobbering each other — the memory-bounded driver materializes a full-universe day as a series
+    of symbol chunks (each chunk loads only its own raw frame, capping peak RAM) that union to the whole day.
+    Only-bar groups read just ``minute_agg`` so per-symbol chunking is exact (no cross-symbol reduction); the
+    cross-sectional universe-reduce groups must NOT be sharded this way (use ``materialize_from_raw_bar_groups``).
+    ``shard=None`` writes the single ``data.parquet`` (whole-partition) — unchanged behaviour.
     """
     bars = load_raw_minute_agg(raw_root, day, symbols)
     frames = {
@@ -142,7 +154,7 @@ def materialize_from_raw_groups(
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
     }
-    return _write_all(root, day, "backfill", frames, only_groups=only_groups)
+    return _write_all(root, day, "backfill", frames, only_groups=only_groups, shard=shard)
 
 
 def materialize_minute(
