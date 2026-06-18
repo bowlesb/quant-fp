@@ -58,6 +58,37 @@ def test_trusted_target_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sb.trusted_target_groups() == {"gA": "1.0", "gB": "2.0"}
 
 
+def test_materialize_day_clears_groups_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole-partition (shard=None) write must be preceded by a group-scoped clear, so a stale
+    sweep-SHARDED ``data-<chunk>.parquet`` left for the day cannot UNION with the new ``data.parquet``
+    and double-count symbols (the ``data*.parquet`` read glob unions both)."""
+    calls: list[tuple[str, str, list[str]]] = []
+    monkeypatch.setattr(
+        sb.store,
+        "clear_backfill_groups_day",
+        lambda root, day, groups: calls.append(("clear", day, list(groups))) or [],
+    )
+    monkeypatch.setattr(
+        sb,
+        "materialize_from_raw_groups",
+        lambda root, raw_root, day, symbols, groups: calls.append(
+            ("materialize", day, list(groups))
+        )
+        or 7,
+    )
+    day, count = sb.materialize_day(
+        "/store", "/store", "2025-01-02", ["AAPL", "NVDA"], ["gA", "gB"]
+    )
+    assert (day, count) == ("2025-01-02", 7)
+    # clear runs FIRST, scoped to exactly the requested groups, then the materialize
+    assert calls == [
+        ("clear", "2025-01-02", ["gA", "gB"]),
+        ("materialize", "2025-01-02", ["gA", "gB"]),
+    ]
+
+
 def test_run_noop_when_nothing_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sb.store, "settled_dates", lambda root, g, v: {"2025-01-02"})
     called = []

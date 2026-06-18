@@ -33,6 +33,7 @@ from quantlib.features.base import KEY_COLUMNS
 from quantlib.features.compare import runnable
 from quantlib.features.materialize import _write_all
 from quantlib.features.session import ext_session_minutes_utc
+from quantlib.features.store import clear_backfill_groups_day
 
 MINUTE_DTYPE = pl.Datetime("us", "UTC")  # the store key dtype (backfill_bars.BARS_SCHEMA["minute"])
 
@@ -70,8 +71,15 @@ def materialize_grid(
     scopes the write (default: every group the grid can run, i.e. ``no_raw_groups``); ``shard`` writes a
     per-chunk file so disjoint symbol batches union on read. Returns the symbol count materialized.
     """
+    groups = only_groups if only_groups is not None else no_raw_groups()
+    # On a whole-partition (shard=None) write, clear the target groups' backfill files for the day first so
+    # it is a clean replace: the ``data*.parquet`` read glob would otherwise UNION a stale sweep-SHARDED
+    # file (``data-<chunk>.parquet``) with the new ``data.parquet`` and double-count. A sharded write
+    # (shard set) is an intentional per-chunk union and must NOT clear its siblings.
+    if shard is None:
+        clear_backfill_groups_day(root, day, groups)
     frames = {"minute_agg": minute_grid(day, symbols)}
-    return _write_all(root, day, "backfill", frames, only_groups=only_groups, shard=shard)
+    return _write_all(root, day, "backfill", frames, only_groups=groups, shard=shard)
 
 
 def main() -> None:

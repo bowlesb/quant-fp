@@ -100,6 +100,56 @@ def test_grid_values_match_raw_path_on_shared_minutes(tmp_path) -> None:
         assert shared[name].to_list() == shared[f"{name}_grid"].to_list(), f"{name} diverged grid vs raw"
 
 
+def test_materialize_grid_clears_stale_shard_before_whole_write(tmp_path) -> None:
+    """A whole-partition (shard=None) grid write CLEANS the partition first: a stale sweep-SHARDED
+    ``data-<chunk>.parquet`` left from a prior nightly sweep must NOT survive and UNION with the new
+    ``data.parquet`` (the ``data*.parquet`` read glob unions both → double-counted symbols)."""
+    symbols = ["AAPL"]
+    partition = (
+        tmp_path / "group=calendar" / "v=1.0.0" / "source=backfill" / f"date={DAY}"
+    )
+    partition.mkdir(parents=True)
+    # A stale chunk file with a BOGUS symbol that must be gone after the clean rewrite.
+    stale = pl.DataFrame(
+        {
+            "symbol": ["BOGUS"],
+            "minute": [dt.datetime(2026, 6, 12, 13, 30, tzinfo=dt.timezone.utc)],
+            "minute_of_day_et": [570.0],
+        }
+    ).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    stale.write_parquet(partition / "data-0.parquet")
+
+    materialize_grid(str(tmp_path), DAY, symbols, only_groups=["calendar"])
+
+    files = sorted(file.name for file in partition.glob("data*.parquet"))
+    assert files == ["data.parquet"], f"stale shard not cleared: {files}"
+    start = dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2026, 6, 12, 23, 59, 59, tzinfo=dt.timezone.utc)
+    written = store.get_features(
+        ["minute_of_day_et"], ["AAPL", "BOGUS"], start, end, str(tmp_path), source="backfill"
+    )
+    # only the real symbol survives — the stale BOGUS row was cleared, not unioned
+    assert set(written["symbol"].unique().to_list()) == {"AAPL"}
+
+
+def test_materialize_grid_shard_write_preserves_siblings(tmp_path) -> None:
+    """A SHARDED (shard set) grid write is an intentional per-chunk union and must NOT clear its
+    siblings — disjoint symbol batches written as ``data-<chunk>.parquet`` union on read."""
+    partition = (
+        tmp_path / "group=calendar" / "v=1.0.0" / "source=backfill" / f"date={DAY}"
+    )
+    materialize_grid(str(tmp_path), DAY, ["AAPL"], only_groups=["calendar"], shard=0)
+    materialize_grid(str(tmp_path), DAY, ["MSFT"], only_groups=["calendar"], shard=1)
+    files = sorted(file.name for file in partition.glob("data*.parquet"))
+    assert files == ["data-0.parquet", "data-1.parquet"]
+    start = dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2026, 6, 12, 23, 59, 59, tzinfo=dt.timezone.utc)
+    written = store.get_features(
+        ["minute_of_day_et"], ["AAPL", "MSFT"], start, end, str(tmp_path), source="backfill"
+    )
+    assert set(written["symbol"].unique().to_list()) == {"AAPL", "MSFT"}
+
+
 def test_grid_is_a_superset_of_raw_minutes(tmp_path) -> None:
     """The grid fills minutes no bar printed — its reason for existing (deep coverage with no raw). So it
     has STRICTLY more (symbol, minute) rows than a sparse raw day, while agreeing on the shared ones."""
