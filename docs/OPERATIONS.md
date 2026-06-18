@@ -61,13 +61,19 @@ storm, a conflict). Every cron MUST follow this; the registry below is the singl
 
 ### Registry — every cron, documented (single source of truth)
 
-| Schedule (UTC) | Command | Purpose | Failure mode | Verify |
-|----------------|---------|---------|--------------|--------|
+**⚠ TIMEZONE: cron times below are SYSTEM LOCAL TIME = America/Los_Angeles (PT).** The crontab has NO
+`TZ=`/`CRON_TZ=` override, so every absolute-time cron fires in PT, not UTC. (This column was previously
+mislabeled "UTC" — that bug had `nightly_relaunch` firing at 12:11 PT = 15:11 ET, ~49 min before close,
+so fc captured almost no RTH on 06-16/06-17. Fixed 2026-06-18 → 05:11 PT pre-market.) RTH = 06:30–13:00 PT
+(13:30–20:00 UTC). Verify a cron's real fire time from syslog's `-07:00` stamp, not this label.
+
+| Schedule (PT) | Command | Purpose | Failure mode | Verify |
+|---------------|---------|---------|--------------|--------|
 | `*/5 * * * *` | `ops/healthcheck.sh --json` | fc freshness/health logging | benign (log only) | `~/.quant-healthcheck/healthcheck.jsonl` |
 | `2-59/6 * * * *` | `feature_scan --json` | feature sanity scan | benign | `~/.quant-healthcheck/feature_scan.jsonl` |
 | `*/3 * * * *` | `ops/live_monitor.sh` | restart EXITED critical containers; mem/disk guard | conservative (only restarts dead) | `~/.quant-ops/live_monitor.jsonl` |
-| `11 12 * * 1-5` | `ops/nightly_relaunch.sh $(date +%F)` | **pre-market clean recreate of fc for the session** | DESTRUCTIVE (rm -f fc) — see guardrail | `~/.quant-validation/nightly_relaunch.log` + §1 health check |
-| `30 18 * * 1-5` | `ops/daily_lifecycle.sh` | nightly parity sweep + trust ledger | benign (read/backfill) | `~/.quant-validation/daily_lifecycle.log` |
+| `11 5 * * 1-5` | `ops/nightly_relaunch.sh $(date +%F)` | **05:11 PT pre-market clean recreate of fc for the session** (must be before the 06:30 PT open) | DESTRUCTIVE (rm -f fc) — see guardrail | `~/.quant-validation/nightly_relaunch.log` + §1 health check |
+| `30 18 * * 1-5` | `ops/daily_lifecycle.sh` | 18:30 PT post-close parity sweep + trust ledger | benign (read/backfill) | `~/.quant-validation/daily_lifecycle.log` |
 
 **Keep this table updated whenever a cron is added/changed/removed.** A cron that isn't here doesn't exist.
 
