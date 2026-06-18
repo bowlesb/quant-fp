@@ -8,9 +8,54 @@ from __future__ import annotations
 
 import datetime as dt
 
+import psycopg
 import pytest
 
 from quantlib.features import selective_backfill as sb
+
+
+class _FakeCursor:
+    def execute(self, *args: object) -> None:
+        return None
+
+    def fetchone(self) -> tuple[int]:
+        return (1,)
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeConn:
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor()
+
+    def __enter__(self) -> "_FakeConn":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_preflight_db_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reachable DB returns silently — the SELECT 1 round-trips."""
+    monkeypatch.setattr(sb.psycopg, "connect", lambda **kwargs: _FakeConn())
+    sb.preflight_db()  # no raise
+
+
+def test_preflight_db_unreachable_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreachable DB (the missing-`--network` case that failed a run as an opaque ProcessPool
+    RemoteTraceback) raises SystemExit immediately with an actionable message naming the network fix.
+    """
+
+    def _boom(**kwargs: object) -> _FakeConn:
+        raise psycopg.OperationalError("failed to resolve host 'timescaledb'")
+
+    monkeypatch.setattr(sb.psycopg, "connect", _boom)
+    with pytest.raises(SystemExit, match="--network quant_default"):
+        sb.preflight_db()
 
 
 def test_resolve_groups_features_and_groups(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +139,8 @@ def test_materialize_day_symbol_sharding_clears_once_then_shards(
 ) -> None:
     """With ``symbol_shard_size`` the target partitions are cleared EXACTLY ONCE up front, then each
     symbol chunk is materialized as its own shard (``data-<shard>.parquet``) so the chunks UNION on read.
-    Re-clearing per chunk would delete the prior chunk's shard — the clear must NOT repeat."""
+    Re-clearing per chunk would delete the prior chunk's shard — the clear must NOT repeat.
+    """
     calls: list[tuple] = []
     monkeypatch.setattr(
         sb.store,
@@ -131,7 +177,8 @@ def test_run_refuses_symbol_sharding_for_universe_reduce_groups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Symbol-sharding a universe-reduce group (breadth/rank) would write a partial-universe reduction per
-    chunk, silently corrupting the feature. ``run`` must REFUSE rather than produce wrong data."""
+    chunk, silently corrupting the feature. ``run`` must REFUSE rather than produce wrong data.
+    """
     monkeypatch.setattr(sb, "cross_sectional_groups", lambda: ["breadth", "gReduce"])
     with pytest.raises(SystemExit, match="universe-reduce"):
         sb.run(

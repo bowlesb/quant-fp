@@ -30,8 +30,11 @@ import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import psycopg
+
 from quantlib.data.raw_backfill import trading_client, trading_days, universe_symbols
 from quantlib.features import store
+from quantlib.features.loaders import DB_KWARGS
 from quantlib.features.materialize import materialize_from_raw_groups
 from quantlib.features.registry import REGISTRY
 from quantlib.features.store import _resolve
@@ -45,6 +48,30 @@ logger = logging.getLogger("selective_backfill")
 
 DEFAULT_ROOT = os.environ.get("STORE_ROOT", "/store")
 DEFAULT_RAW_ROOT = "/store"
+
+
+def preflight_db() -> None:
+    """Fail FAST if the DB is unreachable, before fanning day-workers out across the ProcessPool.
+
+    Every day-worker opens its own DB connection inside ``materialize_from_raw_groups`` (``load_reference``
+    queries the sector/asset-flag reference). When the run is misconfigured — the container not attached to
+    the compose network so ``timescaledb`` does not resolve, or ``DB_PASSWORD`` unset — that failure
+    otherwise surfaces minutes in as an opaque ``concurrent.futures.process._RemoteTraceback`` from a worker.
+    One cheap front-door connection turns that into an immediate, actionable error naming the fix.
+    """
+    kwargs: dict[str, str | int] = {**DB_KWARGS, "connect_timeout": 10}
+    try:
+        with psycopg.connect(**kwargs) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+    except psycopg.OperationalError as e:
+        raise SystemExit(
+            f"DB preflight FAILED connecting to {DB_KWARGS['host']}:{DB_KWARGS['port']} "
+            f"db={DB_KWARGS['dbname']} user={DB_KWARGS['user']}: {e}\n"
+            "Backfill needs the DB (load_reference). If running as a detached `docker run`, attach the "
+            "compose network so the host resolves: `--network quant_default` (and `--env-file .env` for "
+            "DB_PASSWORD)."
+        ) from e
 
 
 def resolve_groups(features: list[str], groups: list[str]) -> dict[str, str]:
@@ -277,6 +304,8 @@ def main() -> None:
     if not group_versions:
         logger.info("no target groups (trusted cohort empty?) — nothing to backfill")
         return
+
+    preflight_db()
 
     days = date_window(args.months, args.start, args.end)
     if args.symbols:
