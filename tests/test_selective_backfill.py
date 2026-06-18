@@ -89,6 +89,117 @@ def test_materialize_day_clears_groups_before_writing(
     ]
 
 
+def test_materialize_day_symbol_sharding_clears_once_then_shards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``symbol_shard_size`` the target partitions are cleared EXACTLY ONCE up front, then each
+    symbol chunk is materialized as its own shard (``data-<shard>.parquet``) so the chunks UNION on read.
+    Re-clearing per chunk would delete the prior chunk's shard — the clear must NOT repeat."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        sb.store,
+        "clear_backfill_groups_day",
+        lambda root, day, groups: calls.append(("clear", day, list(groups))) or [],
+    )
+    monkeypatch.setattr(
+        sb,
+        "materialize_from_raw_groups",
+        lambda root, raw_root, day, symbols, groups, shard=None: calls.append(
+            ("materialize", shard, list(symbols))
+        )
+        or len(symbols),
+    )
+    day, count = sb.materialize_day(
+        "/store",
+        "/store",
+        "2025-01-02",
+        ["AAPL", "NVDA", "TSLA", "AMD", "INTC"],
+        ["gA", "gB"],
+        symbol_shard_size=2,
+    )
+    # 5 symbols / chunk 2 -> chunks [AAPL,NVDA], [TSLA,AMD], [INTC]; count sums the chunks
+    assert (day, count) == ("2025-01-02", 5)
+    assert calls == [
+        ("clear", "2025-01-02", ["gA", "gB"]),
+        ("materialize", 0, ["AAPL", "NVDA"]),
+        ("materialize", 1, ["TSLA", "AMD"]),
+        ("materialize", 2, ["INTC"]),
+    ]
+
+
+def test_run_refuses_symbol_sharding_for_universe_reduce_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Symbol-sharding a universe-reduce group (breadth/rank) would write a partial-universe reduction per
+    chunk, silently corrupting the feature. ``run`` must REFUSE rather than produce wrong data."""
+    monkeypatch.setattr(sb, "cross_sectional_groups", lambda: ["breadth", "gReduce"])
+    with pytest.raises(SystemExit, match="universe-reduce"):
+        sb.run(
+            "/store",
+            "/store",
+            {"gA": "1.0", "gReduce": "1.0"},
+            [dt.date(2025, 1, 2)],
+            ["AAPL"],
+            1,
+            force=False,
+            symbol_shard_size=500,
+        )
+
+
+class _InlineExecutor:
+    """A synchronous stand-in for ProcessPoolExecutor so run() can be unit-tested without pickling the
+    submitted callable across a process boundary."""
+
+    def __init__(self, max_workers: int = 1) -> None:
+        self._results: list[_InlineFuture] = []
+
+    def __enter__(self) -> "_InlineExecutor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def submit(self, fn, *args):  # type: ignore[no-untyped-def]
+        return _InlineFuture(fn(*args))
+
+
+class _InlineFuture:
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    def result(self) -> object:
+        return self._value
+
+
+def test_run_allows_symbol_sharding_for_per_symbol_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-symbol cohort (no universe-reduce group) passes the guard and threads the shard size through
+    to the materialize worker."""
+    monkeypatch.setattr(sb, "cross_sectional_groups", lambda: ["breadth"])
+    monkeypatch.setattr(sb.store, "settled_dates", lambda root, g, v: set())
+    monkeypatch.setattr(sb, "ProcessPoolExecutor", _InlineExecutor)
+    monkeypatch.setattr(sb, "as_completed", lambda futures: list(futures))
+    seen: list[int | None] = []
+    monkeypatch.setattr(
+        sb,
+        "materialize_day",
+        lambda root, raw_root, day, symbols, groups, shard_size: seen.append(shard_size)
+        or (day, 1),
+    )
+    sb.run(
+        "/store",
+        "/store",
+        {"price_returns": "1.0"},
+        [dt.date(2025, 1, 2)],
+        ["AAPL"],
+        1,
+        force=False,
+        symbol_shard_size=500,
+    )
+    assert seen == [500]
+
+
 def test_run_noop_when_nothing_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sb.store, "settled_dates", lambda root, g, v: {"2025-01-02"})
     called = []
