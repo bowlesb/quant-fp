@@ -51,4 +51,5 @@ from quantlib.features.groups import (  # noqa: F401
     trend_quality,
     volatility,
     volume,
+    volume_leads_price,
 )
