@@ -74,8 +74,14 @@ so fc captured almost no RTH on 06-16/06-17. Fixed 2026-06-18 → 05:11 PT pre-m
 | `*/3 * * * *` | `ops/live_monitor.sh` | restart EXITED critical containers; mem/disk guard | conservative (only restarts dead) | `~/.quant-ops/live_monitor.jsonl` |
 | `11 5 * * 1-5` | `ops/nightly_relaunch.sh $(date +%F)` | **05:11 PT pre-market clean recreate of fc for the session** (must be before the 06:30 PT open) | DESTRUCTIVE (rm -f fc) — see guardrail | `~/.quant-validation/nightly_relaunch.log` + §1 health check |
 | `30 18 * * 1-5` | `ops/daily_lifecycle.sh` | 18:30 PT post-close parity sweep + trust ledger | benign (read/backfill) | `~/.quant-validation/daily_lifecycle.log` |
+| `45 14 * * 6` | `ops/trust_random_check.sh` | weekly RANDOM re-check of TRUSTED features on a random recent clean day; un-trusts clean-day failures (docs/TRUST_REDESIGN.md) | conservative (only un-trusts on a positive clean-day disagreement; re-runs an idempotent sweep) | `~/.quant-validation/trust_random_check.log` |
 
 **Keep this table updated whenever a cron is added/changed/removed.** A cron that isn't here doesn't exist.
+
+The random trust re-check is the safety net behind 1-day trust (docs/TRUST_REDESIGN.md): it re-grades a
+random recent clean day and un-trusts any TRUSTED feature that now falls below its per-type threshold,
+filing a parity defect. Trust is otherwise PERMANENT per `(feature, version)`; this is the only un-trust
+path. Saturday 14:45 PT keeps it off the weekday capture/sweep windows.
 
 ### Checklist — before adding or changing ANY cron
 

@@ -23,7 +23,7 @@ Usage:
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 import polars as pl
@@ -301,6 +301,7 @@ def compare_groups(
     scope_symbols: list[str],
     tiers: pl.DataFrame,
     groups: list[str] | None = None,
+    tolerance_of: dict[str, float] | None = None,
 ) -> CompareResult:
     """Compare stream vs backfill for ``groups`` (None = all registered groups) over ``scope_symbols``,
     returning the durable rollup/cell/exceptions frames WITHOUT persisting them.
@@ -308,8 +309,17 @@ def compare_groups(
     Splitting compute from persistence lets the sweep grade cross-sectional (universe-reduce) groups
     against a FULL-UNIVERSE backfill while grading per-symbol/tick groups against the gradable set, then
     union the two results into one set of writes. ``tiers`` is the day's universe membership (already
-    scoped to ``scope_symbols`` by the caller); both sides are pinned to it."""
+    scoped to ``scope_symbols`` by the caller); both sides are pinned to it.
+
+    ``tolerance_of`` (feature -> relative tolerance) overrides each spec's cell tolerance, so the per-type
+    trust policy (docs/TRUST_REDESIGN.md) drives the comparison: a windowed feature's legitimate
+    float-order noise isn't counted as a mismatch at the engine-default 1e-6. None = use spec tolerances."""
     specs = {spec.name: spec for _, spec in REGISTRY.feature_specs()}
+    if tolerance_of:
+        specs = {
+            name: replace(spec, tolerance=tolerance_of.get(name, spec.tolerance))
+            for name, spec in specs.items()
+        }
     version_of = {spec.name: group.version for group, spec in REGISTRY.feature_specs()}
     nan_policy_of = {name: spec.nan_policy for name, spec in specs.items()}
     start = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), tzinfo=timezone.utc)
