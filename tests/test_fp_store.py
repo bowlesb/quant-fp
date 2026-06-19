@@ -1,6 +1,7 @@
 """FP0 store tests: the Parquet read API (R13) round-trips, tracks source, raises on unknown."""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -99,6 +100,49 @@ def test_sharded_backfill_chunks_union_not_clobber(tmp_path: Path) -> None:
     )
     assert sorted(got["symbol"].unique().to_list()) == ["AAA", "BBB"]  # both chunks survive
     assert got.height == 10  # 2 symbols x 5 minutes, neither chunk clobbered
+
+
+def test_fragmented_gather_dups_deduped_to_latest_write(tmp_path: Path) -> None:
+    """The fragmented-gather poison-parity regression: when a live restart splits one minute across several
+    concurrent partial gathers, the SAME (symbol, minute) lands in multiple shard files with DIVERGING
+    values (each gather saw a different bar count → e.g. volume_zscore pinned to n=2 vs the real n>=3). The
+    read must collapse them to the LATEST-WRITTEN file's row (last-write-wins = the most-complete gather),
+    not union the duplicates (which poisoned the stream-vs-backfill parity diff for every per-symbol bar
+    group). Here ``ret_1m`` stands in for any per-symbol bar feature."""
+    early_minute = datetime(2026, 6, 12, 8, 0)
+    early = pl.DataFrame({"symbol": ["AAA"], "minute": [early_minute], "ret_1m": [0.047]})  # partial gather (n=2)
+    late = pl.DataFrame({"symbol": ["AAA"], "minute": [early_minute], "ret_1m": [13.3]})  # full gather (n>=3), correct
+    early_path = store.write_group(
+        tmp_path, "price_returns", "1.0.0", "stream", "2026-06-12", early, shard=0, minute=early_minute
+    )
+    late_path = store.write_group(
+        tmp_path, "price_returns", "1.0.0", "stream", "2026-06-12", late, shard=1, minute=early_minute
+    )
+
+    # Two distinct shard files for the SAME (symbol, minute) -> the duplicate exists on disk (the poison).
+    files = sorted((tmp_path / "group=price_returns/v=1.0.0/source=stream/date=2026-06-12").glob("data*.parquet"))
+    assert len(files) == 2
+    assert pl.read_parquet(files).height == 2  # raw union would carry both rows
+
+    # Pin mtimes so the LATE shard is unambiguously the newest write (no wall-clock flakiness).
+    os.utime(early_path, (1_750_000_000, 1_750_000_000))
+    os.utime(late_path, (1_750_000_100, 1_750_000_100))
+
+    got = store.get_features(["ret_1m"], "universe", early_minute, early_minute, tmp_path, source="stream")
+    assert got.height == 1  # deduped to one row per (symbol, minute)
+    # The latest-written (most-complete gather) value wins, within Float32 storage precision.
+    assert got["ret_1m"].item() == pytest.approx(13.3, rel=1e-6)
+
+
+def test_clean_minutes_unaffected_by_dedupe(tmp_path: Path) -> None:
+    """The dedupe is a no-op on a coherent capture: every (symbol, minute) is written exactly once, so all
+    rows survive untouched and values round-trip — the fix cannot silently drop legitimate rows."""
+    store.write_group(tmp_path, "price_returns", "1.0.0", "stream", "2026-06-12", _ret1m_frame(1.5, 10))
+    got = store.get_features(
+        ["ret_1m"], "universe", BASE_MINUTE, BASE_MINUTE + timedelta(minutes=9), tmp_path, source="stream"
+    ).sort("minute")
+    assert got.height == 10  # all 10 minutes survive
+    assert got["ret_1m"].to_list() == [1.5] * 10
 
 
 def test_clear_backfill_day_removes_only_that_day_and_source(tmp_path: Path) -> None:
