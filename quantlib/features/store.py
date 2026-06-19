@@ -143,6 +143,34 @@ def settled_dates(root: str | Path, group: str, version: str) -> set[str]:
     return _date_dirs(root, group, version, "backfill")
 
 
+_SRC_FILE_COL = "__src_file"  # internal: carries each row's source parquet path so reads can dedupe by write time
+_SRC_MTIME_COL = "__src_mtime"  # internal: per-file mtime (write time) — the last-write-wins ordering key
+
+
+def _dedupe_latest_write(frame: pl.DataFrame, files: list[Path]) -> pl.DataFrame:
+    """Collapse duplicate ``(symbol, minute)`` rows to the LATEST-WRITTEN file's row (last-write-wins).
+
+    A coherent capture writes each ``(symbol, minute)`` exactly once, so this is a no-op on clean data. But
+    a FRAGMENTED-GATHER restart (the live system splitting one minute across ~N concurrent partial gathers)
+    writes the SAME ``(symbol, minute)`` into several shard files with DIVERGING values — each partial gather
+    sees a different bar count, so e.g. ``volume_zscore`` is pinned to n=2 in an early shard while a later,
+    more-complete shard has the real n>=3 value. Unioning those (the prior behavior) poisoned the parity diff
+    for every per-symbol bar group. We keep the row from the file with the newest mtime (the gather that
+    finished last = the most-complete write), restoring stream==backfill on the clean minutes around it.
+    """
+    if frame.height == 0:
+        return frame.drop(_SRC_FILE_COL) if _SRC_FILE_COL in frame.columns else frame
+    mtimes = pl.DataFrame(
+        {_SRC_FILE_COL: [str(f) for f in files], _SRC_MTIME_COL: [f.stat().st_mtime for f in files]}
+    )
+    return (
+        frame.join(mtimes, on=_SRC_FILE_COL, how="left")
+        .sort([_SRC_MTIME_COL, _SRC_FILE_COL])  # path is the deterministic tiebreaker for equal mtimes
+        .unique(subset=list(KEY_COLUMNS), keep="last", maintain_order=True)
+        .drop([_SRC_FILE_COL, _SRC_MTIME_COL])
+    )
+
+
 def _scan_source(
     root: str | Path,
     group: str,
@@ -159,10 +187,14 @@ def _scan_source(
     # Features are stored narrowed (Float32 / nullable UInt8 / small int); widen back to Float64 on read so
     # every consumer (parity diff, training export, API) sees the uniform compute dtype — the narrowing is a
     # pure disk concern. (Without this, UInt8 flags would integer-underflow in the parity subtraction.)
-    frame = pl.scan_parquet(files).select([*KEY_COLUMNS, *[pl.col(name).cast(pl.Float64) for name in feats]])
+    # ``include_file_paths`` carries each row's source file so the dedupe below can order by write time.
+    frame = pl.scan_parquet(files, include_file_paths=_SRC_FILE_COL).select(
+        [*KEY_COLUMNS, *[pl.col(name).cast(pl.Float64) for name in feats], _SRC_FILE_COL]
+    )
     if symbols != "universe":
         frame = frame.filter(pl.col("symbol").is_in(symbols))
-    return frame.filter((pl.col("minute") >= start) & (pl.col("minute") <= end)).collect()
+    collected = frame.filter((pl.col("minute") >= start) & (pl.col("minute") <= end)).collect()
+    return _dedupe_latest_write(collected, files)
 
 
 def get_features(
