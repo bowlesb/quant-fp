@@ -1,5 +1,13 @@
 # Trust metadata lifecycle — what "validated" means and when it is written
 
+> **ARCHIVED (superseded 2026-06-17 by the binary-trust redesign).** This describes the retired
+> 4-state `lifecycle_state` model (`PENDING/VALIDATED/DIVERGENT/RETIRED`) and the
+> `lifecycle_state = 'VALIDATED'` gate. The trust gate is now the binary
+> `feature_trust.trust_state = 'TRUSTED'` — see `docs/TRUST_REDESIGN.md` for the design of record and
+> `quantlib/features/trusted_list.py` for the live accessor. The `lifecycle_state` column itself is
+> still WRITTEN (every parity sweep) and READ as a per-feature DIAGNOSTIC badge on the feature grid,
+> but it is no longer the gate. Kept for historical reference only.
+
 This is the operator's reference for the **feature-validation metadata**: the durable markers that say
 which feature *values* have been proven to reproduce backfill. It answers two questions precisely:
 
