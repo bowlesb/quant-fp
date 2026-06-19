@@ -6,6 +6,7 @@ No secrets; the only write is Ben's per-row reaction on the /status board (a fre
 note persisted to the append-only status store). Ben checks it in a browser; Claude
 reads /status.json or the DB directly in-session.
 """
+
 import html
 import os
 import re
@@ -23,6 +24,9 @@ from feature_grid import CACHE, STORE_ROOT
 from feature_grid_page import FEATURE_GRID_HTML
 from jobs_page import load_status as load_jobs_status
 from jobs_page import render_jobs_page
+from liquidity_bands import CACHE as BANDS_CACHE
+from liquidity_bands import band_members, parse_cuts, symbol_history
+from liquidity_bands_page import LIQUIDITY_BANDS_HTML
 from raw_coverage import CACHE as RAW_CACHE
 from raw_coverage_page import RAW_COVERAGE_HTML
 from status_page import render_status_page
@@ -89,9 +93,7 @@ def collect_metrics() -> dict[str, Any]:
                         row["latest"] = ts_row[0].isoformat() if ts_row and ts_row[0] else None
                     metrics["tables"][table] = row
 
-                cur.execute(
-                    "SELECT ok, ts FROM reconciliation_log ORDER BY ts DESC LIMIT 1"
-                )
+                cur.execute("SELECT ok, ts FROM reconciliation_log ORDER BY ts DESC LIMIT 1")
                 recon = cur.fetchone()
                 metrics["last_reconciliation"] = (
                     {"ok": recon[0], "ts": recon[1].isoformat()} if recon else None
@@ -124,9 +126,7 @@ def render_doc(name: str) -> str:
     path = DOCS_DIR / name
     if not path.exists():
         return f"<p><em>{name} not mounted.</em></p>"
-    return markdown.markdown(
-        path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"]
-    )
+    return markdown.markdown(path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"])
 
 
 def highlight_tags(rendered_html: str) -> str:
@@ -151,9 +151,7 @@ def render_progress_report(name: str) -> str:
     """Render one progress report's markdown with roadmap tags highlighted. `name`
     is validated against the directory listing by the caller, so no path traversal."""
     path = PROGRESS_DIR / name
-    rendered = markdown.markdown(
-        path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"]
-    )
+    rendered = markdown.markdown(path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"])
     return highlight_tags(rendered)
 
 
@@ -302,6 +300,64 @@ def raw_coverage_page() -> str:
     return RAW_COVERAGE_HTML
 
 
+@app.get("/api/liquidity-bands")
+def liquidity_bands_json(
+    days: int = 90, cuts: str | None = None, asof: str | None = None, refresh: bool = False
+) -> JSONResponse:
+    """Canonical ADV-rank / liquidity-band reference surface — the trailing-20d dollar-volume RANK over the
+    raw bars that every research lane otherwise re-derives ad hoc (Lane C's bands, FeatureInventor top-400,
+    the pilot top-500). Per (symbol, date) point-in-time: trailing-20d ADV, its cross-sectional rank, and a
+    band label under configurable contiguous cuts.
+
+    Returns band SIZES over time, membership STABILITY (day-to-day band-cross turnover), and an as-of
+    snapshot of band membership. ``cuts`` overrides the default rank cuts (``500,1000,2000,4000`` ==
+    Lane C's adjudicated B1-B5); ``days`` clips the timeline (0 = full history); ``asof`` pins the snapshot
+    to a date (point-in-time); ``refresh=1`` bypasses the TTL cache.
+
+    Shape:
+      {generated_at, store_root, cuts, band_labels, adv_window, min_trailing_days, days,
+       earliest, latest, asof, n_dates, n_ranked_symbols,
+       timeline: [{date, total, bands: {label: n}}],
+       stability: {overall_cross_rate, per_band: {label: {pairs, crosses, cross_rate}}, n_transitions},
+       snapshot: {date, bands: {label: {n, rank_lo, rank_hi, min_adv, max_adv, median_adv, members_sample}}}}
+    """
+    try:
+        parsed_cuts = parse_cuts(cuts)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(BANDS_CACHE.bands(STORE_ROOT, cuts=parsed_cuts, days=days, asof=asof, force=refresh))
+
+
+@app.get("/api/liquidity-bands/symbol/{symbol}")
+def liquidity_bands_symbol_json(symbol: str, cuts: str | None = None, refresh: bool = False) -> JSONResponse:
+    """One symbol's ADV-rank / band history over time — its trailing ADV, cross-sectional rank, and band on
+    each ranked date. The "given a symbol, its ADV-rank history" lookup."""
+    try:
+        parsed_cuts = parse_cuts(cuts)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(symbol_history(symbol.upper(), STORE_ROOT, cuts=parsed_cuts, force=refresh))
+
+
+@app.get("/api/liquidity-bands/members/{band}")
+def liquidity_bands_members_json(
+    band: str, cuts: str | None = None, asof: str | None = None, refresh: bool = False
+) -> JSONResponse:
+    """The full current (or ``asof``-date) membership of one band, each member's rank + trailing ADV — the
+    reproducible-universe export a lane uses instead of an ad-hoc top-N (band "2000-4000" == Lane C's B4)."""
+    try:
+        parsed_cuts = parse_cuts(cuts)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(band_members(band, STORE_ROOT, cuts=parsed_cuts, asof=asof, force=refresh))
+
+
+@app.get("/liquidity-bands", response_class=HTMLResponse)
+def liquidity_bands_page() -> str:
+    """The visual liquidity-band surface (vanilla HTML/JS; fetches /api/liquidity-bands client-side)."""
+    return LIQUIDITY_BANDS_HTML
+
+
 class ReactionRequest(BaseModel):
     ts: str
     text: str
@@ -409,22 +465,17 @@ def progress(report: str | None = None) -> str:
 def dashboard() -> str:
     metrics = collect_metrics()
     db_badge = (
-        "<span class='ok'>● connected</span>"
-        if metrics["db_ok"]
-        else "<span class='bad'>● down</span>"
+        "<span class='ok'>● connected</span>" if metrics["db_ok"] else "<span class='bad'>● down</span>"
     )
 
     rows_html = ""
     for table, info in metrics.get("tables", {}).items():
         latest = info.get("latest") or "—"
-        rows_html += (
-            f"<tr><td>{table}</td><td class='num'>{info['rows']:,}</td>"
-            f"<td>{latest}</td></tr>"
-        )
+        rows_html += f"<tr><td>{table}</td><td class='num'>{info['rows']:,}</td>" f"<td>{latest}</td></tr>"
 
     recon = metrics.get("last_reconciliation")
-    recon_html = "no reconciliation yet" if not recon else (
-        f"{'OK' if recon['ok'] else 'MISMATCH'} @ {recon['ts']}"
+    recon_html = (
+        "no reconciliation yet" if not recon else (f"{'OK' if recon['ok'] else 'MISMATCH'} @ {recon['ts']}")
     )
 
     coverage = metrics.get("coverage", [])
@@ -440,7 +491,9 @@ def dashboard() -> str:
             f"<th class='num'>coverage</th></tr></thead><tbody>{cov_rows}</tbody></table>"
         )
     else:
-        cov_html = "<h2 style='margin-top:0;font-size:15px;'>Coverage</h2><p class='muted'>no coverage data yet</p>"
+        cov_html = (
+            "<h2 style='margin-top:0;font-size:15px;'>Coverage</h2><p class='muted'>no coverage data yet</p>"
+        )
 
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Quant Dashboard</title>
@@ -468,7 +521,8 @@ def dashboard() -> str:
 <a href="/jobs" style="color:#58a6ff;text-decoration:none;font-size:13px;">Jobs &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
 <a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a> &nbsp;
-<a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a></h1>
+<a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a> &nbsp;
+<a href="/liquidity-bands" style="color:#58a6ff;text-decoration:none;font-size:13px;">Liquidity bands &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
   <div class="grid" style="margin-bottom:24px;">
