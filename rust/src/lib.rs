@@ -576,6 +576,11 @@ fn assemble_canonical<'py>(
                     // each on a fraction of its own scale ((Σx)² / (Σy)²).
                     let defined = b >= 2.0 && denom_x > 1e-12 * (sx * sx);
                     let defined_corr = defined && denom_y > 1e-12 * (sy * sy);
+                    // n==2 perfect-fit corner (mirror _OLS_PERFECT_FIT_COUNT in declarative.py): a line through
+                    // two distinct points is an EXACT fit, so r2==1.0 and corr==sign(cov). From the sums the
+                    // cov²/(denom_x·denom_y) ratio is noise/noise landing at 1.0±ε; emit the exact value so the
+                    // rust/numpy/polars twins agree cell-for-cell AND the value is correct (touches only b==2).
+                    let perfect = defined_corr && b == 2.0;
                     out[[s, j]] = match k {
                         3 => {
                             if defined {
@@ -585,14 +590,18 @@ fn assemble_canonical<'py>(
                             }
                         }
                         4 => {
-                            if defined_corr {
+                            if perfect {
+                                cov_n.signum()
+                            } else if defined_corr {
                                 cov_n / (denom_x * denom_y).sqrt()
                             } else {
                                 f64::NAN
                             }
                         }
                         5 => {
-                            if defined_corr {
+                            if perfect {
+                                1.0
+                            } else if defined_corr {
                                 (cov_n * cov_n) / (denom_x * denom_y)
                             } else {
                                 f64::NAN

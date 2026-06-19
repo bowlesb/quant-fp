@@ -39,10 +39,13 @@ from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
 
-# The groups deliberately kept on the batch fresh-sum path under FP_INCREMENTAL (variance/correlation of raw
-# share volume — incremental-vs-batch corner divergence breaches the parity self-check; see
-# ReductionGroup.incremental_safe). The split keeps them byte-identical to batch even with the flag on.
-INCREMENTAL_UNSAFE = {"volume", "price_volume", "trend_quality", "clean_momentum"}
+# Only ``volume`` remains gated: its variance-family std (sqrt(Σv²−(Σv)²/n) vs backfill rolling_std_by) is a
+# batch-vs-canonical FORMULA gap (Lead-owned centered-std batch change). The OLS-corner groups (price_volume's
+# pv_correlation, trend_quality/clean_momentum's r2) are now parity-true via the n==2 perfect-fit guard
+# (_OLS_PERFECT_FIT_COUNT) + the time-OLS origin-rebase, so they ride the incremental fast path.
+INCREMENTAL_UNSAFE = {"volume"}
+# n==2-guard-fixed (now incremental_safe): they ride the incremental fast path.
+INCREMENTAL_FLIPPED = {"price_volume", "trend_quality", "clean_momentum"}
 
 
 def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float = 0.02) -> list[list[dict]]:
@@ -64,6 +67,29 @@ def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: fl
             c = price[s]
             bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
                          "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+        out.append(bars)
+    return out
+
+
+def _flat_volume_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float) -> list[list[dict]]:
+    """A stream with NEAR-CONSTANT huge share volume (the worst variance-cancellation regime for volume_zscore:
+    Σv² and (Σv)²/n are large near-equal sums whose difference is float noise, so the power-sum std flips
+    across the relative null-floor differently from backfill's rolling_std_by). Price still drifts normally."""
+    rng = np.random.default_rng(seed)
+    price = {s: 100.0 + s for s in range(n_sym)}
+    out: list[list[dict]] = []
+    for mi in range(n_min):
+        minute_iso = (BASE + dt.timedelta(minutes=mi)).isoformat()
+        bars: list[dict] = []
+        for s in range(n_sym):
+            present = mi == 0 or rng.random() < present_p
+            price[s] *= 1.0 + (rng.standard_normal() * vol)
+            if not present:
+                continue
+            c = price[s]
+            v = max(5_000_000.0 + rng.standard_normal(), 1.0)  # huge, ~constant: std cancellation stress
+            bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
+                         "v": v, "t": minute_iso})
         out.append(bars)
     return out
 
@@ -141,25 +167,19 @@ def test_parity_selfcheck_records_clean(monkeypatch: pytest.MonkeyPatch, tmp_pat
         f"no minute should breach on well-conditioned data; worst {max(r for _, r, _ in seen)}x tolerance"
 
 
-@pytest.mark.xfail(
-    reason="n==2 perfect-fit corner; fixed by the Lever-1 incremental_safe flip (LATENCY_PLAN §7), "
-    "Lead-sequenced. PR #132's engine-only OLS-origin rebase already dropped this fixture's worst ratio "
-    "below the breach threshold (~0.41x vs 10x) on trend_quality/clean_momentum, so the 'breach is real' "
-    "premise no longer holds while the flag flip is held. Flips back to expected-PASS when Lever-1 lands.",
-    strict=False,
-)
-def test_ols_near_perfect_fit_is_flagged() -> None:
-    """KNOWN CONDITIONING CAVEAT (still real, now GATED): on a SMOOTH (near-linear) price walk the sum-based
-    OLS R²/correlation family fits near-perfectly, so the incremental running sums diverge from the batch fresh
-    sums far beyond tolerance. Comparing the IncrementalEngine DIRECTLY against the batch over the conditioning-
-    sensitive groups still breaches — proving the divergence is real and the gate (``incremental_safe = False``)
-    is load-bearing. ``test_unsafe_group_stays_on_batch_under_incremental`` proves the gated ``process_bars``
-    path keeps those groups byte-identical to batch, so the breach never reaches a written value."""
+@pytest.mark.parametrize("slice_derive", [True, False])
+def test_ols_near_perfect_fit_is_parity_true(slice_derive: bool) -> None:
+    """The former KNOWN CONDITIONING CAVEAT, now CLOSED at source. On a SMOOTH (near-linear) price walk the
+    OLS R²/correlation family fits near-perfectly (R²→1, the b==2 corner is exact) — the historical breach
+    source. With the time-OLS origin-rebase (PR #132) and the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT:
+    r2=1.0 / corr=sign(cov) at b==2), the IncrementalEngine now agrees with the batch CELL-FOR-CELL on the
+    flipped OLS groups (trend_quality, clean_momentum, price_volume's pv_correlation) — well under the breach
+    ratio on BOTH the live slice-derive and the whole-buffer paths. This is the parity proof gating their
+    ``incremental_safe = True`` flip."""
     smooth = _stream_minutes(n_sym=8, n_min=20, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
-    sensitive = [
-        g for g in REGISTRY.groups()
-        if isinstance(g, ReductionGroup) and not g.incremental_safe and g.name in ("trend_quality", "clean_momentum")
-    ]
+    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_FLIPPED]
+    assert {g.name for g in flipped} == INCREMENTAL_FLIPPED, "flipped OLS groups missing from registry"
+    assert all(g.incremental_safe for g in flipped), "flipped OLS groups must be incremental_safe=True"
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
     worst = 0.0
@@ -169,12 +189,76 @@ def test_ols_near_perfect_fit_is_flagged() -> None:
         ring.push(_bars_to_frame(bars))
         frame = ring.materialize()
         ctx = BatchContext(frames={"minute_agg": frame})
-        batch = compute_reduction_batch(sensitive, ctx)
+        batch = compute_reduction_batch(flipped, ctx)
         if engine is None:
-            engine = IncrementalEngine(sensitive)
-        inc = engine.step(frame, slice_derive=False)
+            engine = IncrementalEngine(flipped)
+        inc = engine.step(frame, slice_derive=slice_derive)
         worst = max(worst, _worst_tol_ratio(batch, inc))
-    assert worst > _PARITY_BREACH_RATIO, "expected near-perfect-fit conditioning divergence on the gated groups"
+    assert worst < _PARITY_BREACH_RATIO, f"flipped OLS groups must be parity-true on perfect-fit walk: {worst}x"
+
+
+@pytest.mark.parametrize(
+    "seed,present_p,vol",
+    [
+        (5, 0.30, 0.0002),  # very sparse + ultra-smooth: many b==2 perfect-fit windows
+        (11, 0.45, 0.0005),  # b==2-heavy churn
+        (23, 0.35, 0.0003),  # sparse near-linear
+        (7, 0.70, 0.020),  # well-conditioned (control)
+    ],
+)
+def test_flipped_ols_groups_parity_on_degenerate_walks(seed: int, present_p: float, vol: float) -> None:
+    """Cell-for-cell batch==incremental on the FLIPPED OLS groups across degenerate regimes (n==2 perfect-fit
+    corners from sparse presence, near-flat ultra-smooth walks) AND a well-conditioned control — on the LIVE
+    slice-derive path. The n==2 perfect-fit guard + origin-rebase make the OLS r2/corr family parity-true by
+    construction: no seed/regime breaches and no null/non-null mismatch (the helper asserts the latter)."""
+    walk = _stream_minutes(n_sym=10, n_min=18, present_p=present_p, seed=seed, vol=vol)
+    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_FLIPPED]
+    ring = MinuteRing(maxlen=120)
+    engine: IncrementalEngine | None = None
+    worst = 0.0
+    for bars in walk:
+        if not bars:
+            continue
+        ring.push(_bars_to_frame(bars))
+        frame = ring.materialize()
+        ctx = BatchContext(frames={"minute_agg": frame})
+        batch = compute_reduction_batch(flipped, ctx)
+        if engine is None:
+            engine = IncrementalEngine(flipped)
+        inc = engine.step(frame, slice_derive=True)
+        worst = max(worst, _worst_tol_ratio(batch, inc))
+    assert worst < _PARITY_BREACH_RATIO, f"flipped OLS breached on degenerate walk (seed={seed}): {worst}x"
+
+
+def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
+    """``volume`` stays gated: its z-score std (power-sum sqrt(Σv²−(Σv)²/n) on the live/incremental path vs
+    backfill rolling_std_by) diverges on a near-constant-volume window — a real batch-vs-canonical FORMULA gap
+    (null/non-null at the std floor, or a large z-score disagreement at n=2/3). This asserts the gate is still
+    LOAD-BEARING for volume so its ``incremental_safe = False`` is not stale; flipping it needs the centered-std
+    batch change. Comparing the engine DIRECTLY against the batch (no gate) must breach."""
+    walk = _flat_volume_minutes(n_sym=8, n_min=25, present_p=0.7, seed=9, vol=0.01)
+    volume = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == "volume"]
+    ring = MinuteRing(maxlen=120)
+    engine: IncrementalEngine | None = None
+    breached = False
+    for bars in walk:
+        if not bars:
+            continue
+        ring.push(_bars_to_frame(bars))
+        frame = ring.materialize()
+        ctx = BatchContext(frames={"minute_agg": frame})
+        batch = compute_reduction_batch(volume, ctx)
+        if engine is None:
+            engine = IncrementalEngine(volume)
+        inc = engine.step(frame, slice_derive=True)
+        # The breach surfaces as EITHER a null/non-null mismatch at the std floor (the helper asserts on it) OR
+        # a large z-score disagreement; both mean the gate is load-bearing.
+        try:
+            if _worst_tol_ratio(batch, inc) > _PARITY_BREACH_RATIO:
+                breached = True
+        except AssertionError:
+            breached = True
+    assert breached, "volume variance-family breach expected (gate is load-bearing)"
 
 
 def test_incremental_parity_helper() -> None:

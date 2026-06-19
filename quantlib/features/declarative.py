@@ -55,6 +55,17 @@ _STAT_CODE = {"sum": 0, "mean": 1, "std": 2, "slope": 3, "corr": 4, "r2": 5, "me
 _OLS_DENOM_X_REL_EPS = 1e-12
 _OLS_DENOM_Y_REL_EPS = 1e-12
 
+# n==2 perfect-fit corner. Two distinct (x, y) points define a line EXACTLY, so the OLS fit through them is
+# perfect: r2 == 1.0, corr == sign(slope) == sign(cov). Computed from the sums, ``r2 = cov²/(denom_x·denom_y)``
+# at b==2 is ``noise/noise`` — a ratio of two cancellation differences that lands at ``1.0 ± ε`` (often
+# slightly ABOVE 1.0, impossible for an R²), and the batch fresh sums and the incremental running sums round
+# that ε differently (the residual batch-vs-incremental breach after the origin-rebase — entirely the b==2
+# cells: price_r2 / pv_correlation / clean_momentum). Emit the EXACT value at b==2 in all three twins (polars /
+# numpy / rust assemble_canonical) so both paths agree cell-for-cell AND the value is mathematically correct
+# (1.0 is the true r2 of a line through two points; the prior 0.9998–1.0001 was float noise). Touches ONLY the
+# b==2 cells, so it is a degenerate-cell value change -> a per-group version bump + re-trust on the affected groups.
+_OLS_PERFECT_FIT_COUNT = 2.0
+
 # Agg accessors — used inside assemble() to reference the canonical aggregate columns the engine builds.
 STATS = ("mean", "std", "sum")
 
@@ -105,13 +116,16 @@ def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[st
     cov_n = b * sxy - sx * sy
     defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
     defined_corr = defined & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
+    perfect = defined_corr & (b == _OLS_PERFECT_FIT_COUNT)  # line through 2 points: r2==1, corr==sign(cov)
     out: dict[str, pl.Expr] = {}
     if "slope" in stats:
         out["slope"] = pl.when(defined).then(cov_n / denom_x).otherwise(None)
     if "corr" in stats:
-        out["corr"] = pl.when(defined_corr).then(cov_n / (denom_x * denom_y).sqrt()).otherwise(None)
+        corr = pl.when(defined_corr).then(cov_n / (denom_x * denom_y).sqrt()).otherwise(None)
+        out["corr"] = pl.when(perfect).then(cov_n.sign()).otherwise(corr)
     if "r2" in stats:
-        out["r2"] = pl.when(defined_corr).then((cov_n * cov_n) / (denom_x * denom_y)).otherwise(None)
+        r2 = pl.when(defined_corr).then((cov_n * cov_n) / (denom_x * denom_y)).otherwise(None)
+        out["r2"] = pl.when(perfect).then(pl.lit(1.0)).otherwise(r2)
     if "mean_y" in stats:
         out["mean_y"] = pl.when(b > 0).then(sy / b).otherwise(None)
     return out
@@ -685,6 +699,7 @@ def _ols_stat_numpy(
     cov_n = b * sxy - sx * sy
     defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
     defined_corr = defined & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
+    perfect = defined_corr & (b == _OLS_PERFECT_FIT_COUNT)  # line through 2 points: r2==1, corr==sign(cov)
     out: dict[str, np.ndarray] = {}
     if "slope" in stats:
         slope = np.where(defined, np.divide(cov_n, denom_x, out=np.zeros_like(cov_n), where=defined), np.nan)
@@ -692,11 +707,11 @@ def _ols_stat_numpy(
     if "corr" in stats:
         denom = np.sqrt(denom_x * denom_y)
         corr = np.where(defined_corr, np.divide(cov_n, denom, out=np.zeros_like(cov_n), where=defined_corr), np.nan)
-        out["corr"] = corr
+        out["corr"] = np.where(perfect, np.sign(cov_n), corr)
     if "r2" in stats:
         prod = denom_x * denom_y
         r2 = np.where(defined_corr, np.divide(cov_n * cov_n, prod, out=np.zeros_like(cov_n), where=defined_corr), np.nan)
-        out["r2"] = r2
+        out["r2"] = np.where(perfect, 1.0, r2)
     if "mean_y" in stats:
         out["mean_y"] = np.where(b > 0, np.divide(sy, b, out=np.zeros_like(sy), where=b > 0), np.nan)
     return out

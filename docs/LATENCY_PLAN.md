@@ -223,6 +223,27 @@ Where we are: the 13 safe reduction groups already clear <100ms on the increment
 
 ### Lever #1 (SMALL, low priority) — stable incremental form for the 4 gated reduction groups
 
+> **STATUS 2026-06-19 [Latency] — 3 of 4 SHIPPED (PR: lat/inc-stable-n2-guard), Lead-deploy + re-trust owed.**
+> The n==2 perfect-fit value-correcting guard (`_OLS_PERFECT_FIT_COUNT`: emit `r2=1.0` / `corr=sign(cov)` at
+> `b==2`) is implemented in ALL THREE twins (`_ols_stat_exprs` polars, `_ols_stat_numpy`, the rust
+> `assemble_canonical`). It closes the b==2 corner cell-for-cell, so with the origin-rebase (#132) already in,
+> **`trend_quality`, `clean_momentum`, and `price_volume` (pv_correlation) are now parity-true** on smooth /
+> degenerate (n==2, sparse) / control walks (verified: worst pv_correlation absdiff ~7e-15, all flipped groups
+> well under the 10x breach on both slice-derive and whole-buffer). They are flipped `incremental_safe = True`
+> (versions bumped: trend_quality 1.0.0→1.1.0, clean_momentum 1.0.0→1.1.0, price_volume 1.1.0→1.2.0). The guard
+> changes the SHARED batch algebra at b==2 cells (max Δ ~1.7e-4, float-noise→exactly-1.0), so it is a
+> **fingerprint change → needs a Lead-coordinated deploy + re-trust of those 3 groups** (crypto 24/7 enables the
+> re-trust). Measured on a 375-sym shard: the 3 flipped groups' batch `compute_latest` p50 254ms / p99 322ms →
+> incremental `step` p50 24.5ms / p99 29.4ms — **~10.4x p50 / ~10.9x p99**, removing ~230ms p50 / ~293ms p99 of
+> batch reduction work (price_volume 163ms, clean_momentum 48ms, trend_quality 34ms p50 each, gone from batch).
+> **`volume` REMAINS GATED** — its blocker is the variance-family std (power-sum `sqrt(Σv²−(Σv)²/n)` live vs
+> backfill `rolling_std_by`), a batch-vs-canonical FORMULA gap (verified present even at zero incremental drift:
+> null/non-null flip at the std floor on near-constant huge volume + ~7e-4 at the n=2/3 z-score). Its parity-true
+> fix is the centered power-sum std in the SHARED batch kernel — Lead-owned, invasive — and is the only Lever-1
+> remainder. `tests/test_fp_incremental_capture.py` extended: per-group cell-for-cell parity on smooth+degenerate
+> walks for the 3 flipped groups (the old xfail is now an asserting parity test), plus a load-bearing
+> volume-still-breaches test.
+
 **Scope:** flip `volume` (volume_zscore), `price_volume` (pv_correlation), `trend_quality` (price_r2),
 `clean_momentum` from `incremental_safe = False` back to `True` by removing the batch-vs-incremental
 conditioning divergence (§6 follow-up #3). All four diverge through the SAME mechanism: variance/cov built
