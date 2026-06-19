@@ -71,6 +71,18 @@ PERIODS: list[tuple[str, str, int | None]] = [
     ("all", "All history", None),
 ]
 
+# Trust-FRONTIER states (a derived view over lifecycle_state x open-defect, NOT a new source of truth):
+#   TRUSTED  — lifecycle_state == VALIDATED (parity held MIN_CLEAN_DAYS; already earned).
+#   BLOCKED  — has an OPEN feature_parity_defect row: a parity failure the agent has NOT yet cleared. These
+#              do NOT advance on the next sweep without a fix (today: the FP_TICK_SYMBOLS tick-coverage tail).
+#   ELIGIBLE — not yet trusted AND no open defect: PENDING/UNGRADED features accruing clean days, PLUS the
+#              DIVERGENT features whose defect was cleared (the lifecycle_state lags until the next clean
+#              sweep re-grades it). This is the frontier that becomes TRUSTED on the next clean settled sweep
+#              — the legibility the flat lifecycle_state badge hides.
+FRONTIER_TRUSTED = "TRUSTED"
+FRONTIER_ELIGIBLE = "ELIGIBLE"
+FRONTIER_BLOCKED = "BLOCKED"
+
 # A feature is VALIDATED at MIN_CLEAN_DAYS clean days of held parity. Mirrors trust_lifecycle.MIN_CLEAN_DAYS
 # — imported rather than hardcoded would couple the dashboard image to that module's constant; we surface it
 # as the "days needed" denominator for the "X% to trusted" progress indicator and keep it here, documented.
@@ -341,6 +353,53 @@ def _read_full_trust() -> list[dict[str, object]]:
         cur.execute(_FULL_TRUST_QUERY)
         columns = [desc[0] for desc in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+_OPEN_DEFECT_QUERY = """
+SELECT feature, version, feature_group, first_seen_day, last_seen_day, worst_rel_err
+FROM feature_parity_defect
+WHERE status = 'open'
+"""
+
+
+def _read_open_defects() -> list[dict[str, object]]:
+    """OPEN rows of ``feature_parity_defect`` as dict rows — the still-blocking parity failures (a defect the
+    parity agent marks ``fixed``/``wontfix`` drops out, even though the feature's ``lifecycle_state`` stays
+    DIVERGENT until the next clean sweep re-grades it). Isolated so tests can monkeypatch it without a DB."""
+    import psycopg
+
+    from quantlib.features.validation_db import DB_KWARGS
+
+    with psycopg.connect(**DB_KWARGS, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(_OPEN_DEFECT_QUERY)
+        columns = [desc[0] for desc in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def open_defect_features() -> set[str]:
+    """{feature} with an OPEN parity defect — the genuinely-blocked set the trust frontier is gated on."""
+    return {str(row["feature"]) for row in _read_open_defects()}
+
+
+_TRUSTED_NAMES_QUERY = "SELECT feature FROM feature_trust WHERE trust_state = 'TRUSTED'"
+
+
+def _read_trusted_names() -> list[str]:
+    """Feature names with ``feature_trust.trust_state = 'TRUSTED'`` — the BINARY-trust system of record (the
+    consumable predicate downstream agents gate on, ``quantlib.features.trusted_list``), NOT the older
+    ``lifecycle_state`` column the grid badge uses. Isolated so tests can monkeypatch it without a DB."""
+    import psycopg
+
+    from quantlib.features.validation_db import DB_KWARGS
+
+    with psycopg.connect(**DB_KWARGS, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(_TRUSTED_NAMES_QUERY)
+        return [str(row[0]) for row in cur.fetchall()]
+
+
+def trusted_feature_names() -> set[str]:
+    """{feature} that have EARNED binary trust (``trust_state = 'TRUSTED'``) — the trusted side of the frontier."""
+    return set(_read_trusted_names())
 
 
 def _catalog_by_group() -> dict[str, list[dict[str, object]]]:
@@ -986,6 +1045,107 @@ def build_orderflow_coverage_trend(
     }
 
 
+def _frontier_state(is_trusted: bool, has_open_defect: bool) -> str:
+    """Classify one feature into a trust-frontier state from its binary-trust grant + open-defect presence.
+
+    Already TRUSTED (``trust_state='TRUSTED'``) -> TRUSTED. Otherwise an OPEN parity defect -> BLOCKED (a
+    failure still on the books). A not-yet-trusted feature with NO open defect -> ELIGIBLE: it advances to
+    TRUSTED on the next clean settled sweep. This is where a feature whose defect was cleared lands — its flat
+    DIVERGENT lifecycle badge would paint it permanently red, but with no open defect it is one clean sweep
+    from trusted."""
+    if is_trusted:
+        return FRONTIER_TRUSTED
+    if has_open_defect:
+        return FRONTIER_BLOCKED
+    return FRONTIER_ELIGIBLE
+
+
+def build_trust_frontier() -> dict[str, object]:
+    """The TRUST FRONTIER: how close the feature set is to fully trusted, split TRUSTED / ELIGIBLE / BLOCKED.
+
+    The binary-trust badge (``trust_state``) plus the flat DIVERGENT lifecycle badge cannot show that a
+    not-yet-trusted feature whose parity defect has been CLEARED is one clean sweep from TRUSTED. This view
+    joins the binary-trust set (``trust_state='TRUSTED'`` — the consumable predicate downstream agents gate on)
+    against the OPEN rows of ``feature_parity_defect`` (both read-only, no new source of truth) to surface that
+    frontier: ELIGIBLE = not-yet-trusted with no open defect (advances on the next clean sweep), BLOCKED =
+    still has an open parity defect (needs a fix).
+
+    Scoped to the CURRENT registry catalog, so superseded older feature versions in the DB do not inflate the
+    counts (the frontier reflects the live feature set, matching the fingerprint).
+
+    Shape:
+      {generated_at, n_features, n_trusted, n_eligible, n_blocked, n_open_defects,
+       trusted_pct, eligible_pct, blocked_pct, projected_trusted_pct,
+       groups: [{group, layer, n_features, n_trusted, n_eligible, n_blocked,
+                 trusted_pct, projected_trusted_pct, blocked_features: [...]}]}
+    ``projected_trusted_pct`` = (trusted + eligible) / total: where trust lands if every eligible feature
+    earns trust on the next clean sweep (the headline of the coming jump)."""
+    catalog_by_group = _catalog_by_group()
+    trusted = trusted_feature_names()
+    blocked = open_defect_features()
+
+    group_rows: list[dict[str, object]] = []
+    total = 0
+    total_trusted = 0
+    total_eligible = 0
+    total_blocked = 0
+
+    for group in sorted(catalog_by_group):
+        features = catalog_by_group[group]
+        n_trusted = 0
+        n_eligible = 0
+        n_blocked = 0
+        blocked_features: list[str] = []
+        for record in features:
+            name = str(record["feature"])
+            state = _frontier_state(name in trusted, name in blocked)
+            if state == FRONTIER_TRUSTED:
+                n_trusted += 1
+            elif state == FRONTIER_BLOCKED:
+                n_blocked += 1
+                blocked_features.append(name)
+            else:
+                n_eligible += 1
+
+        n_features = len(features)
+        total += n_features
+        total_trusted += n_trusted
+        total_eligible += n_eligible
+        total_blocked += n_blocked
+        group_rows.append(
+            {
+                "group": group,
+                "layer": (features[0]["layer"] if features else None),
+                "n_features": n_features,
+                "n_trusted": n_trusted,
+                "n_eligible": n_eligible,
+                "n_blocked": n_blocked,
+                "trusted_pct": round(100.0 * n_trusted / n_features, 1) if n_features else 0.0,
+                "projected_trusted_pct": (
+                    round(100.0 * (n_trusted + n_eligible) / n_features, 1) if n_features else 0.0
+                ),
+                "blocked_features": sorted(blocked_features),
+            }
+        )
+
+    return {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "n_features": total,
+        "n_trusted": total_trusted,
+        "n_eligible": total_eligible,
+        "n_blocked": total_blocked,
+        "n_open_defects": len(blocked),
+        "trusted_pct": round(100.0 * total_trusted / total, 1) if total else 0.0,
+        "eligible_pct": round(100.0 * total_eligible / total, 1) if total else 0.0,
+        "blocked_pct": round(100.0 * total_blocked / total, 1) if total else 0.0,
+        "projected_trusted_pct": (
+            round(100.0 * (total_trusted + total_eligible) / total, 1) if total else 0.0
+        ),
+        # Groups ranked most-blocked-first so the genuinely-stuck families (the tick tail) surface on top.
+        "groups": sorted(group_rows, key=lambda row: (-int(row["n_blocked"]), str(row["group"]))),
+    }
+
+
 class GridCache:
     """Tiny TTL cache so a page load / refresh re-aggregates at most every ``ttl`` seconds. The grid read is
     1-2s on the live store; a 60s TTL makes a busy refresh instant while staying fresh enough for a coverage
@@ -995,6 +1155,8 @@ class GridCache:
         self.ttl = ttl
         self._grid: dict[str, object] | None = None
         self._grid_at: float = 0.0
+        self._frontier: dict[str, object] | None = None
+        self._frontier_at: float = 0.0
         self._details: dict[str, tuple[float, dict[str, object]]] = {}
         self._symbols: dict[str, tuple[float, dict[str, object]]] = {}
         self._thin: dict[int, tuple[float, dict[str, object]]] = {}
@@ -1007,6 +1169,13 @@ class GridCache:
             self._grid = build_grid(root)
             self._grid_at = now
         return self._grid
+
+    def frontier(self, force: bool = False) -> dict[str, object]:
+        now = time.monotonic()
+        if force or self._frontier is None or (now - self._frontier_at) > self.ttl:
+            self._frontier = build_trust_frontier()
+            self._frontier_at = now
+        return self._frontier
 
     def detail(self, group: str, root: str, force: bool = False) -> dict[str, object]:
         now = time.monotonic()

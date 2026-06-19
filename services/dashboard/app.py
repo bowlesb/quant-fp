@@ -237,6 +237,29 @@ def feature_grid_orderflow_trend_json(days: int = 21, refresh: bool = False) -> 
     return JSONResponse(CACHE.orderflow_trend(STORE_ROOT, days=days, force=refresh))
 
 
+@app.get("/api/feature-grid/trust-frontier")
+def feature_grid_trust_frontier_json(refresh: bool = False) -> JSONResponse:
+    """The TRUST FRONTIER: how close the feature set is to fully trusted, split TRUSTED / ELIGIBLE / BLOCKED.
+
+    The flat per-feature ``lifecycle_state`` badge cannot show that a DIVERGENT feature whose parity defect
+    has been CLEARED is one clean sweep from TRUSTED (the state lags until the next sweep re-grades). This view
+    joins ``feature_trust`` against the OPEN rows of ``feature_parity_defect`` (read-only) to make that frontier
+    legible: ELIGIBLE = not-yet-trusted with NO open defect (advances on the next clean settled sweep), BLOCKED
+    = still has an open parity defect (needs a fix; today the FP_TICK_SYMBOLS tick tail). ``projected_trusted_pct``
+    = where trust lands if every eligible feature earns it on the next clean sweep — the headline of the jump.
+
+    Registered BEFORE ``/{group}`` so the static path is not swallowed by the path param. ``refresh=1``
+    bypasses the TTL cache.
+
+    Shape (see docs/FEATURE_DASHBOARD.md):
+      {generated_at, n_features, n_trusted, n_eligible, n_blocked, n_open_defects,
+       trusted_pct, eligible_pct, blocked_pct, projected_trusted_pct,
+       groups: [{group, layer, n_features, n_trusted, n_eligible, n_blocked,
+                 trusted_pct, projected_trusted_pct, blocked_features: [...]}]}
+    """
+    return JSONResponse(CACHE.frontier(force=refresh))
+
+
 @app.get("/api/feature-grid/{group}")
 def feature_grid_group_json(group: str, refresh: bool = False) -> JSONResponse:
     """Per-feature detail for one group (the expanded view) as JSON.
