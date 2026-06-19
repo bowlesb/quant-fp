@@ -1,8 +1,12 @@
 # Strategy containers — each subscribes to the feature-vector bus for its declared symbols, places +
 # manages PAPER bets, and records to its OWN Postgres schema. Run alongside the main stack:
 #
-#   docker build -f Dockerfile.fp -t fp-dev .                       # build the shared base once
+#   make dev-image                                                  # build the shared fp-dev base once
 #   docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --build smoke-strategy
+#
+# The strategy Dockerfiles are `FROM fp-dev`, so the prebuilt fp-dev image (docker/fp-dev.Dockerfile via
+# `make dev-image`) MUST exist first. Build it only via `make dev-image` — never `docker build -f Dockerfile.fp`
+# (that's the wrong, minimal, no-Rust image).
 #
 # smoke-strategy is the FIRST one: a deliberately trivial end-to-end proof of the apparatus.
 name: quant
