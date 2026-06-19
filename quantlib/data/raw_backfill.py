@@ -498,7 +498,11 @@ def run(config: BackfillConfig) -> None:
     # partitions were already written to disk, so a naive resume re-fetches >100k complete tick units
     # (observed after two quotes-tier OOMs). Recording the orphaned on-disk partitions into the manifest
     # makes the resume skip them. Idempotent + cheap relative to fetching, so it runs every time.
-    for tier in ("trades", "quotes"):
+    # ALL tiers, including bars: a broad bars deepfill whose buffer was lost orphaned ~2.77M bars
+    # partitions on disk that the manifest never recorded (observed 2026-06-19) — the manifest is the
+    # coverage source-of-truth (raw-coverage dashboard, resume done_keys), so an un-reconciled bars tape
+    # under-reports breadth by thousands of symbols and lets the resume re-pull data already on disk.
+    for tier in TIERS:
         reconcile_manifest_from_disk(config.store, tier)
 
     trade_client = trading_client()

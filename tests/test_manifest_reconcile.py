@@ -59,6 +59,16 @@ def test_reconcile_skips_already_recorded(tmp_path: pytest.TempPathFactory) -> N
     assert reconcile_manifest_from_disk(store, "trades") == 0
 
 
+def test_reconcile_records_orphaned_bars_partition(tmp_path: pytest.TempPathFactory) -> None:
+    # bars is the tier raw_backfill.run() historically OMITTED from its reconcile loop, so a broad bars
+    # deepfill that lost its manifest buffer orphaned millions of on-disk partitions the manifest never
+    # recorded (observed 2026-06-19). Reconcile must record bars orphans exactly like trades/quotes.
+    store = str(tmp_path)
+    write_partition(store, "bars", "AAPL", DAY, _frame())
+    assert reconcile_manifest_from_disk(store, "bars") == 1
+    assert ("AAPL", DAY.isoformat()) in done_keys(load_manifest(store, "bars"))
+
+
 def test_reconcile_is_idempotent(tmp_path: pytest.TempPathFactory) -> None:
     store = str(tmp_path)
     for symbol in ("AAPL", "NVDA", "MSFT"):
