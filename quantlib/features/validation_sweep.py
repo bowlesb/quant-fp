@@ -98,35 +98,61 @@ MIN_CLEAN_SYMBOLS = 20
 REFERENCE_RELATIVE_GROUPS: frozenset[str] = frozenset({"market_context", "market_beta"})
 
 
+# A settled market-ticker bar tape is a full RTH session (390 minutes) plus pre/post — hundreds of rows.
+# A PER-TICKER floor rejects a stub partition (a pre-session placeholder that wrote a handful of rows then
+# never re-fetched) WITHOUT tripping on a legitimately thin name; well below a real session, well above a stub.
+MIN_MARKET_TICKER_BARS = 100
+# A settled market-ticker tick tape is thousands of prints; a single-digit count is a placeholder stub, not a
+# settled tape (observed: SPY landing 2 trades while QQQ had 757k on a half-acquired day).
+MIN_MARKET_TICKER_TRADES = 100
+
+
+def _per_ticker_counts(frame: pl.DataFrame, probe: list[str]) -> dict[str, int]:
+    """Row count per pinned ticker in ``frame`` (0 for a ticker absent from the union). Each ``probe`` ticker
+    must be present INDIVIDUALLY — a height>0 union can hide one empty ticker behind another's full tape."""
+    if frame.height == 0 or "symbol" not in frame.columns:
+        return {ticker: 0 for ticker in probe}
+    counts = dict(frame.group_by("symbol").len().iter_rows())
+    return {ticker: int(counts.get(ticker, 0)) for ticker in probe}
+
+
 def assert_raw_present(day: str, raw_root: str, with_ticks: bool) -> None:
-    """Refuse to sweep a day whose ``/store/raw`` side has not SETTLED yet (empty bars/trades partitions).
+    """Refuse to sweep a day whose ``/store/raw`` side has not SETTLED yet (empty/stub bars/trades partitions).
 
     ``assert_settled`` only checks the calendar date (``day >= today``); it cannot see that Alpaca historical
     raw lands hours after the close (often ~T+1). On a closed-but-unsettled day the raw partitions exist as
-    EMPTY files, so ``load_raw_minute_agg`` returns an empty frame ("the caller never needs to special-case
-    missing raw days") — PASS 1 materializes nothing, every stream symbol reads as ``no_raw``, and the sweep
-    silently writes a wall of false ``missing_backfill`` cells that mis-grade the whole day. This probe loads
-    the pinned MARKET_TICKERS (SPY/QQQ — always acquired into raw on a settled day) via the SAME loaders the
-    sweep uses and raises an actionable error if their raw is empty, turning a silent mis-grade into a clear
-    "raw not settled, run ops/raw_backfill.sh daily" front-door failure. ``with_ticks`` sweeps additionally
-    require the TRADES tier (the order-flow groups' backfill side); a bar-only sweep needs only bars.
+    EMPTY/stub files, so ``load_raw_minute_agg`` returns an empty/thin frame ("the caller never needs to
+    special-case missing raw days") — PASS 1 materializes nothing, every stream symbol reads as ``no_raw``,
+    and the sweep silently writes a wall of false ``missing_backfill`` cells that mis-grade the whole day.
+
+    The check probes EACH pinned MARKET_TICKER (SPY/QQQ — always acquired into raw on a settled day) via the
+    SAME loaders the sweep uses, requiring each INDIVIDUALLY to carry a real-session tape (>= the floors).
+    Checking the union height was insufficient: on a half-acquired day one ticker can land a full tape while
+    the other is empty or a few-row stub (observed: SPY trades=2 while QQQ had 757k), so ``height > 0`` passed
+    while a market reference was actually missing — exactly the silent mis-grade this guard exists to prevent.
+    ``with_ticks`` sweeps additionally require the TRADES tier (the order-flow groups' backfill side); a
+    bar-only sweep needs only bars.
     """
     probe = list(MARKET_TICKERS)
-    bars = load_raw_minute_agg(raw_root, day, probe)
-    if bars.height == 0:
+    bar_counts = _per_ticker_counts(load_raw_minute_agg(raw_root, day, probe), probe)
+    thin_bars = {ticker: count for ticker, count in bar_counts.items() if count < MIN_MARKET_TICKER_BARS}
+    if thin_bars:
         raise ValueError(
-            f"refusing to sweep {day}: raw BARS are empty for the pinned market tickers {probe} under "
-            f"{raw_root}/raw/bars — the day's raw has not settled yet (Alpaca historical lands hours after "
-            f"close, often ~T+1). Acquire it first: `ops/raw_backfill.sh daily` (or DAY={day}), then re-sweep."
+            f"refusing to sweep {day}: raw BARS are empty/stub for pinned market tickers {thin_bars} "
+            f"(need >= {MIN_MARKET_TICKER_BARS} bars each) under {raw_root}/raw/bars — the day's raw has not "
+            f"settled (Alpaca historical lands hours after close, often ~T+1; a stub partition is a "
+            f"pre-session placeholder). Acquire it: `ops/raw_backfill.sh daily` (or DAY={day}), then re-sweep."
         )
     if with_ticks:
-        trades = load_raw_trades(raw_root, day, probe)
-        if trades.height == 0:
+        trade_counts = _per_ticker_counts(load_raw_trades(raw_root, day, probe), probe)
+        thin_trades = {ticker: count for ticker, count in trade_counts.items() if count < MIN_MARKET_TICKER_TRADES}
+        if thin_trades:
             raise ValueError(
-                f"refusing to sweep {day} with ticks: raw TRADES are empty for {probe} under "
-                f"{raw_root}/raw/trades — the tick side has not settled (bars settled but trades have not). "
-                f"Acquire trades (`ops/raw_backfill.sh daily`) and re-sweep, or run a bar-only sweep "
-                f"(--no-ticks) to grade just the bar/cross-sectional groups now."
+                f"refusing to sweep {day} with ticks: raw TRADES are empty/stub for {thin_trades} "
+                f"(need >= {MIN_MARKET_TICKER_TRADES} trades each) under {raw_root}/raw/trades — the tick side "
+                f"has not settled (bars settled but trades have not, or only partially). Acquire trades "
+                f"(`ops/raw_backfill.sh daily`) and re-sweep, or run a bar-only sweep (--no-ticks) to grade "
+                f"just the bar/cross-sectional groups now."
             )
 
 
