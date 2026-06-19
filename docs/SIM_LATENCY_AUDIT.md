@@ -210,3 +210,62 @@ is in the STABLE column AND rises across ALL three reps. A single-rep spike in a
 it uncontended (min-of-5, quiet box) before believing it, exactly as the #123 latency-ceiling test does on
 its offenders. On this run no STABLE group rose across all three reps → **NO regression** (consistent with
 the sim re-check above; the same fingerprint, a cheaper independent harness).
+
+## Post-deploy regression check + 688 baseline 2026-06-19 (NEW fingerprint `0xb3ac0824224970b0` / 688 / 53)
+
+PR #151 coordinated-deployed two NEW vol-burst feature groups (the burst classifier hit OOS ROC-AUC up to
+0.92 for the |forward-return| ≥ 2% label), changing the live fingerprint `0x710bed9e980616f3` / 682 / 51 →
+**`0xb3ac0824224970b0` / 688 / 53** (+6 features / +2 groups):
+- `realized_range` — `ReductionGroup`, family VOLATILITY (`minute_agg` frame), 3 features
+  (`realized_range_{3,5,10}m`, the short trailing mean of `(high−low)/close`, the `rv3` burst driver).
+- `large_print_burst` — `FeatureGroup`, family MICROSTRUCTURE (`trades` frame), 3 features
+  (`large_print_ratio_1m`, `large_print_volume_share_1m`, `max_print_size_ratio_1m`); one bounded
+  own-minute `group_by` over the tape — no window, no OLS, no order statistic.
+
+Both were tagged RT-GREEN at definition by the #147 RT-cost screen. This cycle MEASURES the actual
+bar→vector cost at the deployed 688 fingerprint and confirms no regression vs the 682 baseline above.
+
+**Stable-group regression check** (deployed fingerprint `0xb3ac0824224970b0` / 688 / 53, origin/main
+`ac598b1`; `docker run … fp-dev python -m quantlib.features.profile 93 300 250 1 --latest`, three min-of-1
+reps, host load avg ~8 on 32 cores — two backfills running). The `--latest` single-shard harness builds only
+`minute_agg`/`daily`/`reference` frames, so `runnable()` excludes the 5 `trades`-frame groups → it profiles
+**669 features / 47 groups** (`realized_range` IS in this set; `large_print_burst` and the 4 other trades
+groups are profiled separately below). Diffs only against ITSELF / the 682 single-shard table above.
+
+| group | rep1 | rep2 | rep3 | classification |
+|---|---|---|---|---|
+| `momentum_run` | 134.3 | 158.6 | 175.3 | **STABLE-dominant** — min 134.3ms in its ~130–180ms band; the rep1→rep3 RISE is a load tail (rep1 = min), not a stable shift |
+| `price_volume` (70 feat) | 52.1 | 48.0 | 54.9 | **STABLE** — non-monotonic, within the ~50ms baseline |
+| `residual_analysis` | 18.5 | 23.1 | 18.1 | **STABLE** — non-monotonic, within band |
+| **`realized_range` (NEW, 3 feat)** | **8.6** | **6.0** | **6.3** | **reduction-floor tier** (~2.5ms/feat) — exactly the #147 RT-GREEN prediction |
+| reduction / reference tail (~38 groups) | ≤ ~10 each | | | at the floor |
+
+End-to-end single-shard total: 758 / 782 / 783 ms for 669 features (`momentum_run` the slowest group each
+rep). Per the diff rule, a real regression requires a STABLE group rising across ALL three reps — satisfied
+by NONE (the only rising group, `momentum_run`, rises WITH rep number = host-load tail and its min is in-band).
+
+**`large_print_burst` + trades-frame tier** (profiled separately — the `--latest` harness has no `trades`
+frame; built a schema-faithful synthetic tape and timed `compute_latest` min-of-3). `large_print_burst` does
+NOT override `compute_latest` (it runs the base full-buffer `compute()` then filters to T — the SAME pattern
+as all 5 shipping trades peers), so its cost scales with the live trade buffer depth:
+
+| trades buffer (93 sym) | `large_print_burst` | `trade_size_dist` (cheapest peer) |
+|---|---|---|
+| 75m × 20 trades/min (~140k rows) | **6.2 ms** | 3.6 ms |
+| 300m × 20 (~558k rows) | 24.5 ms | 7.3 ms |
+| 300m × 40 (~1.1M rows) | 39.9 ms | 11.4 ms |
+
+At any depth `large_print_burst` is the CHEAPEST trades group after `trade_size_dist`, and 4–5× below the
+existing shipping peers `microstructure_burst` (~221ms), `inter_arrival` (~211ms), `tick_runlength` (~153ms)
+on the same 1.1M-row buffer — well under `momentum_run`'s live-dominant cost. It lands squarely in the cheap
+trades-frame tier the #147 gate predicted.
+
+**Verdict: NO regression at 688.** Both new groups land in their expected cheap tiers — `realized_range` at
+the ~6–9ms reduction floor, `large_print_burst` at ~6ms (75m buffer) up to ~40ms (deep 300m×40 buffer),
+both single-digit-to-low-tens ms as predicted. Overall bar→vector stays well inside the 60s minute-bar
+cadence (the stable shape is unchanged: `momentum_run` ≫ `price_volume` > `residual_analysis`; the two new
+groups add ~0.6% / ~6% to the per-minute compute at realistic buffer depth, no shape change). This is the
+diff-able 688 reference for future regression checks. (`large_print_burst` is a candidate for the trivial
+`compute_latest_on_window(lookback_minutes=1)` fast form — its algebra is own-minute-only — but that is a
+parity-gated optimization for the §7 latency lane, NOT a regression; the un-optimized default is parity-true
+and affordable, same as its 5 peers.)
