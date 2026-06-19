@@ -1,0 +1,42 @@
+# Docker build-context excludes. Both image builds use the REPO ROOT as their context
+# (services/dashboard/Dockerfile and docker/fp-dev.Dockerfile — see the compose `build.context: .`),
+# so EVERYTHING here is otherwise tar'd and sent to the daemon on every build.
+#
+# Two reasons this file exists:
+#   1. CORRECTNESS — `data/pg` is the root-owned (uid 70, mode 700) Postgres data dir; the build
+#      context tar can't read it and the build fails with permission-denied. Excluding data/ is what
+#      lets `docker compose build dashboard` run directly (no clean-worktree workaround).
+#   2. SPEED — experiments/ alone is ~13G of regenerable research output; none of it is COPY'd.
+#
+# SAFETY: nothing COPY'd by either Dockerfile is excluded. The dashboard image COPYs `rust/`,
+# `quantlib/`, `services/dashboard/requirements.txt`, and `services/dashboard/*.py`; fp-dev COPYs
+# `rust/`. All of those are kept. rust/target and *.so are build artifacts maturin regenerates from
+# rust/ source, so excluding them is safe and shrinks the context.
+
+# Postgres data dir (root-owned, mode 700 -> unreadable by the context tar; this is the build-breaker)
+data/
+
+# Regenerable research output / experiment artifacts (~13G, never COPY'd)
+experiments/
+
+# Git metadata (worktree .git file + the worktrees dir) — not needed in any image
+.git
+.worktrees/
+.claude/
+
+# Python caches and tooling caches
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.venv/
+
+# Rust build artifacts (the wheel is rebuilt from rust/ source inside the image)
+rust/target/
+*.so
+
+# Local env / logs (also gitignored)
+.env
+*.log
