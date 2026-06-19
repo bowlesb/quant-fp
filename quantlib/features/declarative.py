@@ -607,9 +607,10 @@ def emit_rust_unified(
     groups builds its own polars frame (ingest its canonical slice + a per-group points select + a join)
     and evaluates that group's ``assemble()`` exprs in its OWN ``with_columns`` — the per-group polars
     frame-build + expr-eval is the reduction-emit floor (the canonical algebra is ~1-3ms). This builds ONE
-    wide frame keyed (symbol) carrying EVERY group's canonical columns (the kernel's full contiguous
-    ``(n_symbols, n_out)`` block ingested in ONE ``pl.from_numpy`` — every canonical name is unique across
-    groups by construction of ``build_assemble_plan``) plus the UNION of every group's ``__pt_<name>`` point
+    wide frame keyed (symbol) carrying EVERY group's canonical columns (the kernel's contiguous
+    ``(n_symbols, n_out)`` block ingested in ONE ``pl.from_numpy``, deduped by canonical name — two groups
+    declaring the same reduction key emit the same ``__<stat>_<name>_<w>`` column, an IDENTICAL value by
+    construction, so keeping the first is byte-correct) plus the UNION of every group's ``__pt_<name>`` point
     columns (deduped by output name; colliding point names across groups carry the SAME expr on the SAME
     input column, so one shared column is byte-correct), then evaluates ALL groups' ``assemble()`` exprs in
     ONE ``with_columns`` pass, and slices each group's feature columns back out.
@@ -623,10 +624,26 @@ def emit_rust_unified(
     )  # (n_symbols, n_out), NaN where null
     symbol_series = pl.Series("symbol", symbols)
 
-    # Ingest EVERY group's canonical columns in ONE pl.from_numpy over the full contiguous kernel block.
-    # All canonical names (asm_plan.col_names) are unique across groups, so there is no column collision.
-    if canon.shape[1] > 0:
-        wide = pl.from_numpy(np.ascontiguousarray(canon), schema=asm_plan.col_names).with_columns(symbol_series)
+    # Ingest EVERY group's canonical columns in ONE pl.from_numpy over the kernel block, deduped by canonical
+    # name. Two groups can declare the SAME reduction key (e.g. range_expansion + realized_range both reduce a
+    # `rng` mean over the same windows) -> ``build_assemble_plan`` emits the same ``__mean_rng_<w>`` name twice.
+    # Per-group ``emit_rust`` slices ``col_names[start:stop]`` so duplicates land in DIFFERENT frames; this
+    # single shared frame would collide (DuplicateError). A duplicate name carries an IDENTICAL value column by
+    # construction — same stat over the same per-bar reduce expr and windows -> the kernel computes the same
+    # value from each copy's indices — so keeping the FIRST occurrence's column is byte-correct (the same
+    # dedup-by-name invariant the point-column union below already relies on). Every group's ``assemble()`` reads
+    # the canonical column BY NAME (``__<stat>_<name>_<w>``), so one shared column feeds both groups correctly.
+    seen: set[str] = set()
+    keep_indices: list[int] = []
+    keep_names: list[str] = []
+    for col_idx, col_name in enumerate(asm_plan.col_names):
+        if col_name not in seen:
+            seen.add(col_name)
+            keep_indices.append(col_idx)
+            keep_names.append(col_name)
+    if keep_indices:
+        block = np.ascontiguousarray(canon[:, keep_indices])
+        wide = pl.from_numpy(block, schema=keep_names).with_columns(symbol_series)
     else:
         wide = pl.DataFrame({"symbol": symbols})
 
