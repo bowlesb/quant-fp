@@ -2,8 +2,9 @@
 
 Serves a single status page on the LAN showing build progress (rendered from
 STATE.md / JOURNAL.md) and live system health queried directly from TimescaleDB.
-Read-only: no secrets, no controls. Ben checks it in a browser; Claude reads
-/status.json or the DB directly in-session.
+No secrets; the only write is Ben's per-row reaction on the /status board (a free-text
+note persisted to the append-only status store). Ben checks it in a browser; Claude
+reads /status.json or the DB directly in-session.
 """
 import html
 import os
@@ -15,9 +16,12 @@ import markdown
 import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
+import status_store
 from feature_grid import CACHE, STORE_ROOT
 from feature_grid_page import FEATURE_GRID_HTML
+from status_page import render_status_page
 
 app = FastAPI(title="Quant Dashboard")
 
@@ -208,6 +212,34 @@ def feature_grid_page() -> str:
     return FEATURE_GRID_HTML
 
 
+class ReactionRequest(BaseModel):
+    ts: str
+    text: str
+
+
+@app.get("/api/status/rows")
+def status_rows_json() -> JSONResponse:
+    """The hourly status snapshots NEWEST-FIRST — the same data the /status page renders.
+
+    Shape: [{ts, cells: {workstream: {progress, blockers}}, reaction}, ...] (see status_store).
+    """
+    return JSONResponse(status_store.read_rows())
+
+
+@app.post("/api/status/reaction")
+def status_set_reaction(req: ReactionRequest) -> JSONResponse:
+    """Persist Ben's reaction text onto the snapshot row identified by ``ts`` (last write wins)."""
+    if not status_store.set_reaction(req.ts, req.text):
+        raise HTTPException(status_code=404, detail=f"no status row with ts '{req.ts}'")
+    return JSONResponse({"ok": True, "ts": req.ts})
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status_page() -> str:
+    """The hourly status board: one row per snapshot, columns per workstream, per-row Ben-reaction box."""
+    return render_status_page(status_store.read_rows())
+
+
 PROGRESS_STYLE = """
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background:#0f1115; color:#d7dce2; }
@@ -323,6 +355,7 @@ def dashboard() -> str:
 </style></head>
 <body>
 <header><h1>Quant Trading System &nbsp; {db_badge} &nbsp;
+<a href="/status" style="color:#58a6ff;text-decoration:none;font-size:13px;">Hourly status &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
 <a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
