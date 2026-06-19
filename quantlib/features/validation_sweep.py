@@ -28,13 +28,18 @@ Usage:
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import os
 import random
 import sys
 from typing import Callable
 
 import polars as pl
 
-from quantlib.features import store, trust_binary, trust_lifecycle, validate as validate_mod, validation_store
+from quantlib.data.raw_backfill import trading_client, trading_days
+from quantlib.features import store, supersede_purge, trust_binary, trust_lifecycle
+from quantlib.features import validate as validate_mod
+from quantlib.features import validation_store
 from quantlib.features.base import FeatureType
 from quantlib.features.cleanliness import (
     clean_symbols,
@@ -57,7 +62,8 @@ from quantlib.features.trust_lifecycle import (
     lifecycle_state,
     retired_features,
 )
-from quantlib.data.raw_backfill import trading_client, trading_days
+
+logger = logging.getLogger("validation_sweep")
 
 # Bar features that are non-null at every minute a bar printed (present in BOTH stream and backfill) —
 # their per-minute presence is the minute-coverage signal the cleanliness heuristic reads.
@@ -154,7 +160,9 @@ def assert_raw_present(day: str, raw_root: str, with_ticks: bool) -> None:
         )
     if with_ticks:
         trade_counts = _per_ticker_counts(load_raw_trades(raw_root, day, probe), probe)
-        thin_trades = {ticker: count for ticker, count in trade_counts.items() if count < MIN_MARKET_TICKER_TRADES}
+        thin_trades = {
+            ticker: count for ticker, count in trade_counts.items() if count < MIN_MARKET_TICKER_TRADES
+        }
         if thin_trades:
             raise RawNotSettledError(
                 f"refusing to sweep {day} with ticks: raw TRADES are empty/stub for {thin_trades} "
@@ -172,7 +180,9 @@ def assert_raw_present(day: str, raw_root: str, with_ticks: bool) -> None:
 # We additionally probe a RANDOM sample of the discovered stream universe and require nearly all of them to
 # have landed real backfill bars; on a settled day Alpaca has fetched essentially every streamed symbol, so a
 # sample present-rate below the floor means the universe is only PARTIALLY settled and must not be graded yet.
-TAIL_SETTLE_SAMPLE = 200  # symbols sampled from the discovered universe to probe backfill landing (bounded reads)
+TAIL_SETTLE_SAMPLE = (
+    200  # symbols sampled from the discovered universe to probe backfill landing (bounded reads)
+)
 # On a fully settled day Alpaca historical has fetched essentially every streamed symbol; the few percent that
 # legitimately have no raw bars are delisted/halted names that never produce backfill on ANY day, so the floor
 # sits below 100% to tolerate them while still catching the gross tail-gap of a half-acquired day (where a large
@@ -290,7 +300,9 @@ def day_gather_coherence(feature_root: str, day: str, symbols: list[str]) -> dic
     grade the universe-reduce features — the gate uses ``is_coherent``. Empty (no breadth captured) is
     vacuously coherent — the per-symbol cleanliness still gates grading."""
     start, end = _day_bounds(day)
-    stream = store.get_features([GATHER_COHERENCE_FEATURE], symbols, start, end, feature_root, source="stream")
+    stream = store.get_features(
+        [GATHER_COHERENCE_FEATURE], symbols, start, end, feature_root, source="stream"
+    )
     return gather_coherence(stream, GATHER_COHERENCE_FEATURE)
 
 
@@ -472,7 +484,12 @@ def sweep_day(
     per_symbol_groups = [group.name for group in REGISTRY.groups() if group.name not in set(xsec_groups)]
     per_symbol_scope, per_symbol_tiers = validate_mod.scoped_tiers(day, grade_scope)
     per_symbol_result = validate_mod.compare_groups(
-        feature_root, day, per_symbol_scope, per_symbol_tiers, groups=per_symbol_groups, tolerance_of=tolerance_of
+        feature_root,
+        day,
+        per_symbol_scope,
+        per_symbol_tiers,
+        groups=per_symbol_groups,
+        tolerance_of=tolerance_of,
     )
 
     # Merge the full-universe cross-sectional grade with the gradable-set per-symbol/tick grade and persist
@@ -496,7 +513,25 @@ def sweep_day(
     earned = trust_binary.earned_features(clean_history_today, trust_binary.feature_policy_map())
     grant_counts = trust_binary.write_trust_grants(earned, [], clean_history_today, day)
 
-    state_counts = states.group_by("lifecycle_state").len().sort("lifecycle_state").to_dicts() if states.height else []
+    # On-trust SUPERSEDE-PURGE: a freshly-trusted (group, version) makes any STRICTLY-OLDER untrusted
+    # version of that group stale (Ben's directive). Always plan it (logged); apply only when explicitly
+    # opted-in via SUPERSEDE_PURGE_APPLY=1 — and even then only the reproducible BACKFILL cache (stream is
+    # never auto-deleted: delete_feature_group refuses it). Default is a non-destructive dry-run.
+    purge_apply = os.environ.get("SUPERSEDE_PURGE_APPLY") == "1"
+    purge_results = supersede_purge.supersede_purge_for_grants(
+        feature_root, earned, apply=purge_apply, include_stream=False
+    )
+    if purge_results:
+        logger.info(
+            "supersede-purge %s: %d older untrusted version(s) %s",
+            "APPLIED" if purge_apply else "DRY-RUN (set SUPERSEDE_PURGE_APPLY=1 to apply)",
+            len(purge_results),
+            [f"{row['group']} v{row['version']}" for row in purge_results],
+        )
+
+    state_counts = (
+        states.group_by("lifecycle_state").len().sort("lifecycle_state").to_dicts() if states.height else []
+    )
     return {
         "day": day,
         "discovered": len(discovered),
@@ -510,6 +545,10 @@ def sweep_day(
         "cross_sectional_graded": bool(coherence["is_coherent"]),
         "features_graded": states.height,
         "newly_trusted": grant_counts["earned_trusted"],
+        "supersede_purge_applied": purge_apply,
+        "supersede_purge_candidates": [
+            {"group": row["group"], "version": row["version"], "mb": row["mb"]} for row in purge_results
+        ],
         "state_counts": {row["lifecycle_state"]: row["len"] for row in state_counts},
         "new_or_updated_defects": len(defects),
         "defect_features": [row[0] for row in defects][:20],
