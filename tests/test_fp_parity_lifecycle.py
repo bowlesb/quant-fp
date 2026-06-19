@@ -29,11 +29,15 @@ from quantlib.features.cleanliness import (
     symbol_day_cleanliness,
 )
 from quantlib.features.trust_lifecycle import (
+    AUTO_CLOSE_STREAK,
+    DEFECT_STATUS_AUTO_CLOSED,
+    DEFECT_STATUS_OPEN,
     MIN_CLEAN_DAYS,
     STATE_DIVERGENT,
     STATE_PENDING,
     STATE_RETIRED,
     STATE_VALIDATED,
+    auto_close_updates,
     clean_feature_day,
     defect_rows,
     lifecycle_state,
@@ -882,3 +886,68 @@ def test_main_still_fails_on_a_genuine_error(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["validation_sweep", "2026-06-18", "/feat", "/val", "/raw"])
     with pytest.raises(ValueError, match="a real sweep bug"):
         validation_sweep.main()
+
+
+def test_auto_close_increments_streak_on_a_clean_recurrence_free_day() -> None:
+    """An OPEN defect whose feature graded CLEAN (recurrence-free) this sweep advances its streak by one.
+    Below the target it stays OPEN — one clean day is not enough to close a real defect."""
+    open_defects = [("feat", "1.0.0", 0, None)]
+    updates = auto_close_updates(open_defects, {"feat"}, set(), "2026-06-22", streak_target=3)
+    assert updates == [("feat", "1.0.0", 1, DEFECT_STATUS_OPEN, "2026-06-22")]
+
+
+def test_auto_close_resets_streak_on_recurrence() -> None:
+    """A genuine recurrence (feature re-failed parity on a clean symbol-day) is excluded from the auto-close
+    updates entirely — the defect UPSERT path resets its streak to 0 + re-opens it, so auto_close_updates
+    must NOT emit a competing write for it (no double-write, and the streak never advances on a fail)."""
+    open_defects = [("feat", "1.0.0", 1, "2026-06-21")]  # had a clean streak going
+    updates = auto_close_updates(open_defects, set(), {"feat"}, "2026-06-22", streak_target=3)
+    assert updates == []  # left to the recurrence upsert (streak -> 0)
+
+
+def test_auto_close_flips_to_auto_closed_at_target() -> None:
+    """When the streak reaches AUTO_CLOSE_STREAK the defect flips open -> auto_closed (a status DISTINCT from
+    the manual 'fixed' so the provenance is auto vs hand-cleared)."""
+    open_defects = [("feat", "1.0.0", AUTO_CLOSE_STREAK - 1, "2026-06-21")]
+    updates = auto_close_updates(open_defects, {"feat"}, set(), "2026-06-22")
+    assert updates == [("feat", "1.0.0", AUTO_CLOSE_STREAK, DEFECT_STATUS_AUTO_CLOSED, "2026-06-22")]
+
+
+def test_auto_close_ignores_a_feature_not_graded_this_day() -> None:
+    """THE contamination guard: a feature that was NOT graded clean this sweep (its day was contaminated /
+    skipped / it never appeared) is neither in graded_clean nor recurred — its streak must NOT advance. A
+    skipped or contaminated day can never count as a clean recurrence-free day."""
+    open_defects = [("feat", "1.0.0", 1, "2026-06-20")]
+    updates = auto_close_updates(open_defects, set(), set(), "2026-06-22")
+    assert updates == []  # untouched -> streak stays 1
+
+
+def test_auto_close_is_idempotent_when_the_same_day_re_runs() -> None:
+    """Per-DAY idempotency: the streak counts distinct clean DAYS, not sweep invocations. A defect whose
+    last_streak_day already equals this day was counted on a prior run of the SAME day -> re-running the
+    sweep must NOT advance it again (an operator re-sweep can't double-close a defect)."""
+    open_defects = [("feat", "1.0.0", 1, "2026-06-22")]  # already advanced on 06-22
+    updates = auto_close_updates(open_defects, {"feat"}, set(), "2026-06-22")
+    assert updates == []  # same day -> no-op
+
+
+def test_auto_close_advances_only_the_clean_subset_across_a_mixed_sweep() -> None:
+    """A realistic sweep: one open defect grades clean (advances), one recurs (reset, excluded here), one
+    isn't graded at all (untouched). Only the clean recurrence-free one produces an update."""
+    open_defects = [
+        ("clean", "1.0.0", 0, None),
+        ("recur", "1.0.0", 1, "2026-06-21"),
+        ("absent", "1.0.0", 1, "2026-06-20"),
+    ]
+    updates = auto_close_updates(open_defects, {"clean"}, {"recur"}, "2026-06-22", streak_target=3)
+    assert updates == [("clean", "1.0.0", 1, DEFECT_STATUS_OPEN, "2026-06-22")]
+
+
+def test_auto_close_two_consecutive_clean_days_close_at_default_target() -> None:
+    """End-to-end streak progression at the DEFAULT AUTO_CLOSE_STREAK (2): day 1 advances 0->1 (still open),
+    day 2 advances 1->2 and auto-closes. Proves the chosen N closes exactly on the 2nd distinct clean day."""
+    day1 = auto_close_updates([("feat", "1.0.0", 0, None)], {"feat"}, set(), "2026-06-22")
+    assert day1 == [("feat", "1.0.0", 1, DEFECT_STATUS_OPEN, "2026-06-22")]
+    day2 = auto_close_updates([("feat", "1.0.0", 1, "2026-06-22")], {"feat"}, set(), "2026-06-23")
+    assert day2 == [("feat", "1.0.0", 2, DEFECT_STATUS_AUTO_CLOSED, "2026-06-23")]
+    assert AUTO_CLOSE_STREAK == 2

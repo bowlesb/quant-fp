@@ -507,6 +507,24 @@ def sweep_day(
     defects = defect_rows(states, clean_history_today, exceptions, group_of, version_of)
     trust_lifecycle.write_lifecycle(states, defects, cleanliness, version_of, day)
 
+    # AUTO-CLOSE: this is a CLEAN settled sweep, so the features it graded clean THIS day are a real
+    # recurrence-free observation for any matching OPEN defect. Advance their streak; recurrence-free for
+    # AUTO_CLOSE_STREAK consecutive clean sweeps auto-closes the defect (so a since-fixed/transient
+    # divergence stops rotting trust% instead of needing a manual clear). A feature NOT graded clean today
+    # (contaminated / skipped / fragmented-xsec) is absent here -> its streak is untouched. Run AFTER
+    # write_lifecycle so recurrences have already reset their streak + re-opened.
+    has_grade = "passed" in clean_history_today.columns and clean_history_today.height > 0
+    graded_clean = set(clean_history_today.filter(pl.col("passed"))["feature"].to_list()) if has_grade else set()
+    recurred = set(clean_history_today.filter(~pl.col("passed"))["feature"].to_list()) if has_grade else set()
+    auto_close_summary = trust_lifecycle.apply_auto_close(graded_clean, recurred, day)
+    if auto_close_summary["advanced"]:
+        logger.info(
+            "defect auto-close %s: advanced %d open-defect streak(s), %d auto-closed",
+            day,
+            auto_close_summary["advanced"],
+            auto_close_summary["auto_closed"],
+        )
+
     # Binary trust (docs/TRUST_REDESIGN.md): features that matched backfill within their per-type tolerance
     # on this CLEAN day earn TRUSTED — permanently, with provenance + a check-history row. Only NON_TRUSTED
     # features move; nothing is auto-demoted (the random check is the only un-trust path).

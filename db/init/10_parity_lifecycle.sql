@@ -29,10 +29,12 @@ CREATE TABLE IF NOT EXISTS feature_parity_defect (
     feature          text   NOT NULL,
     version          text   NOT NULL,
     feature_group    text,                              -- the feature's group (for triage by family)
-    status           text   NOT NULL DEFAULT 'open',    -- open | investigating | fixed | wontfix
+    status           text   NOT NULL DEFAULT 'open',    -- open | investigating | fixed | wontfix | auto_closed
     first_seen_day   date   NOT NULL,                   -- first CLEAN day this feature failed parity
     last_seen_day    date   NOT NULL,                   -- most recent CLEAN day it failed
     clean_days_failed int   NOT NULL DEFAULT 0,         -- # clean days with a parity failure
+    clean_streak     int    NOT NULL DEFAULT 0,         -- # consecutive CLEAN recurrence-free DAYS (auto-close fuel)
+    last_streak_day  date,                              -- the clean day that last advanced clean_streak (per-day idempotency)
     worst_rel_err    double precision,                  -- worst relative error across exemplar cells
     -- a few exemplar diverging cells pulled from feature_validation_exception, as JSON:
     -- [{"symbol","ts","stream_value","backfill_value","rel_err"}, ...]
@@ -41,6 +43,16 @@ CREATE TABLE IF NOT EXISTS feature_parity_defect (
     updated_at       timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (feature, version)
 );
+-- Additive for an already-provisioned cluster (this init script only runs on a FRESH DB): the AUTO-CLOSE
+-- streak column. The defect backlog is otherwise UPSERT/open-only, so a since-fixed / transient divergence
+-- would stay 'open' forever and rot trust%. A defect that grades CLEAN (no recurrence) on a CLEAN settled
+-- sweep increments clean_streak; at AUTO_CLOSE_STREAK consecutive clean sweeps it auto-closes
+-- (status='auto_closed', kept DISTINCT from a manual 'fixed' so provenance is clear). A genuine recurrence
+-- resets the streak to 0 and re-opens it.
+ALTER TABLE feature_parity_defect
+    ADD COLUMN IF NOT EXISTS clean_streak int NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS last_streak_day date;
+
 CREATE INDEX IF NOT EXISTS idx_fpd_status ON feature_parity_defect (status);
 CREATE INDEX IF NOT EXISTS idx_fpd_last_seen ON feature_parity_defect (last_seen_day);
 

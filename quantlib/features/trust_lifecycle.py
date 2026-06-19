@@ -40,11 +40,19 @@ from quantlib.features.validation_db import DB_KWARGS, finite_or_none
 MIN_CLEAN_DAYS = 2  # clean days of parity needed to move PENDING -> VALIDATED
 CLEAN_PASS_RATE = 0.999  # a clean (feature,symbol,day) "passes" parity at >= this match rate (B-grade floor)
 MAX_EXEMPLARS = 10  # diverging cells stored per defect (evidence, not the full audit trail)
+# Consecutive CLEAN settled sweeps a defect must grade recurrence-free before it AUTO-CLOSES. Mirrors the
+# binary-trust clean-day convention (MIN_CLEAN_DAYS=2 to TRUST a feature) — symmetric: 2 clean recurrence-free
+# sweeps to CLEAR its defect. Conservative enough that one fluke clean day can't close a real defect, while a
+# genuinely-fixed feature self-heals quickly instead of rotting trust% (the manual-clear problem).
+AUTO_CLOSE_STREAK = 2
 
 STATE_PENDING = "PENDING"
 STATE_VALIDATED = "VALIDATED"
 STATE_DIVERGENT = "DIVERGENT"
 STATE_RETIRED = "RETIRED"
+
+DEFECT_STATUS_OPEN = "open"
+DEFECT_STATUS_AUTO_CLOSED = "auto_closed"  # auto-resolved after AUTO_CLOSE_STREAK clean sweeps (vs manual 'fixed')
 
 
 def clean_feature_day(cell: pl.DataFrame, clean_symbols: list[str], day: str) -> pl.DataFrame:
@@ -194,6 +202,47 @@ def defect_rows(
     return rows
 
 
+def auto_close_updates(
+    open_defects: list[tuple[str, str, int, str | None]],
+    graded_clean: set[str],
+    recurred: set[str],
+    day: str,
+    streak_target: int = AUTO_CLOSE_STREAK,
+) -> list[tuple[str, str, int, str, str]]:
+    """Decide the AUTO-CLOSE streak transition for each currently-OPEN defect from ONE clean settled sweep.
+
+    Pure: no DB. ``open_defects`` is ``(feature, version, clean_streak, last_streak_day)`` for every defect
+    currently status='open' (``last_streak_day`` is the clean day that last advanced the streak, or None).
+    ``graded_clean`` is the set of features the sweep GRADED CLEAN this ``day`` (present in the clean-day
+    history and recurrence-free — i.e. NOT in ``recurred``). ``recurred`` is the set of features that
+    re-failed parity on a clean symbol-day (the day's DIVERGENT set). Returns the rows to write back:
+    ``(feature, version, new_clean_streak, new_status, day)``.
+
+    Rules (conservative — only a CLEAN-GRADED, recurrence-free, NOT-already-counted observation moves it):
+      • recurred today                         -> handled by the defect UPSERT (streak reset to 0, re-opened);
+                                                  NOT returned here (no double-write).
+      • last_streak_day == day                 -> this clean day ALREADY advanced the streak; re-running the
+                                                  same sweep is a no-op (per-DAY idempotency, not per-invocation).
+      • graded clean & recurrence-free today   -> streak += 1; at ``streak_target`` flip 'open'->'auto_closed'.
+      • NOT graded this day (contaminated /     -> NO change. The feature wasn't observed on a clean day, so the
+        skipped / fragmented-xsec / absent)       streak neither advances nor resets. This is what prevents a
+                                                  contaminated or skipped day from counting as a clean recurrence-
+                                                  free day.
+    """
+    updates: list[tuple[str, str, int, str, str]] = []
+    for feature, version, current_streak, last_streak_day in open_defects:
+        if feature in recurred:
+            continue  # the defect upsert already reset+reopened this one; don't double-write
+        if feature not in graded_clean:
+            continue  # not observed on a clean day -> streak untouched (the contamination guard)
+        if last_streak_day is not None and str(last_streak_day) == day:
+            continue  # this exact clean day already counted -> re-run is idempotent
+        new_streak = current_streak + 1
+        new_status = DEFECT_STATUS_AUTO_CLOSED if new_streak >= streak_target else DEFECT_STATUS_OPEN
+        updates.append((feature, version, new_streak, new_status, day))
+    return updates
+
+
 _UPSERT_TRUST_LIFECYCLE = """
 UPDATE feature_trust SET
   lifecycle_state=%s, clean_days=%s, clean_days_passed=%s, clean_value_rate=%s,
@@ -212,8 +261,10 @@ ON CONFLICT (feature,version) DO UPDATE SET
   clean_days_failed=EXCLUDED.clean_days_failed,
   worst_rel_err=EXCLUDED.worst_rel_err,
   exemplars=EXCLUDED.exemplars,
-  status=CASE WHEN feature_parity_defect.status IN ('fixed','wontfix')
+  status=CASE WHEN feature_parity_defect.status IN ('fixed','wontfix','auto_closed')
               THEN 'open' ELSE feature_parity_defect.status END,
+  clean_streak=0,
+  last_streak_day=NULL,
   updated_at=now()
 """
 
@@ -290,6 +341,52 @@ def write_lifecycle(
         if clean_rows:
             cur.executemany(_UPSERT_CLEANLINESS, clean_rows)
         conn.commit()
+
+
+_SELECT_OPEN_DEFECTS = (
+    "SELECT feature, version, clean_streak, last_streak_day FROM feature_parity_defect WHERE status = 'open'"
+)
+
+_APPLY_AUTO_CLOSE = """
+UPDATE feature_parity_defect SET clean_streak=%s, status=%s, last_streak_day=%s, updated_at=now()
+WHERE feature=%s AND version=%s AND status='open'
+"""
+
+
+def apply_auto_close(graded_clean: set[str], recurred: set[str], day: str) -> dict[str, int]:
+    """Advance the AUTO-CLOSE streak for the OPEN defects this CLEAN settled sweep graded recurrence-free,
+    flipping any that reached ``AUTO_CLOSE_STREAK`` to 'auto_closed'. Call AFTER ``write_lifecycle`` so the
+    open set already reflects today's recurrences (the defect upsert reset their streak + re-opened them).
+
+    Idempotent PER DAY: the streak counts distinct clean DAYS, not sweep invocations. Re-running the same
+    ``day`` is a no-op (``last_streak_day == day`` short-circuits in ``auto_close_updates``), so an operator
+    re-sweeping a day can never double-advance a streak. ``graded_clean`` MUST already exclude ``recurred``
+    (the caller passes the clean-graded, recurrence-free set); both are passed so the pure
+    ``auto_close_updates`` enforces the guard explicitly.
+
+    Returns a small summary {advanced, auto_closed} for logging. A day that graded nothing clean (too
+    contaminated / fragmented) yields no open defects in ``graded_clean`` -> no streak moves at all.
+    """
+    if not graded_clean:
+        return {"advanced": 0, "auto_closed": 0}
+    with psycopg.connect(**DB_KWARGS) as conn, conn.cursor() as cur:
+        cur.execute(_SELECT_OPEN_DEFECTS)
+        open_defects = [
+            (feature, version, int(streak), str(last_day) if last_day is not None else None)
+            for feature, version, streak, last_day in cur.fetchall()
+        ]
+        updates = auto_close_updates(open_defects, graded_clean, recurred, day)
+        if updates:
+            cur.executemany(
+                _APPLY_AUTO_CLOSE,
+                [
+                    (streak, status, streak_day, feature, version)
+                    for feature, version, streak, status, streak_day in updates
+                ],
+            )
+        conn.commit()
+    auto_closed = sum(1 for _f, _v, _streak, status, _day in updates if status == DEFECT_STATUS_AUTO_CLOSED)
+    return {"advanced": len(updates), "auto_closed": auto_closed}
 
 
 def trusted_feature_names(min_state: str = STATE_VALIDATED) -> set[str]:
