@@ -108,6 +108,14 @@ MIN_MARKET_TICKER_BARS = 100
 MIN_MARKET_TICKER_TRADES = 100
 
 
+class RawNotSettledError(ValueError):
+    """The day's raw tape has not SETTLED yet (Alpaca historical lands hours after close, often ~T+1) — a
+    TRANSIENT, EXPECTED condition, not a failure. The settle gates raise this so the nightly lifecycle cron
+    can SKIP an unsettled day cleanly (exit 0) instead of grading the whole job FAILED. Subclasses ValueError
+    so every existing ``except ValueError`` / ``pytest.raises(ValueError)`` caller is unchanged; only callers
+    that want to distinguish "skip, retry tomorrow" from a genuine error catch this narrower type."""
+
+
 def _per_ticker_counts(frame: pl.DataFrame, probe: list[str]) -> dict[str, int]:
     """Row count per pinned ticker in ``frame`` (0 for a ticker absent from the union). Each ``probe`` ticker
     must be present INDIVIDUALLY — a height>0 union can hide one empty ticker behind another's full tape."""
@@ -138,7 +146,7 @@ def assert_raw_present(day: str, raw_root: str, with_ticks: bool) -> None:
     bar_counts = _per_ticker_counts(load_raw_minute_agg(raw_root, day, probe), probe)
     thin_bars = {ticker: count for ticker, count in bar_counts.items() if count < MIN_MARKET_TICKER_BARS}
     if thin_bars:
-        raise ValueError(
+        raise RawNotSettledError(
             f"refusing to sweep {day}: raw BARS are empty/stub for pinned market tickers {thin_bars} "
             f"(need >= {MIN_MARKET_TICKER_BARS} bars each) under {raw_root}/raw/bars — the day's raw has not "
             f"settled (Alpaca historical lands hours after close, often ~T+1; a stub partition is a "
@@ -148,7 +156,7 @@ def assert_raw_present(day: str, raw_root: str, with_ticks: bool) -> None:
         trade_counts = _per_ticker_counts(load_raw_trades(raw_root, day, probe), probe)
         thin_trades = {ticker: count for ticker, count in trade_counts.items() if count < MIN_MARKET_TICKER_TRADES}
         if thin_trades:
-            raise ValueError(
+            raise RawNotSettledError(
                 f"refusing to sweep {day} with ticks: raw TRADES are empty/stub for {thin_trades} "
                 f"(need >= {MIN_MARKET_TICKER_TRADES} trades each) under {raw_root}/raw/trades — the tick side "
                 f"has not settled (bars settled but trades have not, or only partially). Acquire trades "
@@ -206,7 +214,7 @@ def assert_tail_settled(day: str, raw_root: str, discovered: list[str]) -> None:
     settle_rate = len(settled) / len(sample)
     if settle_rate < MIN_TAIL_SETTLE_RATE:
         missing = sorted(symbol for symbol, count in bar_counts.items() if count < MIN_TAIL_SYMBOL_BARS)
-        raise ValueError(
+        raise RawNotSettledError(
             f"refusing to sweep {day}: only {len(settled)}/{len(sample)} sampled stream symbols "
             f"({settle_rate:.1%}) have landed raw BARS (need >= {MIN_TAIL_SETTLE_RATE:.0%}) under "
             f"{raw_root}/raw/bars — the ILLIQUID TAIL has not settled (Alpaca historical lands symbol-by-symbol, "
@@ -551,16 +559,24 @@ def _parse_args(args: list[str]) -> dict[str, object]:
 def main() -> None:
     parsed = _parse_args(sys.argv[1:])
     day = parsed["day"] or last_market_day()
-    summary = sweep_day(
-        feature_root=parsed["feature_root"],  # type: ignore[arg-type]
-        val_root=parsed["val_root"],  # type: ignore[arg-type]
-        day=day,  # type: ignore[arg-type]
-        raw_root=parsed["raw_root"],  # type: ignore[arg-type]
-        chunk=parsed["chunk"],  # type: ignore[arg-type]
-        allow_today=parsed["allow_today"],  # type: ignore[arg-type]
-        max_symbols=parsed["max_symbols"],  # type: ignore[arg-type]
-        with_ticks=parsed["with_ticks"],  # type: ignore[arg-type]
-    )
+    try:
+        summary = sweep_day(
+            feature_root=parsed["feature_root"],  # type: ignore[arg-type]
+            val_root=parsed["val_root"],  # type: ignore[arg-type]
+            day=day,  # type: ignore[arg-type]
+            raw_root=parsed["raw_root"],  # type: ignore[arg-type]
+            chunk=parsed["chunk"],  # type: ignore[arg-type]
+            allow_today=parsed["allow_today"],  # type: ignore[arg-type]
+            max_symbols=parsed["max_symbols"],  # type: ignore[arg-type]
+            with_ticks=parsed["with_ticks"],  # type: ignore[arg-type]
+        )
+    except RawNotSettledError as not_settled:
+        # The day's raw tape has not landed yet (Alpaca historical lands ~T+1). This is the EXPECTED outcome
+        # of the post-close nightly lifecycle run — the day's bars settle hours after close. SKIP cleanly
+        # (exit 0) so the cron's /jobs grade is SKIPPED, not FAILED; the next run grades the day once settled.
+        print(f"=== Parity-validation sweep SKIPPED for {day} (raw not settled) ===")
+        print(f"  {not_settled}")
+        return
     print(f"=== Parity-validation sweep summary for {day} ===")
     for key, value in summary.items():
         print(f"  {key}: {value}")
