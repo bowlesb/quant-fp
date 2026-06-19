@@ -16,6 +16,7 @@ from quantlib.features import store
 from quantlib.features.compact import (
     COMPACTED_NAME,
     compact_day,
+    compact_partition,
     compact_settled_days,
     discover_stream_days,
 )
@@ -63,6 +64,30 @@ def test_compaction_folds_per_minute_files_preserving_data(tmp_path: Path) -> No
     assert df.height == 8  # 2 symbols x 4 minutes, re-delivery de-duped (no duplicate cells)
     assert int(df.select(pl.struct("symbol", "minute").is_duplicated().sum()).item()) == 0
     assert df.filter((pl.col("symbol") == "S0") & (pl.col("minute") == BASE + timedelta(minutes=2)))["ret_1m"][0] == 0.002
+
+
+def test_compaction_reconciles_heterogeneous_schemas(tmp_path: Path) -> None:
+    """A fragmented-restart session leaves some per-minute files with a NARROWER schema (a group
+    emitting only a subset of its features in one window). The compactor must union the column
+    superset — the absent feature read as null — instead of raising ColumnNotFoundError."""
+    partition = tmp_path / "group=demo" / "v=1.0.0" / "source=stream" / f"date={DAY}"
+    partition.mkdir(parents=True)
+    # wide file: full feature set; narrow file: a later minute missing residual_mean
+    wide = pl.DataFrame(
+        {"symbol": ["S0"], "minute": [BASE], "residual_std": [1.0], "residual_mean": [0.5]}
+    )
+    narrow = pl.DataFrame({"symbol": ["S0"], "minute": [BASE + timedelta(minutes=1)], "residual_std": [2.0]})
+    wide.write_parquet(partition / "data-0-100.parquet")
+    narrow.write_parquet(partition / "data-0-200.parquet")
+
+    folded = compact_partition(partition)
+
+    assert folded == 2
+    df = pl.read_parquet(partition / COMPACTED_NAME).sort("symbol", "minute")
+    assert df.height == 2  # both minutes preserved, no key lost to the schema mismatch
+    assert set(df.columns) == {"symbol", "minute", "residual_std", "residual_mean"}  # superset
+    assert df["residual_std"].to_list() == [1.0, 2.0]  # every present cell preserved exactly
+    assert df["residual_mean"].to_list() == [0.5, None]  # absent in the narrow file -> null
 
 
 def test_discover_stream_days_lists_on_disk_days_ascending(tmp_path: Path) -> None:
