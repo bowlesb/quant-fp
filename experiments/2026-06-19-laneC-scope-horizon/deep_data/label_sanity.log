@@ -1,0 +1,21 @@
+B4 deep label (fwd_1d cross-sectional excess overnight return)
+  rows=1128482 n_nan=0
+  label_std = 0.024830   (18mo reference ~0.027; absurd >0.1 = bad-print tell)
+  max_abs   = 3.046722
+  mean      = 5.213245e-04
+  pctiles   p0.1=-0.1342 p1=-0.0678 p50=-0.0000 p99=0.0775 p99.9=0.1691
+  X shape=(1128482, 13) features=['ret_1d', 'ret_co_1d', 'overnight_prev', 'intraday_prev', 'ret_2d', 'ret_5d', 'ret_10d', 'ret_20d', 'rvol_5d', 'rvol_20d', 'dollar_vol_20d', 'gap_z', 'range_20d_pos']
+  X max-abs per feature:
+    ret_1d           std=0.0489 max_abs=5.4418
+    ret_co_1d        std=0.8909 max_abs=433.7606
+    overnight_prev   std=1.0487 max_abs=659.2394
+    intraday_prev    std=0.0472 max_abs=5.4418
+    ret_2d           std=1.3639 max_abs=741.8310
+    ret_5d           std=1.7113 max_abs=598.3295
+    ret_10d          std=2.0403 max_abs=521.1881
+    ret_20d          std=3.9534 max_abs=2222.6341
+    rvol_5d          std=0.7955 max_abs=194.0080
+    rvol_20d         std=0.5576 max_abs=96.9850
+    dollar_vol_20d   std=1.1547 max_abs=19.4574
+    gap_z            std=1.3314 max_abs=4.2485
+    range_20d_pos    std=0.3035 max_abs=1.0000

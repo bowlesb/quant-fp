@@ -1,0 +1,10 @@
+daily table: (12024655, 9)
+labelled rows (1d): 3796929 days=2392 symbols=6358
+ranked symbols (>=60 labelled days): 4959
+  B1_0001_0500: rows=764501 days=2392 symbols=500 median_CS_half=6.47bps oneway_cost=7.47bps adv_min=$127,892,175 per_name=$1613 (=1.26e-05 of min ADV)
+  B2_0500_1000: rows=654677 days=2392 symbols=500 median_CS_half=7.52bps oneway_cost=8.52bps adv_min=$53,617,356 per_name=$1852 (=3.45e-05 of min ADV)
+  B3_1000_2000: rows=975626 days=2392 symbols=1000 median_CS_half=11.90bps oneway_cost=12.90bps adv_min=$15,898,200 per_name=$1250 (=7.86e-05 of min ADV)
+  B4_2000_4000: rows=1128482 days=2390 symbols=2000 median_CS_half=17.57bps oneway_cost=18.57bps adv_min=$2,243,983 per_name=$1064 (=4.74e-04 of min ADV)
+  B5_4000_6000: rows=245061 days=2223 symbols=959 median_CS_half=17.55bps oneway_cost=18.55bps adv_min=$123,449 per_name=$4545 (=3.68e-02 of min ADV)
+
+WROTE band_costs.json

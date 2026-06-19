@@ -1,0 +1,22 @@
+=== B4_2000_4000 by-year persistence (leg P) ===
+rows=1128482 days=2390 symbols=2000 own_oneway_cost=18.57bps
+OOS prediction rows: 979442  OOS timestamps: 1992
+daily net L/S P&L periods: 1987
+
+================ BY-YEAR NET-OF-OWN-COST L/S TABLE ================
+  year  days    mean_net     sum_net     NWt  sign
+  2018   166    0.006029      1.0009    0.67     +
+  2019   206   -0.002271     -0.4677   -0.53     -
+  2020   250    0.013851      3.4627    2.50     +
+  2021   251    0.009271      2.3270    1.83     +
+  2022   250    0.003020      0.7549    0.65     +
+  2023   249    0.009913      2.4684    1.56     +
+  2024   252    0.021058      5.3066    3.30     +
+  2025   249    0.011060      2.7539    2.49     +
+  2026   114    0.009870      1.1252    1.83     +
+
+Full years (<=2025): 8  positive: 7  threshold(>=ceil(.7*N)): 6
+P1 (majority-positive): PASS
+P2 (no significant negative year): PASS
+
+LEG P (P1 AND P2): PASS

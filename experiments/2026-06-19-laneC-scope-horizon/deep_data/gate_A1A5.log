@@ -1,0 +1,45 @@
+================ B1_0001_0500 ================
+rows=764501 days=2392 symbols=500 own_oneway_cost=7.47bps (CS_half=6.47+1)
+  REAL OOS IC=0.02854  SHUF=-0.00080  edge=+0.02934  NW t=6.63
+  gross breakeven=10.48bps  own_cost=7.47bps  => breakeven>cost: True
+  net@own_cost/period=0.000885  sharpe_net@own_cost=0.743  turnover=3.003
+  GATE: IC>=.01=True |t|>=2=True be>cost=True sharpe>0=True ==> TRADEABLE
+
+================ B2_0500_1000 ================
+rows=654677 days=2392 symbols=500 own_oneway_cost=8.52bps (CS_half=7.52+1)
+  REAL OOS IC=0.02402  SHUF=0.00066  edge=+0.02336  NW t=5.589
+  gross breakeven=10.99bps  own_cost=8.52bps  => breakeven>cost: True
+  net@own_cost/period=0.000737  sharpe_net@own_cost=0.301  turnover=3.058
+  GATE: IC>=.01=True |t|>=2=True be>cost=True sharpe>0=True ==> TRADEABLE
+
+================ B3_1000_2000 ================
+rows=975626 days=2392 symbols=1000 own_oneway_cost=12.90bps (CS_half=11.90+1)
+  REAL OOS IC=0.02763  SHUF=-0.00293  edge=+0.03056  NW t=6.13
+  gross breakeven=13.05bps  own_cost=12.90bps  => breakeven>cost: True
+  net@own_cost/period=2.7e-05  sharpe_net@own_cost=0.008  turnover=3.212
+  GATE: IC>=.01=True |t|>=2=True be>cost=True sharpe>0=True ==> TRADEABLE
+
+================ B4_2000_4000 ================
+rows=1128482 days=2390 symbols=2000 own_oneway_cost=18.57bps (CS_half=17.57+1)
+  REAL OOS IC=0.05694  SHUF=-0.02232  edge=+0.07926  NW t=13.045
+  gross breakeven=46.91bps  own_cost=18.57bps  => breakeven>cost: True
+  net@own_cost/period=0.009427  sharpe_net@own_cost=1.813  turnover=3.334
+  GATE: IC>=.01=True |t|>=2=True be>cost=True sharpe>0=True ==> TRADEABLE
+
+================ B5_4000_6000 ================
+rows=245061 days=2223 symbols=959 own_oneway_cost=18.55bps (CS_half=17.55+1)
+  REAL OOS IC=0.08848  SHUF=-0.01467  edge=+0.10315  NW t=20.471
+  gross breakeven=24.18bps  own_cost=18.55bps  => breakeven>cost: True
+  net@own_cost/period=0.001984  sharpe_net@own_cost=0.431  turnover=3.555
+  GATE: IC>=.01=True |t|>=2=True be>cost=True sharpe>0=True ==> TRADEABLE
+
+
+================ BAND TABLE ================
+band              rows days       IC     SHUF    NWt  gross_be  own_cost    net/per  sharpe@own   turn  verdict
+B1_0001_0500    764501 2392   0.0285  -0.0008   6.63     10.48      7.47   0.000885       0.743   3.00  TRADEABLE
+B2_0500_1000    654677 2392   0.0240   0.0007   5.59     10.99      8.52   0.000737       0.301   3.06  TRADEABLE
+B3_1000_2000    975626 2392   0.0276  -0.0029   6.13     13.05     12.90   0.000027       0.008   3.21  TRADEABLE
+B4_2000_4000   1128482 2390   0.0569  -0.0223  13.04     46.91     18.57   0.009427       1.813   3.33  TRADEABLE
+B5_4000_6000    245061 2223   0.0885  -0.0147  20.47     24.18     18.55   0.001984       0.431   3.56  TRADEABLE
+
+VERDICT: TRADEABLE NICHE (>=1 band clears all 4 legs)
