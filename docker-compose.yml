@@ -138,6 +138,7 @@ services:
     <<: *common
     environment:
       STORE_ROOT: /store
+      STATUS_STORE_PATH: /quant-ops/status_dashboard.json
     ports:
       - "0.0.0.0:8088:8000"     # LAN-accessible: http://192.168.1.32:8088
     volumes:
@@ -150,6 +151,9 @@ services:
       # Feature store (read-only): the /feature-grid coverage surface reads partition
       # dates + per-date symbol counts from here. RO so the dashboard can never write.
       - fp_store_real:/store:ro
+      # Hourly status board store (read-WRITE): the same ~/.quant-ops file the Lead loop
+      # appends rows to on the host; the /status reaction POST writes Ben's notes back here.
+      - ${HOME}/.quant-ops:/quant-ops
     depends_on:
       timescaledb:
         condition: service_healthy
