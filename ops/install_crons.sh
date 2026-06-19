@@ -36,7 +36,7 @@ LINES+=("45 14 * * 6 cd $REPO && ops/trust_random_check.sh >> $TRUST_LOG 2>&1")
 # crontab -l + each cron's verify-log + docker ps and writes ~/.quant-ops/jobs_status.json for the /jobs page.
 MATCHES+=("ops/collect_jobs_status.py")
 COMMENTS+=("# every 5 min (off-:00) refresh the /jobs dashboard's jobs_status.json — READ-ONLY collector")
-LINES+=("3-58/5 * * * * cd $REPO && python ops/collect_jobs_status.py >> $JOBS_LOG 2>&1")
+LINES+=("3-58/5 * * * * cd $REPO && python3 ops/collect_jobs_status.py >> $JOBS_LOG 2>&1")
 
 # 22:33 PT weekdays — well after the 18:30 PT daily_lifecycle sweep (which READS stream partitions) and far
 # off RTH; only folds days STRICTLY BEFORE today (fc writes only today's partition). Idempotent + atomic +
