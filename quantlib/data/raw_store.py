@@ -35,6 +35,37 @@ def partition_dir(store: str, tier: str, symbol: str, day: dt.date) -> str:
     )
 
 
+RAW_BAR_COLUMNS = ["symbol", "ts", "open", "high", "low", "close", "volume", "vwap", "trade_count"]
+
+_RAW_BAR_SCHEMA: dict[str, pl.DataType] = {
+    "symbol": pl.String,
+    "ts": pl.Datetime("us", "UTC"),
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Int64,
+    "vwap": pl.Float64,
+    "trade_count": pl.Int64,
+}
+
+
+def load_raw_bars(date_iso: str, store: str = "/store") -> pl.DataFrame:
+    """Full-OHLCV minute bars for one day from ``<store>/raw/bars`` — the shared research bar loader.
+
+    Returns every Alpaca minute-bar field (open/high/low/close/volume/vwap/trade_count), not just
+    close+volume, so experiments can invent the bar-SHAPE feature family (body/wick, gaps, intrabar
+    range, candlestick patterns) without each builder re-implementing its own loader. One hive-glob
+    scan over all symbols. Research substrate — reads the raw store directly, no live feature def and
+    no fingerprint surface. Empty frame (full schema) when the date has no partitions, so callers can
+    branch on ``height``.
+    """
+    pattern = os.path.join(store, "raw", "bars", "symbol=*", f"date={date_iso}", "*.parquet")
+    if not glob.glob(pattern):
+        return pl.DataFrame(schema=_RAW_BAR_SCHEMA)
+    return pl.scan_parquet(pattern, hive_partitioning=True).select(RAW_BAR_COLUMNS).collect()
+
+
 def manifest_path(store: str, tier: str) -> str:
     return os.path.join(store, "raw", f"_manifest_{tier}.parquet")
 
