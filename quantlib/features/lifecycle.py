@@ -10,6 +10,7 @@ deletion logs a restore recipe to ``RETIREMENT_LOG``.
 Supports the iteration lifecycle: an abandoned partial backfill (verify what's there, resume the
 rest, or delete it), and disk reclamation (retire old dates / drop a low-value feature, restorable).
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -39,25 +40,70 @@ def _bytes(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
+def store_versions(root: str | Path, group: str) -> list[dict[str, int | str]]:
+    """Per on-disk version of ``group``: the backfill/stream date counts + disk MB. The accounting the
+    supersede-purge planner reads to decide which older versions exist and how much (and which kind of)
+    data each holds. Returns one row per version present on disk, sorted by version string."""
+    backfill_dates: dict[str, int] = {}
+    stream_dates: dict[str, int] = {}
+    version_bytes: dict[str, int] = {}
+    for partition in _iter_partitions(root):
+        if partition["group"] != group:
+            continue
+        version = partition["version"]
+        backfill_dates.setdefault(version, 0)
+        stream_dates.setdefault(version, 0)
+        version_bytes.setdefault(version, 0)
+        if partition["source"] == "stream":
+            stream_dates[version] += 1
+        elif partition["source"] == "backfill":
+            backfill_dates[version] += 1
+        version_bytes[version] += _bytes(partition["path"])
+    return [
+        {
+            "version": version,
+            "backfill_dates": backfill_dates[version],
+            "stream_dates": stream_dates[version],
+            "bytes": version_bytes[version],
+        }
+        for version in sorted(version_bytes)
+    ]
+
+
 def store_status(root: str | Path) -> pl.DataFrame:
     """Per (group, version, source): date count, date range, and disk MB — the accounting view."""
     rows = [
-        {"group": p["group"], "version": p["version"], "source": p["source"], "date": p["date"], "bytes": _bytes(p["path"])}
+        {
+            "group": p["group"],
+            "version": p["version"],
+            "source": p["source"],
+            "date": p["date"],
+            "bytes": _bytes(p["path"]),
+        }
         for p in _iter_partitions(root)
     ]
     if not rows:
         return pl.DataFrame()
-    return pl.DataFrame(rows).group_by(["group", "version", "source"]).agg(
-        pl.col("date").n_unique().alias("dates"),
-        pl.col("date").min().alias("from"),
-        pl.col("date").max().alias("to"),
-        (pl.col("bytes").sum() / 1e6).round(2).alias("mb"),
-    ).sort(["group", "source"])
+    return (
+        pl.DataFrame(rows)
+        .group_by(["group", "version", "source"])
+        .agg(
+            pl.col("date").n_unique().alias("dates"),
+            pl.col("date").min().alias("from"),
+            pl.col("date").max().alias("to"),
+            (pl.col("bytes").sum() / 1e6).round(2).alias("mb"),
+        )
+        .sort(["group", "source"])
+    )
 
 
 def completeness(root: str | Path, group: str, version: str, source: str, expected_dates: list[str]) -> dict:
     """Verify a (possibly abandoned/partial) backfill: which expected dates are present vs missing."""
-    present = {p["date"] for p in _iter_partitions(root) if p["group"] == group and p["version"] == version and p["source"] == source}
+    present = {
+        p["date"]
+        for p in _iter_partitions(root)
+        if p["group"] == group and p["version"] == version and p["source"] == source
+    }
     expected = set(expected_dates)
     done = expected & present
     return {
@@ -99,15 +145,25 @@ def _delete(root: str | Path, matching, action: str, restore: str, include_strea
     return entry
 
 
-def delete_feature_group(root: str | Path, group: str, version: str | None = None, include_stream: bool = False) -> dict:
+def delete_feature_group(
+    root: str | Path, group: str, version: str | None = None, include_stream: bool = False
+) -> dict:
     """Wipe a feature group's BACKFILL partitions (code stays in git → re-materializable). Stream
     partitions are protected unless ``include_stream=True`` (they are irreplaceable)."""
     restore = f"re-materialize group '{group}' backfill via `materialize alpaca <root> <day> <n>` (code in git); stream is NOT re-collectable for past days"
-    return _delete(root, lambda p: p["group"] == group and (version is None or p["version"] == version), f"delete_feature_group:{group}", restore, include_stream)
+    return _delete(
+        root,
+        lambda p: p["group"] == group and (version is None or p["version"] == version),
+        f"delete_feature_group:{group}",
+        restore,
+        include_stream,
+    )
 
 
 def retire_before(root: str | Path, before_date: str, include_stream: bool = False) -> dict:
     """Reclaim disk: wipe BACKFILL partitions older than ``before_date`` (re-backfillable from
     Alpaca). Stream partitions are protected unless ``include_stream=True``."""
     restore = f"re-backfill dates < {before_date} from Alpaca via `materialize alpaca <root> <day> <n>` (settled bars reproducible; stream is not)"
-    return _delete(root, lambda p: p["date"] < before_date, f"retire_before:{before_date}", restore, include_stream)
+    return _delete(
+        root, lambda p: p["date"] < before_date, f"retire_before:{before_date}", restore, include_stream
+    )
