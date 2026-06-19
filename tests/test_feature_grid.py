@@ -226,3 +226,55 @@ def test_build_symbol_coverage_uses_each_sources_own_latest_date(tmp_path: Path,
 def test_build_symbol_coverage_unknown_group(fake_catalog: None) -> None:
     with pytest.raises(KeyError):
         fg.build_symbol_coverage("no_such_group", "/store")
+
+
+def test_build_thin_live_symbols_ranks_cross_group(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    # groupX: stream carries AAA only; backfill has AAA,BBB,CCC -> BBB,CCC under-represented LIVE here.
+    _write_partition(root, "groupX", "stream", "2026-06-18", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB", "CCC"])
+    # groupY: stream carries AAA,BBB; backfill has AAA,BBB,CCC -> only CCC under-represented LIVE here.
+    _write_partition(root, "groupY", "stream", "2026-06-18", ["AAA", "BBB"])
+    _write_partition(root, "groupY", "backfill", "2026-06-18", ["AAA", "BBB", "CCC"])
+
+    rollup = fg.build_thin_live_symbols(str(root))
+    assert rollup["n_live_groups"] == 2 and rollup["n_groups"] == 2
+    by_symbol = {row["symbol"]: row for row in rollup["symbols"]}
+    # CCC is under-represented in BOTH groups -> ranks first; BBB only in groupX.
+    assert rollup["symbols"][0]["symbol"] == "CCC"
+    assert by_symbol["CCC"]["n_under_groups"] == 2
+    assert by_symbol["CCC"]["under_groups"] == ["groupX", "groupY"]
+    assert by_symbol["BBB"]["n_under_groups"] == 1
+    assert by_symbol["BBB"]["under_groups"] == ["groupX"]
+    # AAA is on both streams -> never under-represented, absent from the ranked list.
+    assert "AAA" not in by_symbol
+    assert rollup["n_thin_symbols"] == 2
+
+
+def test_build_thin_live_symbols_excludes_non_live_groups(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    # groupX is live (stream AAA); groupY is backfill-only (no stream) -> its whole universe must NOT count
+    # as under-represented (it was never live-subscribed), so DDD/EEE never enter the ranking.
+    _write_partition(root, "groupX", "stream", "2026-06-18", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB"])
+    _write_partition(root, "groupY", "backfill", "2026-06-18", ["AAA", "DDD", "EEE"])
+
+    rollup = fg.build_thin_live_symbols(str(root))
+    assert rollup["n_live_groups"] == 1
+    symbols = {row["symbol"] for row in rollup["symbols"]}
+    # Only groupX's backfill-only BBB is thin-live; groupY's DDD/EEE are excluded (group not live).
+    assert symbols == {"BBB"}
+    group_rows = {row["group"]: row for row in rollup["groups"]}
+    assert group_rows["groupY"]["live"] is False and group_rows["groupY"]["n_under"] == 0
+    assert group_rows["groupX"]["live"] is True and group_rows["groupX"]["n_under"] == 1
+
+
+def test_build_thin_live_symbols_limit_caps_list(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    _write_partition(root, "groupX", "stream", "2026-06-18", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB", "CCC", "DDD"])
+    rollup = fg.build_thin_live_symbols(str(root), limit=2)
+    # 3 thin symbols exist (BBB,CCC,DDD) but the ranked list is capped at the limit.
+    assert rollup["n_thin_symbols"] == 3
+    assert len(rollup["symbols"]) == 2
+    assert rollup["limit"] == 2

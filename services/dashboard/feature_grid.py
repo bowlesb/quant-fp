@@ -526,6 +526,30 @@ def build_group_detail(group: str, root: str = STORE_ROOT) -> dict[str, object]:
     }
 
 
+@dataclass
+class _GroupSymbolSets:
+    """The stream/backfill symbol sets for one group on each source's own latest date — the raw material both
+    the per-group surface and the cross-group roll-up classify, computed by ONE pass over the store."""
+
+    stream_date: str | None
+    backfill_date: str | None
+    stream_symbols: set[str]
+    backfill_symbols: set[str]
+
+
+def _group_symbol_sets(group: str, version: str, root: str) -> _GroupSymbolSets:
+    """A group's stream + backfill symbol sets on each source's OWN latest partition. Stream and backfill
+    settle at different cadences, so each side uses its freshest captured universe (a lagging stream still
+    diffs against its newest day, not an empty newer date). Same bounded per-partition sampling as the grid."""
+    stream_date = _latest_partition_date(root, group, version, "stream")
+    backfill_date = _latest_partition_date(root, group, version, "backfill")
+    stream_symbols = _read_symbols(root, group, version, "stream", stream_date) if stream_date else set()
+    backfill_symbols = (
+        _read_symbols(root, group, version, "backfill", backfill_date) if backfill_date else set()
+    )
+    return _GroupSymbolSets(stream_date, backfill_date, stream_symbols, backfill_symbols)
+
+
 def build_symbol_coverage(group: str, root: str = STORE_ROOT) -> dict[str, object]:
     """Per-SYMBOL coverage for one group on its latest store date: which tickers the live STREAM actually
     captured vs which exist only in BACKFILL. The group grid surfaces a single peak symbol COUNT, which hides
@@ -543,12 +567,9 @@ def build_symbol_coverage(group: str, root: str = STORE_ROOT) -> dict[str, objec
     if version is None:
         raise KeyError(group)
 
-    stream_date = _latest_partition_date(root, group, version, "stream")
-    backfill_date = _latest_partition_date(root, group, version, "backfill")
-    stream_symbols = _read_symbols(root, group, version, "stream", stream_date) if stream_date else set()
-    backfill_symbols = (
-        _read_symbols(root, group, version, "backfill", backfill_date) if backfill_date else set()
-    )
+    sets = _group_symbol_sets(group, version, root)
+    stream_date, backfill_date = sets.stream_date, sets.backfill_date
+    stream_symbols, backfill_symbols = sets.stream_symbols, sets.backfill_symbols
 
     both = stream_symbols & backfill_symbols
     backfill_only = backfill_symbols - stream_symbols
@@ -586,6 +607,93 @@ def _latest_partition_date(root: str, group: str, version: str, source: str) -> 
     return dates[-1] if dates else None
 
 
+# A symbol is only worth flagging as thin-LIVE in a group that the live stream actually covers at all on that
+# group — a group with ZERO stream symbols (never live-subscribed) would otherwise mark its ENTIRE backfill
+# universe under-represented, drowning the signal. We count a symbol's under-representation only across groups
+# that ARE live (stream non-empty), so the rank reflects names the stream COULD have but DIDN'T carry.
+def build_thin_live_symbols(root: str = STORE_ROOT, limit: int = 50) -> dict[str, object]:
+    """Cross-group roll-up ranking the THINNEST-live tickers: symbols present in the full-universe BACKFILL
+    agg but absent from the live STREAM, counted across the MOST groups. The per-group ``/symbols`` surface
+    answers "which names is THIS group thin on"; this answers the inverse and system-wide — "which NAMES are
+    under-represented live across the most groups", the natural ticker-representation flag for the
+    FP_TICK_SYMBOLS coverage gap. Read-side only: reuses ``_group_symbol_sets`` (one bounded pass per group).
+
+    Under-representation is scored only over LIVE groups (groups with a non-empty stream universe today); a
+    group the stream never subscribes would otherwise mark its entire backfill universe thin and swamp the
+    ranking. So a symbol's ``n_under_groups`` is "of the groups the stream IS carrying, how many omit it".
+    """
+    catalog = _catalog_by_group()
+    groups = sorted(catalog)
+
+    under_count: dict[str, int] = {}
+    under_groups: dict[str, list[str]] = {}
+    live_count: dict[str, int] = {}
+    n_live_groups = 0
+    group_rows: list[dict[str, object]] = []
+
+    for group in groups:
+        version = _group_version(group)
+        if version is None:
+            continue
+        sets = _group_symbol_sets(group, version, root)
+        if not sets.stream_symbols:
+            # Group not live-covered today — it has no live universe to be "under" vs, so it cannot witness
+            # under-representation. Recorded in the group breakdown but excluded from the per-symbol score.
+            group_rows.append(
+                {
+                    "group": group,
+                    "live": False,
+                    "n_stream": 0,
+                    "n_backfill": len(sets.backfill_symbols),
+                    "n_under": 0,
+                }
+            )
+            continue
+        n_live_groups += 1
+        backfill_only = sets.backfill_symbols - sets.stream_symbols
+        for symbol in sets.stream_symbols:
+            live_count[symbol] = live_count.get(symbol, 0) + 1
+        for symbol in backfill_only:
+            under_count[symbol] = under_count.get(symbol, 0) + 1
+            under_groups.setdefault(symbol, []).append(group)
+        group_rows.append(
+            {
+                "group": group,
+                "live": True,
+                "n_stream": len(sets.stream_symbols),
+                "n_backfill": len(sets.backfill_symbols),
+                "n_under": len(backfill_only),
+            }
+        )
+
+    # Rank thinnest-first: most under-represented groups, then fewest groups actually carrying it live (a
+    # symbol missed by 8 groups and live on 1 is thinner than one missed by 8 yet live on 20), then name.
+    ranked = sorted(
+        under_count,
+        key=lambda symbol: (-under_count[symbol], live_count.get(symbol, 0), symbol),
+    )
+    symbols = [
+        {
+            "symbol": symbol,
+            "n_under_groups": under_count[symbol],
+            "n_live_groups": live_count.get(symbol, 0),
+            "under_groups": sorted(under_groups[symbol]),
+        }
+        for symbol in ranked[:limit]
+    ]
+
+    return {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "store_root": root,
+        "n_live_groups": n_live_groups,
+        "n_groups": len(groups),
+        "n_thin_symbols": len(under_count),
+        "limit": limit,
+        "symbols": symbols,
+        "groups": sorted(group_rows, key=lambda gr: (not gr["live"], -int(gr["n_under"]), gr["group"])),
+    }
+
+
 class GridCache:
     """Tiny TTL cache so a page load / refresh re-aggregates at most every ``ttl`` seconds. The grid read is
     1-2s on the live store; a 60s TTL makes a busy refresh instant while staying fresh enough for a coverage
@@ -597,6 +705,7 @@ class GridCache:
         self._grid_at: float = 0.0
         self._details: dict[str, tuple[float, dict[str, object]]] = {}
         self._symbols: dict[str, tuple[float, dict[str, object]]] = {}
+        self._thin: dict[int, tuple[float, dict[str, object]]] = {}
 
     def grid(self, root: str, force: bool = False) -> dict[str, object]:
         now = time.monotonic()
@@ -622,6 +731,15 @@ class GridCache:
         coverage = build_symbol_coverage(group, root)
         self._symbols[group] = (now, coverage)
         return coverage
+
+    def thin_live(self, root: str, limit: int = 50, force: bool = False) -> dict[str, object]:
+        now = time.monotonic()
+        cached = self._thin.get(limit)
+        if not force and cached is not None and (now - cached[0]) <= self.ttl:
+            return cached[1]
+        rollup = build_thin_live_symbols(root, limit)
+        self._thin[limit] = (now, rollup)
+        return rollup
 
 
 CACHE = GridCache()
