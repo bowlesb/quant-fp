@@ -145,3 +145,24 @@ def test_pending_units_rows_aware_resume(tmp_path, monkeypatch) -> None:
     # the aged-out empty is NOT pending on its own day
     old_pending = fast_backfill._pending_units(store, "trades", ["OLDEMPTY"], [dt.date(2026, 1, 2)])
     assert old_pending == []
+
+
+def test_pending_units_pinned_ticker_stub_refetched(tmp_path, monkeypatch) -> None:
+    """A pinned market ticker (SPY) with a tiny pre-settle stub (trades=2) stays PENDING so the fast engine
+    re-fetches the full tape — the 06-18 sweep blocker — while a non-pinned name with 2 rows is done."""
+    store = str(tmp_path)
+    day = dt.date(2026, 6, 18)
+    now = dt.datetime(2026, 6, 19, 1, 30, tzinfo=dt.timezone.utc)
+    pinned = sorted(fast_backfill.FORCE_REFETCH_SYMBOLS)[0]  # SPY/QQQ
+    write_manifest_part(
+        store,
+        "trades",
+        [
+            {"tier": "trades", "symbol": pinned, "date": "2026-06-18", "rows": 2, "bytes": 7, "fetched_at": now},
+            {"tier": "trades", "symbol": "ILLIQ", "date": "2026-06-18", "rows": 2, "bytes": 7, "fetched_at": now},
+        ],
+        part_seq=1,
+    )
+    monkeypatch.setattr(fast_backfill, "_utc_today", lambda: dt.date(2026, 6, 19))
+    pending = fast_backfill._pending_units(store, "trades", [pinned, "ILLIQ"], [day])
+    assert pending == [(pinned, "2026-06-18")]  # the pinned stub re-fetched; the illiquid 2-trade day skipped

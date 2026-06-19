@@ -122,6 +122,16 @@ RANK_WORKERS = (
 # window an empty entry is accepted as a genuine no-data day (illiquid/delisted) and never re-fetched. Sized
 # to comfortably cover the settle lag (a few trading days) without churning the deep history.
 SETTLE_WINDOW_DAYS = 5
+# Symbols where a TINY non-zero tape inside the settle window cannot be genuine (so rows>0 alone would wrongly
+# accept a half-settled stub): the pinned market tickers SPY/QQQ. A 2-row SPY trade "tape" is a fetch that beat
+# Alpaca's settle, not a real session — accepting it strands the market reference the cross-sectional sweep
+# REQUIRES (and the per-ticker sweep floor then blocks the whole day). For these, a within-window entry below
+# MIN_SETTLED_TICK_ROWS is re-fetched until the full tape lands; genuinely-illiquid names (not in this set)
+# keep the rows>0 rule and are never churned. (Observed 2026-06-18: SPY trades=2 blocked the order-flow sweep.)
+FORCE_REFETCH_SYMBOLS: frozenset[str] = frozenset(MARKET_TICKERS)
+# A real RTH tick tape for a pinned ultra-liquid ticker is thousands+ of prints; this floor (matching the
+# validation_sweep per-ticker presence floor) cleanly separates a settled tape from a pre-settle stub.
+MIN_SETTLED_TICK_ROWS = 100
 
 
 @dataclass
@@ -233,10 +243,17 @@ class _TierProgress:
         self.budget_bytes = budget_bytes
         self.lock = threading.Lock()
         manifest = load_manifest(store, tier)
-        # Resume-skip is ROWS-AWARE: a recent EMPTY (premature/unsettled) entry is excluded so it re-fetches;
-        # real rows and aged-out empties are skipped (see resumable_done_keys). Plain presence (done_keys)
-        # would permanently strand a 0-row entry from a fetch that beat Alpaca's symbol-by-symbol settle.
-        self.done = resumable_done_keys(manifest, today or _utc_today(), settle_window_days)
+        # Resume-skip is ROWS-AWARE: a recent EMPTY/STUB (premature/unsettled) entry is excluded so it
+        # re-fetches; real rows and aged-out entries are skipped (see resumable_done_keys). Plain presence
+        # (done_keys) would permanently strand a 0-row entry — or a tiny pinned-ticker stub (SPY trades=2) —
+        # from a fetch that beat Alpaca's symbol-by-symbol settle.
+        self.done = resumable_done_keys(
+            manifest,
+            today or _utc_today(),
+            settle_window_days,
+            force_refetch_symbols=FORCE_REFETCH_SYMBOLS,
+            min_settled_rows=MIN_SETTLED_TICK_ROWS,
+        )
         self.written = 0
         self.bytes_written = 0
         self.budget_used = int(manifest["bytes"].sum()) if manifest.height else 0
