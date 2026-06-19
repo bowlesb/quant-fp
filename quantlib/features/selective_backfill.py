@@ -91,10 +91,11 @@ def resolve_groups(features: list[str], groups: list[str]) -> dict[str, str]:
 
 def trusted_target_groups() -> dict[str, str]:
     """The groups owning the currently-TRUSTED features — the trusted->lightGBM loop's work set. Reads the
-    validation agent's trusted list (``trusted_list.trusted_names`` over the ``trusted_features`` view =
-    feature_trust.lifecycle_state='VALIDATED') and resolves each trusted feature to its group/version. The
-    set GROWS as the nightly sweep promotes PENDING->VALIDATED, so re-running incrementally backfills the
-    newly-trusted features (skip-existing resume means already-backfilled groups are no-ops).
+    validation agent's trusted list (``trusted_list.trusted_names`` over the binary-trust gate =
+    feature_trust.trust_state='TRUSTED', docs/TRUST_REDESIGN.md) and resolves each trusted feature to its
+    group/version. The set GROWS as the nightly sweep earns trust (deterministic-by-construction or one clean
+    parity day), so re-running incrementally backfills the newly-trusted features (skip-existing resume means
+    already-backfilled groups are no-ops).
     """
     names = trusted_names()
     resolved: dict[str, str] = {}

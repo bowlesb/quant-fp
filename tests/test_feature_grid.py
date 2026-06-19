@@ -439,6 +439,14 @@ def test_orderflow_trend_empty_store(tmp_path: Path, fake_oflow_catalog: None) -
     assert view["dates"] == []
 
 
+def test_trusted_names_query_uses_binary_gate() -> None:
+    # The frontier's TRUSTED side keys on the binary gate (trust_state='TRUSTED'), NOT the legacy
+    # lifecycle_state column the grid BADGE renders — a regression onto the legacy predicate would return an
+    # empty trusted set on the live DB (0 lifecycle_state='VALIDATED' rows under the binary model).
+    assert "trust_state = 'TRUSTED'" in fg._TRUSTED_NAMES_QUERY
+    assert "lifecycle_state" not in fg._TRUSTED_NAMES_QUERY
+
+
 def test_frontier_state_classification() -> None:
     # Already binary-trusted -> TRUSTED (a trusted feature has no open defect by construction).
     assert fg._frontier_state(True, False) == fg.FRONTIER_TRUSTED

@@ -5,8 +5,9 @@ MA) gets a clean answer without re-deriving any of them:
 
   * STORE partitions  — ``group=<g>/v=<ver>/source=<stream|backfill>/date=<d>/`` on disk: which dates the
     feature has data for, separately on the STREAM (live) and BACKFILL sides, and the date GAPS.
-  * TRUST surface     — the validation agent's ``trusted_features`` view via ``trusted_list`` (NOT re-encoded
-    here): is the feature VALIDATED, on how many clean days, at what clean match rate.
+  * TRUST surface     — the validation agent's binary-trust gate (``feature_trust.trust_state='TRUSTED'``,
+    docs/TRUST_REDESIGN.md) via ``trusted_list`` (NOT re-encoded here): is the feature TRUSTED, by what
+    reason (deterministic | parity_1day), at what trust value rate.
   * CATALOG           — ``REGISTRY.catalog()``: the feature's group, version, layer, parity_method, owner.
 
 This is the read side of the loop the selective-backfill driver writes: an agent asks "is feature X
@@ -42,9 +43,10 @@ DEFAULT_ROOT = os.environ.get("STORE_ROOT", "/store")
 
 
 def trust_by_feature() -> dict[str, dict[str, object]]:
-    """{feature_name: trusted_features-row} from the validation agent's ``trusted_features`` view (the
-    VALIDATED cohort). Features absent from the map are not (yet) trusted. Reuses ``trusted_list`` so the
-    'what's trusted' definition lives in ONE place (the trust state machine), never re-encoded here.
+    """{feature_name: trusted_features-row} from the validation agent's binary-trust gate (the TRUSTED
+    cohort, ``feature_trust.trust_state='TRUSTED'``). Features absent from the map are not (yet) trusted.
+    Reuses ``trusted_list`` so the 'what's trusted' definition lives in ONE place (the trust state machine),
+    never re-encoded here.
     """
     return {str(row["feature"]): row for row in trusted_features()}
 
@@ -166,8 +168,8 @@ def list_features() -> list[dict[str, object]]:
                 "layer": record["layer"],
                 "parity_method": record["parity_method"],
                 "trusted": feature in trust,
-                "clean_days": graded.get("clean_days"),
-                "clean_value_rate": graded.get("clean_value_rate"),
+                "trust_reason": graded.get("trust_reason"),
+                "trust_value_rate": graded.get("trust_value_rate"),
             }
         )
     return rows
@@ -193,8 +195,8 @@ def trusted_coverage(
                 "feature": feature,
                 "group": group,
                 "version": version,
-                "clean_days": record.get("clean_days"),
-                "clean_value_rate": record.get("clean_value_rate"),
+                "trust_reason": record.get("trust_reason"),
+                "trust_value_rate": record.get("trust_value_rate"),
                 "backfill_dates": len(dates),
                 "backfill_first": dates[0] if dates else None,
                 "backfill_last": dates[-1] if dates else None,
