@@ -63,13 +63,45 @@ def load_manifest(store: str, tier: str) -> pl.DataFrame:
 
 
 def done_keys(manifest: pl.DataFrame) -> set[tuple[str, str]]:
-    """Set of (symbol, date) already recorded in a tier manifest."""
+    """Set of (symbol, date) already recorded in a tier manifest (presence only, ignores rows)."""
     if manifest.height == 0:
         return set()
     return {
         (symbol, date)
         for symbol, date in zip(
             manifest["symbol"].to_list(), manifest["date"].to_list()
+        )
+    }
+
+
+def resumable_done_keys(
+    manifest: pl.DataFrame, today: dt.date, settle_window_days: int
+) -> set[tuple[str, str]]:
+    """The (symbol, date) keys a resume may SAFELY skip — rows-aware, so an empty premature fetch is retried.
+
+    The plain ``done_keys`` treats ANY recorded (symbol, date) as done regardless of ``rows``. That poisons
+    a RECENT day: Alpaca historical settles symbol-by-symbol over hours/~T+1, so a fetch issued before a
+    symbol's tape landed records a 0-row "done" entry — and because the resume keys on (symbol, date) only,
+    the real tape can NEVER be re-fetched. (Observed 2026-06-18: SPY trades rows=2, AAPL/NVDA rows=0 recorded
+    "done" while QQQ landed 757k — a half-settled day permanently stuck.)
+
+    Rule: a key is resumable-done iff its MAX recorded ``rows > 0`` (real data, never re-fetch — idempotent
+    and we have it), OR it is empty but OLDER than ``settle_window_days`` (a genuinely no-data day — illiquid/
+    delisted/holiday-half — which we accept and must NOT re-fetch forever). A RECENT empty key (within the
+    settle window) is EXCLUDED → the resume re-fetches it until either real rows land or it ages out. Taking
+    the MAX rows per key means a later real fetch supersedes an earlier poisoned 0-row entry for the same key.
+    Bounded cost: only empties within the last ``settle_window_days`` are reconsidered (a few recent days), so
+    a nightly run re-tries this-week's stuck empties and never churns the deep history.
+    """
+    if manifest.height == 0:
+        return set()
+    cutoff = (today - dt.timedelta(days=settle_window_days)).isoformat()
+    per_key = manifest.group_by(["symbol", "date"]).agg(pl.col("rows").max().alias("max_rows"))
+    resumable = per_key.filter((pl.col("max_rows") > 0) | (pl.col("date") < pl.lit(cutoff)))
+    return {
+        (symbol, date)
+        for symbol, date in zip(
+            resumable["symbol"].to_list(), resumable["date"].to_list()
         )
     }
 

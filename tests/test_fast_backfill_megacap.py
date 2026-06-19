@@ -13,6 +13,7 @@ import datetime as dt
 import pytest
 
 from quantlib.data import fast_backfill
+from quantlib.data.raw_store import write_manifest_part
 
 
 @pytest.fixture
@@ -120,3 +121,27 @@ def test_returns_combined_written_count(
         "/store", "quotes", symbols, DAYS, heavy_count=10
     )
     assert written == 30  # heavy 10 + tail 20, one unit per symbol-day
+
+
+def test_pending_units_rows_aware_resume(tmp_path, monkeypatch) -> None:
+    """The fast tick engine's resume is rows-aware: a RECENT empty (0-row) trades entry — the 06-18 poison
+    — stays PENDING (re-fetched), while a real recent entry and an aged-out empty are skipped."""
+    store = str(tmp_path)
+    day = dt.date(2026, 6, 18)
+    now = dt.datetime(2026, 6, 18, tzinfo=dt.timezone.utc)
+    write_manifest_part(
+        store,
+        "trades",
+        [
+            {"tier": "trades", "symbol": "REAL", "date": "2026-06-18", "rows": 99, "bytes": 7, "fetched_at": now},
+            {"tier": "trades", "symbol": "EMPTY", "date": "2026-06-18", "rows": 0, "bytes": 7, "fetched_at": now},
+            {"tier": "trades", "symbol": "OLDEMPTY", "date": "2026-01-02", "rows": 0, "bytes": 7, "fetched_at": now},
+        ],
+        part_seq=1,
+    )
+    monkeypatch.setattr(fast_backfill, "_utc_today", lambda: dt.date(2026, 6, 19))
+    pending = fast_backfill._pending_units(store, "trades", ["REAL", "EMPTY"], [day])
+    assert pending == [("EMPTY", "2026-06-18")]  # only the recent empty is re-fetched
+    # the aged-out empty is NOT pending on its own day
+    old_pending = fast_backfill._pending_units(store, "trades", ["OLDEMPTY"], [dt.date(2026, 1, 2)])
+    assert old_pending == []

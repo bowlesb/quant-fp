@@ -35,13 +35,19 @@ from quantlib.data.fast_fetchers import (
     make_client,
 )
 from quantlib.data.raw_store import (
-    done_keys,
     load_manifest,
+    resumable_done_keys,
     write_manifest_part,
     write_partition,
 )
 
 logger = logging.getLogger("fast_backfill")
+
+# Mirror raw_backfill.SETTLE_WINDOW_DAYS: within this many days of the trading date an EMPTY manifest entry
+# is reconsidered (re-fetched) because Alpaca's tick tape may not have settled when it was first fetched;
+# past the window an empty entry is a genuine no-data symbol-day and stays done. The tick tiers (this engine)
+# are exactly where the premature-empty poison was observed (06-18 SPY trades=2, AAPL/NVDA=0 while QQQ=757k).
+SETTLE_WINDOW_DAYS = 5
 
 DEFAULT_PROCESSES = 24
 DEFAULT_THREADS_PER_PROCESS = 8
@@ -134,12 +140,19 @@ def _chunk(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), max(1, size))]
 
 
+def _utc_today() -> dt.date:
+    """Today's UTC date — the reference for the rows-aware settle window. A seam for deterministic tests."""
+    return dt.datetime.now(dt.timezone.utc).date()
+
+
 def _pending_units(
     store: str, tier: str, symbols: list[str], days: list[dt.date]
 ) -> list[tuple[str, str]]:
-    """(symbol, date_iso) units not yet recorded done in the tier manifest (resume skip)."""
+    """(symbol, date_iso) units a resume must still fetch — ROWS-AWARE so a RECENT empty (premature/unsettled)
+    entry is re-fetched, not stranded. resumable_done_keys skips real rows and aged-out empties; a 0-row entry
+    within the settle window is treated as pending so the now-settled tape is acquired (the 06-18 poison)."""
     manifest = load_manifest(store, tier)
-    done = done_keys(manifest)
+    done = resumable_done_keys(manifest, _utc_today(), SETTLE_WINDOW_DAYS)
     day_isos = [day.isoformat() for day in days]
     return [
         (symbol, day_iso)

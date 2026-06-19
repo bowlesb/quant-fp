@@ -29,6 +29,11 @@ from quantlib.data.raw_fetchers import (
 DAY = dt.date(2026, 6, 12)
 
 
+def _pin_resume_today(monkeypatch, today: dt.date) -> None:
+    """Pin the rows-aware resume's reference date so the settle window is deterministic (not wall-clock)."""
+    monkeypatch.setattr(raw_backfill, "_utc_today", lambda: today)
+
+
 @dataclass
 class FakeBar:
     timestamp: dt.datetime
@@ -234,6 +239,9 @@ def test_bars_tier_multi_symbol_writes_every_pending_day(tmp_path, monkeypatch) 
     days = [DAY, DAY + dt.timedelta(days=1), DAY + dt.timedelta(days=2)]
     config = _config(tmp_path, budget_bytes=10**12, max_workers=8, symbols=symbols)
     monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    # Pin the resume's "today" far AFTER these days so the empty no-data partitions are past the settle
+    # window (aged-out genuine no-data, not a premature unsettled fetch) and the idempotency contract holds.
+    _pin_resume_today(monkeypatch, DAY + dt.timedelta(days=400))
     written, _bytes = raw_backfill.fetch_bars_tier(config, symbols, days)
     # every (symbol, day) partition is written — days the mock returns no bar for get an empty partition
     assert written == len(symbols) * len(days)
@@ -241,7 +249,7 @@ def test_bars_tier_multi_symbol_writes_every_pending_day(tmp_path, monkeypatch) 
     assert manifest.height == len(symbols) * len(days)
     dupes = manifest.group_by(["tier", "symbol", "date"]).len().filter(pl.col("len") > 1)
     assert dupes.height == 0
-    # the DAY partition has the canned bar; later days are empty but DONE
+    # the DAY partition has the canned bar; later days are empty but DONE (aged out of the settle window)
     day0 = pl.read_parquet(
         tmp_path / "raw" / "bars" / "symbol=SYM00" / f"date={DAY.isoformat()}" / "data.parquet"
     )
@@ -279,6 +287,86 @@ def test_manifest_unions_legacy_file_and_parts(tmp_path) -> None:
     merged = raw_backfill.load_manifest(store, "bars")
     assert merged.height == 2
     assert raw_backfill.done_keys(merged) == {("OLD", "2026-06-10"), ("NEW", "2026-06-11")}
+
+
+def _manifest_row(symbol: str, date: str, rows: int, fetched: dt.datetime) -> dict:
+    return {"tier": "trades", "symbol": symbol, "date": date, "rows": rows, "bytes": 7, "fetched_at": fetched}
+
+
+def test_resumable_done_keys_rows_aware_settle_window() -> None:
+    """The rows-aware resume set: real rows are always done; a RECENT empty is NOT done (re-fetch the
+    premature/unsettled entry); an OLD empty IS done (genuine no-data, never churned); and the MAX rows
+    per key wins so a later real fetch supersedes an earlier poisoned 0-row entry for the same key."""
+    today = dt.date(2026, 6, 19)
+    now = dt.datetime(2026, 6, 19, tzinfo=dt.timezone.utc)
+    manifest = pl.DataFrame(
+        [
+            _manifest_row("REAL", "2026-06-18", 100, now),  # recent + real -> done
+            _manifest_row("EMPTY_RECENT", "2026-06-18", 0, now),  # recent + empty -> NOT done (re-fetch)
+            _manifest_row("EMPTY_OLD", "2026-01-02", 0, now),  # old + empty -> done (genuine no-data)
+            _manifest_row("SUPERSEDED", "2026-06-18", 0, now),  # poisoned 0-row...
+            _manifest_row("SUPERSEDED", "2026-06-18", 500, now),  # ...later real fetch for same key -> done
+        ],
+        schema=raw_backfill.MANIFEST_SCHEMA,
+    )
+    resumable = raw_backfill.resumable_done_keys(manifest, today, settle_window_days=5)
+    assert ("REAL", "2026-06-18") in resumable
+    assert ("EMPTY_OLD", "2026-01-02") in resumable
+    assert ("SUPERSEDED", "2026-06-18") in resumable  # max rows (500) > 0
+    assert ("EMPTY_RECENT", "2026-06-18") not in resumable  # the poison case: re-fetched
+
+
+def test_fetch_ticks_tier_refetches_recent_empty_entry(tmp_path, monkeypatch) -> None:
+    """End-to-end: a RECENT empty (0-row) trades manifest entry — the exact 06-18 poison (a fetch that beat
+    Alpaca's symbol-by-symbol settle) — is RE-FETCHED on the next run and overwrites the empty partition with
+    the now-settled tape, instead of being permanently stranded by presence-only resume."""
+    store = str(tmp_path)
+    os.makedirs(os.path.join(store, "raw"), exist_ok=True)
+    # Seed the poison: an empty partition + a 0-row "done" manifest entry for (AAPL, DAY), recorded recently.
+    fetched = dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc)
+    raw_backfill.write_partition(store, "trades", "AAPL", DAY, pl.DataFrame(schema=TRADES_SCHEMA))
+    raw_backfill.write_manifest_part(
+        store, "trades", [_manifest_row("AAPL", DAY.isoformat(), 0, fetched)], 1
+    )
+    config = _config(tmp_path, budget_bytes=10**12)
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    _pin_resume_today(monkeypatch, DAY + dt.timedelta(days=2))  # DAY is within the 5-day settle window
+    written, _bytes = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [DAY], chunk_days=5)
+    assert written == 1  # the recent empty was re-fetched, not skipped
+    part = pl.read_parquet(
+        tmp_path / "raw" / "trades" / "symbol=AAPL" / f"date={DAY.isoformat()}" / "data.parquet"
+    )
+    assert part.height == 1  # the empty partition is overwritten with the settled tape
+
+
+def test_fetch_ticks_tier_skips_recent_real_entry(tmp_path, monkeypatch) -> None:
+    """Control for the re-fetch: a RECENT entry with real rows is still skipped (idempotent) — only EMPTY
+    recent entries are reconsidered, so a normal nightly run does not re-pull settled tapes."""
+    store = str(tmp_path)
+    os.makedirs(os.path.join(store, "raw"), exist_ok=True)
+    real_trade = pl.DataFrame(
+        {
+            "symbol": ["AAPL"],
+            "ts": [dt.datetime(2026, 6, 12, 14, 30, tzinfo=dt.timezone.utc)],
+            "price": [1.5],
+            "size": [100.0],
+            "exchange": ["Q"],
+            "conditions": ["@"],
+            "tape": ["C"],
+            "trade_id": [1],
+        },
+        schema=TRADES_SCHEMA,
+    )
+    fetched = dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc)
+    raw_backfill.write_partition(store, "trades", "AAPL", DAY, real_trade)
+    raw_backfill.write_manifest_part(
+        store, "trades", [_manifest_row("AAPL", DAY.isoformat(), 1, fetched)], 1
+    )
+    config = _config(tmp_path, budget_bytes=10**12)
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    _pin_resume_today(monkeypatch, DAY + dt.timedelta(days=2))  # recent, but rows>0 -> done
+    written, _bytes = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [DAY], chunk_days=5)
+    assert written == 0  # real recent entry is skipped
 
 
 def test_rank_by_dollar_volume_reads_bars(tmp_path) -> None:

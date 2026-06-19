@@ -56,6 +56,7 @@ from quantlib.data.raw_store import (
     manifest_path,
     partition_dir,
     reconcile_manifest_from_disk,
+    resumable_done_keys,
     write_manifest_part,
     write_partition,
 )
@@ -115,6 +116,12 @@ RANK_SAMPLE_DAYS = (
 RANK_WORKERS = (
     16  # concurrent symbol reads when ranking (IO-bound over many tiny parquet files)
 )
+# Alpaca historical trades/quotes settle symbol-by-symbol over hours / up to ~T+1, so a fetch issued before
+# a symbol's tape lands records an EMPTY (0-row) "done" entry. Within this many days of the trading date, an
+# empty manifest entry is treated as NOT-done so the resume RE-FETCHES it until real rows land; past the
+# window an empty entry is accepted as a genuine no-data day (illiquid/delisted) and never re-fetched. Sized
+# to comfortably cover the settle lag (a few trading days) without churning the deep history.
+SETTLE_WINDOW_DAYS = 5
 
 
 @dataclass
@@ -197,6 +204,11 @@ def universe_symbols(client: TradingClient) -> list[str]:
     return sorted(set(symbols) | set(MARKET_TICKERS))
 
 
+def _utc_today() -> dt.date:
+    """Today's UTC date — the reference for the rows-aware settle window. A seam for deterministic tests."""
+    return dt.datetime.now(dt.timezone.utc).date()
+
+
 class _TierProgress:
     """Thread-safe shared state for a tier's concurrent fetch.
 
@@ -208,13 +220,23 @@ class _TierProgress:
     fetch + parquet write run OUTSIDE the lock (the slow IO) so threads make real concurrent progress.
     """
 
-    def __init__(self, store: str, tier: str, budget_bytes: int) -> None:
+    def __init__(
+        self,
+        store: str,
+        tier: str,
+        budget_bytes: int,
+        today: dt.date | None = None,
+        settle_window_days: int = SETTLE_WINDOW_DAYS,
+    ) -> None:
         self.store = store
         self.tier = tier
         self.budget_bytes = budget_bytes
         self.lock = threading.Lock()
         manifest = load_manifest(store, tier)
-        self.done = done_keys(manifest)
+        # Resume-skip is ROWS-AWARE: a recent EMPTY (premature/unsettled) entry is excluded so it re-fetches;
+        # real rows and aged-out empties are skipped (see resumable_done_keys). Plain presence (done_keys)
+        # would permanently strand a 0-row entry from a fetch that beat Alpaca's symbol-by-symbol settle.
+        self.done = resumable_done_keys(manifest, today or _utc_today(), settle_window_days)
         self.written = 0
         self.bytes_written = 0
         self.budget_used = int(manifest["bytes"].sum()) if manifest.height else 0
