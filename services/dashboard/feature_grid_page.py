@@ -94,6 +94,16 @@ FEATURE_GRID_HTML = """<!doctype html>
     border-radius:4px; vertical-align:middle; overflow:hidden; }
   .bar > span { display:block; height:100%; background:var(--amber); }
   .closebtn { float:right; cursor:pointer; color:var(--muted); font-size:13px; }
+  .symbtn { cursor:pointer; background:#0f1115; color:#58a6ff; border:1px solid var(--border);
+    border-radius:6px; padding:4px 9px; font-size:12px; margin-top:8px; }
+  .symbtn:hover { background:#1d212a; }
+  .symcov { margin-top:10px; border-top:1px solid var(--border); padding-top:10px; }
+  .symcov .stat { display:inline-block; background:#0f1115; border:1px solid var(--border);
+    border-radius:6px; padding:4px 9px; margin-right:8px; font-size:12px; }
+  .symcov .stat b { font-variant-numeric:tabular-nums; }
+  .symlist { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--muted);
+    max-height:120px; overflow:auto; background:#0f1115; border:1px solid var(--border);
+    border-radius:6px; padding:6px 8px; margin-top:6px; word-break:break-all; line-height:1.6; }
 </style></head>
 <body>
 <header><h1>Feature Coverage &amp; Trust &nbsp;
@@ -262,11 +272,37 @@ async function openDetail(group){
       " ("+d.stream_dates.length+"d) · backfill "+(d.backfill_first||"—")+"→"+
       (d.backfill_last||"—")+" ("+d.backfill_dates.length+"d)</div>"+
     (gaps.length?"<div class='muted' style='margin-top:4px'>"+gaps.join(" · ")+"</div>":"")+
+    "<button class='symbtn' onclick=\\"loadSymbols('"+d.group+"')\\">▸ ticker representation "+
+    "(which symbols are live vs backfill-only)</button>"+
+    "<div id='symcovhost'></div>"+
     "<table class='feat'><thead><tr><th>feature (hover=description)</th><th>trust</th>"+
     "<th>trajectory to trusted</th><th class='num'>clean match-rate</th><th>last validated</th><th>layer</th>"+
     "</tr></thead><tbody>"+rows+"</tbody></table></div>";
   document.getElementById("detailhost").scrollIntoView({behavior:"smooth", block:"nearest"});
 }
+
+async function loadSymbols(group){
+  const host = document.getElementById("symcovhost");
+  if(!host) return;
+  host.innerHTML = "<div class='symcov muted'>loading symbol coverage…</div>";
+  const r = await fetch("/api/feature-grid/"+encodeURIComponent(group)+"/symbols");
+  const s = await r.json();
+  const list = (arr) => arr.length ? "<div class='symlist'>"+arr.join(" ")+"</div>"
+    : "<div class='muted' style='margin-top:4px'>none</div>";
+  host.innerHTML =
+    "<div class='symcov'>"+
+    "<div class='stat'><b>"+s.stream_coverage_pct+"%</b> live stream coverage</div>"+
+    "<div class='stat'><b>"+s.n_stream+"</b> stream <span class='muted'>("+(s.stream_date||"—")+")</span></div>"+
+    "<div class='stat'><b>"+s.n_backfill+"</b> backfill <span class='muted'>("+(s.backfill_date||"—")+")</span></div>"+
+    "<div class='stat'><b>"+s.n_both+"</b> both</div>"+
+    "<div class='stat'><b>"+s.n_backfill_only+"</b> under-represented LIVE</div>"+
+    "<div class='muted' style='margin-top:8px'>backfill-only — present in the (full-universe) backfill agg "+
+      "but NOT captured on the live stream today ("+s.n_backfill_only+"):</div>"+list(s.backfill_only)+
+    (s.n_stream_only? "<div class='muted' style='margin-top:8px'>stream-only — live but absent from "+
+      "today's backfill ("+s.n_stream_only+"):</div>"+list(s.stream_only) : "")+
+    "</div>";
+}
+
 function closeDetail(){ OPENGROUP=null; document.getElementById("detailhost").innerHTML=""; }
 
 document.getElementById("refresh").onclick=()=>loadGrid(true);

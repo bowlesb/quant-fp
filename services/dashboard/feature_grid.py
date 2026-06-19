@@ -140,18 +140,23 @@ def _sample_files(files: list[Path], cap: int) -> list[Path]:
     return [files[i] for i in indices]
 
 
-def _read_n_symbols(root: str, group: str, version: str, source: str, date_iso: str) -> int:
-    """Distinct symbols in a (group, version, source, date) partition. Reads only the ``symbol`` column,
-    from a bounded evenly-spaced SAMPLE of the partition's files (the symbol universe is ~constant across a
-    day's per-minute stream files), so a 7k-file stream partition costs ~12 reads, not 7k."""
+def _read_symbols(root: str, group: str, version: str, source: str, date_iso: str) -> set[str]:
+    """The distinct symbol SET in a (group, version, source, date) partition. Reads only the ``symbol``
+    column, from a bounded evenly-spaced SAMPLE of the partition's files (the symbol universe is ~constant
+    across a day's per-minute stream files), so a 7k-file stream partition costs ~12 reads, not 7k."""
     partition = _partition_dir(root, group, version, source, date_iso)
     files = sorted(partition.glob("data*.parquet"))
     if not files:
-        return 0
+        return set()
     symbols: set[str] = set()
     for path in _sample_files(files, MAX_FILES_PER_PARTITION):
         symbols.update(pl.read_parquet(path, columns=["symbol"])["symbol"].to_list())
-    return len(symbols)
+    return symbols
+
+
+def _read_n_symbols(root: str, group: str, version: str, source: str, date_iso: str) -> int:
+    """Distinct-symbol COUNT in a (group, version, source, date) partition (the set's size)."""
+    return len(_read_symbols(root, group, version, source, date_iso))
 
 
 def _group_version(group: str) -> str | None:
@@ -521,6 +526,66 @@ def build_group_detail(group: str, root: str = STORE_ROOT) -> dict[str, object]:
     }
 
 
+def build_symbol_coverage(group: str, root: str = STORE_ROOT) -> dict[str, object]:
+    """Per-SYMBOL coverage for one group on its latest store date: which tickers the live STREAM actually
+    captured vs which exist only in BACKFILL. The group grid surfaces a single peak symbol COUNT, which hides
+    *which* names are thin live — but the live stream subscribes a far smaller universe than backfill agg
+    covers (e.g. an order-flow group can read ~1300 backfill symbols yet only ~50 on the live tick stream).
+    This is the ticker-representation surface: ``backfill_only`` is exactly the set under-represented LIVE.
+
+    The date is each source's OWN latest partition (stream and backfill backfill at different cadences), so a
+    stream lagging a day still compares its freshest captured universe, not an empty newer date. Symbols are
+    read with the same bounded per-partition sampling the grid uses, so this is one cheap pass per source.
+    """
+    if group not in _catalog_by_group():
+        raise KeyError(group)
+    version = _group_version(group)
+    if version is None:
+        raise KeyError(group)
+
+    stream_date = _latest_partition_date(root, group, version, "stream")
+    backfill_date = _latest_partition_date(root, group, version, "backfill")
+    stream_symbols = _read_symbols(root, group, version, "stream", stream_date) if stream_date else set()
+    backfill_symbols = (
+        _read_symbols(root, group, version, "backfill", backfill_date) if backfill_date else set()
+    )
+
+    both = stream_symbols & backfill_symbols
+    backfill_only = backfill_symbols - stream_symbols
+    stream_only = stream_symbols - backfill_symbols
+    union = stream_symbols | backfill_symbols
+    stream_pct = round(100.0 * len(stream_symbols) / len(union), 1) if union else 0.0
+
+    return {
+        "group": group,
+        "version": version,
+        "stream_date": stream_date,
+        "backfill_date": backfill_date,
+        "n_stream": len(stream_symbols),
+        "n_backfill": len(backfill_symbols),
+        "n_both": len(both),
+        # backfill_only = present in the (full-universe) backfill agg but NOT captured live — the
+        # under-represented LIVE tickers, the headline of this surface.
+        "n_backfill_only": len(backfill_only),
+        "n_stream_only": len(stream_only),
+        # of every symbol this group has on either side today, what fraction the live stream captured.
+        "stream_coverage_pct": stream_pct,
+        "both": sorted(both),
+        "backfill_only": sorted(backfill_only),
+        "stream_only": sorted(stream_only),
+    }
+
+
+def _latest_partition_date(root: str, group: str, version: str, source: str) -> str | None:
+    """The most recent ``date=`` partition (ISO string) for one (group, source), or None if the source has
+    no partitions. A bare directory-name scan — no parquet bodies read."""
+    base = Path(root) / f"group={group}" / f"v={version}" / f"source={source}"
+    if not base.exists():
+        return None
+    dates = sorted(d.name.removeprefix("date=") for d in base.glob("date=*"))
+    return dates[-1] if dates else None
+
+
 class GridCache:
     """Tiny TTL cache so a page load / refresh re-aggregates at most every ``ttl`` seconds. The grid read is
     1-2s on the live store; a 60s TTL makes a busy refresh instant while staying fresh enough for a coverage
@@ -531,6 +596,7 @@ class GridCache:
         self._grid: dict[str, object] | None = None
         self._grid_at: float = 0.0
         self._details: dict[str, tuple[float, dict[str, object]]] = {}
+        self._symbols: dict[str, tuple[float, dict[str, object]]] = {}
 
     def grid(self, root: str, force: bool = False) -> dict[str, object]:
         now = time.monotonic()
@@ -547,6 +613,15 @@ class GridCache:
         detail = build_group_detail(group, root)
         self._details[group] = (now, detail)
         return detail
+
+    def symbols(self, group: str, root: str, force: bool = False) -> dict[str, object]:
+        now = time.monotonic()
+        cached = self._symbols.get(group)
+        if not force and cached is not None and (now - cached[0]) <= self.ttl:
+            return cached[1]
+        coverage = build_symbol_coverage(group, root)
+        self._symbols[group] = (now, coverage)
+        return coverage
 
 
 CACHE = GridCache()
