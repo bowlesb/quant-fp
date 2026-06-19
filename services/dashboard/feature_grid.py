@@ -7,9 +7,14 @@ JOINS the three that already exist:
   * STORE partitions  — ``group=<g>/v=<ver>/source=<stream|backfill>/date=<d>/`` on disk, via
     ``quantlib.features.feature_data`` / ``quantlib.features.store`` (which dates a group has data for,
     stream vs backfill, and the per-date symbol counts).
-  * TRUST state       — the validation agent's ``feature_trust.lifecycle_state`` via
-    ``quantlib.features.trusted_list`` (UNGRADED / PENDING / VALIDATED / DIVERGENT / RETIRED), never
-    re-derived here.
+  * TRUST state       — TWO distinct surfaces, kept separate on purpose, neither re-derived here:
+      - the BINARY-trust GATE ``feature_trust.trust_state='TRUSTED'`` (docs/TRUST_REDESIGN.md, via
+        ``quantlib.features.trusted_list``) — the consumable predicate downstream agents gate on, and the
+        TRUSTED side of the trust-frontier panel (``_read_trusted_names``).
+      - the legacy ``feature_trust.lifecycle_state`` DIAGNOSTIC (UNGRADED / PENDING / VALIDATED / DIVERGENT
+        / RETIRED) — the richer per-feature grade the grid BADGE renders for legibility (the binary gate
+        collapses these five into trusted/not). It is NOT the gate; it is still written each sweep but lags
+        the binary grant, so a feature can be binary-TRUSTED while its lifecycle badge still reads PENDING.
   * CATALOG           — ``REGISTRY.catalog()``: feature -> group, version, description, layer.
 
 Two orthogonal dimensions are kept SEPARATE per the design:
@@ -71,14 +76,14 @@ PERIODS: list[tuple[str, str, int | None]] = [
     ("all", "All history", None),
 ]
 
-# Trust-FRONTIER states (a derived view over lifecycle_state x open-defect, NOT a new source of truth):
-#   TRUSTED  — lifecycle_state == VALIDATED (parity held MIN_CLEAN_DAYS; already earned).
+# Trust-FRONTIER states (a derived view over the binary-trust gate x open-defect, NOT a new source of truth):
+#   TRUSTED  — feature_trust.trust_state == 'TRUSTED' (deterministic-by-construction or stream==backfill on a
+#              clean day; already earned, docs/TRUST_REDESIGN.md).
 #   BLOCKED  — has an OPEN feature_parity_defect row: a parity failure the agent has NOT yet cleared. These
 #              do NOT advance on the next sweep without a fix (today: the FP_TICK_SYMBOLS tick-coverage tail).
-#   ELIGIBLE — not yet trusted AND no open defect: PENDING/UNGRADED features accruing clean days, PLUS the
-#              DIVERGENT features whose defect was cleared (the lifecycle_state lags until the next clean
-#              sweep re-grades it). This is the frontier that becomes TRUSTED on the next clean settled sweep
-#              — the legibility the flat lifecycle_state badge hides.
+#   ELIGIBLE — not yet trusted AND no open defect: features accruing clean days, PLUS those whose defect was
+#              cleared (the lifecycle_state lags until the next clean sweep re-grades). This is the frontier
+#              that becomes TRUSTED on the next clean settled sweep — the legibility the flat badge hides.
 FRONTIER_TRUSTED = "TRUSTED"
 FRONTIER_ELIGIBLE = "ELIGIBLE"
 FRONTIER_BLOCKED = "BLOCKED"

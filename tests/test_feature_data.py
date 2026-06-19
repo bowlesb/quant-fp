@@ -33,10 +33,18 @@ def test_trust_by_feature_reuses_trusted_list(monkeypatch: pytest.MonkeyPatch) -
         fd,
         "trusted_features",
         lambda: [
-            {"feature": "f1", "clean_days": 3, "clean_value_rate": 0.9995},
-            {"feature": "f2", "clean_days": 2, "clean_value_rate": 0.999},
+            {
+                "feature": "f1",
+                "trust_reason": "parity_1day",
+                "trust_value_rate": 0.9995,
+            },
+            {
+                "feature": "f2",
+                "trust_reason": "deterministic",
+                "trust_value_rate": None,
+            },
         ],
     )
     trust = fd.trust_by_feature()
     assert set(trust) == {"f1", "f2"}
-    assert trust["f1"]["clean_days"] == 3
+    assert trust["f1"]["trust_reason"] == "parity_1day"
