@@ -19,6 +19,7 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `GET http://<host>:8088/api/feature-grid/{group}` | per-feature detail for one group |
 | `GET http://<host>:8088/api/feature-grid/{group}/symbols` | per-SYMBOL coverage: which tickers are live (stream) vs backfill-only (under-represented LIVE) |
 | `GET http://<host>:8088/api/feature-grid/thin-live-symbols` | cross-group roll-up: which SYMBOLS are backfill-only (under-represented LIVE) across the most groups (`?limit=N`) |
+| `GET http://<host>:8088/api/feature-grid/timeline` | (group × recent-day × source) presence grid + per-group history-depth & live-horizon (`?days=N`) |
 
 All API endpoints accept `?refresh=1` to bypass the 60s TTL cache and re-aggregate. A cold build over the
 live store is ~4s; cached responses are ~1ms. There is a **↻ refresh** button on the page.
@@ -182,6 +183,41 @@ groups, then fewest groups carrying it live, then name); `?limit=N` caps the ret
   ],
   "groups": [                       // per-group breakdown (live first, then most under-rep)
     {"group": "trade_flow", "live": true, "n_stream": 57, "n_backfill": 1268, "n_under": 1211}
+  ]
+}
+```
+
+### `GET /api/feature-grid/timeline`
+
+The **time/depth** legibility view. The grid collapses every multi-day row onto a single coverage %, and the
+per-group detail lists raw date arrays — neither answers, at a glance, "on each of the last N days did stream
+and/or backfill land for this group, and how far back does each source's history reach". This does:
+
+* **Presence grid** — `days` columns (most-recent first, ending at the latest store date). Each `(group, day)`
+  cell carries the stream/backfill symbol counts and a `provenance` class: `both`, `stream_only` (not yet
+  parity-checkable), `backfill_only` (settled, no live capture that day), `absent` (neither — e.g. a weekend).
+  So live-vs-backfill provenance per `(group, day)` reads straight off the grid.
+* **Depth** — per group, `backfill_earliest` + `backfill_span_days` (how far back history reaches) and
+  `stream_horizon_days` (how many recent **weekdays** the live stream captured **unbroken** from the anchor,
+  skipping weekends) — history depth and live horizon side by side.
+
+`?days=N` sets the window (default 21, capped at `TIMELINE_MAX_DAYS`). Read-side only: reuses the same
+one-pass per-date symbol read the grid already pays for, so it is no extra store I/O.
+
+```jsonc
+{
+  "generated_at": "2026-06-18T...Z", "store_root": "/store",
+  "anchor_date": "2026-06-18", "earliest_date": "2024-01-02",
+  "days": 21,
+  "dates": ["2026-06-18", "2026-06-17", "..."],   // most-recent first
+  "groups": [
+    {"group": "calendar", "version": "1.0.0", "layer": "B", "n_features": 9,
+     "backfill_earliest": "2024-01-02", "backfill_latest": "2026-06-18", "backfill_span_days": 899,
+     "stream_earliest": "2026-06-15", "stream_latest": "2026-06-18", "stream_horizon_days": 4,
+     "days": [
+       {"date": "2026-06-18", "stream": 1054, "backfill": 1268, "provenance": "both"},
+       {"date": "2026-06-14", "stream": 0, "backfill": 0, "provenance": "absent"}      // weekend
+     ]}
   ]
 }
 ```

@@ -104,6 +104,21 @@ FEATURE_GRID_HTML = """<!doctype html>
   .symlist { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--muted);
     max-height:120px; overflow:auto; background:#0f1115; border:1px solid var(--border);
     border-radius:6px; padding:6px 8px; margin-top:6px; word-break:break-all; line-height:1.6; }
+  /* (group x recent-day x source) presence grid: one tiny square per day, split stream(top)/backfill(bottom) */
+  table.tl { border-collapse:separate; border-spacing:0; font-size:11px; margin-top:8px; }
+  table.tl th, table.tl td { padding:0; }
+  table.tl thead th { position:sticky; top:0; background:var(--panel); z-index:2; padding:5px 4px;
+    border-bottom:1px solid var(--border); text-align:center; white-space:nowrap; font-weight:600; }
+  table.tl thead th.wknd { color:var(--muted); }
+  table.tl tbody th { position:sticky; left:0; background:var(--panel); z-index:1; padding:4px 9px 4px 4px;
+    border-bottom:1px solid var(--border); text-align:left; white-space:nowrap; font-weight:600; }
+  table.tl tbody th .depth { color:var(--muted); font-weight:400; font-size:10px; }
+  .tlc { width:22px; height:20px; border-bottom:1px solid var(--border); border-left:1px solid var(--border); }
+  .tlc .pp { width:100%; height:100%; display:flex; flex-direction:column; }
+  .tlc .pp i { flex:1; display:block; }
+  /* upper half = stream, lower half = backfill; bright=present, dark=absent (Okabe-Ito blue/orange split) */
+  .tlc .pp i.s.on { background:#58a6ff; } .tlc .pp i.s.off { background:#1b2230; }
+  .tlc .pp i.b.on { background:#e08a2b; } .tlc .pp i.b.off { background:#241c12; }
 </style></head>
 <body>
 <header><h1>Feature Coverage &amp; Trust &nbsp;
@@ -140,9 +155,11 @@ FEATURE_GRID_HTML = """<!doctype html>
       <option value="backfill_pct">show: backfill %</option>
     </select>
     <button id="thinbtn">▸ thinnest live tickers</button>
+    <button id="tlbtn">▸ depth &amp; recent-day timeline</button>
     <button id="refresh">↻ refresh</button>
   </div>
   <div id="thinhost"></div>
+  <div id="tlhost"></div>
   <div class="gridscroll"><table class="grid" id="grid"></table></div>
   <div id="detailhost"></div>
 </div>
@@ -334,8 +351,52 @@ async function toggleThin(force){
     "</tbody></table></div>";
 }
 
+const WEEKDAY=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+let TLOPEN=false;
+function isWeekend(iso){ const wd=new Date(iso+"T00:00:00").getDay(); return wd===0||wd===6; }
+function tlCellHtml(c){
+  const son = c.stream>0?"on":"off", bon = c.backfill>0?"on":"off";
+  const tip = c.date+" · "+c.provenance+" · stream "+c.stream+" / backfill "+c.backfill;
+  return "<td class='tlc' title=\\""+tip+"\\"><div class='pp'>"+
+    "<i class='s "+son+"'></i><i class='b "+bon+"'></i></div></td>";
+}
+async function toggleTimeline(force){
+  const host = document.getElementById("tlhost");
+  if(TLOPEN && !force){ TLOPEN=false; host.innerHTML=""; return; }
+  TLOPEN=true;
+  host.innerHTML = "<div class='symcov muted'>loading depth &amp; timeline…</div>";
+  const r = await fetch("/api/feature-grid/timeline" + (force?"?refresh=1":""));
+  const t = await r.json();
+  let head = "<thead><tr><th>group <span class='muted'>· backfill depth · live horizon</span></th>";
+  for(const d of t.dates){
+    const wknd = isWeekend(d) ? " wknd" : "";
+    head += "<th class='"+wknd.trim()+"' title='"+d+"'>"+WEEKDAY[new Date(d+'T00:00:00').getDay()]+
+      "<br><span class='muted'>"+d.slice(5)+"</span></th>";
+  }
+  head += "</tr></thead>";
+  let body = "<tbody>";
+  for(const g of t.groups){
+    const depth = g.backfill_earliest ?
+      (g.backfill_earliest+" → "+g.backfill_latest+" ("+g.backfill_span_days+"d)") : "no backfill";
+    body += "<tr><th title='v"+g.version+" · "+g.n_features+"f'>"+g.group+
+      "<br><span class='depth'>bf "+depth+" · live horizon "+g.stream_horizon_days+"d</span></th>";
+    for(const c of g.days){ body += tlCellHtml(c); }
+    body += "</tr>";
+  }
+  body += "</tbody>";
+  host.innerHTML =
+    "<div class='symcov'>"+
+    "<span class='closebtn' onclick='toggleTimeline(false)'>✕ close</span>"+
+    "<div class='muted' style='margin-bottom:6px'>per (group × day) source presence — upper bar = live "+
+      "STREAM, lower = BACKFILL (blue/orange on = landed). Group label shows backfill history DEPTH "+
+      "(earliest→latest span) and live HORIZON (recent weekdays the stream captured unbroken). "+
+      "Anchor "+(t.anchor_date||"—")+", last "+t.days+" days.</div>"+
+    "<div class='gridscroll'><table class='tl'>"+head+body+"</table></div></div>";
+}
+document.getElementById("tlbtn").onclick=()=>toggleTimeline(false);
+
 document.getElementById("thinbtn").onclick=()=>toggleThin(false);
-document.getElementById("refresh").onclick=()=>{ loadGrid(true); if(THINOPEN) toggleThin(true); };
+document.getElementById("refresh").onclick=()=>{ loadGrid(true); if(THINOPEN) toggleThin(true); if(TLOPEN) toggleTimeline(true); };
 document.getElementById("metric").onchange=e=>{ METRIC=e.target.value; renderGrid(); };
 document.getElementById("sortby").onchange=e=>{ SORT=e.target.value; renderGrid(); };
 document.getElementById("trustfilter").onchange=e=>{ TRUSTFILTER=e.target.value; renderGrid(); if(OPENGROUP) openDetail(OPENGROUP); };

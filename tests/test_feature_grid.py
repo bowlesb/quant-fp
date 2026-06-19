@@ -278,3 +278,82 @@ def test_build_thin_live_symbols_limit_caps_list(tmp_path: Path, fake_catalog: N
     assert rollup["n_thin_symbols"] == 3
     assert len(rollup["symbols"]) == 2
     assert rollup["limit"] == 2
+
+
+def test_day_provenance_classifies_all_four() -> None:
+    assert fg._day_provenance(5, 5) == "both"
+    assert fg._day_provenance(5, 0) == "stream_only"
+    assert fg._day_provenance(0, 5) == "backfill_only"
+    assert fg._day_provenance(0, 0) == "absent"
+
+
+def test_stream_horizon_skips_weekends_and_stops_at_gap() -> None:
+    # 2026-06-18 is a Thursday. A Mon(15)-Thu(18) capture streak reads as 4 weekday horizon.
+    anchor = dt.date(2026, 6, 18)
+    streak = ["2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18"]
+    assert fg._stream_horizon_days(streak, anchor) == 4
+    # A weekday gap stops the walk: missing Wed(17) → only Thu(18) counts unbroken from the anchor.
+    with_gap = ["2026-06-15", "2026-06-16", "2026-06-18"]
+    assert fg._stream_horizon_days(with_gap, anchor) == 1
+    # No capture on the anchor weekday → horizon 0.
+    assert fg._stream_horizon_days(["2026-06-15"], anchor) == 0
+    # A Fri-anchor streak crossing the weekend back to the prior Fri still reads its true weekday depth.
+    fri = dt.date(2026, 6, 19)
+    across = ["2026-06-12", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19"]
+    assert fg._stream_horizon_days(across, fri) == 6
+
+
+def test_build_coverage_timeline_presence_and_depth(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    # groupX: deep backfill history (06-10 → 06-18) + a 2-day live stream streak ending at the anchor.
+    _write_partition(root, "groupX", "backfill", "2026-06-10", ["AAA", "BBB"])
+    _write_partition(root, "groupX", "backfill", "2026-06-17", ["AAA", "BBB", "CCC"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB", "CCC"])
+    _write_partition(root, "groupX", "stream", "2026-06-17", ["AAA", "BBB"])
+    _write_partition(root, "groupX", "stream", "2026-06-18", ["AAA"])
+    # groupY: backfill-only on the anchor day (no live stream at all).
+    _write_partition(root, "groupY", "backfill", "2026-06-18", ["AAA"])
+
+    view = fg.build_coverage_timeline(str(root), days=10)
+    assert view["anchor_date"] == "2026-06-18"
+    assert view["days"] == 10
+    assert view["dates"][0] == "2026-06-18"  # most-recent first
+    assert len(view["dates"]) == 10
+
+    by_group = {g["group"]: g for g in view["groups"]}
+    gx = by_group["groupX"]
+    # History depth: 06-10 → 06-18 inclusive = 9 calendar days.
+    assert gx["backfill_earliest"] == "2026-06-10"
+    assert gx["backfill_latest"] == "2026-06-18"
+    assert gx["backfill_span_days"] == 9
+    # Live horizon: Wed 06-17 + Thu 06-18 captured unbroken from the anchor = 2 weekdays.
+    assert gx["stream_horizon_days"] == 2
+
+    gx_days = {d["date"]: d for d in gx["days"]}
+    # 06-18: stream(1) + backfill(3) both present.
+    assert gx_days["2026-06-18"]["provenance"] == "both"
+    assert gx_days["2026-06-18"]["stream"] == 1 and gx_days["2026-06-18"]["backfill"] == 3
+    # 06-10: backfill only (deep history, no live capture that day).
+    assert gx_days["2026-06-10"]["provenance"] == "backfill_only"
+    # 06-13 (a Saturday inside the window): neither source -> absent.
+    assert gx_days["2026-06-13"]["provenance"] == "absent"
+
+    gy = by_group["groupY"]
+    assert gy["stream_horizon_days"] == 0  # never live
+    gy_days = {d["date"]: d for d in gy["days"]}
+    assert gy_days["2026-06-18"]["provenance"] == "backfill_only"
+
+
+def test_build_coverage_timeline_caps_days(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA"])
+    view = fg.build_coverage_timeline(str(root), days=10000)
+    assert view["days"] == fg.TIMELINE_MAX_DAYS
+    assert len(view["dates"]) == fg.TIMELINE_MAX_DAYS
+
+
+def test_build_coverage_timeline_empty_store(tmp_path: Path, fake_catalog: None) -> None:
+    view = fg.build_coverage_timeline(str(tmp_path / "empty"), days=5)
+    assert view["anchor_date"] is None
+    assert view["groups"] == []
+    assert view["dates"] == []
