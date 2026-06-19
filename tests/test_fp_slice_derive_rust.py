@@ -22,6 +22,7 @@ import polars as pl
 
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup
+from quantlib.features.groups.volume_leads_price import LAGS as VOLUME_LEADS_LAGS
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.slice_derive import lag_specs, rewrite_global
 
@@ -133,15 +134,20 @@ def test_rust_slice_derive_with_missing_prior_bar_hole() -> None:
     _assert_derive_equal(polars_row, rust_row, "hole")
 
 
-def test_lag_specs_only_positional_close_shifts() -> None:
-    """Structural guard: the only ``over('symbol')`` in the safe+aux+extra derive is a positional ``close``
-    shift (lags 1/2/3). If a new group adds another grouped op, ``lag_specs`` would surface it here — keeping
-    the Rust slice-derive's assumption (everything grouped is a plain-column shift) honest."""
+def test_lag_specs_only_positional_plain_column_shifts() -> None:
+    """Structural guard: every ``over('symbol')`` in the safe+aux+extra derive is a positional plain-column
+    shift — ``close`` lags 1/2/3 (price-return family) and ``volume`` lags (volume_leads_price). If a new group
+    adds a grouped op that is NOT a plain-column shift, ``lag_specs`` would surface it here — keeping the Rust
+    slice-derive's assumption (everything grouped is a plain-column shift) honest. The expected volume lags are
+    taken from the group's own ``LAGS`` so the guard tracks the feature instead of a hard-coded magic set."""
     stream = _stream(n_sym=3, n_min=8)
     engine = _engine(stream)
     lags, max_lag = lag_specs([*engine.safe_derived, *engine.stateful_aux, *engine.extra])
-    assert lags == {("close", 1), ("close", 2), ("close", 3)}, f"unexpected lag specs: {lags}"
-    assert max_lag == 3
+    expected = {("close", 1), ("close", 2), ("close", 3)} | {
+        ("volume", lag) for lag in VOLUME_LEADS_LAGS
+    }
+    assert lags == expected, f"unexpected lag specs: {lags}"
+    assert max_lag == max(lag for _, lag in expected)
     # rewrite_global must strip the over() (no Over node remains for the shifted column)
     for expr in engine.rust_safe_derived:
         serialized = expr.meta.serialize(format="json")
