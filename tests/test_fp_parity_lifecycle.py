@@ -240,6 +240,7 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
+    monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
 
@@ -317,6 +318,7 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
+    monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -371,6 +373,7 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
+    monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
@@ -411,6 +414,7 @@ def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> 
 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
+    monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
@@ -784,3 +788,56 @@ def test_assert_raw_present_refuses_stub_trades_below_floor(tmp_path) -> None:
     _write_raw_trade(str(tmp_path), MARKET_TICKERS[1], "2026-06-18", rows=2)  # stub
     with pytest.raises(ValueError, match="raw TRADES are empty/stub"):
         validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=True)
+
+
+def _settled_tail(raw_root: str, symbols: list[str], day: str, rate: float) -> None:
+    """Land settled raw BARS for the first ``rate`` fraction of ``symbols`` (the rest have NO backfill yet) —
+    emulates Alpaca's symbol-by-symbol historical fetch having reached only part of the illiquid tail."""
+    n_settled = int(round(len(symbols) * rate))
+    for symbol in symbols[:n_settled]:
+        _write_raw_bar(raw_root, symbol, day)
+
+
+def test_assert_tail_settled_refuses_partially_settled_universe(tmp_path) -> None:
+    """The 2026-06-18 mis-grade: SPY/QQQ settled (assert_raw_present passed) but the illiquid TAIL had not —
+    streamed thin names had NO backfill bars, so the sweep filed ~450 false stream>0/backfill=0 defects. The
+    tail probe samples the discovered universe and refuses when the backfill present-rate is below the floor."""
+    discovered = [f"T{i:04d}" for i in range(400)]
+    _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.50)  # half the tail not landed yet
+    with pytest.raises(ValueError, match="ILLIQUID TAIL has not settled"):
+        validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), discovered)
+
+
+def test_assert_tail_settled_passes_when_tail_landed(tmp_path) -> None:
+    """A fully settled day has landed raw bars for essentially every streamed symbol — the sample present-rate
+    clears the floor and the probe passes (tolerating the few percent of delisted/halted names with no raw)."""
+    discovered = [f"T{i:04d}" for i in range(400)]
+    _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.97)  # 97% landed (a couple no-raw names)
+    validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), discovered)
+
+
+def test_assert_tail_settled_rejects_stub_bars_in_tail(tmp_path) -> None:
+    """A few pre-session STUB bar rows are not a landed tape — a tail symbol below the bar floor counts as
+    unsettled, so a universe of stubs is refused just like an empty one."""
+    discovered = [f"T{i:04d}" for i in range(400)]
+    for symbol in discovered:
+        _write_raw_bar(str(tmp_path), symbol, "2026-06-18", rows=3)  # all stubs
+    with pytest.raises(ValueError, match="ILLIQUID TAIL has not settled"):
+        validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), discovered)
+
+
+def test_assert_tail_settled_noops_on_tiny_universe(tmp_path) -> None:
+    """A sandbox universe of just the market tickers has nothing beyond them to probe — the tail check is a
+    no-op there (assert_raw_present already certifies the pinned tickers); it must not raise."""
+    validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), list(MARKET_TICKERS))
+
+
+def test_tail_settle_sample_is_deterministic_and_excludes_market_tickers() -> None:
+    """The probe sample is day-seeded (idempotent across re-runs of the same day) and never includes the
+    pinned market tickers (they settle first and would bias the tail present-rate upward)."""
+    discovered = list(MARKET_TICKERS) + [f"T{i:04d}" for i in range(500)]
+    sample_a = validation_sweep._sample_universe(discovered, "2026-06-18", validation_sweep.TAIL_SETTLE_SAMPLE)
+    sample_b = validation_sweep._sample_universe(discovered, "2026-06-18", validation_sweep.TAIL_SETTLE_SAMPLE)
+    assert sample_a == sample_b
+    assert len(sample_a) == validation_sweep.TAIL_SETTLE_SAMPLE
+    assert not (set(sample_a) & set(MARKET_TICKERS))

@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import datetime as dt
+import random
 import sys
 from typing import Callable
 
@@ -154,6 +155,66 @@ def assert_raw_present(day: str, raw_root: str, with_ticks: bool) -> None:
                 f"(`ops/raw_backfill.sh daily`) and re-sweep, or run a bar-only sweep (--no-ticks) to grade "
                 f"just the bar/cross-sectional groups now."
             )
+
+
+# The pinned MARKET_TICKERS (SPY/QQQ) are the FIRST symbols Alpaca's symbol-by-symbol historical fetch
+# settles — they pass ``assert_raw_present`` while the ILLIQUID TAIL is still landing hours later. That tail
+# gap is the 2026-06-18 footgun: SPY/QQQ raw was full (gate passed) but ~450 thin names had streamed bars and
+# NO backfill bars yet, so the sweep graded them stream>0/backfill=0 and filed ~450 false DIVERGENT defects.
+# We additionally probe a RANDOM sample of the discovered stream universe and require nearly all of them to
+# have landed real backfill bars; on a settled day Alpaca has fetched essentially every streamed symbol, so a
+# sample present-rate below the floor means the universe is only PARTIALLY settled and must not be graded yet.
+TAIL_SETTLE_SAMPLE = 200  # symbols sampled from the discovered universe to probe backfill landing (bounded reads)
+# On a fully settled day Alpaca historical has fetched essentially every streamed symbol; the few percent that
+# legitimately have no raw bars are delisted/halted names that never produce backfill on ANY day, so the floor
+# sits below 100% to tolerate them while still catching the gross tail-gap of a half-acquired day (where a large
+# fraction of the sample has no backfill yet). Empirically a settled day samples ~98%+; the 06-18 partial day
+# would have sampled far below this as the illiquid tail had not landed.
+MIN_TAIL_SETTLE_RATE = 0.90
+# A symbol counts as backfill-settled only if its raw bars clear the same stub floor the market tickers use —
+# a handful of pre-session placeholder rows is not a landed tape (mirrors MIN_MARKET_TICKER_BARS).
+MIN_TAIL_SYMBOL_BARS = MIN_MARKET_TICKER_BARS
+
+
+def _sample_universe(symbols: list[str], day: str, sample_size: int) -> list[str]:
+    """A deterministic (day-seeded) random sample of ``symbols`` — same day always probes the same set, so the
+    settle gate is idempotent across re-runs. The market tickers are excluded (they are probed separately and
+    settle first, so including them would bias the tail-settle rate upward)."""
+    candidates = [symbol for symbol in symbols if symbol not in set(MARKET_TICKERS)]
+    if len(candidates) <= sample_size:
+        return candidates
+    rng = random.Random(day)
+    return rng.sample(candidates, sample_size)
+
+
+def assert_tail_settled(day: str, raw_root: str, discovered: list[str]) -> None:
+    """Refuse to grade a day whose ILLIQUID TAIL has not finished landing in ``/store/raw`` yet.
+
+    ``assert_raw_present`` only probes the pinned market tickers (SPY/QQQ), which settle FIRST in Alpaca's
+    symbol-by-symbol historical fetch — they pass while the thin tail of the universe is still arriving hours
+    later. On such a partially-settled day the streamed thin names have rows live but NO backfill side yet, so
+    the sweep grades them stream>0/backfill=0 and manufactures a wall of false DIVERGENT defects (the 2026-06-18
+    ~450-defect mis-grade). This guard samples the discovered stream universe and requires nearly all sampled
+    symbols to have landed real backfill bars (>= the stub floor); a present-rate below ``MIN_TAIL_SETTLE_RATE``
+    means the universe is only PARTIALLY settled and the day must not be graded until its raw backfill completes.
+    """
+    sample = _sample_universe(discovered, day, TAIL_SETTLE_SAMPLE)
+    if not sample:
+        return  # nothing beyond the market tickers to probe (tiny sandbox universe) — assert_raw_present suffices
+    bar_counts = _per_ticker_counts(load_raw_minute_agg(raw_root, day, sample), sample)
+    settled = [symbol for symbol, count in bar_counts.items() if count >= MIN_TAIL_SYMBOL_BARS]
+    settle_rate = len(settled) / len(sample)
+    if settle_rate < MIN_TAIL_SETTLE_RATE:
+        missing = sorted(symbol for symbol, count in bar_counts.items() if count < MIN_TAIL_SYMBOL_BARS)
+        raise ValueError(
+            f"refusing to sweep {day}: only {len(settled)}/{len(sample)} sampled stream symbols "
+            f"({settle_rate:.1%}) have landed raw BARS (need >= {MIN_TAIL_SETTLE_RATE:.0%}) under "
+            f"{raw_root}/raw/bars — the ILLIQUID TAIL has not settled (Alpaca historical lands symbol-by-symbol, "
+            f"the thin names hours after the liquid ones; grading now would file false DIVERGENT defects for "
+            f"streamed names whose backfill side has not arrived). Acquire the full universe "
+            f"(`ops/raw_backfill.sh daily` or DAY={day}) and re-sweep once settled. "
+            f"Unsettled examples: {missing[:10]}"
+        )
 
 
 def cross_sectional_groups() -> list[str]:
@@ -313,6 +374,12 @@ def sweep_day(
     assert_raw_present(day, raw_root, with_ticks)
     full_materialize = materialize_from_raw_full if with_ticks else materialize_from_raw
     discovered = store.stream_symbols_on(feature_root, day)
+    # The pinned-ticker probe (assert_raw_present) only certifies SPY/QQQ, which settle first; the illiquid
+    # tail of the FULL discovered universe may still be landing. Probe it on the full set (before the sandbox
+    # cap) so a partially-settled day can't file false stream>0/backfill=0 defects. A max_symbols evidence run
+    # deliberately scopes down to a subset, so its tail-settle rate is not the universe's — skip the probe there.
+    if max_symbols is None:
+        assert_tail_settled(day, raw_root, discovered)
     if max_symbols is not None:
         discovered = discovered[:max_symbols]
     if not discovered:
