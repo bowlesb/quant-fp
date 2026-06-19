@@ -36,7 +36,15 @@ def compact_partition(partition: Path) -> int:
     files = sorted(partition.glob("data*.parquet"))
     if not files or (len(files) == 1 and files[0].name == COMPACTED_NAME):
         return 0
-    merged = pl.read_parquet(files).unique(subset=list(KEY_COLUMNS), keep="last").sort(list(KEY_COLUMNS))
+    # missing_columns="insert" reconciles heterogeneous schemas across a partition's files: a
+    # fragmented-restart session can leave a narrower per-minute file (a group emitting a subset of its
+    # features in one window, the full set in another). The columns union to the superset, the absent
+    # feature read as null — exactly as a globbing reader already unions these files today.
+    merged = (
+        pl.read_parquet(files, missing_columns="insert")
+        .unique(subset=list(KEY_COLUMNS), keep="last")
+        .sort(list(KEY_COLUMNS))
+    )
     tmp = partition / f".tmp-compact.{os.getpid()}"
     merged.write_parquet(tmp, compression="zstd", compression_level=BATCH_ZSTD_LEVEL)
     os.replace(tmp, partition / COMPACTED_NAME)  # authoritative compacted file in place first (crash-safe)
