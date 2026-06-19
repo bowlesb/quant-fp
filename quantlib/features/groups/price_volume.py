@@ -24,18 +24,19 @@ WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
 @register
 class PriceVolumeGroup(ReductionGroup):
     name = "price_volume"
-    version = "1.1.0"
+    # 1.2.0: n==2 perfect-fit guard makes pv_correlation exactly sign(cov) at the b==2 corner.
+    version = "1.2.0"
     owner = "modeller"
     type = FeatureType.PRICE_VOLUME
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "high", "low", "close", "volume")),)
-    # pv_correlation is a Pearson corr (cov / √(var_x·var_y)) of one-minute return against RAW share volume
-    # (~1e3–1e4). The covariance/variance are differences of large near-equal sums; the incremental running
-    # sums round differently from the batch fresh sums by ~1e-8 absolute, which at a near-perfect-fit corr
-    # (==1.0 over a 3-minute window) crosses the parity self-check breach ratio. Keep the batch fresh-sum
-    # recompute under FP_INCREMENTAL until a centered-moment rewrite closes the corner. The OBV-slope OLS in
-    # this group is well-conditioned (centered time axis), so the divergence is confined to pv_correlation.
-    # (Sandbox: pv_correlation_3m 34x tolerance == 2.3e-8 absolute; the ratio/vwap/obv features were clean.)
-    incremental_safe = False
+    # pv_correlation is a Pearson corr (cov / √(var_x·var_y)) of one-minute return against RAW share volume.
+    # Its only incremental-vs-batch breach was the near-perfect-fit corr (==±1.0 over a 3-minute window) at the
+    # b==2 corner, where cov/√(var_x·var_y) is noise/noise. The n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT)
+    # emits corr=sign(cov) exactly there — batch==incremental cell-for-cell on smooth/degenerate/n==2 walks
+    # (verified worst pv_correlation absdiff ~7e-15, machine eps). The OBV-slope OLS is well-conditioned (centered
+    # time axis) and this group has NO std-based feature (only sum/mean reductions), so no variance-cancellation
+    # blocker remains. The guard changes the degenerate-cell corr value -> the version bump above.
+    incremental_safe = True
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

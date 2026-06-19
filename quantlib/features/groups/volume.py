@@ -35,12 +35,16 @@ class VolumeGroup(ReductionGroup):
         InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),
     )
     windows = WINDOWS
-    # volume_zscore divides by std(ddof=1) built as sqrt(Σv² − (Σv)²/n) over RAW share volume (~1e3–1e4).
-    # That cancellation makes the incremental running add/subtract sums round differently from the batch fresh
-    # window sums by ~1e-8 absolute — negligible as a value, but at the n=2 minimal-window z-score (==1/√2) it
-    # crosses the parity self-check breach ratio. Keep the batch fresh-sum recompute under FP_INCREMENTAL until
-    # a centered-moment rewrite closes the corner. (Sandbox: volume_zscore_3m 28x tolerance == 1.5e-8 absolute;
-    # every other window/feature in the group was clean.)
+    # volume_zscore divides by std(ddof=1). REMAINS GATED (the only one of the 4 not flippable by the n==2 OLS
+    # guard): its blocker is a VARIANCE-family cancellation, not the OLS corner. Backfill (truth) computes std via
+    # polars ``rolling_std_by`` (Welford, stable); the live/incremental path computes it from power sums as
+    # ``sqrt((Σv² − (Σv)²/n)/(n−1))`` (catastrophic cancellation on RAW share volume ~1e6). On a near-constant
+    # huge-volume window the two land on OPPOSITE sides of the relative null-floor (``_VOL_STD_REL_EPS``) — a
+    # null/non-null parity break — AND at the n=2/3 z-score they disagree by ~7e-4 (verified, fresh-seed: the
+    # break is present even with ZERO incremental running-drift, so it is a batch-vs-canonical std FORMULA gap,
+    # not engine drift). The parity-true fix is the centered power-sum std (store Σ(v−c)/Σ(v−c)² for a
+    # reproducible per-symbol c) in the SHARED batch kernel so backfill and live compute std identically — that
+    # touches the batch path (Lead-owned, invasive). Flip to True only after that lands and parity-gates clean.
     incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:

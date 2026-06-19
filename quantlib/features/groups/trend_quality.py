@@ -28,17 +28,18 @@ TREND_TOL = 1e-4
 @register
 class TrendQualityGroup(ReductionGroup):
     name = "trend_quality"
-    version = "1.0.0"
+    # 1.1.0: n==2 perfect-fit guard makes price_r2 exactly 1.0 at the b==2 corner (was ~0.9998 float noise).
+    version = "1.1.0"
     owner = "modeller"
     type = FeatureType.TREND_QUALITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
-    # price_r2 is the OLS R² = cov²/(var_x·var_y) of close on time. On a near-LINEAR intraday window (a quiet
-    # midday drift) the fit is near-perfect (R²→1) and that ratio is a difference of large near-equal sums; the
-    # incremental running sums round differently from the batch fresh sums and the cancellation amplifies past
-    # the parity-breach ratio (sandbox smooth-walk: price_r2_5m 254x tolerance). Real well-conditioned data
-    # (vol≈0.02) is clean (0.1x), but low-vol windows occur intraday, so keep the batch fresh-sum recompute under
-    # FP_INCREMENTAL until the OLS family gets a centered-residual incremental form (then flip safe).
-    incremental_safe = False
+    # price_r2 is the OLS R² = cov²/(var_x·var_y) of close on time. The two former incremental-vs-batch breaches
+    # are now closed AT SOURCE: (1) the rolling time-OLS origin-rebase (PR #132) keeps x small so the variance
+    # term is well conditioned for every n>=3 cell, and (2) the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT)
+    # emits the EXACT r2=1.0 at the b==2 corner where cov²/(var_x·var_y) was noise/noise. With both, batch and
+    # incremental agree cell-for-cell on smooth/degenerate/n==2 walks, so the fast path is parity-true here. The
+    # n==2 guard changes the degenerate-cell value (0.9998->1.0) -> the version bump above.
+    incremental_safe = True
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
