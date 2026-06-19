@@ -8,6 +8,37 @@ Each standing role is a long-lived agent with a **charter** + an append-only **l
 woken on a schedule with fresh context (reads its charter + ledger first). Code changes are worktree→PR,
 reviewed/merged by the Lead; nothing changes the bus fingerprint or touches live capture without the Lead.
 
+## Staying informed — the system log (EVERY agent, every cycle)
+
+The loops are not silos — they run as a TEAM with a CONDUCTOR (the Lead). The coordination surface is ONE
+shared, accumulating file: **`~/.quant-ops/SYSTEM_LOG.md`**, with three sections, all read by every agent:
+
+1. **CURRENT STATE** (Lead-maintained) — the live whole-system picture: bus fingerprint, what's deploying,
+   trusted cohorts, what each workstream is doing right now.
+2. **GAPS & CROSS-TEAM CONSIDERATIONS** (Lead-maintained, refreshed every orchestration cycle) — the
+   CONDUCTOR layer. Each cycle the Lead considers the ENTIRE team and writes the system's current gaps:
+   things falling *between* workstreams, conflicts, places where one role can unblock or hand off to another,
+   under-served areas. Each gap is TAGGED with the workstream(s) that can address it. This is how each agent
+   gains "consideration across the entire team," not just its own role.
+3. **ROLLING LOG** (every agent appends) — the accumulating change feed: one terse dated line whenever an
+   agent ships/learns something system-relevant: `YYYY-MM-DDTHH:MMZ [workstream] — what changed + who it affects`.
+
+**Every agent, at the START of its cycle, reads all three** — CURRENT STATE (awareness), GAPS (picks up any
+gap tagged to or within its scope and may act on it), recent ROLLING LOG (what just changed). Then acts. So
+awareness + cross-team gaps flow DOWN (Lead → shared state), work flows UP (ledgers + reports → Lead), and
+the team state ACCUMULATES over time. Keep entries terse — signal, not journal.
+
+**Anti-duplication / anti-cross-purposes (NON-NEGOTIABLE — without this the loops collide):**
+- **CLAIM before you act.** Once an agent picks the task it will do this cycle, it FIRST appends a claim to
+  the ROLLING LOG: `YYYY-MM-DDTHH:MMZ [workstream] CLAIMING — <task>`. Then it does the work, and on finish
+  appends `… SHIPPED — <task> (PR #N)` (or `DROPPED — <reason>`).
+- **Check claims first.** Before choosing a task, scan recent ROLLING-LOG claims: if the thing you were about
+  to do is already CLAIMED (and not yet SHIPPED/DROPPED) by another agent, or is outside your scope, pick a
+  DIFFERENT task. Never redo work another loop already claimed.
+- **The Lead is the conductor + tie-breaker.** Each orchestration cycle the Lead refreshes GAPS to route work
+  so roles hand off rather than overlap, resolves any contention it sees in the claims, and dedupes PRs at
+  review. When two workstreams could do a thing, GAPS says which one owns it.
+
 ---
 
 ## 1. Alpaca Data Backfill (raw layer)
@@ -67,6 +98,21 @@ thin; schema/format stewardship is unowned.
 
 **Owner today:** ad-hoc (TickParity this session; the DIA files defects). **Gap:** not a standing role; the
 defect backlog (currently ~507 from the 06-18 sweep, mostly a coverage artifact) has no dedicated owner.
+
+## 4b. Latency of Production Features
+
+**Mission:** drive bar-arrival → full-feature-vector toward <100ms, and kill latency regressions in real-time.
+
+- Aggressively measure bar→vector E2E (feed-delivery + shard-compute + gather), p50/p99, per feature + overall.
+- DETECT → FIX → VERIFY regressions immediately: a slow/regressed feature gets a worktree→PR same cycle, with
+  the speedup re-measured. (Highest loop frequency for this reason.)
+- Maintain/improve the real-time state abstractions so each minute bar is a few small incremental updates, not
+  a window recompute (the incremental fast-path + the heavy-group migration — docs/LATENCY_PLAN.md §7).
+- Create new monitoring/metrics; recommend system-efficiency improvements to the Lead.
+- A feature whose latency is verified-fast becomes a candidate to be "trusted" for the low-latency path.
+
+**Owner today:** a standing Latency loop (was LatencyOpt; #117 landed the gate, #118 the roadmap). **Gap:**
+production runs the batch path (FP_INCREMENTAL off); the heavy-group migration is unstarted.
 
 ## 5. The Modeller
 
