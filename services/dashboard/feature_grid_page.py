@@ -134,7 +134,7 @@ FEATURE_GRID_HTML = """<!doctype html>
 </style></head>
 <body>
 <header><h1>Feature Coverage &amp; Trust &nbsp;
-  <a href="/">&larr; dashboard</a></h1>
+  <a href="/">&larr; dashboard</a><a href="/raw-coverage">raw-tape coverage &rarr;</a></h1>
   <div class="muted" id="subhead">loading…</div>
 </header>
 <div class="wrap">

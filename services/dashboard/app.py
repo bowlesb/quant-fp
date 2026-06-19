@@ -23,6 +23,8 @@ from feature_grid import CACHE, STORE_ROOT
 from feature_grid_page import FEATURE_GRID_HTML
 from jobs_page import load_status as load_jobs_status
 from jobs_page import render_jobs_page
+from raw_coverage import CACHE as RAW_CACHE
+from raw_coverage_page import RAW_COVERAGE_HTML
 from status_page import render_status_page
 
 app = FastAPI(title="Quant Dashboard")
@@ -274,6 +276,32 @@ def feature_grid_page() -> str:
     return FEATURE_GRID_HTML
 
 
+@app.get("/api/raw-coverage")
+def raw_coverage_json(days: int = 90, refresh: bool = False) -> JSONResponse:
+    """RAW-TAPE coverage: what raw Alpaca history exists per layer (minute bars / tick trades / tick quotes) —
+    the substrate modellers invent features on, read straight from the raw manifests (cheap, NO store scan).
+
+    Per layer: DEPTH (earliest/latest date + span days) and BREADTH (distinct symbols-per-day over time, so
+    the thin-trades / shallow-quotes gaps read off at a glance), plus a per-date timeline (which dates present,
+    gaps visible). All computed over REAL cells (rows>0); 0-row settled-empty manifest markers are excluded.
+    ``days`` clips each layer's per-date timeline to the most-recent N calendar days (``days=0`` = full
+    history); summary depth/breadth stats are always over the full tape. ``refresh=1`` bypasses the TTL cache.
+
+    Shape (see docs/RAW_TAPE_COVERAGE.md):
+      {generated_at, store_root, days, anchor_date, span_earliest, span_latest,
+       layers: [{tier, label, earliest, latest, span_days, n_dates, n_symbols, n_cells,
+                 mean_symbols_per_day, median_symbols_per_day, newest_symbols_per_day,
+                 shown_from, n_dates_shown, dates: [{date, n_symbols, rows}]}]}
+    """
+    return JSONResponse(RAW_CACHE.coverage(STORE_ROOT, days=days, force=refresh))
+
+
+@app.get("/raw-coverage", response_class=HTMLResponse)
+def raw_coverage_page() -> str:
+    """The visual raw-tape coverage surface (vanilla HTML/JS; fetches /api/raw-coverage client-side)."""
+    return RAW_COVERAGE_HTML
+
+
 class ReactionRequest(BaseModel):
     ts: str
     text: str
@@ -439,7 +467,8 @@ def dashboard() -> str:
 <a href="/status" style="color:#58a6ff;text-decoration:none;font-size:13px;">Hourly status &rarr;</a> &nbsp;
 <a href="/jobs" style="color:#58a6ff;text-decoration:none;font-size:13px;">Jobs &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
-<a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a></h1>
+<a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a> &nbsp;
+<a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
   <div class="grid" style="margin-bottom:24px;">
