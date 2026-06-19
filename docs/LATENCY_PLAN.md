@@ -207,3 +207,110 @@ NOTE: `momentum_run` and `residual_analysis` (the heaviest live groups, ~497ms /
 per-group panel) are hand-written `FeatureGroup`s, NOT `ReductionGroup`s — the incremental engine does
 not touch them, so `FP_INCREMENTAL` does not reduce their cost. Their speed lever is the stateful-engine /
 Rust-kernel migration (separate workstream), not this gate.
+
+## 7. Deferred <100ms roadmap (written 2026-06-18; DEFERRED, not abandoned)
+
+> Decision (team lead, 2026-06-18): STAND DOWN on latency execution. Latency is production-readiness,
+> not edge-blocking — we sit at ~1.75s p50, comfortably inside the 60s minute-bar cadence, and sub-second
+> only matters once an edge needs to react fast (the active priority is the order-flow trust jump + edge
+> hunt, not speed). The two remaining levers below are scoped and ready to pick up the moment latency gets
+> the green light; nothing here is built yet. `FP_INCREMENTAL` stays OFF in production until the team lead
+> sequences the staged rollout in §6.
+
+Where we are: the 13 safe reduction groups already clear <100ms on the incremental fast path in sim (§6,
+~88ms p99) and the gate to enable them is merged (PR #117) but NOT turned on. The remaining gap between
+"fast path proven in sim" and "live <100ms" is two levers, in priority order.
+
+### Lever #1 (SMALL, low priority) — stable incremental form for the 4 gated reduction groups
+
+**Scope:** flip `volume` (volume_zscore), `price_volume` (pv_correlation), `trend_quality` (price_r2),
+`clean_momentum` from `incremental_safe = False` back to `True` by removing the batch-vs-incremental
+conditioning divergence (§6 follow-up #3). All four diverge through the SAME mechanism: variance/cov built
+as `Σx²−(Σx)²/n` (a difference of large near-equal sums) on large-magnitude values (raw share volume) or a
+near-perfect fit (price_r2≈1), where the incremental running add/subtract sums round differently from the
+batch fresh window sums. Worst ABSOLUTE divergence is ~2e-8 (float floor) — this is a parity-self-check
+nicety, not a value bug.
+
+**What it takes (all contained to `quantlib/features/incremental.py`; batch path untouched; per-group
+parity-gated; reversible via `incremental_safe`):**
+- *OLS family (price_r2, clean_momentum, pv_correlation).* Root cause located: the engine's `time`
+  StatefulRegressor uses a FIXED seed origin (`ref_epoch`, `_stateful_matrix` ~L258 `time_x =
+  (minute_epoch − ref_epoch)/60`) that GROWS all session, while the batch path re-centers on the current
+  frame's `epoch.min()` each minute — so the OLS cross-products are large and the two origins round the
+  `cov²/(var_x·var_y)` cancellation differently. PROTOTYPE: rebasing the engine origin to stay bounded
+  (like batch) took single-series price_r2 divergence 1e-9 → 0.0. Step 1 is origin-rebasing the time axis;
+  step 2 is accumulating the OLS paired sums centered (running co-moments) so the cancellation is gone at
+  source.
+- *Variance family (volume_zscore).* Accumulate the std's `__sq` running sum centered: store `Σ(x−c)` and
+  `Σ(x−c)²` for a fixed per-symbol reference `c` instead of `Σx`, `Σx²`. PROTOTYPE: centered running sums
+  took batch-fresh-vs-incremental-running std divergence 3.1e-7 → 4.4e-14. CONSTRAINT to resolve in design:
+  `c` must be reproducible identically by the stateless batch path; a per-window mean breaks O(1), a global
+  constant doesn't help far-from-center symbols, so `c` is a per-symbol session-fixed reference the engine
+  holds — which means EITHER the batch kernel must subtract the same `c` (invasive, touches
+  `rust_windowed_sums`) OR the divergence is accepted as the float floor it is and only the OLS-origin
+  piece (which needs no batch change) is shipped. Decide at build time; prefer the engine-only OLS-origin
+  fix first and re-measure whether volume/price_volume even still breach.
+- Per-group parity test in `tests/test_fp_incremental_capture.py`: pin batch-vs-incremental < breach ratio
+  on the smooth near-perfect-fit walk for each group BEFORE flipping its `incremental_safe`.
+
+**Rough effort:** ~1 focused cycle. **Expected after:** the 4 groups move off batch onto the fast path,
+removing ~54ms p50 / ~91ms p99 of batch reduction work from the per-minute path (measured, 375-sym shard).
+**Risk:** MEDIUM — contained to the engine, but it is the shared incremental path every ReductionGroup
+rides; ship per-group behind the existing gate so any regression is one flag away from revert.
+
+### Lever #2 (BIG, the REAL <100ms lever) — heavy-group migration (`momentum_run` + `residual_analysis`)
+
+These two hand-written `FeatureGroup`s are ~497ms + ~247ms ≈ **43% of the live per-minute compute** and the
+incremental gate does NOT touch them (they are not `ReductionGroup`s). This is the dominant remaining cost
+and the lever that actually moves the full-flow number toward <100ms.
+
+**Why they are slow:** both run a per-minute polars `rolling`/`rolling_sum_by` with `.over("symbol")` — a
+per-minute symbol-partitioned sort + windowed reduction over the trailing slice (`LOOKBACK_MINUTES` = 75m).
+That `over("symbol")` re-partition is the same cost class the incremental V2 work already eliminated for the
+reduction tier (the ~53ms slice-derive that the Rust kernel cut to ~2.5ms — §6) and for the stateful tier
+(the per-minute whole-buffer sort that `stateful.coded_buffer` cut by sharing ONE sort across groups — §6).
+So the migration is NOT new research; it reapplies two proven, parity-gated patterns.
+
+**Migration plan, per group:**
+
+- **`residual_analysis`** (6 features, `residual_std_{w}` for w∈{5,10,15,20,30,60}) is a rolling
+  power-sum OLS residual-std — STRUCTURALLY identical to `trend_quality` (already a `ReductionGroup` on the
+  fast path). Path: convert it to a `ReductionGroup` declaring the residual power sums via
+  `reduced()`/`regressions()` (it already computes `__one/__x/__xx/__xy/__yy` power sums — the exact shape
+  `build_plan` sums) and the std-from-SSR in `assemble()`. Then it rides the SAME incremental engine for
+  free (and the SAME batched marshal as the other reductions — no separate per-minute sort). The one
+  subtlety is the near-linear degenerate guard (`REL_RESID_FLOOR`) which must move into the shared
+  `assemble()` so live==backfill (the `trend_quality` r2-flat guard is the precedent). **This is the
+  highest-ROI single move:** ~247ms → folds into the existing reduction-emit (~tens of ms shared), AND it
+  likely lands `residual_analysis` as an `incremental_safe=False` group at first (its SSR is the same
+  near-perfect-fit cancellation as price_r2) — so it pairs naturally with Lever #1's OLS-centering work.
+
+- **`momentum_run`** (12 features) splits cleanly:
+  - *`residual_skew_{w}` (6)* — a window-LOCAL OLS third moment (`m3/m2^1.5`). It needs two more power sums
+    than the standard OLS kernel carries (`Σx²y`, `Σx³` for the centered third moment), so it is either (a)
+    a `ReductionGroup` after extending the reduction kernel to emit those two extra co-moments (a modest,
+    parity-gated kernel addition — the declarative path is designed for exactly this), or (b) a Rust
+    `windowed_skew` kernel mirroring `rolling_extrema`/`time_lag_gather`. Prefer (a) — it reuses the shared
+    marshal and the existing parity harness.
+  - *`longest_streak_{w}` (6)* — a sequential run-length state machine over return signs. This is NOT a
+    windowed sum; it is a per-symbol RUNNING accumulator exactly like OBV (cumulative) — i.e. a natural
+    `StatefulEngine` resident (a per-(symbol) running run-length advanced one bar at a time, windowed-capped
+    in emit). Path: add a `run_length` stateful spec alongside the existing `rolling_extrema` / lag kinds in
+    `stateful.py`; it folds O(1)/bar like the others and shares the one `coded_buffer` sort.
+
+**Rough effort:** MEDIUM-LARGE — ~2–3 focused cycles. `residual_analysis`→ReductionGroup is the cheap first
+half (~0.5 cycle, big win); the `momentum_run` skew kernel-extension + the streak StatefulEngine resident
+are the larger half. Each step is independently parity-gated (the generic `tests/test_fp_latest.py` +
+per-group cell-for-cell tests) and independently shippable.
+
+**Expected after (projection, NOT yet measured):** moving ~744ms of `over("symbol")` rolling work onto the
+shared marshal + Rust kernels should track the same ~20× the reduction/stateful migrations achieved (§6:
+53ms→2.5ms, 250ms→125ms). Realistic target: the two groups' combined contribution drops from ~744ms to the
+tens-of-ms range, bringing the FULL 519-feature flow from its current live cost toward the sim-proven
+~300–330ms p99, and the fast-path tier to the <100ms bar — i.e. THIS is the lever that closes the
+production <100ms gap, not the incremental gate alone. The certified number is owed once built and measured
+at the 10k steady-state (§2).
+
+**Sequencing recommendation:** when latency is re-prioritized, do `residual_analysis`→ReductionGroup FIRST
+(cheapest, biggest single win, and it co-locates with Lever #1's OLS-centering), then `momentum_run`'s two
+halves, each behind its own parity gate. Do NOT batch them into one big-bang change (§4.5).
