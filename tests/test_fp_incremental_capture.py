@@ -23,15 +23,26 @@ import polars as pl
 import pytest
 
 from quantlib.features import capture
+from quantlib.features.base import BatchContext
 from quantlib.features.capture import (
     _PARITY_BREACH_RATIO,
     CaptureState,
+    MinuteRing,
+    _bars_to_frame,
     _incremental_config,
     _incremental_parity,
     process_bars,
 )
+from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
+from quantlib.features.incremental import IncrementalEngine
+from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
+
+# The groups deliberately kept on the batch fresh-sum path under FP_INCREMENTAL (variance/correlation of raw
+# share volume — incremental-vs-batch corner divergence breaches the parity self-check; see
+# ReductionGroup.incremental_safe). The split keeps them byte-identical to batch even with the flag on.
+INCREMENTAL_UNSAFE = {"volume", "price_volume", "trend_quality", "clean_momentum"}
 
 
 def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float = 0.02) -> list[list[dict]]:
@@ -130,21 +141,33 @@ def test_parity_selfcheck_records_clean(monkeypatch: pytest.MonkeyPatch, tmp_pat
         f"no minute should breach on well-conditioned data; worst {max(r for _, r, _ in seen)}x tolerance"
 
 
-def test_ols_near_perfect_fit_is_flagged(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """KNOWN CONDITIONING CAVEAT: on a SMOOTH (near-linear) price walk the sum-based OLS family fits
-    near-perfectly, so the incremental running sums diverge from the batch fresh sums far beyond tolerance.
-    The self-check FLAGS it (a breach) — proving it detects real divergence — whereas well-conditioned data
-    (``test_parity_selfcheck_records_clean``) does not. This is the divergence to harden before the fast
-    path is trusted as the source (see docs/AUTONOMOUS_BACKLOG.md P1 #1)."""
+def test_ols_near_perfect_fit_is_flagged() -> None:
+    """KNOWN CONDITIONING CAVEAT (still real, now GATED): on a SMOOTH (near-linear) price walk the sum-based
+    OLS R²/correlation family fits near-perfectly, so the incremental running sums diverge from the batch fresh
+    sums far beyond tolerance. Comparing the IncrementalEngine DIRECTLY against the batch over the conditioning-
+    sensitive groups still breaches — proving the divergence is real and the gate (``incremental_safe = False``)
+    is load-bearing. ``test_unsafe_group_stays_on_batch_under_incremental`` proves the gated ``process_bars``
+    path keeps those groups byte-identical to batch, so the breach never reaches a written value."""
     smooth = _stream_minutes(n_sym=8, n_min=20, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
-
-    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
-    batch = _run(smooth, str(tmp_path / "b"))
-    monkeypatch.setenv("FP_INCREMENTAL", "1")
-    monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
-    inc = _run(smooth, str(tmp_path / "i"))
-
-    assert _worst_tol_ratio(batch, inc) > _PARITY_BREACH_RATIO, "expected near-perfect-fit conditioning divergence"
+    sensitive = [
+        g for g in REGISTRY.groups()
+        if isinstance(g, ReductionGroup) and not g.incremental_safe and g.name in ("trend_quality", "clean_momentum")
+    ]
+    ring = MinuteRing(maxlen=120)
+    engine: IncrementalEngine | None = None
+    worst = 0.0
+    for bars in smooth:
+        if not bars:
+            continue
+        ring.push(_bars_to_frame(bars))
+        frame = ring.materialize()
+        ctx = BatchContext(frames={"minute_agg": frame})
+        batch = compute_reduction_batch(sensitive, ctx)
+        if engine is None:
+            engine = IncrementalEngine(sensitive)
+        inc = engine.step(frame, slice_derive=False)
+        worst = max(worst, _worst_tol_ratio(batch, inc))
+    assert worst > _PARITY_BREACH_RATIO, "expected near-perfect-fit conditioning divergence on the gated groups"
 
 
 def test_incremental_parity_helper() -> None:
@@ -157,3 +180,55 @@ def test_incremental_parity_helper() -> None:
     assert _incremental_parity({"g": a}, {}) == float("inf")  # missing group
     nulled = {"g": a.with_columns(pl.lit(None, dtype=pl.Float64).alias("f"))}
     assert _incremental_parity({"g": a}, nulled) == float("inf")  # null vs non-null
+
+
+def test_unsafe_groups_are_flagged() -> None:
+    """The conditioning-sensitive reduction groups carry ``incremental_safe = False`` and every other
+    reduction group is safe — so the per-group split (incremental for safe, batch for unsafe) is driven by a
+    declared attribute, not a hard-coded name list in the dispatch."""
+    reduction = {g.name: g for g in REGISTRY.groups() if isinstance(g, ReductionGroup)}
+    unsafe = {name for name, group in reduction.items() if not group.incremental_safe}
+    assert unsafe == INCREMENTAL_UNSAFE, f"unexpected incremental_safe set: {unsafe}"
+
+
+def test_unsafe_group_stays_on_batch_under_incremental(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """On a SMOOTH (near-perfect-fit) walk — the regime where the incremental running sums diverge from the
+    batch fresh sums beyond tolerance — the unsafe groups (volume / price_volume) stay on the batch path under
+    FP_INCREMENTAL, so their output is BYTE-IDENTICAL to the no-flag batch output (not merely within tolerance).
+    Meanwhile the safe groups still ride the incremental path. This proves the split protects the sensitive
+    features from the conditioning corner while still serving everything else fast."""
+    smooth = _stream_minutes(n_sym=8, n_min=25, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
+
+    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
+    monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
+    batch = _run(smooth, str(tmp_path / "batch"))
+
+    monkeypatch.setenv("FP_INCREMENTAL", "1")
+    monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
+    monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
+    inc = _run(smooth, str(tmp_path / "inc"))
+
+    keys = ["symbol", "minute"]
+    for name in INCREMENTAL_UNSAFE:
+        assert name in batch, f"{name} expected in reduction output"
+        # Byte-identical: the unsafe group ran the SAME batch recompute in both runs (frame_equal, not a tol).
+        assert batch[name].sort(keys).equals(inc[name].sort(keys)), \
+            f"{name} must be byte-identical to batch under FP_INCREMENTAL (it stays on the batch path)"
+
+
+def test_incremental_capture_no_breach_when_unsafe_gated(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """With the unsafe groups gated to batch, the FP_INCREMENTAL output matches the batch output within the
+    benign-drift breach ratio for EVERY group, even on the smooth near-perfect-fit walk that previously drove
+    the volume/price_volume conditioning divergence past tolerance (test_ols_near_perfect_fit_is_flagged)."""
+    smooth = _stream_minutes(n_sym=8, n_min=25, present_p=0.7, seed=3, vol=0.002)
+
+    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
+    batch = _run(smooth, str(tmp_path / "batch"))
+
+    monkeypatch.setenv("FP_INCREMENTAL", "1")
+    monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
+    monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
+    inc = _run(smooth, str(tmp_path / "inc"))
+
+    worst = _worst_tol_ratio(batch, inc)
+    assert worst < _PARITY_BREACH_RATIO, f"gated incremental still breached: worst {worst}x tolerance"

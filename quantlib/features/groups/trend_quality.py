@@ -32,6 +32,13 @@ class TrendQualityGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.TREND_QUALITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
+    # price_r2 is the OLS R² = cov²/(var_x·var_y) of close on time. On a near-LINEAR intraday window (a quiet
+    # midday drift) the fit is near-perfect (R²→1) and that ratio is a difference of large near-equal sums; the
+    # incremental running sums round differently from the batch fresh sums and the cancellation amplifies past
+    # the parity-breach ratio (sandbox smooth-walk: price_r2_5m 254x tolerance). Real well-conditioned data
+    # (vol≈0.02) is clean (0.1x), but low-vol windows occur intraday, so keep the batch fresh-sum recompute under
+    # FP_INCREMENTAL until the OLS family gets a centered-residual incremental form (then flip safe).
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

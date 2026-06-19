@@ -6,9 +6,16 @@
 
 ## 1. The target, stated precisely
 
-**p99 per-minute compute < 50ms for 519 features × 10,000 tickers, steady-state, on the 32-core box.**
+**Bet-latency ≤ 500ms; vector-compute < 100ms (Ben's stated goal, 2026-06-18).** Bet-latency is the
+wall-clock from a ticker's bar arriving to THAT ticker's feature vector being ready to act on (per the
+bet-latency-metric rule — not the slowest-shard p99). Vector-compute (< 100ms) is the per-shard minute-mark
+work that turns the just-arrived minute into the feature matrix.
 
-Stretch: < 30ms. Floor we must not regress past: the current ~617ms 8-shard compute.
+**Prior internal target (still the engineering stretch): p99 per-minute compute < 50ms for 519 features ×
+10,000 tickers, steady-state, on the 32-core box.** Stretch: < 30ms. Floor we must not regress past: the
+current ~617ms 8-shard compute. The incremental fast path already clears < 100ms in sim (§6); the open
+gap is that it is NOT YET ENABLED in production (`FP_INCREMENTAL` unset live — the live path runs the
+batch O(window) recompute at ~1.75s p50). Enabling it safely, per-group, is this cycle's deliverable.
 
 "Per-minute compute" = the work that MUST happen at the minute mark to turn the just-arrived minute
 into the full feature matrix. It does NOT include the parquet write (that happens AFTER the bet is
@@ -151,3 +158,52 @@ share; a Rust assemble is the next lever IF a sub-15ms step is ever wanted (not 
 the tick-aggregation consumer; wire the incremental engine + `tick_capture` into the capture loop; run
 the 10k sim on continuous trades+quotes+bars; measure p50/p99. The compute step is proven ~23ms; this
 measures it IN the real flow (tick-agg + fold + emit + ingestion) to certify the <100ms bar end-to-end.
+
+**2026-06-18 — production-enablement parity audit + per-group gate (branch `inc-latency`).** The fast
+path is proven in sim but NOT enabled live (`FP_INCREMENTAL` unset → live runs the batch O(window)
+recompute at ~1.75s p50). Audited which ReductionGroups can be turned on safely by replaying a realistic
+fluctuating-membership minute stream through BOTH paths and tabling the per-group batch-vs-incremental
+divergence (375-symbol shard, whole-buffer derive):
+
+| regime | divergent groups (worst feature) | clean groups |
+|---|---|---|
+| realistic (vol≈0.02) | `volume` 28x (volume_zscore_3m), `price_volume` 34x (pv_correlation_3m) | the other 15 ≤ 2.2x |
+| smooth near-perfect-fit (vol≈0.002) | + `trend_quality` 254x (price_r2_5m), `clean_momentum` 96x | the other 13 ≤ 1.8x |
+
+The "x tolerance" is a near-degenerate-cell artifact: the WORST absolute divergence is **~2e-8** (a
+perfect-fit corr==1.0, an n=2 z-score==1/√2) — the float floor, not a value bug. But it crosses the 10x
+parity-self-check breach ratio, so per the binding rule (§4.1: never loosen a tolerance; a divergent
+group must not be the written source) those 4 stay on batch. ROOT CAUSE is the same for all four:
+`_canonical`/`_ols_stat_exprs` build variance/cov as `Σx²−(Σx)²/n` (a difference of large near-equal
+sums), and the incremental running add/subtract sums round differently from the batch fresh window sums;
+the cancellation amplifies that at large-magnitude (raw share volume) or near-perfect-fit cells.
+`market_beta` (also OLS) is CLEAN (0.000x) because it regresses well-conditioned returns.
+
+**Mechanism delivered:** a declarative per-group gate — `ReductionGroup.incremental_safe` (default True).
+`process_bars` now SPLITS each reduce bucket: `incremental_safe` groups assemble from the running sums
+(`step`), the 4 sensitive groups keep the batch fresh-sum recompute even under `FP_INCREMENTAL`. So
+flipping `FP_INCREMENTAL=1` serves 13 groups (≈ all the bar+tick reductions) from the fast path and
+leaves the 4 byte-identical to batch — parity-true by construction, no bus-fingerprint change. Pinned by
+`tests/test_fp_incremental_capture.py` (gated groups byte-identical to batch on the smooth walk; no breach
+across the full 30-group set; the conditioning divergence still bites the engine directly — the gate is
+load-bearing). Sandbox latency (375-symbol reduction-bucket pass): batch p50 ~127ms → incremental p50
+~77ms (1.64x); per the sim §6 the full fast path is ~88ms p99.
+
+**Production rollout (staged, per the verification-culture no-big-bang rule):**
+1. Stage with `FP_INCREMENTAL=1 FP_INCREMENTAL_PARITY=1` live for ≥1 session — runs BOTH paths, writes
+   the BATCH truth, records the per-bucket divergence to Prometheus (`record_incremental_parity`). Watch
+   for any breach beyond the 4 expected-gated groups (there should be none — the gate excludes them from
+   the compared set). This is the live evidence gate before trusting the fast path as the source.
+2. Then `FP_INCREMENTAL=1` (drop PARITY): the 13 safe groups become the written source from the running
+   sums; the 4 stay batch. The validation-ledger nightly sweep (§4.3) confirms the live fast-path output
+   reproduces backfill per cell on the overlay day.
+3. FOLLOW-UP to flip the 4: give the OLS/variance family a centered (Welford/co-moment) incremental form
+   so `Σx²−(Σx)²/n` is replaced by a running centered M2 (and the OLS residual-SS by centered co-moments)
+   — exactly the stabilization `residual_analysis`/`momentum_run` already use (window-local centered fits).
+   Compensated (Neumaier) running sums help (~5x) but do NOT close the cancellation alone; the centered
+   form is the real fix. Until then the 4 ride batch (correctness > the last 4 groups' speed).
+
+NOTE: `momentum_run` and `residual_analysis` (the heaviest live groups, ~497ms / ~247ms per the live
+per-group panel) are hand-written `FeatureGroup`s, NOT `ReductionGroup`s — the incremental engine does
+not touch them, so `FP_INCREMENTAL` does not reduce their cost. Their speed lever is the stateful-engine /
+Rust-kernel migration (separate workstream), not this gate.

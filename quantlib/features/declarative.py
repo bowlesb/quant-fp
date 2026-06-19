@@ -155,6 +155,16 @@ class ReductionGroup(FeatureGroup):
 
     reduce_input: str = "minute_agg"
 
+    # Whether this group may be served from the INCREMENTAL running sums (FP_INCREMENTAL) or must stay on the
+    # batch fresh-sum recompute. Default True — for almost every group the incremental sums and the batch fresh
+    # window sums agree to benign float drift. Set False on a group whose canonical algebra is a difference of
+    # large near-equal sums on LARGE-MAGNITUDE values (variance/correlation of raw share volume), where the
+    # running add/subtract rounds differently from the batch fresh sum and the cancellation amplifies it past
+    # the parity-breach ratio at near-degenerate cells (a perfect-fit corr, an n=2 z-score). Such a group keeps
+    # the batch fresh-sum path even under FP_INCREMENTAL until a stable-summation rewrite closes the corner;
+    # the absolute divergence is ~1e-8 (float floor), so this is a parity-self-check guard, not a value bug.
+    incremental_safe: bool = True
+
     def prepare(self, frame: pl.DataFrame) -> pl.DataFrame:
         """Optional per-minute preprocessing of the (symbol, minute)-sorted input frame BEFORE the reduced /
         regression exprs are evaluated — for a CROSS-SYMBOL column the per-symbol exprs need (e.g. broadcasting
