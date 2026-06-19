@@ -571,7 +571,10 @@ fn assemble_canonical<'py>(
                     let denom_y = b * syy - sy * sy;
                     let cov_n = b * sxy - sx * sy;
                     let defined = b >= 2.0 && denom_x > 0.0;
-                    let defined_corr = defined && denom_y > 0.0;
+                    // Relative y-variance floor (mirrors _OLS_DENOM_Y_REL_EPS in declarative.py): on a
+                    // near-flat window denom_y is a cancellation difference whose sign is float-noise, so a
+                    // bare `> 0.0` would diverge from the polars/numpy paths. Gate on a fraction of (Σy)².
+                    let defined_corr = defined && denom_y > 1e-12 * (sy * sy);
                     out[[s, j]] = match k {
                         3 => {
                             if defined {
