@@ -54,6 +54,13 @@ feature earns its place only if it is timed and fast"* (`docs/LATENCY_PLAN.md`, 
 
 ### Recommended fix (NOT done in this PR — parity-sensitive, scoped separately)
 
+> **STATUS (updated 2026-06-18): the buffer-slice half of this is SHIPPED.** Both `MomentumRunGroup`
+> (v2.0.0) and `ResidualAnalysisGroup` now override `compute_latest` to run the SAME `compute()` on the
+> buffer sliced to `LOOKBACK_MINUTES = max(window)+15 = 75m` (not the full 300m) — guarded cell-for-cell by
+> `tests/test_fp_latest.py` + each group's parity test. So the *recompute-the-whole-300m-buffer* tax below
+> is GONE; what remains is the intrinsic `rolling().agg().over("symbol")` cost on the 75m slice. Collapsing
+> THAT (→ ReductionGroup / Rust kernel) is the still-open, Lead-gated Lever #2 in `docs/LATENCY_PLAN.md` §7.
+
 Override `compute_latest` on `MomentumRunGroup` (and then `ResidualAnalysisGroup`) with an aggregate-at-T
 form that:
 
@@ -145,3 +152,28 @@ groups are listed; the long tail of reduction groups sits at the floor (~2.5ms p
 it is the slowest-shard tail, not the sum). The ranking is unchanged in SHAPE from 06-15: `momentum_run` +
 `residual_analysis` together (~144ms p50) are ~43% of the per-minute compute — exactly the Lever #2 thesis
 in `docs/LATENCY_PLAN.md` §7. No single group regressed; nothing to fix this cycle.
+
+## Regression re-check 2026-06-18 (later cycle) — NO regression, with a host-load caveat
+
+Re-ran `FP_SIM_GROUP_TIMINGS=1 make fp-profile-sim N=1000 SHARDS=16` at the SAME deployed fingerprint
+(`0x710bed9e980616f3` / 682 / 51, commit 47e3187) plus single-shard `profile 93 300 250 5 --latest` reps,
+to diff against the per-group baseline above. **Verdict: NO per-group regression.** The per-group *shape* is
+identical — `momentum_run` then `residual_analysis` then `daily_beta` dominate; the 33-group reduction tier
+sits at its ~2.5ms floor; nothing changed rank.
+
+**Read the per-group p50, NOT the end-to-end p99, for the regression signal.** This re-check ran while the
+box was under heavy concurrent load (1-min load avg ~15 on 32 cores; two sibling loops at 540% + 400% CPU =
+the order-flow backfill + a research harness). Under that BLAS oversubscription the contention-sensitive
+numbers inflated uniformly (end-to-end p99 1256ms vs the 761ms baseline; `momentum_run` per-group p50
+108ms vs 94ms, +15%), while the contention-LIGHT numbers stayed flat (`residual_analysis` 49ms vs 50ms;
+the reduction tier unchanged). Confirmed it is load, not code: re-measuring `momentum_run` uncontended via
+three single-shard min-of-5 reps gave 130 / 131 / 180ms — a 38% spread across identical reps that tracks
+host load, not a stable shift (the same parallelism-profile effect documented in the #123 latency-ceiling
+fix). The robust regression discipline holds: **diff per-group p50 on a quiet box, and re-confirm any
+suspected offender uncontended before declaring a regression** (mirrors the re-confirm-on-offense logic in
+`tests/test_fp_latency.py`).
+
+Net: the 682/51 fingerprint is latency-stable vs the #125 baseline. The dominant cost is still Lever #2
+(`momentum_run` + `residual_analysis`, ~43% of compute) — and note (see the "Recommended fix" status box
+above) the *buffer-slice* sub-lever already shipped (both groups slice to 75m); what remains is the
+intrinsic `over("symbol")` rolling cost on the slice, which is the still-open, Lead-gated §7 migration.
