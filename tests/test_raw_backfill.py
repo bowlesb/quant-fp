@@ -196,6 +196,8 @@ def _config(tmp_path, budget_bytes: int, max_workers: int = 1, symbols=None) -> 
         budget_bytes=budget_bytes,
         symbols=symbols or ["AAPL"],
         days=2,
+        start=None,
+        end=None,
         max_workers=max_workers,
         bars_symbols_per_request=100,
         bars_chunk_days=30,
@@ -506,6 +508,84 @@ def test_daily_mode_uses_full_universe_for_recent_days(tmp_path, monkeypatch) ->
     raw_backfill.run(config)
     assert captured["days"] == [DAY]  # only the last settled day
     assert set(captured["symbols"]) == {"AAPL", "SPY", "QQQ"}  # full universe
+
+
+def test_parse_args_window_mode_sets_start_end() -> None:
+    """--start/--end populate the WINDOW range as dates; --months keeps its default but is unused in
+    WINDOW mode (the run() branch selects on start/end being set)."""
+    config = raw_backfill.parse_args(["--start", "2025-09-01", "--end", "2026-03-01"])
+    assert config.start == dt.date(2025, 9, 1)
+    assert config.end == dt.date(2026, 3, 1)
+
+
+def test_parse_args_no_window_leaves_start_end_none() -> None:
+    """The additive default: with no window flags, start/end are None and every existing mode is reached
+    exactly as before (the --months path is byte-unchanged)."""
+    config = raw_backfill.parse_args(["--months", "6"])
+    assert config.start is None and config.end is None
+    assert config.months == 6
+
+
+def test_parse_window_requires_both_flags() -> None:
+    with pytest.raises(SystemExit):
+        raw_backfill.parse_window("2025-09-01", None)
+    with pytest.raises(SystemExit):
+        raw_backfill.parse_window(None, "2026-03-01")
+
+
+def test_parse_window_rejects_inverted_range() -> None:
+    with pytest.raises(SystemExit):
+        raw_backfill.parse_window("2026-03-01", "2025-09-01")
+
+
+def test_window_mode_selects_explicit_range_over_full_universe(tmp_path, monkeypatch) -> None:
+    """WINDOW mode fetches exactly the trading days in [start, end] over the full universe — it does NOT
+    fall through to the months lookback, and the days passed to the tiers are the windowed calendar."""
+    window_days = [dt.date(2025, 9, 2), dt.date(2025, 9, 3), dt.date(2025, 9, 4)]
+    captured: dict[str, object] = {}
+
+    def _capture_trading_days(_client, start, end):  # type: ignore[no-untyped-def]
+        captured["start"] = start
+        captured["end"] = end
+        return window_days
+
+    monkeypatch.setattr(raw_backfill, "trading_client", lambda: object())
+    monkeypatch.setattr(raw_backfill, "trading_days", _capture_trading_days)
+    monkeypatch.setattr(raw_backfill, "universe_symbols", lambda _client: ["AAPL", "SPY", "QQQ"])
+
+    def _capture_bars(_config: object, symbols: list[str], days: list[dt.date]) -> tuple[int, int]:
+        captured["symbols"] = symbols
+        captured["days"] = days
+        return 0, 0
+
+    monkeypatch.setattr(raw_backfill, "fetch_bars_tier", _capture_bars)
+    monkeypatch.setattr(raw_backfill, "rank_by_dollar_volume", lambda *a, **k: ["AAPL"])
+    monkeypatch.setattr(raw_backfill, "run_tier_fast", lambda *a, **k: (0, 0))
+
+    config = raw_backfill.parse_args(
+        ["--store", str(tmp_path), "--start", "2025-09-01", "--end", "2025-09-05"]
+    )
+    raw_backfill.run(config)
+    # the calendar query used the explicit window, NOT a months-lookback from today
+    assert captured["start"] == dt.date(2025, 9, 1)
+    assert captured["end"] == dt.date(2025, 9, 5)
+    assert captured["days"] == window_days
+    assert set(captured["symbols"]) == {"AAPL", "SPY", "QQQ"}
+
+
+def test_window_mode_manifest_skips_present_cells(tmp_path, monkeypatch) -> None:
+    """The core no-double-acquire guarantee in WINDOW mode: a (symbol, date) cell already present with
+    rows>0 is skipped, so a windowed re-pull fetches nothing new. Drives the real fetch_ticks_tier path
+    (the same manifest-skip every mode uses), proving WINDOW inherits idempotency by construction."""
+    window_day = dt.date(2025, 9, 3)
+    config = _config(tmp_path, budget_bytes=10**12)
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    # pin resume "today" well after the window so the settled real rows are plainly done (not in-window)
+    _pin_resume_today(monkeypatch, window_day + dt.timedelta(days=400))
+    first, _ = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [window_day], chunk_days=5)
+    assert first == 1  # cell fetched on the first windowed pass
+    second, _ = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [window_day], chunk_days=5)
+    assert second == 0  # present cell skipped — no double-acquire on the overlapping window
 
 
 if __name__ == "__main__":
