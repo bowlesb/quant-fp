@@ -12,7 +12,7 @@ import polars as pl
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup
-from quantlib.features.incremental import IncrementalEngine
+from quantlib.features.incremental import _TIME_ORIGIN_LAG, IncrementalEngine
 from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
@@ -137,6 +137,36 @@ def test_slice_derive_sparse_symbol_matches_whole_buffer() -> None:
         if minute in sp_minutes and minute > min(sp_minutes):
             checked_sparse += 1
     assert checked_sparse >= 3, "test did not exercise enough sparse-symbol print minutes past its first bar"
+
+
+def test_time_origin_rolls_to_keep_ols_x_bounded() -> None:
+    """The time-OLS origin ROLLS forward each minute so the regressor's x stays O(1) over a long session,
+    instead of growing unbounded from a fixed seed origin (which makes ``b·Σxx − (Σx)²`` a difference of large
+    near-equal sums — the near-perfect-fit conditioning hazard). After many minutes the latest minute's x must
+    be pinned at ``_TIME_ORIGIN_LAG`` and the in-window x must stay small, NOT grow with session age."""
+    stream = _stream(n_sym=6, n_min=120)
+    minutes = sorted(stream["minute"].unique())
+    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup) and g.name == "trend_quality"]
+    engine = IncrementalEngine(groups)
+    assert engine.time_ols_cols, "trend_quality declares a time regressor; its OLS cols must be tracked"
+
+    for minute in minutes:
+        engine.step(stream.filter(pl.col("minute") <= minute), slice_derive=False)
+
+    latest_epoch = int(minutes[-1].timestamp())
+    assert engine.ref_epoch is not None
+    latest_x = (latest_epoch - engine.ref_epoch) / 60.0
+    assert latest_x == _TIME_ORIGIN_LAG, f"latest minute's x should be pinned at {_TIME_ORIGIN_LAG}, got {latest_x}"
+
+    # The largest in-window x magnitude must stay bounded by the session's longest window, NOT the session age
+    # (120 min). Read the running x/b sums for the longest window and bound the per-bar mean x.
+    ns = next(iter(engine.stateful_specs))
+    longest = max(engine.windows)
+    sums = engine.state.sums(longest)  # type: ignore[union-attr]
+    x_col = sums[:, engine.col_index[f"__rd_{ns}_x"]]
+    b_col = sums[:, engine.col_index[f"__rd_{ns}_b"]]
+    mean_x = x_col[b_col > 0] / b_col[b_col > 0]
+    assert np.all(np.abs(mean_x) <= longest + 1), f"in-window x grew past the longest window ({longest}): {mean_x}"
 
 
 def test_sqrt_features_clip_negative_residue_to_zero_not_nan() -> None:
