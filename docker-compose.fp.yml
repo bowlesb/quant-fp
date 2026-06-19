@@ -5,8 +5,8 @@
 #
 # `capture` runs the PREBUILT `fp-dev` image (docker/fp-dev.Dockerfile via `make dev-image`) — the SAME
 # Rust-baked (quant_tick) image the equity fc/strategies run on. NO `build:` directive here ON PURPOSE:
-# Dockerfile.fp is the WRONG, minimal (no-Rust) image, and the feature engine imports quant_tick, so a
-# Dockerfile.fp build would crash on import. Refresh fp-dev only via `make dev-image`.
+# the feature engine imports quant_tick, so the image MUST be the Rust-baked fp-dev. Refresh it only via
+# `make dev-image`.
 services:
   mock-stream:
     build: ./mock_stream
