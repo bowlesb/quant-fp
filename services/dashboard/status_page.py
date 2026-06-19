@@ -126,6 +126,7 @@ def render_status_page(rows: list[dict[str, Any]]) -> str:
 <body>
 <header><h1>Hourly Status Dashboard &nbsp;
 <a href="/">&larr; dashboard</a> &nbsp;
+<a href="/jobs">jobs &rarr;</a> &nbsp;
 <a href="/feature-grid">feature coverage &amp; trust &rarr;</a></h1>
 <div class="muted">newest snapshot on top &middot; auto-refreshes every 2 min &middot; per-row reaction persists for the Lead to review</div></header>
 <div class="wrap">
