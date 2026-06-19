@@ -25,8 +25,9 @@ COPY --from=rustbuild /wheels/*.whl /tmp/
 RUN pip install /tmp/*.whl && rm /tmp/*.whl
 
 COPY quantlib ./quantlib
-COPY services/dashboard/app.py services/dashboard/feature_grid.py services/dashboard/feature_grid_page.py \
-     services/dashboard/status_store.py services/dashboard/status_page.py services/dashboard/jobs_page.py ./
+# Copy ALL dashboard modules via glob so a newly-added panel can never be silently dropped from the
+# image (a hardcoded list previously omitted liquidity_bands/raw_coverage, crashing app.py's imports).
+COPY services/dashboard/*.py ./
 
 # Default store mount (read-only fp_store_real in compose). Overridable per environment.
 ENV STORE_ROOT=/store
