@@ -81,7 +81,11 @@ so fc captured almost no RTH on 06-16/06-17. Fixed 2026-06-18 → 05:11 PT pre-m
 The random trust re-check is the safety net behind 1-day trust (docs/TRUST_REDESIGN.md): it re-grades a
 random recent clean day and un-trusts any TRUSTED feature that now falls below its per-type threshold,
 filing a parity defect. Trust is otherwise PERMANENT per `(feature, version)`; this is the only un-trust
-path. Saturday 14:45 PT keeps it off the weekday capture/sweep windows.
+path. Saturday 14:45 PT keeps it off the weekday capture/sweep windows. It was documented here but had
+drifted out of the live crontab (hand-managed, no installer); `ops/install_crons.sh` closes that gap
+idempotently — it appends this one entry if absent and is a no-op if present, never touching the other
+(hand-managed) lines. Run `ops/install_crons.sh --dry-run` to preview, then `ops/install_crons.sh` to
+install; verify with `crontab -l | grep trust_random_check`.
 
 ### Checklist — before adding or changing ANY cron
 
