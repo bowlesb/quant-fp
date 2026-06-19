@@ -316,6 +316,35 @@ def test_resumable_done_keys_rows_aware_settle_window() -> None:
     assert ("EMPTY_RECENT", "2026-06-18") not in resumable  # the poison case: re-fetched
 
 
+def test_resumable_done_keys_pinned_ticker_stub_floor() -> None:
+    """The pinned-ticker floor: a TINY non-zero tape (SPY trades=2, a pre-settle stub) is NOT done so it is
+    re-fetched, while the SAME 2-row tape for a NON-pinned illiquid name IS done (genuine 2-trade day, never
+    churned), and rows==0 is re-fetched regardless. This separates the impossible-real liquid stub that blocks
+    the sweep from a genuinely-thin microcap, without a flat row floor that would churn illiquid names."""
+    today = dt.date(2026, 6, 19)
+    now = dt.datetime(2026, 6, 19, tzinfo=dt.timezone.utc)
+    manifest = pl.DataFrame(
+        [
+            _manifest_row("SPY", "2026-06-18", 2, now),  # pinned + tiny stub -> NOT done (re-fetch)
+            _manifest_row("ILLIQ", "2026-06-18", 2, now),  # non-pinned + genuine 2 trades -> done
+            _manifest_row("SPY", "2026-06-17", 50000, now),  # pinned + real tape -> done
+            _manifest_row("SPY", "2026-01-02", 2, now),  # pinned + OLD stub -> done (aged out, don't churn)
+        ],
+        schema=raw_backfill.MANIFEST_SCHEMA,
+    )
+    resumable = raw_backfill.resumable_done_keys(
+        manifest,
+        today,
+        settle_window_days=5,
+        force_refetch_symbols=frozenset({"SPY", "QQQ"}),
+        min_settled_rows=100,
+    )
+    assert ("SPY", "2026-06-18") not in resumable  # the SPY=2 sweep blocker: re-fetched
+    assert ("ILLIQ", "2026-06-18") in resumable  # illiquid 2-trade day: NOT churned
+    assert ("SPY", "2026-06-17") in resumable  # pinned real tape: done
+    assert ("SPY", "2026-01-02") in resumable  # pinned old stub: aged out
+
+
 def test_fetch_ticks_tier_refetches_recent_empty_entry(tmp_path, monkeypatch) -> None:
     """End-to-end: a RECENT empty (0-row) trades manifest entry — the exact 06-18 poison (a fetch that beat
     Alpaca's symbol-by-symbol settle) — is RE-FETCHED on the next run and overwrites the empty partition with
@@ -367,6 +396,24 @@ def test_fetch_ticks_tier_skips_recent_real_entry(tmp_path, monkeypatch) -> None
     _pin_resume_today(monkeypatch, DAY + dt.timedelta(days=2))  # recent, but rows>0 -> done
     written, _bytes = raw_backfill.fetch_ticks_tier(config, "trades", ["AAPL"], [DAY], chunk_days=5)
     assert written == 0  # real recent entry is skipped
+
+
+def test_fetch_ticks_tier_refetches_pinned_ticker_stub(tmp_path, monkeypatch) -> None:
+    """End-to-end: a pinned market ticker with a tiny pre-settle stub (SPY trades=2 recorded "done") is
+    RE-FETCHED — rows>0 alone would have stranded it and blocked the sweep's market reference. A non-pinned
+    name with the same 2-row tape is NOT re-fetched (genuine illiquid day, no churn)."""
+    store = str(tmp_path)
+    os.makedirs(os.path.join(store, "raw"), exist_ok=True)
+    pinned = sorted(raw_backfill.FORCE_REFETCH_SYMBOLS)[0]  # SPY/QQQ
+    fetched = dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc)
+    for symbol in (pinned, "ILLIQ"):
+        raw_backfill.write_partition(store, "trades", symbol, DAY, pl.DataFrame(schema=TRADES_SCHEMA))
+        raw_backfill.write_manifest_part(store, "trades", [_manifest_row(symbol, DAY.isoformat(), 2, fetched)], 1)
+    config = _config(tmp_path, budget_bytes=10**12)
+    monkeypatch.setattr(raw_backfill, "_thread_client", lambda: MockDataClient())
+    _pin_resume_today(monkeypatch, DAY + dt.timedelta(days=2))  # within the settle window
+    written, _bytes = raw_backfill.fetch_ticks_tier(config, "trades", [pinned, "ILLIQ"], [DAY], chunk_days=5)
+    assert written == 1  # only the pinned stub is re-fetched (the illiquid 2-row day is left done)
 
 
 def test_rank_by_dollar_volume_reads_bars(tmp_path) -> None:

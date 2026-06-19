@@ -75,29 +75,45 @@ def done_keys(manifest: pl.DataFrame) -> set[tuple[str, str]]:
 
 
 def resumable_done_keys(
-    manifest: pl.DataFrame, today: dt.date, settle_window_days: int
+    manifest: pl.DataFrame,
+    today: dt.date,
+    settle_window_days: int,
+    force_refetch_symbols: frozenset[str] | None = None,
+    min_settled_rows: int = 1,
 ) -> set[tuple[str, str]]:
-    """The (symbol, date) keys a resume may SAFELY skip — rows-aware, so an empty premature fetch is retried.
+    """The (symbol, date) keys a resume may SAFELY skip — rows-aware, so a premature/incomplete fetch retries.
 
     The plain ``done_keys`` treats ANY recorded (symbol, date) as done regardless of ``rows``. That poisons
     a RECENT day: Alpaca historical settles symbol-by-symbol over hours/~T+1, so a fetch issued before a
-    symbol's tape landed records a 0-row "done" entry — and because the resume keys on (symbol, date) only,
-    the real tape can NEVER be re-fetched. (Observed 2026-06-18: SPY trades rows=2, AAPL/NVDA rows=0 recorded
-    "done" while QQQ landed 757k — a half-settled day permanently stuck.)
+    symbol's tape landed records a 0-row (or tiny) "done" entry — and because the resume keys on (symbol,
+    date) only, the real tape can NEVER be re-fetched. (Observed 2026-06-18: AAPL/NVDA trades rows=0, SPY
+    rows=2 recorded "done" while QQQ landed 757k — a half-settled day permanently stuck.)
 
-    Rule: a key is resumable-done iff its MAX recorded ``rows > 0`` (real data, never re-fetch — idempotent
-    and we have it), OR it is empty but OLDER than ``settle_window_days`` (a genuinely no-data day — illiquid/
-    delisted/holiday-half — which we accept and must NOT re-fetch forever). A RECENT empty key (within the
-    settle window) is EXCLUDED → the resume re-fetches it until either real rows land or it ages out. Taking
-    the MAX rows per key means a later real fetch supersedes an earlier poisoned 0-row entry for the same key.
-    Bounded cost: only empties within the last ``settle_window_days`` are reconsidered (a few recent days), so
-    a nightly run re-tries this-week's stuck empties and never churns the deep history.
+    Rule (per key, taking the MAX recorded ``rows`` so a later real fetch supersedes an earlier poison):
+      * OLDER than ``settle_window_days`` → DONE regardless of rows (a genuine no-data / thin day — illiquid/
+        delisted — must NOT be re-fetched forever; the deep history is never churned).
+      * within the window → DONE iff it has a REAL tape: ``rows >= min_settled_rows`` for a forced symbol, or
+        ``rows > 0`` for everything else. Otherwise PENDING → re-fetched until a real tape lands or it ages out.
+
+    ``force_refetch_symbols`` are names where a TINY non-zero tape cannot be genuine — the pinned market
+    tickers SPY/QQQ (and any liquid tier the caller passes). On a half-settled day Alpaca can return a 2-row
+    stub for SPY (a real fetch that beat the settle), and ``rows > 0`` alone would wrongly accept it — stranding
+    the market reference the cross-sectional sweep REQUIRES (the per-ticker sweep floor then blocks the whole
+    day). Requiring ``rows >= min_settled_rows`` for these forces a re-fetch until the full tape lands, WITHOUT
+    touching genuinely-illiquid names (a microcap's real 2-trade day stays done — it is not in the forced set).
+    For non-forced symbols ``min_settled_rows`` is irrelevant; only ``rows > 0`` gates them.
     """
     if manifest.height == 0:
         return set()
+    forced = force_refetch_symbols or frozenset()
     cutoff = (today - dt.timedelta(days=settle_window_days)).isoformat()
     per_key = manifest.group_by(["symbol", "date"]).agg(pl.col("rows").max().alias("max_rows"))
-    resumable = per_key.filter((pl.col("max_rows") > 0) | (pl.col("date") < pl.lit(cutoff)))
+    has_real_tape = (
+        pl.when(pl.col("symbol").is_in(list(forced)))
+        .then(pl.col("max_rows") >= min_settled_rows)
+        .otherwise(pl.col("max_rows") > 0)
+    )
+    resumable = per_key.filter(has_real_tape | (pl.col("date") < pl.lit(cutoff)))
     return {
         (symbol, date)
         for symbol, date in zip(

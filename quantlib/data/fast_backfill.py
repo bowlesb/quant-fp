@@ -40,14 +40,21 @@ from quantlib.data.raw_store import (
     write_manifest_part,
     write_partition,
 )
+from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
 
 logger = logging.getLogger("fast_backfill")
 
-# Mirror raw_backfill.SETTLE_WINDOW_DAYS: within this many days of the trading date an EMPTY manifest entry
-# is reconsidered (re-fetched) because Alpaca's tick tape may not have settled when it was first fetched;
-# past the window an empty entry is a genuine no-data symbol-day and stays done. The tick tiers (this engine)
-# are exactly where the premature-empty poison was observed (06-18 SPY trades=2, AAPL/NVDA=0 while QQQ=757k).
+# Mirror raw_backfill.SETTLE_WINDOW_DAYS: within this many days of the trading date an EMPTY/STUB manifest
+# entry is reconsidered (re-fetched) because Alpaca's tick tape may not have settled when it was first
+# fetched; past the window an empty entry is a genuine no-data symbol-day and stays done. The tick tiers
+# (this engine) are exactly where the premature poison was observed (06-18 SPY trades=2, AAPL/NVDA=0 while
+# QQQ=757k). Within the window, the PINNED market tickers additionally require a real tape (>= the floor)
+# because a tiny non-zero stub (SPY=2) cannot be genuine and strands the sweep's market reference; illiquid
+# names keep the rows>0 rule and never churn. Constants mirror raw_backfill (kept local to avoid importing
+# raw_backfill here — it imports THIS module, so the dependency must stay one-way).
 SETTLE_WINDOW_DAYS = 5
+FORCE_REFETCH_SYMBOLS: frozenset[str] = frozenset(MARKET_INDICES.values())
+MIN_SETTLED_TICK_ROWS = 100
 
 DEFAULT_PROCESSES = 24
 DEFAULT_THREADS_PER_PROCESS = 8
@@ -148,11 +155,18 @@ def _utc_today() -> dt.date:
 def _pending_units(
     store: str, tier: str, symbols: list[str], days: list[dt.date]
 ) -> list[tuple[str, str]]:
-    """(symbol, date_iso) units a resume must still fetch — ROWS-AWARE so a RECENT empty (premature/unsettled)
-    entry is re-fetched, not stranded. resumable_done_keys skips real rows and aged-out empties; a 0-row entry
-    within the settle window is treated as pending so the now-settled tape is acquired (the 06-18 poison)."""
+    """(symbol, date_iso) units a resume must still fetch — ROWS-AWARE so a RECENT empty/stub (premature/
+    unsettled) entry is re-fetched, not stranded. resumable_done_keys skips real tapes and aged-out entries;
+    within the settle window a 0-row entry (any symbol) OR a sub-floor tape for a PINNED ticker is treated as
+    pending so the now-settled tape is acquired (the 06-18 poison: AAPL/NVDA=0, SPY trades=2)."""
     manifest = load_manifest(store, tier)
-    done = resumable_done_keys(manifest, _utc_today(), SETTLE_WINDOW_DAYS)
+    done = resumable_done_keys(
+        manifest,
+        _utc_today(),
+        SETTLE_WINDOW_DAYS,
+        force_refetch_symbols=FORCE_REFETCH_SYMBOLS,
+        min_settled_rows=MIN_SETTLED_TICK_ROWS,
+    )
     day_isos = [day.isoformat() for day in days]
     return [
         (symbol, day_iso)
