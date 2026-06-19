@@ -8,8 +8,13 @@
 # fp_store_real), and a SEPARATE bus namespace (fv:crypto:<SYMBOL>) — so it can NEVER touch the equity fc,
 # its 688-feature fingerprint, its store, or its bus.
 #
-#   docker build -f Dockerfile.fp -t fp-dev .                                   # shared base
-#   docker compose -f docker-compose.crypto.yml up -d --build crypto-capture
+#   make dev-image                                                              # build/refresh shared fp-dev
+#   docker compose -f docker-compose.crypto.yml up -d crypto-capture
+#
+# Uses the PREBUILT `fp-dev` image (docker/fp-dev.Dockerfile via `make dev-image`) — the SAME Rust-baked
+# (quant_tick) image the equity fc/strategies run on. NO `build:` directive here ON PURPOSE: a stray
+# `up --build` must NEVER be able to re-tag/overwrite the good fp-dev with a wrong image. Refresh fp-dev
+# only via `make dev-image`.
 #
 # This is a TEST / VALIDATION harness (prove the pipeline runs live 24/7), NOT a crypto trading strategy.
 name: quant
@@ -17,7 +22,6 @@ name: quant
 services:
   crypto-capture:
     container_name: crypto-capture
-    build: { context: ., dockerfile: Dockerfile.fp }
     image: fp-dev
     restart: unless-stopped
     mem_limit: 2g
@@ -31,6 +35,17 @@ services:
       FP_CRYPTO_SYMBOLS: "BTC/USD,ETH/USD,SOL/USD,LTC/USD,DOGE/USD"
       # Prometheus /metrics for the crypto reader (separate port from the equity reader's 9200).
       CRYPTO_METRICS_PORT: "9300"
+      # Lever-1 STAGE 2 live A/B: compute BOTH batch (written truth) and incremental each minute and
+      # compare them. SAFE — with FP_INCREMENTAL_PARITY=1 the batch recompute STAYS the source of truth
+      # (capture.process_bars takes the else-branch), so there is NO output change; the incremental path is
+      # computed only for the cell-for-cell self-check on the live 24/7 crypto stream. The parity self-check
+      # guard requires BOTH flags (capture.py: `if incremental and parity_check`), so FP_INCREMENTAL=1 is
+      # set here too — but it does NOT make incremental the truth while PARITY is on. Validates
+      # incremental==batch live before FP_INCREMENTAL=1 (parity OFF) is ever flipped on fc/crypto.
+      FP_INCREMENTAL: "1"
+      FP_INCREMENTAL_PARITY: "1"
+    ports:
+      - "9300:9300"                     # expose the crypto reader /metrics so the parity self-check is readable
     volumes:
       - fp_store_crypto:/store          # OWN store volume — never the equity fp_store_real
       - .:/app                          # bind the working tree (mirrors the equity feature-computer)
