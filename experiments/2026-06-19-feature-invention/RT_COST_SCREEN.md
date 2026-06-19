@@ -155,4 +155,16 @@ tiers above: at the ~2.5ms floor → GREEN confirmed; in the ~10–50ms band →
 
 ---
 
-_Cross-linked from `experiments/BACKLOG.md` (Modeller portfolio). Latency workstream; see `latency-ledger.md`._
+## The symmetric parity gate
+
+This RT screen answers *"can we afford to compute it live?"*. Its sibling **`PARITY_PROMOTION_GATE.md`**
+answers the orthogonal *"will the live value EQUAL the backfill value?"* — a definition-time GREEN/YELLOW/RED
+parity tag + mandatory degenerate-window guards (the `#122`/`#131`/`#139` relative-epsilon floor class) so a
+promoted feature is parity-true BY CONSTRUCTION. A KEEP feature carries BOTH tags (`RT-tag:` + `Parity-tag:`)
+before any promotion PR. The two tiers coincide: the cheap `ReductionGroup` form is also the parity-true
+form, so the strong-IC head of the batch is GREEN on both screens.
+
+---
+
+_Cross-linked from `experiments/BACKLOG.md` (Modeller portfolio) and `PARITY_PROMOTION_GATE.md` (the
+symmetric parity gate). Latency workstream; see `latency-ledger.md`._
