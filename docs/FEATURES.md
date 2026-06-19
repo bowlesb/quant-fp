@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-682 features across 51 group(s).
+688 features across 53 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -133,6 +133,9 @@
 | `trade_timing_entropy_1m` | inter_arrival | microstructure | C | tolerance | Float64 | sparse | (0.0, 1.0001) | Normalized Shannon entropy of the trade-count distribution across the minute's one-second buckets, in [0, 1]: 1 is activity spread evenly over the seconds it touched, near 0 is clustered into few seconds. Null on a tradeless minute. |
 | `absret_vs_tod` | intraday_seasonality | price | A | tolerance | Float64 | sparse | (0.0, None) | This minute's |close/open-1| divided by the typical |return| for this time-of-day bucket (the frozen intraday-seasonality baseline). >1 = a bigger move than normal for this clock. NULL outside RTH / unmapped bucket. |
 | `volume_vs_tod` | intraday_seasonality | price | A | tolerance | Float64 | sparse | (0.0, None) | This minute's volume divided by (the name's running since-open mean volume * the time-of-day volume-shape factor). >1 = more volume than this name's typical minute scaled to this time of day. NULL outside RTH / unmapped bucket. |
+| `large_print_ratio_1m` | large_print_burst | microstructure | C | tolerance | Float64 | sparse | (0.0, 1.0) | Fraction of this minute's trades whose size is at least 4x the minute's own mean print size — a relative-to-own-scale large-print burst (vol-burst study, OOS ROC-AUC up to 0.92). Count-weighted, in [0, 1]; null on a tradeless or zero-mean-size minute. |
+| `large_print_volume_share_1m` | large_print_burst | microstructure | C | tolerance | Float64 | sparse | (0.0, 1.0) | Share of this minute's traded volume that printed in large prints (size >= 4x the minute's mean print size) — how concentrated the minute's volume is in outsized prints. Volume-weighted, in [0, 1]; null on a tradeless or zero-volume minute. |
+| `max_print_size_ratio_1m` | large_print_burst | microstructure | C | tolerance | Float64 | sparse | (1.0, None) | Largest single print this minute relative to the minute's mean print size (max size / mean size) — the peak outlier print, >= 1. Null on a tradeless or zero-mean-size minute. |
 | `amihud_illiq_10m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 10 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
 | `amihud_illiq_120m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 120 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
 | `amihud_illiq_15m` | liquidity | trade_flow | B | tolerance | Float64 | warmup | (0.0, None) | Amihud illiquidity over 15 minutes: mean of |one-minute return| / dollar volume (price impact per dollar traded). |
@@ -484,6 +487,9 @@
 | `spread_bps_5m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 5 minutes. |
 | `spread_bps_60m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 60 minutes. |
 | `spread_bps_90m` | quote_spread | quote_spread | B | tolerance | Float64 | sparse | (0.0, 100000.0) | Mean top-of-book spread in basis points over the trailing 90 minutes. |
+| `realized_range_10m` | realized_range | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Trailing 10-minute mean of the intra-minute high-low range as a fraction of close ((high-low)/close) — short-window realized range (the burst study's rv3). A bar-clearing driver of imminent large moves (vol-burst study, OOS ROC-AUC up to 0.92). |
+| `realized_range_3m` | realized_range | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Trailing 3-minute mean of the intra-minute high-low range as a fraction of close ((high-low)/close) — short-window realized range (the burst study's rv3). A bar-clearing driver of imminent large moves (vol-burst study, OOS ROC-AUC up to 0.92). |
+| `realized_range_5m` | realized_range | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Trailing 5-minute mean of the intra-minute high-low range as a fraction of close ((high-low)/close) — short-window realized range (the burst study's rv3). A bar-clearing driver of imminent large moves (vol-burst study, OOS ROC-AUC up to 0.92). |
 | `residual_std_10m` | residual_analysis | trend_quality | A | tolerance | Float64 | warmup | (0.0, 100.0) | Std of OLS residuals around the 10-minute close-vs-time trend, as a percent of mean price: how tightly price hugs its trend line. |
 | `residual_std_15m` | residual_analysis | trend_quality | A | tolerance | Float64 | warmup | (0.0, 100.0) | Std of OLS residuals around the 15-minute close-vs-time trend, as a percent of mean price: how tightly price hugs its trend line. |
 | `residual_std_20m` | residual_analysis | trend_quality | A | tolerance | Float64 | warmup | (0.0, 100.0) | Std of OLS residuals around the 20-minute close-vs-time trend, as a percent of mean price: how tightly price hugs its trend line. |

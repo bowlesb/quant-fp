@@ -3,6 +3,7 @@
 To add a feature, add ONE module here decorated with ``@register`` and import it below. No edits to
 base/registry/engine/store/parity/introspect (FEATURE_PLATFORM.md §3.7).
 """
+
 from quantlib.features.groups import (  # noqa: F401
     asset_flags,
     breadth,
@@ -18,6 +19,7 @@ from quantlib.features.groups import (  # noqa: F401
     gap_fill_state,
     inter_arrival,
     intraday_seasonality,
+    large_print_burst,
     liquidity,
     liquidity_rank,
     market_beta,
@@ -37,6 +39,7 @@ from quantlib.features.groups import (  # noqa: F401
     price_volume,
     prior_day,
     quote_spread,
+    realized_range,
     residual_analysis,
     return_dispersion,
     return_dynamics,
