@@ -2,6 +2,9 @@
 
 > An honest audit of the streaming sim's realism and the measured bar→vector latency, with the slowest
 > groups named. Companion to `docs/PROFILE_SIM.md` (the pre-flight tool) and `docs/LATENCY_PLAN.md`.
+>
+> **Re-measured 2026-06-18 (682 features / 51 groups). See the dated section at the bottom for the current
+> per-group baseline — the table just below is the original 519-feature 06-15 reading, kept as history.**
 
 ## TL;DR
 
@@ -101,3 +104,44 @@ sim path is byte-for-byte what it was.
 - The per-shard *compute* decomposition (`stream_sim._report`) and the per-group ranking are
   contention-light at small shard counts but grow super-linearly with symbols/shard, so always profile at
   the shard size you intend to deploy.
+
+## Re-measure 2026-06-18 (682 features / 51 groups) — regression check + current baseline
+
+Run: `make fp-profile-sim N=1000 SHARDS=16 MIN=20` at the deployed commit (fingerprint
+`0x710bed9e980616f3`). Same scale as the 06-15 reading above, so the two are directly comparable.
+
+**End-to-end bar-arrival → universe-vector-ready (slowest shard / minute, write excluded):**
+
+| date | universe / shards | features | end-to-end p50 | p95 | p99 |
+|---|---|---|---|---|---|
+| 2026-06-15 | 1000 / 16 | 519 | — | — | **~603ms** |
+| 2026-06-18 | 1000 / 16 | 682 | 401ms | 616ms | **761ms** |
+
+The +26% p99 (603→761ms) tracks the **+31% feature growth** (519→682, the order-flow batches PRs #115 et
+al.) almost exactly — it is expected scaling, **NOT a regression**. The two dominant groups are stable
+against their 06-15 readings: `momentum_run` p50 94ms (was ~95ms), `residual_analysis` p50 50ms (was the
+top of its ~13–50ms range). Still **FAIL** vs the 100ms budget (7.6×), as designed — latency is on a
+team-lead STAND-DOWN (`docs/LATENCY_PLAN.md` §7); this is the production-readiness number, not edge-blocking.
+
+**Per-group `compute_latest` p50/p99 baseline (slowest shard each minute, post-warmup).** Diff the next
+sim against this to catch a real per-group regression instead of eyeballing prose. Only the non-trivial
+groups are listed; the long tail of reduction groups sits at the floor (~2.5ms p50 / ~4.5ms p99 each).
+
+| group | p50 | p99 | note |
+|---|---|---|---|
+| `momentum_run` | 94ms | 269ms | dominant — Lever #2 target (`compute_latest` override / kernel migration) |
+| `residual_analysis` | 50ms | 110ms | second — Lever #2 first move (→ ReductionGroup) |
+| `daily_beta` | 20ms | 133ms | cross-sectional gather |
+| `overnight_beta` | 12ms | 30ms | |
+| `return_dispersion` | 12ms | 48ms | cross-sectional gather |
+| `market_context` | 11ms | 113ms | cross-sectional gather |
+| `gap_fill_state` | 11ms | 35ms | |
+| `dumper_state` | 11ms | 57ms | |
+| `runner_state` | 10ms | 72ms | |
+| `liquidity_rank` | 9ms | 33ms | cross-sectional gather |
+| reduction tier (33 groups) | ~2.5ms | ~4.5ms | each — already on the proven fast shape |
+
+`SUM of per-group p50 = 333ms` (the per-minute serial compute budget; the end-to-end p99 is higher because
+it is the slowest-shard tail, not the sum). The ranking is unchanged in SHAPE from 06-15: `momentum_run` +
+`residual_analysis` together (~144ms p50) are ~43% of the per-minute compute — exactly the Lever #2 thesis
+in `docs/LATENCY_PLAN.md` §7. No single group regressed; nothing to fix this cycle.
