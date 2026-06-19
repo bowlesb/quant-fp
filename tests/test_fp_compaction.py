@@ -7,16 +7,27 @@ Float64 compute dtype.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
 
 from quantlib.features import store
-from quantlib.features.compact import COMPACTED_NAME, compact_day
+from quantlib.features.compact import (
+    COMPACTED_NAME,
+    compact_day,
+    compact_settled_days,
+    discover_stream_days,
+)
 
 BASE = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
 DAY = "2026-06-15"
+
+
+def _write_minute_on(root: str, day: str, shard: int, minute_index: int) -> None:
+    minute = datetime.fromisoformat(f"{day}T14:00:00+00:00") + timedelta(minutes=minute_index)
+    frame = pl.DataFrame({"symbol": [f"S{shard}"], "minute": [minute], "ret_1m": [0.001 * minute_index]})
+    store.write_group(root, "demo", "1.0.0", "stream", day, frame, mode="mock", shard=shard, minute=minute)
 
 
 def _write_minute(root: str, shard: int, minute_index: int) -> None:
@@ -52,3 +63,36 @@ def test_compaction_folds_per_minute_files_preserving_data(tmp_path: Path) -> No
     assert df.height == 8  # 2 symbols x 4 minutes, re-delivery de-duped (no duplicate cells)
     assert int(df.select(pl.struct("symbol", "minute").is_duplicated().sum()).item()) == 0
     assert df.filter((pl.col("symbol") == "S0") & (pl.col("minute") == BASE + timedelta(minutes=2)))["ret_1m"][0] == 0.002
+
+
+def test_discover_stream_days_lists_on_disk_days_ascending(tmp_path: Path) -> None:
+    root = str(tmp_path / "store")
+    for day in ("2026-06-15", "2026-06-13", "2026-06-16"):
+        _write_minute_on(root, day, shard=0, minute_index=0)
+    assert discover_stream_days(root) == ["2026-06-13", "2026-06-15", "2026-06-16"]
+
+
+def test_compact_settled_days_skips_today_and_compacts_the_rest(tmp_path: Path) -> None:
+    root = str(tmp_path / "store")
+    for day in ("2026-06-15", "2026-06-16", "2026-06-17"):
+        for minute_index in range(3):
+            _write_minute_on(root, day, shard=0, minute_index=minute_index)
+
+    result = compact_settled_days(root, today=date(2026, 6, 17))
+
+    assert set(result) == {"2026-06-15", "2026-06-16"}  # 06-17 == today: fc may still write it, left alone
+    today_partition = Path(root) / "group=demo" / "v=1.0.0" / "source=stream" / "date=2026-06-17"
+    assert len(list(today_partition.glob("data*.parquet"))) == 3  # untouched
+    settled_partition = Path(root) / "group=demo" / "v=1.0.0" / "source=stream" / "date=2026-06-15"
+    assert list(settled_partition.glob("data*.parquet")) == [settled_partition / COMPACTED_NAME]
+
+
+def test_compact_settled_days_is_idempotent(tmp_path: Path) -> None:
+    root = str(tmp_path / "store")
+    for minute_index in range(3):
+        _write_minute_on(root, "2026-06-15", shard=0, minute_index=minute_index)
+
+    first = compact_settled_days(root, today=date(2026, 6, 17))
+    assert first["2026-06-15"]  # folded files on the first pass
+    second = compact_settled_days(root, today=date(2026, 6, 17))
+    assert second == {}  # already compacted -> nothing to fold

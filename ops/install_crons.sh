@@ -12,6 +12,7 @@
 # Managed entries:
 #   - trust_random_check : weekly RANDOM trust re-check (docs/TRUST_REDESIGN.md), Sat 14:45 PT.
 #   - collect_jobs_status: refresh the /jobs dashboard's jobs_status.json every 5 min (off-:00), READ-ONLY.
+#   - compact_stream     : nightly fold of SETTLED stream partitions' per-minute files, 22:33 PT weekdays.
 #
 #   ops/install_crons.sh --dry-run   # show what WOULD change; change nothing
 #   ops/install_crons.sh             # install any missing managed cron
@@ -20,6 +21,7 @@ set -uo pipefail
 REPO="${REPO:-/home/ben/quant-fp}"
 TRUST_LOG=/home/ben/.quant-validation/trust_random_check.log
 JOBS_LOG=/home/ben/.quant-ops/collect_jobs_status.log
+COMPACT_LOG=/home/ben/.quant-validation/compact_stream.log
 
 # Each managed entry is a match-substring (presence test) + its crontab comment + its crontab line.
 # Times are SYSTEM LOCAL TIME (America/Los_Angeles / PT); the crontab has no TZ override.
@@ -35,6 +37,13 @@ LINES+=("45 14 * * 6 cd $REPO && ops/trust_random_check.sh >> $TRUST_LOG 2>&1")
 MATCHES+=("ops/collect_jobs_status.py")
 COMMENTS+=("# every 5 min (off-:00) refresh the /jobs dashboard's jobs_status.json — READ-ONLY collector")
 LINES+=("3-58/5 * * * * cd $REPO && python ops/collect_jobs_status.py >> $JOBS_LOG 2>&1")
+
+# 22:33 PT weekdays — well after the 18:30 PT daily_lifecycle sweep (which READS stream partitions) and far
+# off RTH; only folds days STRICTLY BEFORE today (fc writes only today's partition). Idempotent + atomic +
+# reader-transparent — no fingerprint impact. See docs/STREAM_COMPACTION.md.
+MATCHES+=("ops/compact_stream.sh")
+COMMENTS+=("# 22:33 PT weekdays fold SETTLED stream partitions' per-minute files (docs/STREAM_COMPACTION.md) — idempotent, reader-transparent, settled-days-only")
+LINES+=("33 22 * * 1-5 cd $REPO && ops/compact_stream.sh >> $COMPACT_LOG 2>&1")
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
