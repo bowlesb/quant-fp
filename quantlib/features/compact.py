@@ -11,11 +11,14 @@ removed, so a crash mid-compaction leaves a correct (if not-yet-tidy) union that
 narrowed storage dtypes are preserved (the files are already Float32 / UInt8 / small-int on disk).
 
 Usage:  python -m quantlib.features.compact <root> <YYYY-MM-DD> [stream|backfill]
+        python -m quantlib.features.compact <root> --settled    # every SETTLED stream day (< today)
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -24,6 +27,7 @@ from quantlib.features.base import KEY_COLUMNS
 from quantlib.features.store import BATCH_ZSTD_LEVEL
 
 COMPACTED_NAME = "data-compacted.parquet"
+_DATE_DIR = re.compile(r"date=(\d{4}-\d{2}-\d{2})$")
 
 
 def compact_partition(partition: Path) -> int:
@@ -55,10 +59,55 @@ def compact_day(root: str | Path, day: str, source: str = "stream") -> dict[str,
     return result
 
 
+def discover_stream_days(root: str | Path, source: str = "stream") -> list[str]:
+    """Every distinct ``date=`` value that has a ``source`` partition on disk, ascending."""
+    base = Path(root)
+    days: set[str] = set()
+    for partition in base.glob(f"group=*/v=*/source={source}/date=*"):
+        match = _DATE_DIR.search(partition.name)
+        if match:
+            days.add(match.group(1))
+    return sorted(days)
+
+
+def compact_settled_days(
+    root: str | Path, source: str = "stream", today: date | None = None
+) -> dict[str, dict[str, int]]:
+    """Compact every SETTLED ``source`` day under ``root`` — i.e. every on-disk day STRICTLY BEFORE
+    ``today`` (the SYSTEM-LOCAL date, matching how fc keys its session partition via ``date +%F``). The
+    live session only ever writes today's ``date=`` partition, so excluding today guarantees we never fold
+    a partition that fc is still appending to. Idempotent (an already-compacted day folds 0 files).
+    Returns {day: compact_day-result}; days with nothing to fold are omitted."""
+    cutoff = today or date.today()
+    result: dict[str, dict[str, int]] = {}
+    for day in discover_stream_days(root, source):
+        if date.fromisoformat(day) >= cutoff:
+            continue  # today (or future) — fc may still be writing it; never touch
+        folded = compact_day(root, day, source)
+        if folded:
+            result[day] = folded
+    return result
+
+
 def main() -> None:
     if len(sys.argv) < 3:
-        raise SystemExit("usage: python -m quantlib.features.compact <root> <YYYY-MM-DD> [stream|backfill]")
-    root, day = sys.argv[1], sys.argv[2]
+        raise SystemExit(
+            "usage: python -m quantlib.features.compact <root> <YYYY-MM-DD> [stream|backfill]\n"
+            "       python -m quantlib.features.compact <root> --settled [stream|backfill]"
+        )
+    root = sys.argv[1]
+    if sys.argv[2] == "--settled":
+        source = sys.argv[3] if len(sys.argv) > 3 else "stream"
+        per_day = compact_settled_days(root, source)
+        grand_total = sum(sum(folded.values()) for folded in per_day.values())
+        print(
+            f"compacted {len(per_day)} settled {source} day(s), folded {grand_total} per-minute "
+            f"files -> {COMPACTED_NAME} (zstd-{BATCH_ZSTD_LEVEL})"
+        )
+        for day, folded in per_day.items():
+            print(f"  {day}: {len(folded)} partitions, {sum(folded.values())} files folded")
+        return
+    day = sys.argv[2]
     source = sys.argv[3] if len(sys.argv) > 3 else "stream"
     folded = compact_day(root, day, source)
     total = sum(folded.values())
