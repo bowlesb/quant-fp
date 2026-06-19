@@ -233,23 +233,34 @@ nicety, not a value bug.
 
 **What it takes (all contained to `quantlib/features/incremental.py`; batch path untouched; per-group
 parity-gated; reversible via `incremental_safe`):**
-- *OLS family (price_r2, clean_momentum, pv_correlation).* Root cause located: the engine's `time`
-  StatefulRegressor uses a FIXED seed origin (`ref_epoch`, `_stateful_matrix` ~L258 `time_x =
-  (minute_epoch − ref_epoch)/60`) that GROWS all session, while the batch path re-centers on the current
-  frame's `epoch.min()` each minute — so the OLS cross-products are large and the two origins round the
-  `cov²/(var_x·var_y)` cancellation differently. PROTOTYPE: rebasing the engine origin to stay bounded
-  (like batch) took single-series price_r2 divergence 1e-9 → 0.0. Step 1 is origin-rebasing the time axis;
-  step 2 is accumulating the OLS paired sums centered (running co-moments) so the cancellation is gone at
-  source.
-- *Variance family (volume_zscore).* Accumulate the std's `__sq` running sum centered: store `Σ(x−c)` and
-  `Σ(x−c)²` for a fixed per-symbol reference `c` instead of `Σx`, `Σx²`. PROTOTYPE: centered running sums
-  took batch-fresh-vs-incremental-running std divergence 3.1e-7 → 4.4e-14. CONSTRAINT to resolve in design:
-  `c` must be reproducible identically by the stateless batch path; a per-window mean breaks O(1), a global
-  constant doesn't help far-from-center symbols, so `c` is a per-symbol session-fixed reference the engine
-  holds — which means EITHER the batch kernel must subtract the same `c` (invasive, touches
-  `rust_windowed_sums`) OR the divergence is accepted as the float floor it is and only the OLS-origin
-  piece (which needs no batch change) is shipped. Decide at build time; prefer the engine-only OLS-origin
-  fix first and re-measure whether volume/price_volume even still breach.
+- *OLS family — time-axis origin (price_r2, clean_momentum).* **SHIPPED 2026-06-18 (PR lat-inc-stable),
+  engine-only, no batch change.** The engine's `time` StatefulRegressor used a FIXED seed origin (`ref_epoch`)
+  that GROWS all session, so the OLS x-sums were large and rounded the `cov²/(var_x·var_y)` cancellation
+  differently from the batch's per-frame centering. FIX: `IncrementalEngine` now ROLLS `ref_epoch` forward
+  each fold (`_roll_time_origin` + `WindowedSumState.rebase_time_axis`, the exact affine `x→x−Δ` transform on
+  the running OLS sums) so x stays pinned at `_TIME_ORIGIN_LAG`. This zeroes the divergence for every n≥3
+  cell and bounds x over a full session (verified: price_r2_5m worst tol-ratio stays ~0.02x from minute 30 to
+  350+).
+- *The REMAINING flag-flip blocker is NOT the origin — it is the n==2 perfect-fit corner.* MEASURED this
+  cycle: with the origin-rebase in, the only residual breach on the flagged smooth-churn walk
+  (`test_ols_near_perfect_fit_is_flagged`) is at **paired count b==2** — two points define a line exactly, so
+  `dy = b·Σyy − (Σy)²` cancels to float noise and r2 is computed as `noise/noise ≈ 1.0±ε`; the two paths'
+  noise differs (price_r2_5m 254x, clean_momentum_score_5m 96x — both ENTIRELY the b==2 cells). A shared,
+  value-CORRECTING guard closes it: at b==2 emit `r2 = 1.0`, `corr = sign(cov)` in BOTH `_ols_stat_exprs`
+  and `_ols_stat_numpy` (an OLS line through two points is a perfect fit; 1.0 is the true value, the current
+  0.9998 is float noise). VERIFIED: origin-rebase + n==2 guard takes ALL FOUR groups to ≤0.03x (clean), and
+  the guard changes ONLY b==2 cells (93 cells, max Δ 1.7e-4, float-noise→exactly-1.0; zero n≥3 cells touched).
+  **This guard touches the SHARED batch algebra → it changes backfill feature values at the degenerate cells →
+  it needs a per-group VERSION BUMP on the 4 groups → fingerprint-coordinated. That is the LEAD's to sequence
+  (Latency proposes; the n==2 guard + version bumps + the flag flip ride together in a Lead-coordinated
+  deploy).** The engine-only origin-rebase shipped now removes the x-growth pathology and makes that final
+  flip a contained change.
+- *Variance family (volume_zscore, pv_correlation).* Still needs the centered-sum batch change (store
+  `Σ(x−c)`/`Σ(x−c)²` for a fixed per-symbol `c`) — `c` must be reproducible by the stateless batch kernel, so
+  this touches `rust_windowed_sums` (invasive, Lead-owned). NOTE: on the flagged smooth-churn walk volume /
+  price_volume now measure 0.00x (their breach is volume-MAGNITUDE driven and that fixture has no degenerate
+  volume window); confirm on a degenerate-volume walk before relying on the variance family being flippable
+  via the n==2 guard alone.
 - Per-group parity test in `tests/test_fp_incremental_capture.py`: pin batch-vs-incremental < breach ratio
   on the smooth near-perfect-fit walk for each group BEFORE flipping its `incremental_safe`.
 
