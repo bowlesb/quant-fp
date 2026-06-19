@@ -119,6 +119,18 @@ FEATURE_GRID_HTML = """<!doctype html>
   /* upper half = stream, lower half = backfill; bright=present, dark=absent (Okabe-Ito blue/orange split) */
   .tlc .pp i.s.on { background:#58a6ff; } .tlc .pp i.s.off { background:#1b2230; }
   .tlc .pp i.b.on { background:#e08a2b; } .tlc .pp i.b.off { background:#241c12; }
+  /* order-flow live coverage trend: per-day union-of-symbols bars (height ∝ distinct live symbols) */
+  .oft { display:flex; align-items:flex-end; gap:3px; height:120px; margin-top:8px; padding:6px 4px;
+    background:#0f1115; border:1px solid var(--border); border-radius:6px; overflow-x:auto; }
+  .oft .bar { display:flex; flex-direction:column; align-items:center; min-width:26px; }
+  .oft .bar .col { width:18px; background:#1b2230; border-radius:2px 2px 0 0; position:relative; }
+  .oft .bar .col .u { position:absolute; bottom:0; left:0; width:100%; background:#58a6ff; border-radius:2px 2px 0 0; }
+  .oft .bar .col .x { position:absolute; bottom:0; left:0; width:100%; background:#2f81f7; }
+  .oft .bar .lbl { font-size:9px; color:var(--muted); margin-top:3px; white-space:nowrap; }
+  .oft .bar .n { font-size:9px; color:var(--text); font-variant-numeric:tabular-nums; }
+  .oft .bar.wknd .col { opacity:0.4; }
+  .verdict { font-weight:600; }
+  .verdict.up { color:var(--green); } .verdict.flat { color:var(--amber); } .verdict.down { color:var(--red); }
 </style></head>
 <body>
 <header><h1>Feature Coverage &amp; Trust &nbsp;
@@ -156,10 +168,12 @@ FEATURE_GRID_HTML = """<!doctype html>
     </select>
     <button id="thinbtn">▸ thinnest live tickers</button>
     <button id="tlbtn">▸ depth &amp; recent-day timeline</button>
+    <button id="oftbtn">▸ order-flow live coverage trend</button>
     <button id="refresh">↻ refresh</button>
   </div>
   <div id="thinhost"></div>
   <div id="tlhost"></div>
+  <div id="ofthost"></div>
   <div class="gridscroll"><table class="grid" id="grid"></table></div>
   <div id="detailhost"></div>
 </div>
@@ -395,8 +409,46 @@ async function toggleTimeline(force){
 }
 document.getElementById("tlbtn").onclick=()=>toggleTimeline(false);
 
+let OFTOPEN=false;
+async function toggleOrderflowTrend(force){
+  const host = document.getElementById("ofthost");
+  if(OFTOPEN && !force){ OFTOPEN=false; host.innerHTML=""; return; }
+  OFTOPEN=true;
+  host.innerHTML = "<div class='symcov muted'>loading order-flow live coverage trend…</div>";
+  const r = await fetch("/api/feature-grid/orderflow-trend" + (force?"?refresh=1":""));
+  const t = await r.json();
+  // trend is most-recent-first; render oldest→newest left-to-right so the trend reads naturally.
+  const days = t.trend.slice().reverse();
+  const peak = Math.max(1, ...days.map(d=>d.n_union));
+  let bars="";
+  for(const d of days){
+    const wknd = isWeekend(d.date) ? " wknd" : "";
+    const uh = Math.round(100*d.n_union/peak), xh = Math.round(100*d.n_intersection/peak);
+    const tip = d.date+" · union "+d.n_union+" symbols (≥1 group) · full-coverage "+d.n_intersection+
+      " (all "+d.n_live_groups+" capturing groups)";
+    bars += "<div class='bar"+wknd+"' title=\\""+tip+"\\"><div class='n'>"+(d.n_union||"")+"</div>"+
+      "<div class='col' style='height:100px'>"+
+      "<div class='u' style='height:"+uh+"%'></div><div class='x' style='height:"+xh+"%'></div></div>"+
+      "<div class='lbl'>"+d.date.slice(5)+"</div></div>";
+  }
+  const delta = t.union_delta||0;
+  const vclass = delta>0?"up":(delta<0?"down":"flat");
+  const vword = delta>0?("WIDENING (+"+delta+")"):(delta<0?("SHRINKING ("+delta+")"):"FLAT");
+  host.innerHTML =
+    "<div class='symcov'>"+
+    "<span class='closebtn' onclick='toggleOrderflowTrend(false)'>✕ close</span>"+
+    "<div class='muted' style='margin-bottom:6px'>distinct symbols the LIVE stream carried per day across "+
+      "the "+t.groups.length+" order-flow groups — bar = UNION (≥1 group, light blue), inner = "+
+      "full-coverage core (every capturing group, dark). Tracks the FP_TICK_SYMBOLS widening-vs-stalling "+
+      "decision for live order-flow certification. Anchor "+(t.anchor_date||"—")+", last "+t.days+" days. "+
+      "Window edge-to-edge: <span class='verdict "+vclass+"'>"+vword+"</span> "+
+      "("+t.oldest_captured_union+" → "+t.newest_captured_union+" symbols).</div>"+
+    "<div class='oft'>"+(bars||"<div class='muted'>no live order-flow capture in window</div>")+"</div></div>";
+}
+document.getElementById("oftbtn").onclick=()=>toggleOrderflowTrend(false);
+
 document.getElementById("thinbtn").onclick=()=>toggleThin(false);
-document.getElementById("refresh").onclick=()=>{ loadGrid(true); if(THINOPEN) toggleThin(true); if(TLOPEN) toggleTimeline(true); };
+document.getElementById("refresh").onclick=()=>{ loadGrid(true); if(THINOPEN) toggleThin(true); if(TLOPEN) toggleTimeline(true); if(OFTOPEN) toggleOrderflowTrend(true); };
 document.getElementById("metric").onchange=e=>{ METRIC=e.target.value; renderGrid(); };
 document.getElementById("sortby").onchange=e=>{ SORT=e.target.value; renderGrid(); };
 document.getElementById("trustfilter").onchange=e=>{ TRUSTFILTER=e.target.value; renderGrid(); if(OPENGROUP) openDetail(OPENGROUP); };

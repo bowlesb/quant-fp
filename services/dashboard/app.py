@@ -215,6 +215,28 @@ def feature_grid_timeline_json(days: int = 21, refresh: bool = False) -> JSONRes
     return JSONResponse(CACHE.timeline(STORE_ROOT, days=days, force=refresh))
 
 
+@app.get("/api/feature-grid/orderflow-trend")
+def feature_grid_orderflow_trend_json(days: int = 21, refresh: bool = False) -> JSONResponse:
+    """Per-recent-day LIVE-stream breadth across the order-flow groups — is FP_TICK_SYMBOLS coverage WIDENING
+    or STALLING at the ~24-canary floor? For the last ``days`` calendar days (most-recent first, ending at the
+    latest order-flow stream date), each day carries the DISTINCT symbol count live in at least one order-flow
+    group (``n_union``, the headline trend), the count live in EVERY capturing order-flow group
+    (``n_intersection``, the full-coverage core), the per-group stream counts, and the window's first-vs-last
+    captured ``union_delta`` (>0 widening, 0 flat, <0 shrinking). This is the symbol-level trend the per-group
+    timeline and the latest-day per-symbol surfaces don't give — the certification readiness signal for live
+    order-flow.
+
+    Registered BEFORE ``/{group}`` so the static path is not swallowed by the path param. ``refresh=1``
+    bypasses the TTL cache.
+
+    Shape (see docs/FEATURE_DASHBOARD.md):
+      {generated_at, store_root, anchor_date, days, groups: [...], dates: [...],
+       newest_captured_union, oldest_captured_union, union_delta,
+       trend: [{date, n_union, n_intersection, n_live_groups, per_group: {group: n}}]}
+    """
+    return JSONResponse(CACHE.orderflow_trend(STORE_ROOT, days=days, force=refresh))
+
+
 @app.get("/api/feature-grid/{group}")
 def feature_grid_group_json(group: str, refresh: bool = False) -> JSONResponse:
     """Per-feature detail for one group (the expanded view) as JSON.

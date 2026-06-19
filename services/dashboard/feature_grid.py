@@ -76,6 +76,28 @@ PERIODS: list[tuple[str, str, int | None]] = [
 # as the "days needed" denominator for the "X% to trusted" progress indicator and keep it here, documented.
 DAYS_NEEDED_FOR_TRUST = 2
 
+# The tick/order-flow groups: features derived from the per-trade tick stream (signed flow, inter-arrival,
+# run-length, size distribution, trade-frequency z, liquidity/spread, exhaustion). These are the groups whose
+# LIVE breadth is gated by ``FP_TICK_SYMBOLS`` (unset -> ~24-canary floor) while their full-universe BACKFILL
+# agg is parity-true. The coverage-trend surface reads live-stream breadth ONLY over these groups, so the
+# day-over-day number tracks exactly the FP_TICK_SYMBOLS widening (vs stalling at the floor) decision — bar/
+# price groups, which the stream covers ~universe-wide, would otherwise drown the order-flow signal.
+# Kept in sync with the Modeller's FULL order-flow tier (build_orderflow_dataset.py); a group not on disk is
+# simply skipped, so listing a not-yet-shipped group here is harmless.
+ORDERFLOW_GROUPS = [
+    "trade_flow",
+    "signed_trade_ratio",
+    "liquidity",
+    "quote_spread",
+    "trade_freq_z",
+    "trade_size_dist",
+    "inter_arrival",
+    "tick_runlength",
+    "microstructure_burst",
+    "volume_leads_price",
+    "volume_exhaustion",
+]
+
 
 @dataclass
 class FeatureTrust:
@@ -834,6 +856,136 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
     }
 
 
+def _gather_stream_symbols_by_date(
+    root: str, group: str, version: str, dates: list[str]
+) -> dict[str, set[str]]:
+    """Per-date STREAM symbol SETS for one group, restricted to ``dates``. Same bounded per-partition read
+    (``_read_symbols`` -> evenly-spaced file sample) the grid/timeline already pay; here the SETS are RETAINED
+    (the timeline keeps only the counts) so the union across groups can be taken per day. Only the requested
+    recent ``dates`` are read, so this is at most ``len(dates)`` partition touches per group, not the whole
+    history — cheaper than the timeline's full-history count pass."""
+    out: dict[str, set[str]] = {}
+    for date_iso in dates:
+        symbols = _read_symbols(root, group, version, "stream", date_iso)
+        if symbols:
+            out[date_iso] = symbols
+    return out
+
+
+def build_orderflow_coverage_trend(
+    root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT_DAYS
+) -> dict[str, object]:
+    """Per-recent-day LIVE-stream breadth across the order-flow groups — is FP_TICK_SYMBOLS WIDENING or STALLING?
+
+    The timeline grid (build_coverage_timeline) shows per (group x day) presence + counts, and the per-symbol
+    surfaces (#121 /symbols, #127 thin-live) show WHICH names are thin on the LATEST day. Neither answers the
+    trend question Ben needs for the universe-wide live order-flow certification: across the tick-derived
+    groups, how many DISTINCT symbols did the live stream actually carry on each of the last N days, and is
+    that union climbing off the ~24-canary floor or flat?
+
+    For each recent day this surface reports, over ``ORDERFLOW_GROUPS`` present on disk:
+      * ``union`` — distinct symbols live on the stream in AT LEAST ONE order-flow group (the widest live
+        order-flow universe that day; the headline trend number).
+      * ``intersection`` — symbols live in EVERY order-flow group that captured anything that day (the names
+        with FULL order-flow coverage — the tradeable-live core).
+      * per-group stream counts, so a single thin group is visible against the union.
+
+    Read-side only: reuses ``_read_symbols`` over just the recent ``days`` window per order-flow group (same
+    bounded sampling, no extra heavy I/O beyond what the grid already does — and only the recent slice, not
+    the full history the timeline scans). NO schema/format change.
+    """
+    catalog_by_group = _catalog_by_group()
+    present_groups = [group for group in ORDERFLOW_GROUPS if group in catalog_by_group]
+
+    versions: dict[str, str] = {}
+    for group in present_groups:
+        version = _group_version(group)
+        if version is not None:
+            versions[group] = version
+    present_groups = [group for group in present_groups if group in versions]
+
+    span = max(1, min(days, TIMELINE_MAX_DAYS))
+
+    anchor: dt.date | None = None
+    for group in present_groups:
+        latest = _latest_partition_date(root, group, versions[group], "stream")
+        if latest is not None:
+            day = dt.date.fromisoformat(latest)
+            if anchor is None or day > anchor:
+                anchor = day
+
+    if anchor is None:
+        return {
+            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "store_root": root,
+            "anchor_date": None,
+            "days": span,
+            "groups": sorted(present_groups),
+            "dates": [],
+            "trend": [],
+        }
+
+    timeline_dates = [(anchor - dt.timedelta(days=offset)).isoformat() for offset in range(span)]
+
+    # {group: {date: stream symbol set}} over only the recent window — the single store read of this surface.
+    per_group_sets: dict[str, dict[str, set[str]]] = {}
+    for group in present_groups:
+        per_group_sets[group] = _gather_stream_symbols_by_date(root, group, versions[group], timeline_dates)
+
+    trend: list[dict[str, object]] = []
+    for date_iso in timeline_dates:
+        day_sets = [
+            per_group_sets[group][date_iso]
+            for group in present_groups
+            if date_iso in per_group_sets[group]
+        ]
+        live_groups = [
+            group for group in present_groups if date_iso in per_group_sets[group]
+        ]
+        if day_sets:
+            union = set.union(*day_sets)
+            # Intersection over only the groups that captured anything that day (an absent group must not
+            # zero out the full-coverage core just because it had no session row).
+            intersection = set.intersection(*day_sets)
+        else:
+            union = set()
+            intersection = set()
+        trend.append(
+            {
+                "date": date_iso,
+                "n_union": len(union),
+                "n_intersection": len(intersection),
+                "n_live_groups": len(live_groups),
+                "per_group": {group: len(per_group_sets[group][date_iso]) for group in live_groups},
+            }
+        )
+
+    # First vs last captured day in the window -> a single widening/stalling verdict for the header.
+    captured = [row for row in trend if int(row["n_union"]) > 0]
+    if len(captured) >= 2:
+        # trend is most-recent-first, so captured[-1] is the OLDEST captured day in the window.
+        oldest_union = int(captured[-1]["n_union"])
+        newest_union = int(captured[0]["n_union"])
+        union_delta = newest_union - oldest_union
+    else:
+        oldest_union = newest_union = union_delta = 0
+
+    return {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "store_root": root,
+        "anchor_date": anchor.isoformat(),
+        "days": span,
+        "groups": sorted(present_groups),
+        # Most-recent first (matches the timeline surface) so the freshest day reads leftmost.
+        "dates": timeline_dates,
+        "trend": trend,
+        "newest_captured_union": newest_union,
+        "oldest_captured_union": oldest_union,
+        # > 0 widening, 0 flat, < 0 shrinking — the FP_TICK_SYMBOLS coverage direction at a glance.
+        "union_delta": union_delta,
+    }
+
+
 class GridCache:
     """Tiny TTL cache so a page load / refresh re-aggregates at most every ``ttl`` seconds. The grid read is
     1-2s on the live store; a 60s TTL makes a busy refresh instant while staying fresh enough for a coverage
@@ -847,6 +999,7 @@ class GridCache:
         self._symbols: dict[str, tuple[float, dict[str, object]]] = {}
         self._thin: dict[int, tuple[float, dict[str, object]]] = {}
         self._timeline: dict[int, tuple[float, dict[str, object]]] = {}
+        self._oflow_trend: dict[int, tuple[float, dict[str, object]]] = {}
 
     def grid(self, root: str, force: bool = False) -> dict[str, object]:
         now = time.monotonic()
@@ -891,6 +1044,17 @@ class GridCache:
             return cached[1]
         view = build_coverage_timeline(root, days)
         self._timeline[days] = (now, view)
+        return view
+
+    def orderflow_trend(
+        self, root: str, days: int = TIMELINE_DEFAULT_DAYS, force: bool = False
+    ) -> dict[str, object]:
+        now = time.monotonic()
+        cached = self._oflow_trend.get(days)
+        if not force and cached is not None and (now - cached[0]) <= self.ttl:
+            return cached[1]
+        view = build_orderflow_coverage_trend(root, days)
+        self._oflow_trend[days] = (now, view)
         return view
 
 
