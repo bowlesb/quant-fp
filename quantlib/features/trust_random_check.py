@@ -92,8 +92,10 @@ INSERT INTO feature_parity_defect
 VALUES (%(feature)s, %(version)s, %(feature_group)s, 'open', %(day)s, %(day)s, 1, NULL, '[]')
 ON CONFLICT (feature, version) DO UPDATE SET
   last_seen_day=GREATEST(feature_parity_defect.last_seen_day, EXCLUDED.last_seen_day),
-  status=CASE WHEN feature_parity_defect.status IN ('fixed','wontfix') THEN 'open'
+  status=CASE WHEN feature_parity_defect.status IN ('fixed','wontfix','auto_closed') THEN 'open'
               ELSE feature_parity_defect.status END,
+  clean_streak=0,
+  last_streak_day=NULL,
   updated_at=now()
 """
 
