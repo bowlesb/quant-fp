@@ -44,6 +44,16 @@ from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
 
+
+class WarmStartUnderfilled(Exception):
+    """Raised after a warm-start seed when a window that the seed buffer HAD enough history to fill did NOT
+    end up populated — i.e. the seed data was present but the state failed to absorb it (the 7/13-col schema
+    ShapeError, a sort/index mismatch, a silently-dropped slot). This is the "warm-start FAILED" arm of the
+    three-way distinction: it is NOT raised for a window that is legitimately not-yet-full because the
+    AVAILABLE seed history was itself shorter than the window (a newly-listed ticker / first day / genuine
+    gap). Fail-fast per CLAUDE.md ("let errors raise / no lazy graceful degradation") so a partial warm-start
+    is caught loudly at init instead of silently under-warming live emissions."""
+
 # How far (minutes) behind the incoming minute to pin the rolling time-OLS origin each fold. Small and fixed
 # so the time regressor's x stays O(1) for every window — keeping ``b·Σxx − (Σx)²`` well conditioned instead
 # of a difference of large near-equal sums (the source of the near-perfect-fit time-OLS incremental breach).
@@ -70,10 +80,21 @@ class WindowedSumState:
         self._buf_epoch: list[int] = []
         self._buf_vals: list[np.ndarray] = []
         self._oldest = [0] * len(self.windows)  # per-window index of the oldest minute still in the sum
+        # Span of folded history (in epoch seconds), tracked across trims so ``populated`` survives the
+        # memory eviction that drops buffered minutes once they leave the longest window. ``_first_epoch``
+        # is the EARLIEST minute ever folded since seed (the left edge of the absorbed history);
+        # ``_last_epoch`` is the latest. A window ``w`` is POPULATED when the absorbed history reaches at
+        # least ``w`` minutes behind the latest minute — i.e. its lower edge ``last − w·60`` has slid past
+        # real data rather than being truncated by the seed's left edge.
+        self._first_epoch: int | None = None
+        self._last_epoch: int | None = None
 
     def update(self, minute_epoch: int, values: np.ndarray) -> None:
         """Fold one new minute into every window's running sum, then expire minutes now outside each window."""
         index = len(self._buf_epoch)
+        if self._first_epoch is None:
+            self._first_epoch = int(minute_epoch)
+        self._last_epoch = int(minute_epoch)
         self._buf_epoch.append(int(minute_epoch))
         self._buf_vals.append(values)
         for wi, w in enumerate(self.windows):
@@ -121,6 +142,45 @@ class WindowedSumState:
         """The current ``(n_symbols, n_cols)`` running sum for ``window`` (minutes)."""
         return self.running[self.windows.index(window)]
 
+    def observed_span_minutes(self) -> float:
+        """How many minutes of history the state has ABSORBED: latest folded minute − earliest folded minute,
+        in minutes. ``0`` before any fold. Survives ``trim`` (tracked from ``_first/_last_epoch``, not the
+        evicted buffer), so it reflects the full warm-started depth even after memory eviction."""
+        if self._first_epoch is None or self._last_epoch is None:
+            return 0.0
+        return (self._last_epoch - self._first_epoch) / 60.0
+
+    def populated(self, window: int) -> bool:
+        """True when the absorbed history reaches a FULL ``window`` minutes behind the latest minute — i.e.
+        the window holds its full required depth rather than being truncated by the seed's left edge. A
+        window equal to or shorter than the observed span is full; a longer one is still warming."""
+        return self.observed_span_minutes() >= float(window)
+
+    def assert_populated(self, available_span_minutes: float) -> None:
+        """Post-seed self-check (the warm-start ``populated`` assert). ``available_span_minutes`` is the span
+        the SEED BUFFER actually carried (latest − earliest seed minute). For every window the engine
+        declares, apply the three-way distinction:
+
+          * FULL — ``observed_span >= window`` → the state absorbed its full depth → OK.
+          * LEGITIMATELY not-yet-full — the seed buffer itself was shorter than the window
+            (``available_span < window``: newly-listed ticker, first day, genuine short history) → the
+            window is correctly not populated → OK (no raise; it emits partial/NaN as today).
+          * warm-start FAILED — the seed buffer HAD ``>= window`` minutes but the state's observed span is
+            short (data present, not absorbed: the ShapeError, a schema/index mismatch) → RAISE
+            ``WarmStartUnderfilled``.
+
+        The assert fires ONLY on the third arm: ``available_span >= window`` (the buffer could fill it) but
+        ``observed_span < window`` (the state didn't)."""
+        observed = self.observed_span_minutes()
+        for window in self.windows:
+            if available_span_minutes >= float(window) and observed < float(window):
+                raise WarmStartUnderfilled(
+                    f"warm-start failed to populate the {window}m window: seed buffer carried "
+                    f"{available_span_minutes:.1f}m of history (>= {window}m, so it COULD fill the window) "
+                    f"but the state only absorbed {observed:.1f}m — the seed data was present but not "
+                    f"absorbed (schema/shape mismatch or dropped minutes), not a legitimately-short history."
+                )
+
 
 class IncrementalEngine:
     """The live incremental execution path for the declarative reduction groups. Holds a per-shard
@@ -142,8 +202,13 @@ class IncrementalEngine:
 
     DERIVE_SLICE = 6  # legacy minute-window depth (>= max_lag); the live slice tails by ROW (see _matrix_at). Used by the rust-vs-polars unit tests and the dense-feed sim slot count.
 
-    def __init__(self, groups: list[ReductionGroup], *, rust_slice: bool = True) -> None:
+    def __init__(self, groups: list[ReductionGroup], *, rust_slice: bool = True, warm_start_assert: bool = False) -> None:
         self.rust_slice = rust_slice
+        # When True, the FIRST seed (the lazy warm-start seed, folding the rehydrated ring) asserts every
+        # window is ``populated`` GIVEN that buffer's available history (``assert_populated``) — catching a
+        # FAILED warm-start (data present but not absorbed) loudly. Cleared after that first seed, so later
+        # re-seeds (a genuinely-new ticker / daily resync mid-session) are normal operation, not re-asserted.
+        self.warm_start_assert = warm_start_assert
         self.groups = [g for g in groups if isinstance(g, ReductionGroup)]
         self.derived, self.extra, self.value_cols, self.plan, self.reg_plan, self.windows = build_plan(self.groups)
         self.col_index = {col: i for i, col in enumerate(self.value_cols)}
@@ -442,6 +507,30 @@ class IncrementalEngine:
             self._roll_time_origin(minute_epoch)
             self.state.update(minute_epoch, self._matrix_at(buffer_frame, minute, slice_derive=slice_derive))
             self.state.trim()
+        if self.warm_start_assert:
+            self.assert_populated(buffer_frame)
+            self.warm_start_assert = False  # assert only on the warm-start seed; later resyncs are normal ops
+
+    def seed_buffer_span_minutes(self, buffer_frame: pl.DataFrame) -> float:
+        """The span of distinct minutes the seed buffer carries (latest − earliest), in minutes — how much
+        history was AVAILABLE to populate the windows. Compared against ``observed_span_minutes`` to tell a
+        legitimately-short buffer (no raise) from a failed absorb of a deep buffer (raise)."""
+        if buffer_frame.is_empty():
+            return 0.0
+        minutes = buffer_frame.select(
+            pl.col("minute").dt.epoch("s").min().alias("lo"),
+            pl.col("minute").dt.epoch("s").max().alias("hi"),
+        )
+        return float((minutes["hi"][0] - minutes["lo"][0]) / 60.0)
+
+    def assert_populated(self, buffer_frame: pl.DataFrame) -> None:
+        """Assert every window the engine declares is ``populated`` GIVEN the history the seed buffer
+        carried. Call AFTER a warm-start ``seed(buffer_frame)`` to catch a FAILED warm-start (data present
+        but not absorbed) loudly, while letting a legitimately-short seed buffer pass. No-op (the assert is
+        vacuous) when the engine declares no windows or has not been seeded."""
+        if self.state is None or not self.windows:
+            return
+        self.state.assert_populated(self.seed_buffer_span_minutes(buffer_frame))
 
     def step(self, frame: pl.DataFrame, *, slice_derive: bool = True) -> dict[str, pl.DataFrame]:
         """Fold the new latest minute and assemble features from the running sums. ``frame`` is the trailing

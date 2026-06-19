@@ -115,7 +115,7 @@ def _engine_for(state: "CaptureState", reduce_input: str, batch_groups: list) ->
     the buffer on its first ``step`` and re-seeds itself when a genuinely-new ticker appears)."""
     engine = state.engines.get(reduce_input)
     if engine is None:
-        engine = IncrementalEngine(batch_groups)
+        engine = IncrementalEngine(batch_groups, warm_start_assert=state.warm_start_assert)
         state.engines[reduce_input] = engine
     return engine
 
@@ -178,13 +178,22 @@ class MinuteRing:
             self._slots.popitem(last=False)  # evict the oldest minute slot
 
     def materialize(self) -> pl.DataFrame:
-        """The trailing-window frame: concat the live per-minute slots in minute order."""
-        return pl.concat(list(self._slots.values()))
+        """The trailing-window frame: concat the live per-minute slots in minute order.
+
+        ``how="diagonal"`` null-fills columns absent from a slot, so a 7-col bar-only slot (e.g. a
+        warm-start seed minute from settled bars, which carry no tick enrichment) and a 13-col
+        tick-enriched live slot concat cleanly: the seed minute gets NULL tick columns — honest "not
+        collected" — exactly the null a settled premarket bar carries in the backfill ``minute_agg``, so
+        parity holds. For a homogeneous ring (every slot the same schema) this is byte-identical to the
+        plain concat. Without it, mixing 7-col and 13-col slots raises a polars ShapeError (the warm-start
+        crash that forced FP_WARM_START off)."""
+        return pl.concat(list(self._slots.values()), how="diagonal")
 
     def last_minutes(self, n: int) -> pl.DataFrame:
-        """Concat only the last ``n`` minute slots (the short trailing slice consumers need)."""
+        """Concat only the last ``n`` minute slots (the short trailing slice consumers need). ``diagonal``
+        for the same heterogeneous-schema reason as ``materialize`` (seed vs tick-enriched slots)."""
         slots = list(self._slots.values())
-        return pl.concat(slots[-n:])
+        return pl.concat(slots[-n:], how="diagonal")
 
 
 class StoreWriter:
@@ -234,6 +243,9 @@ class CaptureState:
         self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
         self.engines: dict[str, IncrementalEngine] = {}  # one incremental engine per reduce_input bucket (FP_INCREMENTAL)
         self.bus_hook: BusHook | None = None  # set lazily when FP_BUS=1 (real mode) -> publishes vectors off-path
+        # Set by the warm-start path (``warm_start_ring``) so the FIRST incremental engine seed asserts every
+        # window is ``populated`` for the rehydrated buffer's history — catching a failed warm-start loudly.
+        self.warm_start_assert = False
 
     @property
     def buffer(self) -> pl.DataFrame | None:
@@ -447,6 +459,10 @@ def warm_start_ring(
         state.ring = MinuteRing(maxlen=depth, columns=project_columns)
     # Minute-ascending so the trailing ``depth`` slots survive eviction (push evicts the OLDEST past maxlen).
     state.ring.push(bars.sort(["minute", "symbol"]))
+    # Arm the populated-assert: the first incremental engine seed (which folds this rehydrated ring) will
+    # assert every window reached its full depth GIVEN the seeded history — a FAILED warm-start (data
+    # present but not absorbed) then raises at init instead of silently under-warming live emissions.
+    state.warm_start_assert = True
     return len(state.ring._slots)
 
 
