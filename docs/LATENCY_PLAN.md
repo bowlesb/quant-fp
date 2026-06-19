@@ -263,6 +263,14 @@ parity-gated; reversible via `incremental_safe`):**
   via the n==2 guard alone.
 - Per-group parity test in `tests/test_fp_incremental_capture.py`: pin batch-vs-incremental < breach ratio
   on the smooth near-perfect-fit walk for each group BEFORE flipping its `incremental_safe`.
+- *`test_ols_near_perfect_fit_is_flagged` is currently `@pytest.mark.xfail(strict=False)`.* PR #132's
+  engine-only origin-rebase already dropped this fixture's worst batch-vs-incremental ratio on
+  `trend_quality`/`clean_momentum` to ~0.41x (well under the 10x breach), so the test's "the breach is real,
+  the gate is load-bearing" premise no longer holds while the flag flip is held — leaving it un-xfailed would
+  pollute every agent's suite with a known-pending failure and mask real regressions. **WHEN the Lever-1 n==2
+  guard + `incremental_safe` flip lands, REMOVE the xfail and rework the assertion** (those two groups become
+  `incremental_safe=True`, so the current `not g.incremental_safe` filter yields an empty `sensitive` list —
+  re-target the test at whatever groups remain gated, or convert it to assert the post-flip ≤0.03x parity).
 
 **Rough effort:** ~1 focused cycle. **Expected after:** the 4 groups move off batch onto the fast path,
 removing ~54ms p50 / ~91ms p99 of batch reduction work from the per-minute path (measured, 375-sym shard).
