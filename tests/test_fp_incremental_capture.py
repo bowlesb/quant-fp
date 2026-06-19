@@ -230,6 +230,74 @@ def test_flipped_ols_groups_parity_on_degenerate_walks(seed: int, present_p: flo
     assert worst < _PARITY_BREACH_RATIO, f"flipped OLS breached on degenerate walk (seed={seed}): {worst}x"
 
 
+def _late_appearance_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float) -> list[list[dict]]:
+    """A sparse stream where NO minute carries every symbol — symbols FIRST appear at random later minutes (NOT
+    a clean minute-0 warmup). This drives the ``SymbolSetExpanded`` re-seed (a genuinely-new ticker each time a
+    fresh symbol appears), folding the whole multi-minute buffer through ``_matrix_at`` for HISTORICAL minutes —
+    the path that exposed the rust slice-derive future-row lag leak (a first-bar return wrongly non-null →
+    double-counted OLS pairing → ``pv_correlation`` ±1.0 in incremental vs ``null`` in batch). Mirrors the live
+    crypto regime (1-5 symbols/minute) the FP_INCREMENTAL crypto soak breached on."""
+    rng = np.random.default_rng(seed)
+    price = {s: 100.0 + s for s in range(n_sym)}
+    out: list[list[dict]] = []
+    for mi in range(n_min):
+        minute_iso = (BASE + dt.timedelta(minutes=mi)).isoformat()
+        bars: list[dict] = []
+        for s in range(n_sym):
+            price[s] *= 1.0 + (rng.standard_normal() * vol)
+            if rng.random() >= present_p:  # no minute-0 force: symbols appear (and reappear) sparsely
+                continue
+            c = price[s]
+            bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
+                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+        if not bars:  # a real feed always carries >=1 symbol per minute
+            s = int(rng.integers(n_sym))
+            c = price[s]
+            bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
+                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+        out.append(bars)
+    return out
+
+
+@pytest.mark.parametrize(
+    "seed,present_p,vol",
+    [
+        (1, 0.40, 0.005),  # sparse, symbols first-appear late -> repeated re-seed over multi-minute buffer
+        (2, 0.25, 0.005),  # sparser (crypto-like 1-5 sym/min)
+        (3, 0.15, 0.005),  # very sparse: most windows are first-appearance b==1/b==2 corners
+    ],
+)
+def test_flipped_ols_parity_on_late_appearance_reseed(seed: int, present_p: float, vol: float) -> None:
+    """Cell-for-cell batch==incremental on the FLIPPED OLS groups when symbols FIRST APPEAR at later minutes
+    (no clean minute-0 warmup), so each new ticker triggers a ``SymbolSetExpanded`` re-seed that folds the whole
+    buffer through the slice-derive path for HISTORICAL minutes. Regression for the rust slice-derive future-row
+    lag leak: without the ``<= minute`` point-in-time cut a first-appearance return's prior-close lag came back
+    non-null, double-counting the OLS pairing ``b`` and emitting ``pv_correlation`` ±1.0 (the n==2 perfect-fit
+    value) where the batch correctly emits ``null`` — the FP_INCREMENTAL null/non-null A/B breach the crypto
+    soak found. The helper ``_worst_tol_ratio`` returns ``inf`` on any null/non-null mismatch, so a re-breach
+    fails here loudly."""
+    walk = _late_appearance_minutes(n_sym=20, n_min=40, present_p=present_p, seed=seed, vol=vol)
+    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_FLIPPED]
+    ring = MinuteRing(maxlen=120)
+    engine: IncrementalEngine | None = None
+    worst = 0.0
+    for bars in walk:
+        if not bars:
+            continue
+        ring.push(_bars_to_frame(bars))
+        frame = ring.materialize()
+        ctx = BatchContext(frames={"minute_agg": frame})
+        batch = compute_reduction_batch(flipped, ctx)
+        if engine is None:
+            engine = IncrementalEngine(flipped)
+        inc = engine.step(frame, slice_derive=True)
+        worst = max(worst, _worst_tol_ratio(batch, inc))
+    assert worst < _PARITY_BREACH_RATIO, (
+        f"flipped OLS breached on late-appearance re-seed (seed={seed}, p={present_p}): {worst}x "
+        "(inf = a null/non-null mismatch = the sparse first-bar lag leak regressed)"
+    )
+
+
 def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
     """``volume`` stays gated: its z-score std (power-sum sqrt(Σv²−(Σv)²/n) on the live/incremental path vs
     backfill rolling_std_by) diverges on a near-constant-volume window — a real batch-vs-canonical FORMULA gap

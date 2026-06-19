@@ -494,15 +494,26 @@ class IncrementalEngine:
         given. Asserts a fixed symbol set (V1)."""
         source = frame
         if slice_derive:
-            # Positional lags (``shift(k).over("symbol")``) need each present symbol's last ``max_lag+1`` ROWS,
-            # not a fixed minute window. A sparse symbol's prior bar can be arbitrarily far back in time, and
-            # backfill's shift is POSITIONAL (the k-th prior ROW, not the bar k minutes ago); a minute-window
-            # slice would miss it and slice-derive a wrong null lag where backfill returns a real value. Tailing
-            # by ROW per symbol reaches each symbol's actual prior bars regardless of gaps, so the slice derive
-            # is cell-for-cell identical to the whole-buffer derive at the latest row for dense AND sparse
-            # symbols (this resolves the OPEN PARITY CONSTRAINT). ``minute``-sort so each symbol's ``tail`` is
-            # its latest rows; the derive then runs on ~``max_lag+1`` rows/symbol, not the whole buffer.
-            source = frame.sort("minute").group_by("symbol", maintain_order=True).tail(self.max_lag + 1)
+            # Positional lags (``shift(k).over("symbol")``) need each present symbol's last ``max_lag+1`` ROWS
+            # AT OR BEFORE ``minute``, not a fixed minute window. A sparse symbol's prior bar can be arbitrarily
+            # far back in time, and backfill's shift is POSITIONAL (the k-th prior ROW, not the bar k minutes
+            # ago); a minute-window slice would miss it and slice-derive a wrong null lag where backfill returns
+            # a real value. Tailing by ROW per symbol (over rows ``<= minute``) reaches each symbol's actual
+            # prior bars regardless of gaps AND ends each symbol's tail at its ``minute`` row, so the slice
+            # derive is cell-for-cell identical to the whole-buffer derive AT ``minute`` for dense AND sparse
+            # symbols (this resolves the OPEN PARITY CONSTRAINT). The ``<= minute`` cut is a no-op when ``minute``
+            # is the buffer's latest (the live ``step``), and the correctness fix when the SEED folds a HISTORICAL
+            # minute over a multi-minute buffer: without it the tail would END at a symbol's FUTURE bar, so the
+            # rust lag kernel would join that future row's lag onto the earlier ``minute`` row — wrongly making a
+            # first-appearance return's prior-close lag non-null and double-counting the OLS pairing (b) on the
+            # sparse first-bar window (the FP_INCREMENTAL null/non-null A/B breach on pv_correlation). ``minute``-
+            # sort so each symbol's ``tail`` is its latest in-window rows.
+            source = (
+                frame.filter(pl.col("minute") <= minute)
+                .sort("minute")
+                .group_by("symbol", maintain_order=True)
+                .tail(self.max_lag + 1)
+            )
         row = self._derived_row_rust(source, minute) if self.rust_slice else self._derived_row(source, minute)
         n_sym = len(self.symbols or [])
         # Live capture delivers only the minute's ACTIVE symbols — a fluctuating SUBSET of the fixed session
