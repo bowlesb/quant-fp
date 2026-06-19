@@ -219,7 +219,16 @@ class TechnicalGroup(StatefulGroup):
         # null/finite at the same cells -> a stream-vs-backfill PARITY divergence. Guard on a RELATIVE
         # threshold (std20 must be a non-trivial fraction of |sma|) and emit NULL on degenerate windows
         # so both paths agree. Same guard gates bb_width (which divides by sma).
-        bb_well_defined = (std20 > _BB_REL_EPS * sma20.abs()) & (sma20.abs() > 0)
+        #
+        # std20 must also be FINITE: on a degenerate flat window the live `rust_reductions` std kernel
+        # emits NaN while the backfill `rolling_std_by` emits a tiny finite value — and polars orders NaN
+        # as the LARGEST float, so `NaN > threshold` is TRUE. Without an explicit finite check the NaN
+        # sails through the guard and the live path emits NaN where backfill emits NULL (the residual
+        # bb_position parity break the relative-eps guard alone did not close). `is_finite` makes both
+        # degenerate cases (NaN-std live, finite-tiny-std backfill) take the same NULL branch.
+        bb_well_defined = (
+            std20.is_finite() & (std20 > _BB_REL_EPS * sma20.abs()) & (sma20.abs() > 0)
+        )
         bb_position = (pl.col("close") - sma20) / (2.0 * std20)
         feats: dict[str, pl.Expr] = {
             "rsi_14m": pl.col("_rsi_14m"),

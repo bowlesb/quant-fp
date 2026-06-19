@@ -101,6 +101,43 @@ def test_volume_zscore_no_nan_on_constant_volume() -> None:
     assert early["volume_zscore_5m"] is None
 
 
+def _near_flat(symbol: str, base_price: float, n: int) -> pl.DataFrame:
+    """A NEAR-flat window (sub-epsilon float jitter, NOT exactly constant) — the residual parity case the
+    exact-zero-std tests miss. Backfill ``rolling_std_by`` yields a tiny FINITE std here while live
+    ``rust_reductions`` yields NaN; polars orders NaN as the largest float, so a bare ``std > threshold``
+    guard passes for the NaN and the live path emits NaN where backfill emits NULL."""
+    rows = []
+    for i in range(n):
+        close = base_price + (1e-9 if i % 2 else 0.0)
+        rows.append(
+            {
+                "symbol": symbol,
+                "minute": BASE + timedelta(minutes=i),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 100.0,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def test_technical_bb_position_parity_on_near_flat_window() -> None:
+    # The live (NaN-std) and backfill (finite-tiny-std) paths must AGREE on a near-flat window: both NULL.
+    group = REGISTRY.get_group("technical")
+    ctx = BatchContext(frames={"minute_agg": _near_flat("ILLQ", 5.0, 25)})
+    backfill = group.compute(ctx).sort("minute")
+    last_backfill = backfill.filter(
+        pl.col("minute") == backfill["minute"].max()
+    ).row(0, named=True)
+    live = group.compute_latest(ctx).row(0, named=True)
+    for col in ("bb_position_20m", "bb_width_20m"):
+        _assert_finite_or_null(group.compute_latest(ctx), col)
+        assert last_backfill[col] is None, f"backfill {col} should be NULL on near-flat window"
+        assert live[col] is None, f"live {col} should be NULL on near-flat window (was NaN)"
+
+
 def test_normal_window_values_are_finite_and_present() -> None:
     # a genuinely varying window must still PRODUCE finite values (the guard didn't over-null).
     rows = []
