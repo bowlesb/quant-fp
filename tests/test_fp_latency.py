@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import polars as pl
 
+from quantlib.features.compare import runnable
 from quantlib.features.profile import build_frames, profile
 
 REFERENCE_TICKERS = 500
@@ -36,11 +37,44 @@ def confirmed_offenders(frames: dict[str, pl.DataFrame]) -> pl.DataFrame:
 
 
 def test_every_group_under_latency_ceiling() -> None:
-    frames = build_frames(n_tickers=REFERENCE_TICKERS, window_min=120, daily_days=120)
+    # Bar-path only: the ``us_per_feature`` ceiling is calibrated for the minute-bar groups (one row/minute
+    # of input). The sub-minute tape groups process ~12 prints/minute into only 2-4 features, so their
+    # per-FEATURE ratio is structurally high (real work, not a regression) and ``us_per_feature`` mis-gates
+    # them — their cost is gated by the live-path budget below + the RT-cost screen (PR #147), not this ceiling.
+    frames = build_frames(n_tickers=REFERENCE_TICKERS, window_min=120, daily_days=120, include_trades=False)
     offenders = confirmed_offenders(frames)
     assert offenders.height == 0, (
         f"groups over {PER_FEATURE_CEILING_US:.0f} us/feature at {REFERENCE_TICKERS} tickers, "
         f"CONFIRMED on a {CONFIRM_REPS}-rep re-measure (a real regression, not transient host load) — "
         f"profile and optimize (materialize shared rolling sums) before merging:\n"
         f"{offenders.select('group', 'us_per_feature', 'ms')}"
+    )
+
+
+# The live per-minute group cost (ms) the production path actually pays — the right gate for the
+# few-feature sub-minute tape groups, where a per-FEATURE ceiling mis-measures real tick work. Generous
+# (catches a 5x+ regression / accidental O(buffer) scan, not normal variance): the trades groups all sit
+# well under this on the bounded ``compute_latest`` slice path at a realistic shard, and only ``size_entropy``
+# (a 30/60m windowed entropy) approaches it. Calibrated at the ``fp-profile-latest`` reference shard.
+TRADES_LIVE_CEILING_MS = 250.0
+_TRADES_SHARD_TICKERS = 312
+
+
+def test_trades_groups_live_cost_bounded() -> None:
+    """The sub-minute tape groups must stay cheap on the LIVE (``compute_latest``) path — the per-minute
+    budget production pays. Guards the bounded-slice fast form: without it these run ``compute()`` over the
+    whole ~245m trade buffer and scale with buffer depth (the regression this gate catches)."""
+    frames = build_frames(n_tickers=_TRADES_SHARD_TICKERS, window_min=245, daily_days=120)
+    live = profile(frames, reps=SCREEN_REPS, latest=True)
+    trades_groups = [g.name for g in runnable(frames) if any(i.name == "trades" for i in g.inputs)]
+    over = live.filter(
+        pl.col("group").is_in(trades_groups) & (pl.col("ms") > TRADES_LIVE_CEILING_MS)
+    )
+    if over.height:  # re-confirm a suspect with more reps before failing (host-load robust)
+        reconfirm = profile(frames, reps=CONFIRM_REPS, latest=True)
+        over = reconfirm.filter(pl.col("group").is_in(trades_groups) & (pl.col("ms") > TRADES_LIVE_CEILING_MS))
+    assert over.height == 0, (
+        f"trades-frame groups over {TRADES_LIVE_CEILING_MS:.0f}ms live at {_TRADES_SHARD_TICKERS} tickers "
+        f"(CONFIRMED) — the bounded compute_latest slice regressed; profile before merging:\n"
+        f"{over.select('group', 'ms', 'us_per_feature')}"
     )

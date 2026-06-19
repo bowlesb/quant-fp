@@ -101,3 +101,10 @@ class MicrostructureBurstGroup(FeatureGroup):
                  "inter_arrival_cv_1m", "max_runup_1m"]
             )
         )
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Own-minute-only live path: every cell reads ONLY its own minute's tape (seconds/gaps/run-up all
+        partitioned ``.over(["symbol", "minute"])``), so the SAME ``compute()`` on the trailing 1-minute tape
+        slice (filtered to T) is parity-true by construction — older trades cannot affect T's value. Avoids
+        running the per-minute group-by over the whole ~300m trade buffer."""
+        return self.compute_latest_on_window(ctx, 1)

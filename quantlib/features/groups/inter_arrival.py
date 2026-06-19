@@ -148,3 +148,10 @@ class InterArrivalGroup(FeatureGroup):
                 ["symbol", "minute", "rapid_fire_ratio_1m", "p10_inter_arrival_ms_1m", "trade_timing_entropy_1m"]
             )
         )
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Own-minute-only live path: every cell reads ONLY its own minute's tape (gaps partitioned
+        ``.over(["symbol", "minute"])``, so no minute borrows from the prior one), so the SAME ``compute()`` on
+        the trailing 1-minute tape slice (filtered to T) is parity-true by construction — older trades cannot
+        affect T's value. Avoids running the per-minute group-by over the whole ~300m trade buffer."""
+        return self.compute_latest_on_window(ctx, 1)

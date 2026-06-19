@@ -25,9 +25,14 @@ INTRADAY_COLS = ("open", "close", "high", "low", "volume", "n_trades", "signed_v
                  "mean_spread_bps", "quote_imbalance", "mean_bid_size", "mean_ask_size")
 
 
-def build_frames(n_tickers: int, window_min: int, daily_days: int) -> dict[str, pl.DataFrame]:
+def build_frames(
+    n_tickers: int, window_min: int, daily_days: int, include_trades: bool = True
+) -> dict[str, pl.DataFrame]:
     """Synthetic but schema-faithful frames at a target scale (intraday buffer + daily cache +
-    reference snapshot), so the profiler exercises every runnable group."""
+    reference snapshot), so the profiler exercises every runnable group. ``include_trades`` adds a raw
+    tape so the trades-frame groups are runnable too (default on — the profiler and the latest-minute
+    parity test need it); pass False to profile ONLY the minute-bar path (the latency ceiling gate, whose
+    ``us_per_feature`` ceiling is calibrated for bar groups, not the few-feature sub-minute tape groups)."""
     symbols = pl.DataFrame({"symbol": [f"S{i}" for i in range(n_tickers)]})
     minutes = pl.DataFrame({"minute": [BASE + timedelta(minutes=j) for j in range(window_min)]})
     intraday = symbols.join(minutes, how="cross").with_columns(
@@ -43,7 +48,30 @@ def build_frames(n_tickers: int, window_min: int, daily_days: int) -> dict[str, 
         [pl.lit("Technology").alias("sector"), pl.lit(True).alias("shortable"),
          pl.lit(True).alias("easy_to_borrow"), pl.lit(True).alias("marginable"), pl.lit(False).alias("fractionable")]
     )
-    return {"minute_agg": intraday, "daily": daily, "reference": reference}
+    frames = {"minute_agg": intraday, "daily": daily, "reference": reference}
+    if include_trades:
+        frames["trades"] = _build_trades(symbols, window_min)
+    return frames
+
+
+_TRADES_PER_MINUTE = 12  # synthetic tape density per (symbol, minute) — enough ticks to exercise the burst groups
+
+
+def _build_trades(symbols: pl.DataFrame, window_min: int) -> pl.DataFrame:
+    """Schema-faithful raw tape (symbol, ts, price, size): ``_TRADES_PER_MINUTE`` prints spread across each
+    minute of the buffer, so the trades-frame groups (own-minute + windowed) are runnable and the generic
+    latest-minute parity test exercises their ``compute_latest`` slice path against the rolling ``compute()``."""
+    minutes = pl.DataFrame({"_min": [BASE + timedelta(minutes=j) for j in range(window_min)]})
+    ticks = pl.DataFrame({"_k": list(range(_TRADES_PER_MINUTE))})
+    tape = symbols.join(minutes, how="cross").join(ticks, how="cross")
+    idx = pl.int_range(pl.len())
+    return tape.select(
+        pl.col("symbol"),
+        # spread ticks across the minute (5s apart) so within-minute timing/gap features are non-degenerate
+        (pl.col("_min") + pl.duration(seconds=pl.col("_k") * 5)).alias("ts"),
+        (100.0 + (idx % 53) * 0.01).alias("price"),
+        (100.0 + (idx % 37) * 25.0).alias("size"),
+    )
 
 
 def time_group(group: FeatureGroup, frames: dict[str, pl.DataFrame], reps: int = 3, latest: bool = False) -> float:
