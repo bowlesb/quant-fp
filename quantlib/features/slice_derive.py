@@ -120,7 +120,11 @@ def rust_slice_derive(
     ``slice_frame`` is the trailing slice (the input columns + symbol + minute); ``lag_columns`` maps a column
     name -> the lags of it that the derive needs. The kernel resolves those lags per symbol in one ordered pass;
     a missing prior bar comes back as NaN and is restored to Polars ``null`` so the rewritten derive sees the
-    same ``null`` ``shift().over()`` would. The returned frame is symbol-sorted (matching ``_derived_row``)."""
+    same ``null`` ``shift().over()`` would. The returned frame is symbol-sorted (matching ``_derived_row``).
+
+    ``minute`` must be the slice's latest minute (the caller's ``_matrix_at`` tails each symbol's last
+    ``max_lag+1`` rows AT OR BEFORE ``minute`` — see the point-in-time cut there), so each symbol's last in-slice
+    row IS its ``minute`` row and the kernel resolves the k-th prior ROW positionally from there."""
     columns = sorted(lag_columns)
     max_lag = max((max(lags) for lags in lag_columns.values()), default=0)
     select_cols = list(dict.fromkeys(["symbol", "minute", *input_cols]))  # input_cols already holds symbol/minute
@@ -146,7 +150,10 @@ def rust_slice_derive(
         for lag in lag_columns[col]:
             # column ``col``'s lag-``lag`` value for symbol si is at si*max_lag + (lag-1)
             data[f"__lag{lag}_{col}"] = [flat[si * max_lag + (lag - 1)] for si in range(n_sym)]
-    lag_frame = pl.DataFrame({"symbol": [reverse[code] for code in out_sym], **data}).with_columns(
+    lag_frame = pl.DataFrame(
+        {"symbol": [reverse[code] for code in out_sym], **data},
+        schema={"symbol": pl.String, **{name: pl.Float64 for name in data}},  # stable dtypes when empty
+    ).with_columns(
         # NaN sentinel (missing prior bar) -> Polars null, so rewritten exprs see shift().over()'s null
         [pl.when(pl.col(name).is_nan()).then(None).otherwise(pl.col(name)).alias(name) for name in data]
     )
