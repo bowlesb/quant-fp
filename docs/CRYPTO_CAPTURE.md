@@ -52,10 +52,15 @@ quotes here → honest-null).
 ## Run it
 
 ```bash
-docker build -f Dockerfile.fp -t fp-dev .                            # shared base image
-docker compose -f docker-compose.crypto.yml up -d --build crypto-capture
+make dev-image                                                       # build/refresh the shared fp-dev image
+docker compose -f docker-compose.crypto.yml up -d crypto-capture
 docker logs -f crypto-capture                                        # per-minute compute lines
 ```
+
+> The crypto compose uses the **prebuilt** `fp-dev` image (the Rust-baked `docker/fp-dev.Dockerfile`, built
+> via `make dev-image`) — the SAME image the equity fc/strategies run on. There is intentionally NO `build:`
+> directive in `docker-compose.crypto.yml`, so a stray `up --build` can never re-tag/overwrite `fp-dev` with
+> the wrong (minimal, no-Rust) image. Refresh `fp-dev` only via `make dev-image`.
 
 Symbols and bus toggle are env-driven (`docker-compose.crypto.yml`):
 
