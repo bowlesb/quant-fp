@@ -18,6 +18,7 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `GET http://<host>:8088/api/feature-grid` | full grid JSON (groups × periods) |
 | `GET http://<host>:8088/api/feature-grid/{group}` | per-feature detail for one group |
 | `GET http://<host>:8088/api/feature-grid/{group}/symbols` | per-SYMBOL coverage: which tickers are live (stream) vs backfill-only (under-represented LIVE) |
+| `GET http://<host>:8088/api/feature-grid/thin-live-symbols` | cross-group roll-up: which SYMBOLS are backfill-only (under-represented LIVE) across the most groups (`?limit=N`) |
 
 All API endpoints accept `?refresh=1` to bypass the 60s TTL cache and re-aggregate. A cold build over the
 live store is ~4s; cached responses are ~1ms. There is a **↻ refresh** button on the page.
@@ -155,6 +156,35 @@ OWN latest store date (stream and backfill backfill at different cadences).
 ```
 
 Returns `404` for an unknown group.
+
+### `GET /api/feature-grid/thin-live-symbols`
+
+The **cross-group** inverse of the per-group surface: the `{group}/symbols` view answers "which names is THIS
+group thin on"; this answers "which NAMES are under-represented LIVE across the most groups" — the
+system-wide ticker-representation flag for the FP_TICK_SYMBOLS coverage gap. A symbol's `n_under_groups` is
+how many LIVE groups (non-empty stream universe today) have it in backfill but not on the stream.
+
+Under-representation is scored **only over live groups**: a group the stream never subscribes (zero stream
+symbols) would otherwise mark its entire backfill universe thin and swamp the ranking, so it is recorded in
+the `groups` breakdown but excluded from the per-symbol score. Symbols rank thinnest-first (most under-rep
+groups, then fewest groups carrying it live, then name); `?limit=N` caps the returned list (default 50).
+
+```jsonc
+{
+  "generated_at": "2026-06-18T...Z", "store_root": "/store",
+  "n_live_groups": 47,              // groups with a non-empty stream universe today (the scoring base)
+  "n_groups": 51,
+  "n_thin_symbols": 870,            // distinct symbols under-represented in >=1 live group
+  "limit": 50,
+  "symbols": [
+    {"symbol": "ACI", "n_under_groups": 45, "n_live_groups": 2,
+     "under_groups": ["asset_flags", "calendar", "..."]}   // sorted group names
+  ],
+  "groups": [                       // per-group breakdown (live first, then most under-rep)
+    {"group": "trade_flow", "live": true, "n_stream": 57, "n_backfill": 1268, "n_under": 1211}
+  ]
+}
+```
 
 ## Deployment notes
 

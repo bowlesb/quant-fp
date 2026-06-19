@@ -171,6 +171,23 @@ def feature_grid_json(refresh: bool = False) -> JSONResponse:
     return JSONResponse(CACHE.grid(STORE_ROOT, force=refresh))
 
 
+@app.get("/api/feature-grid/thin-live-symbols")
+def feature_grid_thin_live_json(limit: int = 50, refresh: bool = False) -> JSONResponse:
+    """Cross-group THINNEST-live ticker roll-up: which SYMBOLS are present in the full-universe backfill agg
+    but absent from the live stream across the MOST groups — the system-wide ticker-representation flag for the
+    FP_TICK_SYMBOLS coverage gap (the inverse of the per-group ``/symbols`` surface). Under-representation is
+    scored only over LIVE groups (non-empty stream universe today).
+
+    Registered BEFORE ``/{group}`` so the static path is not swallowed by the path param. ``limit`` caps the
+    ranked symbol list; ``refresh=1`` bypasses the TTL cache.
+
+    Shape: {generated_at, store_root, n_live_groups, n_groups, n_thin_symbols, limit,
+            symbols: [{symbol, n_under_groups, n_live_groups, under_groups: [...]}],
+            groups:  [{group, live, n_stream, n_backfill, n_under}]}
+    """
+    return JSONResponse(CACHE.thin_live(STORE_ROOT, limit=limit, force=refresh))
+
+
 @app.get("/api/feature-grid/{group}")
 def feature_grid_group_json(group: str, refresh: bool = False) -> JSONResponse:
     """Per-feature detail for one group (the expanded view) as JSON.

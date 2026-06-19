@@ -139,8 +139,10 @@ FEATURE_GRID_HTML = """<!doctype html>
       <option value="stream_pct">show: stream %</option>
       <option value="backfill_pct">show: backfill %</option>
     </select>
+    <button id="thinbtn">▸ thinnest live tickers</button>
     <button id="refresh">↻ refresh</button>
   </div>
+  <div id="thinhost"></div>
   <div class="gridscroll"><table class="grid" id="grid"></table></div>
   <div id="detailhost"></div>
 </div>
@@ -305,7 +307,35 @@ async function loadSymbols(group){
 
 function closeDetail(){ OPENGROUP=null; document.getElementById("detailhost").innerHTML=""; }
 
-document.getElementById("refresh").onclick=()=>loadGrid(true);
+let THINOPEN=false;
+async function toggleThin(force){
+  const host = document.getElementById("thinhost");
+  if(THINOPEN && !force){ THINOPEN=false; host.innerHTML=""; return; }
+  THINOPEN=true;
+  host.innerHTML = "<div class='symcov muted'>loading thinnest-live tickers…</div>";
+  const r = await fetch("/api/feature-grid/thin-live-symbols" + (force?"?refresh=1":""));
+  const t = await r.json();
+  let rows="";
+  for(const s of t.symbols){
+    rows += "<tr><td>"+s.symbol+"</td><td class='num'>"+s.n_under_groups+"/"+t.n_live_groups+
+      "</td><td class='num'>"+s.n_live_groups+"</td>"+
+      "<td title='"+s.under_groups.join(", ")+"'>"+s.under_groups.join(" ")+"</td></tr>";
+  }
+  host.innerHTML =
+    "<div class='symcov'>"+
+    "<span class='closebtn' onclick='toggleThin(false)'>✕ close</span>"+
+    "<div class='muted' style='margin-bottom:6px'>symbols present in the full-universe backfill agg but "+
+      "absent from the live STREAM, across the most LIVE groups — the FP_TICK_SYMBOLS coverage gap, "+
+      "system-wide. Scored over "+t.n_live_groups+" live of "+t.n_groups+" groups; "+
+      t.n_thin_symbols+" thin symbols total (top "+t.limit+").</div>"+
+    "<table class='feat'><thead><tr><th>symbol</th><th class='num'>under-rep groups</th>"+
+    "<th class='num'>live in</th><th>under-represented in (hover=all)</th></tr></thead>"+
+    "<tbody>"+(rows||"<tr><td colspan='4' class='muted'>no under-represented tickers</td></tr>")+
+    "</tbody></table></div>";
+}
+
+document.getElementById("thinbtn").onclick=()=>toggleThin(false);
+document.getElementById("refresh").onclick=()=>{ loadGrid(true); if(THINOPEN) toggleThin(true); };
 document.getElementById("metric").onchange=e=>{ METRIC=e.target.value; renderGrid(); };
 document.getElementById("sortby").onchange=e=>{ SORT=e.target.value; renderGrid(); };
 document.getElementById("trustfilter").onchange=e=>{ TRUSTFILTER=e.target.value; renderGrid(); if(OPENGROUP) openDetail(OPENGROUP); };
