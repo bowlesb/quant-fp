@@ -194,6 +194,27 @@ def feature_grid_thin_live_json(limit: int = 50, refresh: bool = False) -> JSONR
     return JSONResponse(CACHE.thin_live(STORE_ROOT, limit=limit, force=refresh))
 
 
+@app.get("/api/feature-grid/timeline")
+def feature_grid_timeline_json(days: int = 21, refresh: bool = False) -> JSONResponse:
+    """The (group x recent-day x source) PRESENCE grid + per-group DEPTH stats — the time/depth legibility
+    view. For the last ``days`` calendar days (most-recent first, ending at the latest store date), each
+    (group, day) cell carries the stream/backfill symbol counts and a provenance class (both / stream_only /
+    backfill_only / absent), so live-vs-backfill provenance per (group, day) reads off the grid. Each group
+    also carries history depth (``backfill_earliest`` + ``backfill_span_days``) and live horizon
+    (``stream_horizon_days``: recent weekdays the stream captured unbroken).
+
+    Registered BEFORE ``/{group}`` so the static path is not swallowed by the path param. ``refresh=1``
+    bypasses the TTL cache.
+
+    Shape (see docs/FEATURE_DASHBOARD.md):
+      {generated_at, store_root, anchor_date, earliest_date, days, dates: [...],
+       groups: [{group, version, layer, n_features, backfill_earliest, backfill_latest, backfill_span_days,
+                 stream_earliest, stream_latest, stream_horizon_days,
+                 days: [{date, stream, backfill, provenance}]}]}
+    """
+    return JSONResponse(CACHE.timeline(STORE_ROOT, days=days, force=refresh))
+
+
 @app.get("/api/feature-grid/{group}")
 def feature_grid_group_json(group: str, refresh: bool = False) -> JSONResponse:
     """Per-feature detail for one group (the expanded view) as JSON.

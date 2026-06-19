@@ -694,6 +694,146 @@ def build_thin_live_symbols(root: str = STORE_ROOT, limit: int = 50) -> dict[str
     }
 
 
+# Default span of the recent-day presence grid: enough trading days to read the live-vs-backfill landing
+# pattern at a glance without a wall of columns. Calendar days (weekends render as absent on both sources,
+# which is the honest "no session" read), capped so the page stays one cheap pass.
+TIMELINE_DEFAULT_DAYS = 21
+TIMELINE_MAX_DAYS = 120
+
+
+def _day_provenance(stream_n: int, backfill_n: int) -> str:
+    """Classify one (group, day) by which sources landed: both / stream-only (not yet parity-checkable) /
+    backfill-only (settled, no live capture that day) / absent (neither source has the day)."""
+    if stream_n > 0 and backfill_n > 0:
+        return "both"
+    if stream_n > 0:
+        return "stream_only"
+    if backfill_n > 0:
+        return "backfill_only"
+    return "absent"
+
+
+def _stream_horizon_days(stream_dates: list[str], anchor: dt.date) -> int:
+    """The live-coverage HORIZON: how many of the most recent WEEKDAYS (ending at ``anchor``) the stream
+    actually captured, walking back until the first weekday gap. Weekends are skipped (no session expected),
+    so a Mon-Fri capture streak reads as its true depth across a weekend. Answers "how far back does live
+    coverage reach unbroken" — the live counterpart to backfill's history depth."""
+    captured = set(stream_dates)
+    horizon = 0
+    day = anchor
+    while True:
+        if day.weekday() < 5:
+            if day.isoformat() not in captured:
+                break
+            horizon += 1
+        day -= dt.timedelta(days=1)
+        if day < anchor - dt.timedelta(days=TIMELINE_MAX_DAYS):
+            break
+    return horizon
+
+
+def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT_DAYS) -> dict[str, object]:
+    """A (group x recent-day x source) PRESENCE grid + per-group DEPTH stats — the time/depth legibility view.
+
+    The group grid collapses every multi-day row onto a single coverage %; the per-group detail lists raw date
+    arrays. Neither answers, at a glance, "on each of the last N days, did stream and/or backfill land for this
+    group, and how deep does each source's history reach". This surface does:
+
+      * ``days`` columns, most-recent-first, ending at the latest store date. Each (group, day) cell carries
+        ``stream``/``backfill`` symbol counts and a provenance class (both / stream_only / backfill_only /
+        absent) — so live-vs-backfill provenance per (group, day) reads off the grid directly.
+      * Per-group DEPTH: ``backfill_earliest`` + ``backfill_span_days`` (how far back history reaches) and
+        ``stream_horizon_days`` (how many recent weekdays the live stream captured unbroken) — history depth
+        and live horizon side by side.
+
+    Read-side only: reuses ``gather_group_store_info`` (the SAME one-pass per-date symbol read the grid pays
+    for), so this is no extra store I/O beyond the grid's, and shares nothing's source of truth.
+    """
+    catalog_by_group = _catalog_by_group()
+    groups = sorted(catalog_by_group)
+
+    infos: dict[str, _GroupStoreInfo] = {}
+    for group in groups:
+        version = _group_version(group)
+        if version is None:
+            continue
+        infos[group] = gather_group_store_info(root, group, version)
+
+    anchor = latest_store_date(infos)
+    floor = earliest_store_date(infos)
+    span = max(1, min(days, TIMELINE_MAX_DAYS))
+
+    if anchor is None:
+        return {
+            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "store_root": root,
+            "anchor_date": None,
+            "earliest_date": None,
+            "days": span,
+            "dates": [],
+            "groups": [],
+        }
+
+    timeline_dates = [(anchor - dt.timedelta(days=offset)).isoformat() for offset in range(span)]
+
+    group_rows: list[dict[str, object]] = []
+    for group in groups:
+        info = infos.get(group)
+        if info is None:
+            continue
+        stream_per_date = {d: n for d, n in info.per_date_symbols.get("stream", {}).items() if n > 0}
+        backfill_per_date = {d: n for d, n in info.per_date_symbols.get("backfill", {}).items() if n > 0}
+        stream_dates = sorted(stream_per_date)
+        backfill_dates = sorted(backfill_per_date)
+
+        day_cells: list[dict[str, object]] = []
+        for date_iso in timeline_dates:
+            stream_n = stream_per_date.get(date_iso, 0)
+            backfill_n = backfill_per_date.get(date_iso, 0)
+            day_cells.append(
+                {
+                    "date": date_iso,
+                    "stream": stream_n,
+                    "backfill": backfill_n,
+                    "provenance": _day_provenance(stream_n, backfill_n),
+                }
+            )
+
+        backfill_earliest = backfill_dates[0] if backfill_dates else None
+        backfill_latest = backfill_dates[-1] if backfill_dates else None
+        backfill_span = (
+            (dt.date.fromisoformat(backfill_latest) - dt.date.fromisoformat(backfill_earliest)).days + 1
+            if backfill_earliest and backfill_latest
+            else 0
+        )
+        group_rows.append(
+            {
+                "group": group,
+                "version": info.version,
+                "layer": (catalog_by_group[group][0]["layer"] if catalog_by_group[group] else None),
+                "n_features": len(catalog_by_group[group]),
+                "backfill_earliest": backfill_earliest,
+                "backfill_latest": backfill_latest,
+                "backfill_span_days": backfill_span,
+                "stream_earliest": stream_dates[0] if stream_dates else None,
+                "stream_latest": stream_dates[-1] if stream_dates else None,
+                "stream_horizon_days": _stream_horizon_days(stream_dates, anchor),
+                "days": day_cells,
+            }
+        )
+
+    return {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "store_root": root,
+        "anchor_date": anchor.isoformat(),
+        "earliest_date": floor.isoformat() if floor else None,
+        "days": span,
+        # Most-recent first so the freshest day is the leftmost column next to the group label.
+        "dates": timeline_dates,
+        "groups": sorted(group_rows, key=lambda gr: str(gr["group"])),
+    }
+
+
 class GridCache:
     """Tiny TTL cache so a page load / refresh re-aggregates at most every ``ttl`` seconds. The grid read is
     1-2s on the live store; a 60s TTL makes a busy refresh instant while staying fresh enough for a coverage
@@ -706,6 +846,7 @@ class GridCache:
         self._details: dict[str, tuple[float, dict[str, object]]] = {}
         self._symbols: dict[str, tuple[float, dict[str, object]]] = {}
         self._thin: dict[int, tuple[float, dict[str, object]]] = {}
+        self._timeline: dict[int, tuple[float, dict[str, object]]] = {}
 
     def grid(self, root: str, force: bool = False) -> dict[str, object]:
         now = time.monotonic()
@@ -740,6 +881,17 @@ class GridCache:
         rollup = build_thin_live_symbols(root, limit)
         self._thin[limit] = (now, rollup)
         return rollup
+
+    def timeline(
+        self, root: str, days: int = TIMELINE_DEFAULT_DAYS, force: bool = False
+    ) -> dict[str, object]:
+        now = time.monotonic()
+        cached = self._timeline.get(days)
+        if not force and cached is not None and (now - cached[0]) <= self.ttl:
+            return cached[1]
+        view = build_coverage_timeline(root, days)
+        self._timeline[days] = (now, view)
+        return view
 
 
 CACHE = GridCache()
