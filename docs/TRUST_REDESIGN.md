@@ -1,7 +1,7 @@
 # Feature Trust — Redesign (binary, reproducible, self-checking)
 
 Status: design of record. Supersedes the 4-state lifecycle (PENDING/VALIDATED/DIVERGENT/NULL)
-in `docs/TRUST_METADATA.md` / `docs/PARITY_LIFECYCLE.md`. Authored 2026-06-17 per Ben's direction.
+in `docs/archive/TRUST_METADATA.md` (archived) / `docs/PARITY_LIFECYCLE.md`. Authored 2026-06-17 per Ben's direction.
 
 ## The principle
 
