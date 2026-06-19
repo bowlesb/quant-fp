@@ -5,8 +5,8 @@
 #   docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --build smoke-strategy
 #
 # The strategy Dockerfiles are `FROM fp-dev`, so the prebuilt fp-dev image (docker/fp-dev.Dockerfile via
-# `make dev-image`) MUST exist first. Build it only via `make dev-image` — never `docker build -f Dockerfile.fp`
-# (that's the wrong, minimal, no-Rust image).
+# `make dev-image`) MUST exist first. Build it only via `make dev-image` (the Rust-baked image the feature
+# engine needs).
 #
 # smoke-strategy is the FIRST one: a deliberately trivial end-to-end proof of the apparatus.
 name: quant
