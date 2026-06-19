@@ -64,7 +64,7 @@ in `services/` (tracked separately):
   trailing range, so backfill can't see pre-anchor minutes live never had.
 Until both are verified, long-window features remain `validating` rather than `certified`.
 
-## Warm-start `populated` self-check (the cold-start-eliminator)
+## The `populated` invariant (the cold-start-eliminator)
 
 Anchoring the lookback (above) keeps live==backfill *parity* safe across the warmup, but a cold relaunch
 still EMITS under-warmed partial values on the bus for the first `window` minutes of streaming. The
@@ -73,30 +73,40 @@ trailing ring from the session's already-settled bars (`backfill_bars` = Alpaca 
 unadjusted SIP tape the stream delivers) BEFORE the first live minute, so every windowed feature is full
 from minute one.
 
-To make that warm start **robust and self-checking** (rather than silently under-warming if the seed
-fails), the increment abstraction has a first-class **`populated`** concept:
+To make that robust and self-checking, the increment abstraction carries a first-class **`populated`**
+concept as a **continuous, source-agnostic invariant** — NOT a warm-start-specific hook. It is maintained
+by the SAME `update`/expire/`trim` fold that both `seed()` and live `step()` already call, so a window
+reports `populated` identically whether it filled via a warm-start seed OR via N live minutes accumulating.
+(This also *guarantees* warm-started state == live-accumulated state cell-for-cell: same fold, same result.)
 
-- **`WindowedSumState.populated(window)`** — a window is `populated` when the absorbed history reaches a
-  full `window` minutes behind the latest minute (`observed_span_minutes() >= window`). Tracked from the
-  first/last folded epoch, so it survives the memory `trim` that evicts buffered minutes past the longest
-  window.
-- **`IncrementalEngine.assert_populated(buffer)` / `WindowedSumState.assert_populated(available_span)`** —
-  called right after the warm-start seed. It enforces a **three-way distinction**:
-  1. **FULL** (`observed_span >= window`) → the state absorbed its full depth → assert passes.
-  2. **LEGITIMATELY not-yet-full** — the seed buffer ITSELF carried fewer than `window` minutes of history
-     (newly-listed ticker, first day of data, a genuine gap: `available_span < window`) → the window is
-     correctly not populated → **no raise** (it emits partial/NaN as today).
-  3. **warm-start FAILED** — the seed buffer HAD `>= window` minutes but the state only absorbed a short
-     span (data present, not absorbed: a schema/shape mismatch, a dropped slot) → **raises
-     `WarmStartUnderfilled`** (fail-fast, per CLAUDE.md "let errors raise").
+- **`WindowedSumState.populated(window)`** — True when the absorbed history reaches a full `window` minutes
+  behind the latest minute (`observed_span_minutes() >= window`). `observed_span` is tracked from the
+  first/last folded epoch by the shared fold, so it survives the memory `trim` and is derived the same way
+  at init and in steady state.
+- **`WindowedSumState.check_invariants(deep=False)`** — the UNIVERSAL internal self-consistency check, valid
+  at ANY time. Cheap checks (always on): the span tracker agrees with the buffer; each window's expiry
+  pointer partitions the buffer correctly (no in-window minute expired, no out-of-window minute retained).
+  The `deep` check (opt-in, `FP_INCREMENT_DEEP_CHECK=1`, off the hot path): each window's running sum equals
+  the sum over exactly its buffered in-window minutes — catching a dropped/duplicated fold or numeric
+  corruption at source. A violation raises `IncrementInvariantError`. **`seed()` runs the cheap invariants by
+  default on every seed** (not only warm-start), so a corrupted fold surfaces immediately.
+- **`WindowedSumState.assert_ready(buffer_span)` / `IncrementalEngine.assert_ready(frame)`** — the three-way
+  FILL check, source-agnostic (`buffer_span` = the span the supplied buffer carried: the seed frame at init
+  OR the trailing frame in steady state). It first runs `check_invariants`, then per window:
+  1. **FULL** (`observed_span >= window`) → absorbed its full depth → OK.
+  2. **LEGITIMATELY not-yet-full** — the buffer itself carried fewer than `window` minutes
+     (`buffer_span < window`: newly-listed ticker, first day, genuine gap) → correctly not populated → **no
+     raise** (emits partial/NaN as today).
+  3. **FAILED** — the buffer HAD `>= window` minutes but the state only absorbed a short span (data PRESENT
+     in the buffer, not absorbed: the ShapeError, a schema/index mismatch, a dropped minute) → **raises
+     `IncrementUnderfilled`** (fail-fast, per CLAUDE.md "let errors raise").
 
-  The assert fires ONLY on arm 3 (`available_span >= window` but `observed_span < window`). Because the
-  engine seeds from exactly the buffer it then asserts against, a successful seed has
-  `observed_span == available_span`, so any short-fall is unambiguously a failed absorb. The assert runs
-  once, on the warm-start seed, then clears (later resyncs — a genuinely-new ticker, a daily resync — are
-  normal operation, not re-asserted). The `populated`/assert additions are **state metadata + a check
-  only**: they touch no running sum, so they are **not a fingerprint change** (proved byte-identical by
-  `test_fp_warm_start.py::test_populated_assert_is_value_neutral` and the full incremental/twin/parity
+  Fires only on arm 3 (`buffer_span >= window` but `observed_span < window`). The post-seed assert (armed by
+  `warm_start_ring` → `assert_ready_on_seed`, run once then cleared) is just ONE call site of this universal
+  property — the identical check is valid in steady state against the live trailing frame. The
+  `populated`/invariant additions are **state metadata + checks only**: they touch no running sum, so they
+  are **not a fingerprint change** (proved byte-identical by
+  `test_fp_warm_start.py::test_populated_invariant_is_value_neutral` and the full incremental/twin/parity
   suite).
 
 ### The 7-col / 13-col warm-start ShapeError (fixed)

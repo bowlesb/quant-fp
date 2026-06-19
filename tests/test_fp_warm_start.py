@@ -30,7 +30,8 @@ from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup
 from quantlib.features.incremental import (
     IncrementalEngine,
-    WarmStartUnderfilled,
+    IncrementInvariantError,
+    IncrementUnderfilled,
     WindowedSumState,
 )
 
@@ -179,14 +180,17 @@ def test_warm_start_then_live_minute_matches_cold(tmp_path) -> None:
     _assert_frames_match(truth, got)
 
 
-# ``populated`` concept + post-seed assert (Ben-designed): a window is ``populated`` when the state has
-# absorbed its full required depth; the post-seed assert catches a FAILED warm-start (data present but not
-# absorbed) loudly, while LEGITIMATELY-short history (newly-listed ticker / first day / gap) passes. The
-# three-way FULL / legit-not-full / FAILED distinction is the crux — these prove the boundary is right.
+# ``populated`` is a CONTINUOUS, SOURCE-AGNOSTIC invariant of the increment abstraction (Ben-designed):
+# a window is ``populated`` when the state has absorbed its full required depth, maintained by the SHARED
+# fold (so it reads the same whether filled via warm-start seed OR via live minutes accumulating). The
+# universal three-way distinction — FULL / legit-not-yet-full=NaN-no-raise / FAILED=raise — is checked the
+# same way at init and in steady state; ``check_invariants`` is the internal self-consistency check, valid
+# at any time; the post-seed assert is just ONE call site of the same property.
 
 
-def _full_state(span_minutes: int, windows: tuple[int, ...]) -> WindowedSumState:
-    """A ``WindowedSumState`` fed ``span_minutes + 1`` consecutive minutes (observed span == span_minutes)."""
+def _state_over(span_minutes: int, windows: tuple[int, ...]) -> WindowedSumState:
+    """A ``WindowedSumState`` fed ``span_minutes + 1`` consecutive minutes through the shared fold (observed
+    span == span_minutes), with ``trim`` after each — i.e. the SAME update/expire/trim cycle as live."""
     state = WindowedSumState(["A"], windows, 2)
     base = int(BASE.timestamp())
     for i in range(span_minutes + 1):
@@ -197,63 +201,91 @@ def _full_state(span_minutes: int, windows: tuple[int, ...]) -> WindowedSumState
 
 def test_populated_tracks_observed_span_across_trim() -> None:
     """``observed_span_minutes`` / ``populated`` reflect the FULL absorbed history even after ``trim`` evicts
-    buffered minutes past the longest window — the span is tracked from first/last folded epoch, not the
-    (evicted) buffer. A window is populated iff the absorbed span reaches its full depth."""
-    state = _full_state(span_minutes=40, windows=(5, 10, 30, 60))
+    buffered minutes past the longest window — the span is tracked from first/last folded epoch by the shared
+    fold, not the (evicted) buffer. A window is populated iff the absorbed span reaches its full depth."""
+    state = _state_over(span_minutes=40, windows=(5, 10, 30, 60))
     assert state.observed_span_minutes() == 40.0
     assert state.populated(5) and state.populated(10) and state.populated(30)
     assert not state.populated(60), "60m window is not yet full on only 40m of history"
 
 
-def test_assert_populated_full_passes() -> None:
-    """FULL arm: every window <= the absorbed span asserts populated; the seed buffer carried that span, so
-    the assert passes for all of them."""
-    state = _full_state(span_minutes=70, windows=(5, 30, 60))
-    state.assert_populated(available_span_minutes=70.0)  # no raise
+def test_check_invariants_holds_in_steady_state() -> None:
+    """The internal self-consistency invariant holds at ANY time, not only after a seed — here after a long
+    live fill where every window has reached steady-state expiry/repopulation. The DEEP check (running sum ==
+    sum over the window's buffered minutes) also passes, proving the fold/expire bookkeeping is coherent."""
+    state = _state_over(span_minutes=120, windows=(5, 10, 30, 60))
+    state.check_invariants(deep=True)  # cheap + deep both pass in steady state
 
 
-def test_assert_populated_legit_short_history_no_raise() -> None:
-    """LEGITIMATELY not-yet-full arm: the seed buffer ITSELF was shorter than the long window (a newly-listed
-    ticker / first day / genuine short history), so the window is correctly not populated — NO raise. This is
-    the boundary the assert must NOT cross."""
-    state = _full_state(span_minutes=12, windows=(5, 10, 30, 60))
+def test_check_invariants_detects_corrupted_expiry() -> None:
+    """A corrupted expiry pointer (a minute that left the window left un-expired) trips the universal internal
+    invariant — independent of how the window filled. This is the FAILED-class detected by self-consistency,
+    not by any warm-start-bespoke logic."""
+    state = _state_over(span_minutes=40, windows=(5, 10, 30))
+    state._oldest[0] = 0  # force the 5m window to "retain" minutes that should have expired
+    with pytest.raises(IncrementInvariantError, match="window 5"):
+        state.check_invariants()
+
+
+def test_check_invariants_deep_detects_dropped_fold() -> None:
+    """The DEEP invariant catches a running sum that no longer equals its window's buffered minutes — the
+    present-but-not-absorbed corruption (a dropped/duplicated fold) surfaced from the state's OWN contents."""
+    state = _state_over(span_minutes=20, windows=(5, 60))
+    state.running[1] += 1.0  # corrupt the 60m window's running sum (a phantom fold)
+    state.check_invariants(deep=False)  # cheap checks can't see a sum drift
+    with pytest.raises(IncrementInvariantError, match="window 60"):
+        state.check_invariants(deep=True)
+
+
+def test_assert_ready_full_passes() -> None:
+    """FULL arm: every window <= the absorbed span is ready; the buffer carried that span, so all pass."""
+    state = _state_over(span_minutes=70, windows=(5, 30, 60))
+    state.assert_ready(buffer_span_minutes=70.0)  # no raise
+
+
+def test_assert_ready_legit_short_history_no_raise() -> None:
+    """LEGITIMATELY not-yet-full arm: the buffer ITSELF was shorter than the long window (a newly-listed
+    ticker / first day / genuine short history), so the window is correctly not populated — NO raise. The
+    boundary the assert must NOT cross. Source-agnostic: holds whether the buffer was a seed or live minutes."""
+    state = _state_over(span_minutes=12, windows=(5, 10, 30, 60))
     assert not state.populated(30) and not state.populated(60)
-    state.assert_populated(available_span_minutes=12.0)  # buffer only had 12m -> 30/60m legit-short, no raise
+    state.assert_ready(buffer_span_minutes=12.0)  # buffer only had 12m -> 30/60m legit-short, no raise
 
 
-def test_assert_populated_failed_warm_start_raises() -> None:
-    """warm-start FAILED arm: the seed buffer HAD enough history (available >= window) but the state only
-    absorbed a short span (data present, not absorbed — the ShapeError / a dropped slot). The assert RAISES."""
-    state = _full_state(span_minutes=12, windows=(5, 10, 30, 60))  # only absorbed 12m
-    with pytest.raises(WarmStartUnderfilled, match="30m window"):
-        state.assert_populated(available_span_minutes=60.0)  # buffer COULD fill 30/60m, state didn't -> raise
+def test_assert_ready_failed_absorb_raises() -> None:
+    """FAILED arm: the buffer HAD enough history (buffer_span >= window) but the state only absorbed a short
+    span (data present in the buffer, not absorbed — the ShapeError / a dropped slot). RAISES, source-
+    agnostically (no warm-start-specific input)."""
+    state = _state_over(span_minutes=12, windows=(5, 10, 30, 60))  # only absorbed 12m
+    with pytest.raises(IncrementUnderfilled, match="30m window"):
+        state.assert_ready(buffer_span_minutes=60.0)  # buffer COULD fill 30/60m, state didn't -> raise
 
 
 def _engine_over(stream: pl.DataFrame) -> tuple[IncrementalEngine, list[ReductionGroup]]:
     groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
-    return IncrementalEngine(groups, warm_start_assert=True), groups
+    return IncrementalEngine(groups, assert_ready_on_seed=True), groups
 
 
-def test_engine_assert_populated_full_history() -> None:
-    """Engine-level FULL: after seeding over a buffer DEEPER than every declared window, the assert passes
-    and every window reports populated=True."""
+def test_engine_assert_ready_full_history() -> None:
+    """Engine-level FULL: after seeding over a buffer DEEPER than every declared window, ``assert_ready``
+    passes and every window reports populated=True."""
     stream = _bars_frame(_stream_minutes(n_sym=6, n_min=10, seed=11))
     groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
     deepest = max(IncrementalEngine(groups).windows)
     n_min = deepest + 30  # deeper than the deepest reduction window (price_levels' 240m)
     stream = _bars_frame(_stream_minutes(n_sym=6, n_min=n_min, seed=11))
     engine, _ = _engine_over(stream)
-    engine.seed(stream)  # warm_start_assert=True -> asserts populated; must not raise on a deep buffer
+    engine.seed(stream)  # assert_ready_on_seed=True -> universal readiness assert; must not raise on a deep buffer
     assert engine.state is not None
     for window in engine.windows:
         assert engine.state.populated(window), f"{window}m not populated after a {n_min}m seed"
-    assert engine.warm_start_assert is False, "assert flag should clear after the warm-start seed"
+    assert engine.assert_ready_on_seed is False, "assert flag should clear after the seed"
 
 
-def test_engine_assert_populated_short_history_no_raise() -> None:
+def test_engine_assert_ready_short_history_no_raise() -> None:
     """Engine-level LEGITIMATELY-short: seeding over a SHALLOW buffer (shorter than the long windows, e.g. a
     newly-listed ticker's first few minutes) must NOT raise — the long windows are legitimately not-yet-full.
-    This is the unit test the spec requires: a short-history ticker does NOT raise."""
+    The unit test the spec requires: a short-history ticker does NOT raise."""
     stream = _bars_frame(_stream_minutes(n_sym=4, n_min=8, seed=12))  # only 8 minutes of history
     engine, _ = _engine_over(stream)
     engine.seed(stream)  # must NOT raise though long windows are unfilled
@@ -261,18 +293,27 @@ def test_engine_assert_populated_short_history_no_raise() -> None:
     assert engine.state.observed_span_minutes() == 7.0
 
 
-def test_engine_assert_populated_broken_seed_raises() -> None:
-    """Engine-level FAILED: a seed where the buffer HAS deep history but the absorbed state is short (we
-    simulate the failed-absorb by asserting against a larger available span than the state holds) RAISES —
-    the ShapeError-class failure surfaced loudly instead of silently under-warming."""
+def test_engine_assert_ready_failed_absorb_raises() -> None:
+    """Engine-level FAILED: a buffer with deep history but a short absorbed state (we assert against a buffer
+    span larger than the state holds) RAISES — the present-but-not-absorbed failure surfaced loudly."""
     stream = _bars_frame(_stream_minutes(n_sym=4, n_min=12, seed=13))  # absorbs ~11m
     engine, _ = _engine_over(stream)
-    engine.warm_start_assert = False  # seed normally, then assert against a deeper claimed buffer
+    engine.assert_ready_on_seed = False  # seed normally, then assert against a deeper claimed buffer span
     engine.seed(stream)
     longest = max(engine.windows)
-    with pytest.raises(WarmStartUnderfilled):
-        # claim the buffer carried > the longest window of history; the state only absorbed 11m -> failed-absorb
-        engine.state.assert_populated(available_span_minutes=float(longest) + 50.0)
+    with pytest.raises(IncrementUnderfilled):
+        engine.state.assert_ready(buffer_span_minutes=float(longest) + 50.0)
+
+
+def test_seed_runs_invariants_by_default() -> None:
+    """Every engine ``seed`` runs ``check_invariants`` BY DEFAULT (not only on the warm-start path) — a
+    corrupted fold would raise on any seed. Here a clean seed passes; the call site is unconditional."""
+    stream = _bars_frame(_stream_minutes(n_sym=5, n_min=40, seed=14))
+    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
+    engine = IncrementalEngine(groups, assert_ready_on_seed=False)  # readiness assert OFF, invariants still run
+    engine.seed(stream)
+    assert engine.state is not None
+    engine.state.check_invariants(deep=True)  # still coherent
 
 
 def test_warm_start_tick_enriched_no_shape_error(tmp_path) -> None:
@@ -300,11 +341,11 @@ def test_warm_start_tick_enriched_no_shape_error(tmp_path) -> None:
     assert warm.accumulated, "the enriched live minute emitted features without crashing"
 
 
-def test_populated_assert_is_value_neutral() -> None:
-    """NOT a fingerprint change: the ``populated`` tracking + ``assert_populated`` add state metadata and a
-    post-seed check ONLY — they touch no running sum. An engine seeded with ``warm_start_assert=True`` (the
-    assert runs) emits features BYTE-IDENTICAL to one seeded with it OFF, over the same buffer. This isolates
-    THIS change's contribution: it moves no value.
+def test_populated_invariant_is_value_neutral() -> None:
+    """NOT a fingerprint change: the ``populated`` tracking + ``assert_ready`` + ``check_invariants`` add
+    state metadata and checks ONLY — they touch no running sum. An engine seeded with
+    ``assert_ready_on_seed=True`` (the readiness assert + invariants run) emits features BYTE-IDENTICAL to one
+    seeded with it OFF, over the same buffer. This isolates THIS change's contribution: it moves no value.
 
     (Engine whole-buffer-seed vs minute-by-minute / vs batch for the OLS-conditioning family is a separate
     documented sensitivity — test_fp_incremental_features; the DEPLOYED warm-start parity vs backfill is the
@@ -312,14 +353,14 @@ def test_populated_assert_is_value_neutral() -> None:
     stream = _bars_frame(_stream_minutes(n_sym=6, n_min=90, seed=31))
     groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
 
-    asserted = IncrementalEngine(groups, warm_start_assert=True)
-    asserted_out = asserted.step(stream)  # warm-start seed runs the populated assert, then assembles
-    assert asserted.warm_start_assert is False, "warm-start seed ran and cleared the assert flag"
+    asserted = IncrementalEngine(groups, assert_ready_on_seed=True)
+    asserted_out = asserted.step(stream)  # seed runs the readiness assert + invariants, then assembles
+    assert asserted.assert_ready_on_seed is False, "seed ran and cleared the assert flag"
 
-    plain = IncrementalEngine(groups, warm_start_assert=False)
+    plain = IncrementalEngine(groups, assert_ready_on_seed=False)
     plain_out = plain.step(stream)
 
     for group in groups:
         a = asserted_out[group.name].sort("symbol")
         b = plain_out[group.name].sort("symbol").select(a.columns)
-        assert a.equals(b), f"{group.name}: populated-assert changed a value (must be byte-identical)"
+        assert a.equals(b), f"{group.name}: populated invariant changed a value (must be byte-identical)"

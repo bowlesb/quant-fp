@@ -115,7 +115,7 @@ def _engine_for(state: "CaptureState", reduce_input: str, batch_groups: list) ->
     the buffer on its first ``step`` and re-seeds itself when a genuinely-new ticker appears)."""
     engine = state.engines.get(reduce_input)
     if engine is None:
-        engine = IncrementalEngine(batch_groups, warm_start_assert=state.warm_start_assert)
+        engine = IncrementalEngine(batch_groups, assert_ready_on_seed=state.assert_ready_on_seed)
         state.engines[reduce_input] = engine
     return engine
 
@@ -243,9 +243,11 @@ class CaptureState:
         self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
         self.engines: dict[str, IncrementalEngine] = {}  # one incremental engine per reduce_input bucket (FP_INCREMENTAL)
         self.bus_hook: BusHook | None = None  # set lazily when FP_BUS=1 (real mode) -> publishes vectors off-path
-        # Set by the warm-start path (``warm_start_ring``) so the FIRST incremental engine seed asserts every
-        # window is ``populated`` for the rehydrated buffer's history — catching a failed warm-start loudly.
-        self.warm_start_assert = False
+        # Set by the warm-start path (``warm_start_ring``) so the FIRST incremental engine seed runs the
+        # universal ``assert_ready`` (FULL / legit-not-yet-full / FAILED) + internal invariants against the
+        # rehydrated buffer — catching a present-but-not-absorbed fill loudly at init. The populated invariant
+        # holds at all times regardless; this just picks the warm-start seed as a convenient call site.
+        self.assert_ready_on_seed = False
 
     @property
     def buffer(self) -> pl.DataFrame | None:
@@ -459,10 +461,12 @@ def warm_start_ring(
         state.ring = MinuteRing(maxlen=depth, columns=project_columns)
     # Minute-ascending so the trailing ``depth`` slots survive eviction (push evicts the OLDEST past maxlen).
     state.ring.push(bars.sort(["minute", "symbol"]))
-    # Arm the populated-assert: the first incremental engine seed (which folds this rehydrated ring) will
-    # assert every window reached its full depth GIVEN the seeded history — a FAILED warm-start (data
-    # present but not absorbed) then raises at init instead of silently under-warming live emissions.
-    state.warm_start_assert = True
+    # Arm the universal readiness assert at the first incremental engine seed (which folds this rehydrated
+    # ring): every window must be populated or legitimately not-yet-full GIVEN the seeded history — a
+    # present-but-not-absorbed fill (the warm-start ShapeError class) then raises at init instead of silently
+    # under-warming live emissions. The populated invariant is maintained continuously regardless; this is one
+    # convenient call site of it.
+    state.assert_ready_on_seed = True
     return len(state.ring._slots)
 
 
