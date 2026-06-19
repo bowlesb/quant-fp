@@ -20,6 +20,7 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `GET http://<host>:8088/api/feature-grid/{group}/symbols` | per-SYMBOL coverage: which tickers are live (stream) vs backfill-only (under-represented LIVE) |
 | `GET http://<host>:8088/api/feature-grid/thin-live-symbols` | cross-group roll-up: which SYMBOLS are backfill-only (under-represented LIVE) across the most groups (`?limit=N`) |
 | `GET http://<host>:8088/api/feature-grid/timeline` | (group × recent-day × source) presence grid + per-group history-depth & live-horizon (`?days=N`) |
+| `GET http://<host>:8088/api/feature-grid/orderflow-trend` | per-recent-day LIVE-stream symbol breadth across the order-flow groups — is FP_TICK_SYMBOLS coverage widening or stalling (`?days=N`) |
 
 All API endpoints accept `?refresh=1` to bypass the 60s TTL cache and re-aggregate. A cold build over the
 live store is ~4s; cached responses are ~1ms. There is a **↻ refresh** button on the page.
@@ -218,6 +219,42 @@ one-pass per-date symbol read the grid already pays for, so it is no extra store
        {"date": "2026-06-18", "stream": 1054, "backfill": 1268, "provenance": "both"},
        {"date": "2026-06-14", "stream": 0, "backfill": 0, "provenance": "absent"}      // weekend
      ]}
+  ]
+}
+```
+
+### `GET /api/feature-grid/orderflow-trend`
+
+The **order-flow live-coverage TREND**. The timeline shows per `(group, day)` presence and the per-symbol
+surfaces (`/symbols`, `thin-live-symbols`) show *which* names are thin on the **latest** day. Neither answers
+the trend question for the universe-wide live order-flow certification: across the tick-derived groups, how
+many **distinct symbols** did the live stream actually carry on each of the last N days, and is that union
+**climbing off the ~24-canary floor or flat**?
+
+For each recent day, over the order-flow groups present on disk (`ORDERFLOW_GROUPS`; bar/price groups are
+deliberately excluded so their ~universe-wide stream coverage doesn't drown the order-flow signal):
+
+* `n_union` — distinct symbols live on the stream in **at least one** order-flow group that day (the widest
+  live order-flow universe; the headline trend number).
+* `n_intersection` — symbols live in **every** order-flow group that captured anything that day (the
+  full-coverage core; absent groups don't zero it out).
+* `per_group` — each group's live stream symbol count, so a single thin group is visible against the union.
+
+The header carries `union_delta` = newest-captured-day `n_union` − oldest-captured-day `n_union` (> 0
+widening, 0 flat, < 0 shrinking). `?days=N` sets the window (default 21, capped at `TIMELINE_MAX_DAYS`).
+Read-side only: reads `_read_symbols` (bounded per-partition sampling) over **only** the recent window per
+order-flow group — no extra heavy I/O beyond what the grid already does.
+
+```jsonc
+{
+  "generated_at": "2026-06-18T...Z", "store_root": "/store",
+  "anchor_date": "2026-06-18", "days": 21,
+  "groups": ["inter_arrival", "liquidity", "...", "trade_flow"],   // order-flow groups present on disk
+  "dates": ["2026-06-18", "2026-06-17", "..."],                    // most-recent first
+  "newest_captured_union": 1054, "oldest_captured_union": 428, "union_delta": 626,  // WIDENING
+  "trend": [
+    {"date": "2026-06-18", "n_union": 1054, "n_intersection": 11, "n_live_groups": 7,
+     "per_group": {"trade_flow": 1054, "signed_trade_ratio": 803, "...": 0}}
   ]
 }
 ```

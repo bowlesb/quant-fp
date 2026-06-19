@@ -357,3 +357,83 @@ def test_build_coverage_timeline_empty_store(tmp_path: Path, fake_catalog: None)
     assert view["anchor_date"] is None
     assert view["groups"] == []
     assert view["dates"] == []
+
+
+@pytest.fixture()
+def fake_oflow_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A catalog with two REAL order-flow group names + one non-order-flow group, so the trend's
+    ORDERFLOW_GROUPS filter (and its exclusion of bar/price groups) is exercised against the live constant.
+    """
+    rows = [
+        {"feature": "tf_a", "group": "trade_flow", "version": "1.0.0", "layer": "B",
+         "parity_method": "tolerance", "description": "trade flow."},
+        {"feature": "sr_a", "group": "signed_trade_ratio", "version": "1.0.0", "layer": "B",
+         "parity_method": "tolerance", "description": "signed ratio."},
+        {"feature": "px_a", "group": "price_volume", "version": "1.0.0", "layer": "B",
+         "parity_method": "tolerance", "description": "a non-order-flow bar group."},
+    ]
+    monkeypatch.setattr(fg, "_catalog_by_group", lambda: {
+        "trade_flow": [r for r in rows if r["group"] == "trade_flow"],
+        "signed_trade_ratio": [r for r in rows if r["group"] == "signed_trade_ratio"],
+        "price_volume": [r for r in rows if r["group"] == "price_volume"],
+    })
+    monkeypatch.setattr(fg, "_group_version", lambda group: "1.0.0")
+
+
+def test_orderflow_trend_union_and_intersection(tmp_path: Path, fake_oflow_catalog: None) -> None:
+    root = tmp_path / "store"
+    # trade_flow live: 06-17 {AAA,BBB}, 06-18 {AAA,BBB,CCC} — widening.
+    _write_partition(root, "trade_flow", "stream", "2026-06-17", ["AAA", "BBB"])
+    _write_partition(root, "trade_flow", "stream", "2026-06-18", ["AAA", "BBB", "CCC"])
+    # signed_trade_ratio live: 06-17 {AAA}, 06-18 {AAA,BBB}.
+    _write_partition(root, "signed_trade_ratio", "stream", "2026-06-17", ["AAA"])
+    _write_partition(root, "signed_trade_ratio", "stream", "2026-06-18", ["AAA", "BBB"])
+    # A non-order-flow group with a far WIDER live universe — must NOT inflate the order-flow trend.
+    _write_partition(root, "price_volume", "stream", "2026-06-18", ["AAA", "BBB", "CCC", "DDD", "EEE"])
+
+    view = fg.build_orderflow_coverage_trend(str(root), days=10)
+    assert view["anchor_date"] == "2026-06-18"
+    assert sorted(view["groups"]) == ["signed_trade_ratio", "trade_flow"]  # price_volume excluded
+    by_date = {row["date"]: row for row in view["trend"]}
+
+    # 06-18: union = {AAA,BBB,CCC} (3), intersection across both groups = {AAA,BBB} (2).
+    assert by_date["2026-06-18"]["n_union"] == 3
+    assert by_date["2026-06-18"]["n_intersection"] == 2
+    assert by_date["2026-06-18"]["n_live_groups"] == 2
+    assert by_date["2026-06-18"]["per_group"] == {"trade_flow": 3, "signed_trade_ratio": 2}
+    # 06-17: union = {AAA,BBB} (2), intersection = {AAA} (1).
+    assert by_date["2026-06-17"]["n_union"] == 2
+    assert by_date["2026-06-17"]["n_intersection"] == 1
+    # Edge-to-edge verdict: oldest captured (06-17)=2 -> newest (06-18)=3 -> widening by 1.
+    assert view["oldest_captured_union"] == 2
+    assert view["newest_captured_union"] == 3
+    assert view["union_delta"] == 1
+
+
+def test_orderflow_trend_intersection_ignores_absent_group(tmp_path: Path, fake_oflow_catalog: None) -> None:
+    root = tmp_path / "store"
+    # Only trade_flow captures on the anchor day; signed_trade_ratio is absent that day. The intersection
+    # must be over the CAPTURING groups only (not zeroed by the absent group).
+    _write_partition(root, "trade_flow", "stream", "2026-06-18", ["AAA", "BBB"])
+    _write_partition(root, "signed_trade_ratio", "stream", "2026-06-17", ["AAA"])
+
+    view = fg.build_orderflow_coverage_trend(str(root), days=5)
+    by_date = {row["date"]: row for row in view["trend"]}
+    assert by_date["2026-06-18"]["n_union"] == 2
+    assert by_date["2026-06-18"]["n_intersection"] == 2  # only trade_flow capturing -> its own set
+    assert by_date["2026-06-18"]["n_live_groups"] == 1
+
+
+def test_orderflow_trend_caps_days(tmp_path: Path, fake_oflow_catalog: None) -> None:
+    root = tmp_path / "store"
+    _write_partition(root, "trade_flow", "stream", "2026-06-18", ["AAA"])
+    view = fg.build_orderflow_coverage_trend(str(root), days=10000)
+    assert view["days"] == fg.TIMELINE_MAX_DAYS
+    assert len(view["dates"]) == fg.TIMELINE_MAX_DAYS
+
+
+def test_orderflow_trend_empty_store(tmp_path: Path, fake_oflow_catalog: None) -> None:
+    view = fg.build_orderflow_coverage_trend(str(tmp_path / "empty"), days=5)
+    assert view["anchor_date"] is None
+    assert view["trend"] == []
+    assert view["dates"] == []
