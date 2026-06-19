@@ -14,6 +14,7 @@ import datetime as dt
 import json
 import math
 import os
+import sys
 
 import polars as pl
 import pytest
@@ -841,3 +842,43 @@ def test_tail_settle_sample_is_deterministic_and_excludes_market_tickers() -> No
     assert sample_a == sample_b
     assert len(sample_a) == validation_sweep.TAIL_SETTLE_SAMPLE
     assert not (set(sample_a) & set(MARKET_TICKERS))
+
+
+def test_settle_gates_raise_raw_not_settled_subclass_of_value_error(tmp_path) -> None:
+    """The settle gates raise the NARROWER RawNotSettledError so the lifecycle cron can distinguish "skip,
+    retry once landed" from a genuine error — while staying a ValueError subclass so every existing
+    ``except ValueError`` / ``pytest.raises(ValueError)`` caller is unchanged."""
+    assert issubclass(validation_sweep.RawNotSettledError, ValueError)
+    with pytest.raises(validation_sweep.RawNotSettledError, match="raw BARS are empty"):
+        validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=False)
+    discovered = [f"T{i:04d}" for i in range(400)]
+    _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.50)
+    with pytest.raises(validation_sweep.RawNotSettledError, match="ILLIQUID TAIL has not settled"):
+        validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), discovered)
+
+
+def test_main_skips_cleanly_on_unsettled_day(monkeypatch, capsys) -> None:
+    """The exact daily_lifecycle footgun: the post-close nightly sweep targets a day whose raw has not landed
+    yet (Alpaca ~T+1), so the settle gate raises RawNotSettledError. main() must SKIP it cleanly (no raise,
+    exit 0 → /jobs grades SKIPPED, not FAILED), not propagate the error and fail the whole cron job."""
+
+    def _raise_not_settled(**kwargs: object) -> dict[str, object]:
+        raise validation_sweep.RawNotSettledError("refusing to sweep 2026-06-18: raw BARS are empty")
+
+    monkeypatch.setattr(validation_sweep, "sweep_day", _raise_not_settled)
+    monkeypatch.setattr(sys, "argv", ["validation_sweep", "2026-06-18", "/feat", "/val", "/raw"])
+    validation_sweep.main()  # must NOT raise
+    assert "SKIPPED for 2026-06-18 (raw not settled)" in capsys.readouterr().out
+
+
+def test_main_still_fails_on_a_genuine_error(monkeypatch) -> None:
+    """The skip is NARROW: only RawNotSettledError is swallowed. A genuine error (any other exception) still
+    propagates and fails the job — we never want a real sweep bug graded as a benign skip."""
+
+    def _raise_real_error(**kwargs: object) -> dict[str, object]:
+        raise ValueError("a real sweep bug")
+
+    monkeypatch.setattr(validation_sweep, "sweep_day", _raise_real_error)
+    monkeypatch.setattr(sys, "argv", ["validation_sweep", "2026-06-18", "/feat", "/val", "/raw"])
+    with pytest.raises(ValueError, match="a real sweep bug"):
+        validation_sweep.main()
