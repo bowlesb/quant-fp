@@ -17,6 +17,9 @@ Run inside the fp-dev image with the /store volume mounted and Alpaca creds in e
     python -m quantlib.data.raw_backfill --months 6 --top-trades 1500 --top-quotes 300 \
         --budget-tb 1.8 --store /store
 A `--symbols AAPL,SPY,NVDA --days 2` sample mode fetches a tiny set for evidence without ranking.
+A `--start YYYY-MM-DD --end YYYY-MM-DD` WINDOW mode fetches an explicit trading-day range over the full
+universe (ranking restricted to that window), so a deep historical pull never re-ranks the whole span;
+the manifest still skips any (symbol, date) already on disk, so windows never double-acquire.
 """
 
 from __future__ import annotations
@@ -145,6 +148,8 @@ class BackfillConfig:
     days: (
         int | None
     )  # explicit day count for sample mode; None => `months` of trading days
+    start: dt.date | None  # WINDOW mode: explicit range start (inclusive); None => not windowed
+    end: dt.date | None  # WINDOW mode: explicit range end (inclusive); None => not windowed
     max_workers: int  # thread-pool size for concurrent request-units
     bars_symbols_per_request: int  # symbols per multi-symbol bars request
     bars_chunk_days: int  # trading days per bars request
@@ -499,7 +504,26 @@ def run(config: BackfillConfig) -> None:
     trade_client = trading_client()
 
     today = dt.datetime.now(dt.timezone.utc).date()
-    if config.symbols is not None and config.days is not None:
+    if config.start is not None and config.end is not None:
+        # WINDOW mode: an explicit [start, end] trading-day range over the full universe. Ranking is
+        # restricted to this window (rank_by_dollar_volume scores only the passed days), so a deep
+        # historical pull never re-ranks dollar-volume over the whole 10yr span. The manifest still
+        # makes it idempotent — a (symbol, date) cell already present with rows>0 is skipped, so a
+        # re-run or overlapping windows never double-acquire. Resumable like every other mode.
+        days = trading_days(trade_client, config.start, config.end)
+        universe = (
+            config.symbols
+            if config.symbols is not None
+            else universe_symbols(trade_client)
+        )
+        logger.info(
+            "WINDOW mode: %d universe symbols x %d trading days (%s..%s)",
+            len(universe),
+            len(days),
+            config.start.isoformat(),
+            config.end.isoformat(),
+        )
+    elif config.symbols is not None and config.days is not None:
         all_days = trading_days(trade_client, today - dt.timedelta(days=14), today)
         days = all_days[-config.days :]
         universe = config.symbols
@@ -579,6 +603,25 @@ def run(config: BackfillConfig) -> None:
     )
 
 
+def parse_window(
+    start: str | None, end: str | None
+) -> tuple[dt.date | None, dt.date | None]:
+    """Validate the optional `--start/--end` WINDOW pair: both-or-neither, parseable, start <= end.
+
+    Returns (None, None) when neither is given (the additive default — every existing mode is reached
+    only when no window is set). Raises SystemExit (argparse-style) on a malformed window so a bad deep
+    pull fails fast rather than silently falling through to the `--months` lookback."""
+    if (start is None) != (end is None):
+        raise SystemExit("--start and --end must be given together")
+    if start is None or end is None:
+        return None, None
+    start_date = dt.date.fromisoformat(start)
+    end_date = dt.date.fromisoformat(end)
+    if start_date > end_date:
+        raise SystemExit(f"--start {start} must be <= --end {end}")
+    return start_date, end_date
+
+
 def parse_args(argv: list[str]) -> BackfillConfig:
     parser = argparse.ArgumentParser(
         description="Resumable raw bars/trades/quotes backfill"
@@ -591,6 +634,16 @@ def parse_args(argv: list[str]) -> BackfillConfig:
     parser.add_argument("--symbols", default=None, help="comma list => SAMPLE mode")
     parser.add_argument(
         "--days", type=int, default=None, help="recent trading days for SAMPLE mode"
+    )
+    parser.add_argument(
+        "--start",
+        default=None,
+        help="WINDOW mode start date YYYY-MM-DD (inclusive); requires --end",
+    )
+    parser.add_argument(
+        "--end",
+        default=None,
+        help="WINDOW mode end date YYYY-MM-DD (inclusive); requires --start",
     )
     parser.add_argument(
         "--max-workers",
@@ -622,6 +675,7 @@ def parse_args(argv: list[str]) -> BackfillConfig:
     symbols = (
         [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     )
+    start, end = parse_window(args.start, args.end)
     return BackfillConfig(
         store=args.store,
         months=args.months,
@@ -630,6 +684,8 @@ def parse_args(argv: list[str]) -> BackfillConfig:
         budget_bytes=int(args.budget_tb * BYTES_PER_TB),
         symbols=symbols,
         days=args.days,
+        start=start,
+        end=end,
         max_workers=args.max_workers,
         bars_symbols_per_request=args.bars_symbols_per_request,
         bars_chunk_days=args.bars_chunk_days,
