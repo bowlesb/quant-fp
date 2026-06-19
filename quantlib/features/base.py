@@ -177,12 +177,23 @@ class FeatureGroup(ABC):
 
     @staticmethod
     def _slice_to_window(frame: pl.DataFrame, lookback_minutes: int) -> pl.DataFrame:
-        """Keep only the trailing ``lookback_minutes`` of ``frame`` (by its own latest minute). Frames with no
-        ``minute`` column or no rows pass through unchanged."""
-        if "minute" not in frame.columns or frame.height == 0:
+        """Keep only the trailing ``lookback_minutes`` of ``frame`` (by its own latest minute). Empty frames
+        pass through unchanged. A bar-grid frame keyed by ``minute`` slices on that column; a raw-tape frame
+        keyed by ``ts`` (the trades feed — no ``minute`` column) slices on the trade timestamp, cutting at
+        the START of the minute ``lookback_minutes`` before the last trade's minute so the WHOLE last minute
+        (and every trailing window minute) is kept intact. A frame with neither column passes through whole."""
+        if frame.height == 0:
             return frame
-        cutoff = pl.col("minute").max() - pl.duration(minutes=lookback_minutes)
-        return frame.filter(pl.col("minute") >= cutoff)
+        if "minute" in frame.columns:
+            cutoff = pl.col("minute").max() - pl.duration(minutes=lookback_minutes)
+            return frame.filter(pl.col("minute") >= cutoff)
+        if "ts" in frame.columns:
+            # The tape's own-minute / windowed groups bucket by ``ts.truncate("1m")``; slice from the start
+            # of the minute ``lookback_minutes`` before the last trade so no in-window minute is half-dropped.
+            last_minute = frame.select(pl.col("ts").max().dt.truncate("1m")).item()
+            cutoff = last_minute - pl.duration(minutes=lookback_minutes)
+            return frame.filter(pl.col("ts") >= cutoff)
+        return frame
 
     @property
     def feature_names(self) -> list[str]:

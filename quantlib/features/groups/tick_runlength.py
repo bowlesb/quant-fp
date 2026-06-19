@@ -78,3 +78,11 @@ class TickRunLengthGroup(FeatureGroup):
             .with_columns(((pl.col("_min_i") * 1_000_000).cast(pl.Datetime("us")).dt.replace_time_zone("UTC")).alias("minute"))
             .select(["symbol", "minute", "max_signed_run_1m", "signed_run_count_1m", "tick_signed_volume_1m"])
         )
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """Own-minute-only live path: the Rust ``tick_run_features`` resets its run state at every
+        ``(symbol, minute)`` boundary (the first print of a minute has sign 0 — no borrowing from the prior
+        minute), so the SAME ``compute()`` on the trailing 1-minute tape slice (filtered to T) is parity-true by
+        construction — older trades cannot affect T's value. Avoids running the Rust pass over the whole ~300m
+        trade buffer."""
+        return self.compute_latest_on_window(ctx, 1)
