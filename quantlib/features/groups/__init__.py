@@ -16,6 +16,7 @@ from quantlib.features.groups import (  # noqa: F401
     dumper_state,
     efficiency,
     gap_fill_state,
+    inter_arrival,
     intraday_seasonality,
     liquidity,
     liquidity_rank,
@@ -48,7 +49,10 @@ from quantlib.features.groups import (  # noqa: F401
     tick_runlength,
     trade_flow,
     trade_freq_z,
+    trade_size_dist,
     trend_quality,
     volatility,
     volume,
+    volume_exhaustion,
+    volume_leads_price,
 )
