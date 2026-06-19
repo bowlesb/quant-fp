@@ -26,6 +26,8 @@ matrix the batch would, so the running sums (and therefore every feature) stay p
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import polars as pl
 
@@ -43,6 +45,27 @@ from quantlib.features.declarative import (
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
+
+
+class IncrementUnderfilled(Exception):
+    """Raised when a window that the supplied buffer HAD enough history to fill did NOT end up populated —
+    the data was PRESENT in the buffer handed to the state but the state failed to absorb it (the 7/13-col
+    schema ShapeError, a sort/index mismatch, a silently-dropped slot/minute). This is the "FAILED" arm of
+    the universal three-way distinction (FULL / legitimately-not-yet-full / FAILED); it is source-agnostic —
+    the SAME failure whether the buffer came from a warm-start seed or from live minutes accumulating. It is
+    NOT raised for a window that is legitimately not-yet-full because the buffer itself was shorter than the
+    window (a newly-listed ticker / first day / genuine gap). Fail-fast per CLAUDE.md ("let errors raise / no
+    lazy graceful degradation") so a partial fill is caught loudly instead of silently under-warming."""
+
+
+class IncrementInvariantError(Exception):
+    """Raised when a ``WindowedSumState`` fails an INTERNAL self-consistency invariant — its own bookkeeping
+    contradicts its own buffer (the span tracker disagrees with the buffered minutes; a per-window expiry
+    pointer retained a minute that left the window or expired one still inside it; or, under the deep check,
+    a running sum no longer equals the sum over its window's buffered minutes). This is corruption of the
+    fold/expire/trim cycle itself, independent of how the window was filled — checkable at ANY time, not just
+    after a seed. Distinct from ``IncrementUnderfilled`` (which is a present-but-not-absorbed INPUT problem,
+    not internal corruption)."""
 
 # How far (minutes) behind the incoming minute to pin the rolling time-OLS origin each fold. Small and fixed
 # so the time regressor's x stays O(1) for every window — keeping ``b·Σxx − (Σx)²`` well conditioned instead
@@ -70,10 +93,21 @@ class WindowedSumState:
         self._buf_epoch: list[int] = []
         self._buf_vals: list[np.ndarray] = []
         self._oldest = [0] * len(self.windows)  # per-window index of the oldest minute still in the sum
+        # Span of folded history (in epoch seconds), tracked across trims so ``populated`` survives the
+        # memory eviction that drops buffered minutes once they leave the longest window. ``_first_epoch``
+        # is the EARLIEST minute ever folded since seed (the left edge of the absorbed history);
+        # ``_last_epoch`` is the latest. A window ``w`` is POPULATED when the absorbed history reaches at
+        # least ``w`` minutes behind the latest minute — i.e. its lower edge ``last − w·60`` has slid past
+        # real data rather than being truncated by the seed's left edge.
+        self._first_epoch: int | None = None
+        self._last_epoch: int | None = None
 
     def update(self, minute_epoch: int, values: np.ndarray) -> None:
         """Fold one new minute into every window's running sum, then expire minutes now outside each window."""
         index = len(self._buf_epoch)
+        if self._first_epoch is None:
+            self._first_epoch = int(minute_epoch)
+        self._last_epoch = int(minute_epoch)
         self._buf_epoch.append(int(minute_epoch))
         self._buf_vals.append(values)
         for wi, w in enumerate(self.windows):
@@ -121,6 +155,109 @@ class WindowedSumState:
         """The current ``(n_symbols, n_cols)`` running sum for ``window`` (minutes)."""
         return self.running[self.windows.index(window)]
 
+    def observed_span_minutes(self) -> float:
+        """How many minutes of history the state has ABSORBED: latest folded minute − earliest folded minute,
+        in minutes. ``0`` before any fold. Maintained by the shared ``update`` fold (so it is identical
+        whether the depth came from a warm-start seed or from live minutes accumulating), and survives
+        ``trim`` (tracked from ``_first/_last_epoch``, not the evicted buffer) so it reflects the full
+        absorbed depth even after memory eviction."""
+        if self._first_epoch is None or self._last_epoch is None:
+            return 0.0
+        return (self._last_epoch - self._first_epoch) / 60.0
+
+    def buffer_span_minutes(self) -> float:
+        """The span the CURRENTLY-RETAINED buffer covers (newest − oldest buffered minute), in minutes. After
+        ``trim`` this is ≤ ``observed_span_minutes`` (older minutes are evicted once past the longest window);
+        before any trim it equals it. Read from the live buffer, so it tracks the actual folded minutes."""
+        if not self._buf_epoch:
+            return 0.0
+        return (self._buf_epoch[-1] - self._buf_epoch[0]) / 60.0
+
+    def populated(self, window: int) -> bool:
+        """The continuous, SOURCE-AGNOSTIC populated property: True when the absorbed history reaches a FULL
+        ``window`` minutes behind the latest minute (so the window holds its full required depth rather than
+        being truncated by a short left edge). Derived the SAME way at all times — at init after a seed, or in
+        steady state after live expiry/repopulation — because ``observed_span_minutes`` is maintained by the
+        shared fold. A window ≤ the observed span is full; a longer one is still warming."""
+        return self.observed_span_minutes() >= float(window)
+
+    def check_invariants(self, *, deep: bool = False) -> None:
+        """UNIVERSAL internal self-consistency check — the state's own bookkeeping must agree with its own
+        buffer. Checkable at ANY time (init or steady state), independent of how the windows filled. Cheap
+        checks always run; the O(buffer) running-sum reconstruction runs only when ``deep`` (kept off the hot
+        path). Raises ``IncrementInvariantError`` on any contradiction.
+
+          1. Span ↔ buffer: the tracked newest epoch equals the buffer's newest, and the tracked earliest is
+             no newer than the buffer's oldest (the earliest may predate the trimmed buffer, never postdate).
+          2. Expiry pointers: each window's ``_oldest`` partitions the buffer correctly — every retained
+             minute (index ≥ ``_oldest``) is strictly INSIDE the window (epoch > last − w·60) and every
+             expired minute (index < ``_oldest``) is at/under that cutoff. A mis-fold/mis-expire trips here.
+          3. (deep) Running sum ↔ buffer: each window's running sum equals the sum over exactly its retained
+             in-window minutes — catches a dropped/duplicated fold or numeric corruption at source."""
+        if not self._buf_epoch:
+            if self._first_epoch is not None or self._last_epoch is not None:
+                raise IncrementInvariantError("span tracker set but buffer empty")
+            return
+        if self._last_epoch != self._buf_epoch[-1]:
+            raise IncrementInvariantError(
+                f"last-epoch tracker {self._last_epoch} != buffer newest {self._buf_epoch[-1]}"
+            )
+        if self._first_epoch is None or self._first_epoch > self._buf_epoch[0]:
+            raise IncrementInvariantError(
+                f"first-epoch tracker {self._first_epoch} is newer than buffer oldest {self._buf_epoch[0]}"
+            )
+        last = self._buf_epoch[-1]
+        for wi, w in enumerate(self.windows):
+            oldest = self._oldest[wi]
+            cutoff = last - w * 60
+            if not (0 <= oldest <= len(self._buf_epoch)):
+                raise IncrementInvariantError(f"window {w}: _oldest {oldest} out of range")
+            if oldest > 0 and self._buf_epoch[oldest - 1] > cutoff:
+                raise IncrementInvariantError(
+                    f"window {w}: retained an expired minute at index {oldest - 1} (inside _oldest)"
+                )
+            if oldest < len(self._buf_epoch) and self._buf_epoch[oldest] <= cutoff:
+                raise IncrementInvariantError(
+                    f"window {w}: failed to expire a minute at index {oldest} (epoch ≤ cutoff)"
+                )
+            if deep:
+                expected = (
+                    np.sum(self._buf_vals[oldest:], axis=0)
+                    if oldest < len(self._buf_vals)
+                    else np.zeros((self.n, self.n_cols), dtype=np.float64)
+                )
+                if not np.allclose(self.running[wi], expected, rtol=1e-9, atol=1e-9, equal_nan=True):
+                    raise IncrementInvariantError(
+                        f"window {w}: running sum diverged from its buffered in-window minutes"
+                    )
+
+    def assert_ready(self, buffer_span_minutes: float) -> None:
+        """The three-way FILL check, source-agnostic. ``buffer_span_minutes`` is the span the buffer handed to
+        the state actually carried — the span of the seed frame at init, or of the trailing frame in steady
+        state; it is NOT warm-start-specific. For every declared window:
+
+          * FULL — ``observed_span >= window`` → the state absorbed its full depth → OK.
+          * LEGITIMATELY not-yet-full — the buffer itself was shorter than the window
+            (``buffer_span < window``: newly-listed ticker, first day, genuine short history) → correctly not
+            populated → OK (no raise; emits partial/NaN as today).
+          * FAILED — the buffer HAD ``>= window`` minutes but the state's observed span is short (data present
+            in the supplied buffer, not absorbed: the ShapeError, a schema/index mismatch, a dropped minute)
+            → RAISE ``IncrementUnderfilled``.
+
+        Fires only on the third arm (``buffer_span >= window`` but ``observed_span < window``). Also runs the
+        internal ``check_invariants`` so a corruption surfaces here too. Identical at init and in steady
+        state — the post-seed assert is just one call site of this universal property."""
+        self.check_invariants()
+        observed = self.observed_span_minutes()
+        for window in self.windows:
+            if buffer_span_minutes >= float(window) and observed < float(window):
+                raise IncrementUnderfilled(
+                    f"the {window}m window is underfilled: the supplied buffer carried "
+                    f"{buffer_span_minutes:.1f}m of history (>= {window}m, so it COULD fill the window) but "
+                    f"the state only absorbed {observed:.1f}m — data present in the buffer but not absorbed "
+                    f"(schema/shape mismatch or dropped minutes), not a legitimately-short history."
+                )
+
 
 class IncrementalEngine:
     """The live incremental execution path for the declarative reduction groups. Holds a per-shard
@@ -142,8 +279,15 @@ class IncrementalEngine:
 
     DERIVE_SLICE = 6  # legacy minute-window depth (>= max_lag); the live slice tails by ROW (see _matrix_at). Used by the rust-vs-polars unit tests and the dense-feed sim slot count.
 
-    def __init__(self, groups: list[ReductionGroup], *, rust_slice: bool = True) -> None:
+    def __init__(self, groups: list[ReductionGroup], *, rust_slice: bool = True, assert_ready_on_seed: bool = False) -> None:
         self.rust_slice = rust_slice
+        # When True, the FIRST seed runs the UNIVERSAL ``assert_ready`` (three-way FULL / legit-not-yet-full /
+        # FAILED) + internal invariants against the seed buffer — catching a present-but-not-absorbed fill
+        # (e.g. the warm-start ShapeError) loudly at init. It is the SAME populated property maintained by the
+        # shared fold, evaluated at one convenient call site; cleared after that first seed so later re-seeds
+        # (a genuinely-new ticker / daily resync) are normal operation. The invariant itself holds at all
+        # times regardless of this flag.
+        self.assert_ready_on_seed = assert_ready_on_seed
         self.groups = [g for g in groups if isinstance(g, ReductionGroup)]
         self.derived, self.extra, self.value_cols, self.plan, self.reg_plan, self.windows = build_plan(self.groups)
         self.col_index = {col: i for i, col in enumerate(self.value_cols)}
@@ -442,6 +586,37 @@ class IncrementalEngine:
             self._roll_time_origin(minute_epoch)
             self.state.update(minute_epoch, self._matrix_at(buffer_frame, minute, slice_derive=slice_derive))
             self.state.trim()
+        # The internal invariants are cheap (O(windows)) and run by DEFAULT at init — a corrupted fold/expire
+        # surfaces immediately, on every seed, not only on the warm-start path. The deep O(buffer) sum-vs-
+        # buffer reconstruction is opt-in (FP_INCREMENT_DEEP_CHECK=1) so steady-state throughput is unaffected.
+        self.state.check_invariants(deep=os.environ.get("FP_INCREMENT_DEEP_CHECK") == "1")
+        if self.assert_ready_on_seed:
+            self.assert_ready(buffer_frame)
+            self.assert_ready_on_seed = False  # one call site; the populated property holds at all times
+
+    def frame_span_minutes(self, frame: pl.DataFrame) -> float:
+        """The span of distinct minutes ``frame`` carries (latest − earliest), in minutes — how much history
+        the supplied buffer made available to fill the windows. Source-agnostic: the seed frame at init, or
+        the trailing frame in steady state. Compared against ``observed_span_minutes`` to tell a
+        legitimately-short buffer (no raise) from a present-but-not-absorbed fill (raise)."""
+        if frame.is_empty():
+            return 0.0
+        minutes = frame.select(
+            pl.col("minute").dt.epoch("s").min().alias("lo"),
+            pl.col("minute").dt.epoch("s").max().alias("hi"),
+        )
+        return float((minutes["hi"][0] - minutes["lo"][0]) / 60.0)
+
+    def assert_ready(self, frame: pl.DataFrame) -> None:
+        """Run the UNIVERSAL readiness check against ``frame``: every window the engine declares is either
+        ``populated`` or legitimately not-yet-full given the history ``frame`` carried; a present-but-not-
+        absorbed window raises ``IncrementUnderfilled``, and an internal-bookkeeping contradiction raises
+        ``IncrementInvariantError`` (``WindowedSumState.assert_ready`` → ``check_invariants`` + the three-way
+        fill check). Source-agnostic and valid at ANY time — at init after a seed, or in steady state against
+        the live trailing frame. No-op (vacuous) when the engine declares no windows or has not been seeded."""
+        if self.state is None or not self.windows:
+            return
+        self.state.assert_ready(self.frame_span_minutes(frame))
 
     def step(self, frame: pl.DataFrame, *, slice_derive: bool = True) -> dict[str, pl.DataFrame]:
         """Fold the new latest minute and assemble features from the running sums. ``frame`` is the trailing
