@@ -42,15 +42,17 @@ _USE_RUST_ASSEMBLE = bool(os.environ.get("FP_RUST_ASSEMBLE")) and os.environ.get
 # (slope, corr, r2, mean_y) matches the kernel's 3..=6 arm.
 _STAT_CODE = {"sum": 0, "mean": 1, "std": 2, "slope": 3, "corr": 4, "r2": 5, "mean_y": 6}
 
-# Relative floor on the y-variance numerator (``denom_y = b*Σy² − (Σy)²``) for the corr/r2 defined-guard.
-# On a near-flat window denom_y is a catastrophic-cancellation difference of two near-equal large sums whose
-# low bits are sensitive to accumulation order, so the backfill rolling sums and the live kernel sums land it
-# on OPPOSITE sides of zero at the ~1e-16 (machine-eps) relative level — the same SIGN-at-threshold trap as
-# the bb_position std guard (#122). A bare ``denom_y > 0.0`` then sends one path to a finite corr/r2 and the
-# other to NULL: a stream-vs-backfill parity break on degenerate-flat names. Require denom_y to be a
-# non-trivial fraction of its scale ``(Σy)²`` so a genuinely-flat window is NULL on BOTH paths; 1e-12 sits far
-# above the float-noise floor (~1e-16 here) and far below any real intraday close variance, so well-defined
-# windows are untouched.
+# Relative floor on each OLS variance numerator (``denom_x = b*Σx² − (Σx)²`` for slope/corr/r2's defined-guard,
+# ``denom_y = b*Σy² − (Σy)²`` for corr/r2) — the SIGN-at-threshold trap from #122/#131. On a near-flat
+# regressor (or regressand) the numerator is a catastrophic-cancellation difference of two near-equal large
+# sums whose low bits are sensitive to accumulation order, so the backfill rolling sums and the live kernel
+# sums land it on OPPOSITE sides of zero at the ~1e-16 (machine-eps) relative level. A bare ``denom > 0.0``
+# then sends one path to a finite stat and the other to NULL: a stream-vs-backfill parity break on
+# degenerate-flat names (e.g. kyle_lambda on a constant-signed-flow window). Require each numerator to be a
+# non-trivial fraction of its own scale ((Σx)² / (Σy)²) so a genuinely-flat window is NULL on BOTH paths;
+# 1e-12 sits far above the float-noise floor (~1e-16 here) and far below any real intraday variance, so
+# well-conditioned windows are untouched.
+_OLS_DENOM_X_REL_EPS = 1e-12
 _OLS_DENOM_Y_REL_EPS = 1e-12
 
 # Agg accessors — used inside assemble() to reference the canonical aggregate columns the engine builds.
@@ -101,7 +103,7 @@ def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[st
     denom_x = b * sxx - sx * sx
     denom_y = b * syy - sy * sy
     cov_n = b * sxy - sx * sy
-    defined = (b >= 2.0) & (denom_x > 0.0)
+    defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
     defined_corr = defined & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
     out: dict[str, pl.Expr] = {}
     if "slope" in stats:
@@ -674,14 +676,14 @@ def _ols_stat_numpy(
 ) -> dict[str, np.ndarray]:
     """Numpy twin of ``_ols_stat_exprs`` for ONE regression over ONE window — IDENTICAL algebra to
     ``_ols_derived``/``ols.py``, with ``np.nan`` for polars ``null`` and the SAME defined guards (b>=2 &
-    denom_x>0 for slope; additionally denom_y>0 for corr/r2). The six paired sums are columns
-    ``__rd_<ns>_{b,x,y,xy,xx,yy}`` in the running-sum row."""
+    denom_x>relative-floor for slope; additionally denom_y>relative-floor for corr/r2). The six paired sums
+    are columns ``__rd_<ns>_{b,x,y,xy,xx,yy}`` in the running-sum row."""
     base_sums = {key: sums[:, col_index[f"__rd_{ns}_{key}"]] for key in ("b", "x", "y", "xy", "xx", "yy")}
     b, sx, sy, sxy, sxx, syy = (base_sums[key] for key in ("b", "x", "y", "xy", "xx", "yy"))
     denom_x = b * sxx - sx * sx
     denom_y = b * syy - sy * sy
     cov_n = b * sxy - sx * sy
-    defined = (b >= 2.0) & (denom_x > 0.0)
+    defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
     defined_corr = defined & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
     out: dict[str, np.ndarray] = {}
     if "slope" in stats:

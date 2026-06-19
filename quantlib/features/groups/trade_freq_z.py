@@ -22,6 +22,16 @@ from quantlib.features.declarative import ReductionGroup, mean_, pt_, std_
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
+# A constant-count window's std is mathematically 0, but the backfill rolling form computes it as
+# sqrt(Σv² − (Σv)²/n) — a catastrophic cancellation that lands on a tiny FINITE std/mean ratio (~1e-8 at
+# small integer counts) while the live rust kernel returns exactly 0.0. A bare ``std > 0`` guard then passes
+# on backfill (emitting z=0) and fails on live (emitting NULL): the #122 std-sign-at-zero parity break, here
+# on a flat trade-COUNT window (e.g. an illiquid name printing the same count each minute). Require std to be
+# a non-trivial fraction of the mean count so a flat-activity window is NULL on BOTH paths; 1e-6 dominates the
+# ~1e-8 cancellation residual by ~100x and sits far below any real per-minute count dispersion (a single
+# off-count gives std/mean >> 0.01), so genuine activity bursts are untouched. Mirrors volume_zscore's
+# ``_VOL_STD_REL_EPS`` (volume's ~1e3-1e4 scale needs only 1e-9; small integer counts need a higher floor).
+_TFZ_STD_REL_EPS = 1e-6
 
 
 @register
@@ -54,9 +64,10 @@ class TradeFreqZGroup(ReductionGroup):
         return {"nt1": pl.col("n_trades")}
 
     def assemble(self) -> dict[str, pl.Expr]:
-        # z = (count_now - rolling_mean) / rolling_std; null when std is null/0 (undefined, not 0).
+        # z = (count_now - rolling_mean) / rolling_std; null on warmup (<2 samples) and on a flat-count
+        # window (std a relative ~0) — undefined, not 0 — so stream and backfill agree (see _TFZ_STD_REL_EPS).
         return {
-            f"trade_freq_z_{w}m": pl.when(std_("nt", w) > 0)
+            f"trade_freq_z_{w}m": pl.when(std_("nt", w) > _TFZ_STD_REL_EPS * mean_("nt", w).abs())
             .then((pt_("nt1") - mean_("nt", w)) / std_("nt", w))
             .otherwise(None)
             for w in WINDOWS
