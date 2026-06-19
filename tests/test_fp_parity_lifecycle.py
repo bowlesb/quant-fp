@@ -687,31 +687,40 @@ def test_gather_coherence_empty_is_vacuously_coherent() -> None:
     assert verdict["is_coherent"] is True
 
 
-def _write_raw_bar(raw_root: str, symbol: str, day: str) -> None:
-    """One settled raw BARS partition (the loader-relevant columns) for the presence probe."""
+def _write_raw_bar(raw_root: str, symbol: str, day: str, rows: int = 200) -> None:
+    """A settled raw BARS partition (the loader-relevant columns) for the presence probe. ``rows`` defaults
+    to a real-session count (above MIN_MARKET_TICKER_BARS); pass a small value to emulate a pre-session stub."""
     target = dt.date.fromisoformat(day)
     out = partition_dir(raw_root, "bars", symbol, target)
     os.makedirs(out, exist_ok=True)
+    minutes = [OPEN_ET + dt.timedelta(minutes=i) for i in range(rows)]
     pl.DataFrame(
         {
-            "symbol": [symbol],
-            "ts": [OPEN_ET],
-            "open": [10.0],
-            "close": [10.1],
-            "high": [10.2],
-            "low": [9.9],
-            "volume": [1000],
+            "symbol": [symbol] * rows,
+            "ts": minutes,
+            "open": [10.0] * rows,
+            "close": [10.1] * rows,
+            "high": [10.2] * rows,
+            "low": [9.9] * rows,
+            "volume": [1000] * rows,
         }
     ).write_parquet(os.path.join(out, "data.parquet"))
 
 
-def _write_raw_trade(raw_root: str, symbol: str, day: str) -> None:
-    """One settled raw TRADES partition for the with-ticks presence probe."""
+def _write_raw_trade(raw_root: str, symbol: str, day: str, rows: int = 200) -> None:
+    """A settled raw TRADES partition for the with-ticks presence probe. ``rows`` defaults to a real-session
+    count (above MIN_MARKET_TICKER_TRADES); pass a small value to emulate a partially-settled stub tape."""
     target = dt.date.fromisoformat(day)
     out = partition_dir(raw_root, "trades", symbol, target)
     os.makedirs(out, exist_ok=True)
+    timestamps = [OPEN_ET + dt.timedelta(seconds=i) for i in range(rows)]
     pl.DataFrame(
-        {"symbol": [symbol], "ts": [OPEN_ET], "price": [10.05], "size": [100]}
+        {
+            "symbol": [symbol] * rows,
+            "ts": timestamps,
+            "price": [10.05] * rows,
+            "size": [100] * rows,
+        }
     ).write_parquet(os.path.join(out, "data.parquet"))
 
 
@@ -745,3 +754,33 @@ def test_assert_raw_present_passes_when_settled(tmp_path) -> None:
         _write_raw_bar(str(tmp_path), ticker, "2026-06-18")
         _write_raw_trade(str(tmp_path), ticker, "2026-06-18")
     validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=True)
+
+
+def test_assert_raw_present_refuses_when_one_ticker_bars_empty(tmp_path) -> None:
+    """On a half-acquired day one pinned ticker can land a full bar tape while the OTHER is missing. The
+    union has rows>0, but a market reference is absent — checking each ticker individually must refuse."""
+    settled = MARKET_TICKERS[0]
+    _write_raw_bar(str(tmp_path), settled, "2026-06-18")
+    with pytest.raises(ValueError, match="raw BARS are empty/stub"):
+        validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=False)
+
+
+def test_assert_raw_present_refuses_stub_bars_below_floor(tmp_path) -> None:
+    """A pre-session STUB bar partition (a handful of rows the idempotent resume never re-fetched) is not a
+    settled tape — a per-ticker ROW FLOOR must reject it even though the partition exists with rows>0."""
+    for ticker in MARKET_TICKERS:
+        _write_raw_bar(str(tmp_path), ticker, "2026-06-18", rows=3)
+    with pytest.raises(ValueError, match="raw BARS are empty/stub"):
+        validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=False)
+
+
+def test_assert_raw_present_refuses_stub_trades_below_floor(tmp_path) -> None:
+    """The exact 06-18 footgun: one pinned ticker lands a full trade tape while the other lands a 2-row STUB
+    (the manifest recorded rows=2 'done', so the resume never re-fetched). A union height>0 hid it; the
+    per-ticker trade floor must refuse the with-ticks sweep."""
+    for ticker in MARKET_TICKERS:
+        _write_raw_bar(str(tmp_path), ticker, "2026-06-18")
+    _write_raw_trade(str(tmp_path), MARKET_TICKERS[0], "2026-06-18")  # full tape
+    _write_raw_trade(str(tmp_path), MARKET_TICKERS[1], "2026-06-18", rows=2)  # stub
+    with pytest.raises(ValueError, match="raw TRADES are empty/stub"):
+        validation_sweep.assert_raw_present("2026-06-18", str(tmp_path), with_ticks=True)
