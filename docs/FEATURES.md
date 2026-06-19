@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-694 features across 56 group(s).
+699 features across 57 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -210,6 +210,11 @@
 | `relative_return_5m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 5-minute return minus SPY's over the same window (market-relative excess return). |
 | `relative_return_60m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 60-minute return minus SPY's over the same window (market-relative excess return). |
 | `relative_return_90m` | market_context | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 90-minute return minus SPY's over the same window (market-relative excess return). |
+| `mkt_absret_15m` | market_turbulence | cross_sectional | A | tolerance | Float64 | sparse | (0.0, None) | Universe equal-weight mean of |trailing-15m return| — the realized whole-market move magnitude (turbulence, not direction); a market-wide scalar broadcast to every ticker. |
+| `mkt_absret_30m` | market_turbulence | cross_sectional | A | tolerance | Float64 | sparse | (0.0, None) | Universe equal-weight mean of |trailing-30m return| — the realized whole-market move magnitude (turbulence, not direction); a market-wide scalar broadcast to every ticker. |
+| `mkt_absret_5m` | market_turbulence | cross_sectional | A | tolerance | Float64 | sparse | (0.0, None) | Universe equal-weight mean of |trailing-5m return| — the realized whole-market move magnitude (turbulence, not direction); a market-wide scalar broadcast to every ticker. |
+| `mkt_absret_60m` | market_turbulence | cross_sectional | A | tolerance | Float64 | sparse | (0.0, None) | Universe equal-weight mean of |trailing-60m return| — the realized whole-market move magnitude (turbulence, not direction); a market-wide scalar broadcast to every ticker. |
+| `mkt_rv_30m` | market_turbulence | cross_sectional | A | tolerance | Float64 | sparse | (0.0, None) | Universe equal-weight mean of each symbol's trailing-30m realized volatility (std of 1m log returns); the market-wide realized-vol level broadcast to every ticker. |
 | `active_seconds_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, 60.0) | Count of distinct seconds within the minute that had at least one trade (0-60). |
 | `inter_arrival_cv_1m` | microstructure_burst | microstructure | C | distributional | Float64 | sparse | (0.0, None) | Coefficient of variation of inter-trade gaps in the minute (burstiness of arrivals). |
 | `max_runup_1m` | microstructure_burst | microstructure | C | tolerance | Float64 | none | (0.0, None) | Largest within-minute price run-up: max over trades (in exchange-timestamp order) of price minus the running minimum. A PATH-DEPENDENT pattern feature. |

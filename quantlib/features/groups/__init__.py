@@ -24,6 +24,7 @@ from quantlib.features.groups import (  # noqa: F401
     liquidity_rank,
     market_beta,
     market_context,
+    market_turbulence,
     microstructure_burst,
     momentum,
     momentum_consistency,
