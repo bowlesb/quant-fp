@@ -15,7 +15,11 @@ from datetime import datetime, timedelta, timezone
 
 import polars as pl
 
+import pytest
+
 from quantlib.features import BatchContext, REGISTRY, run_group
+from quantlib.features.compare import runnable
+from quantlib.features.profile import build_frames
 
 BASE = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
 
@@ -136,6 +140,75 @@ def test_technical_bb_position_parity_on_near_flat_window() -> None:
         _assert_finite_or_null(group.compute_latest(ctx), col)
         assert last_backfill[col] is None, f"backfill {col} should be NULL on near-flat window"
         assert live[col] is None, f"live {col} should be NULL on near-flat window (was NaN)"
+
+
+def _frames_with_near_flat_symbol(symbol: str, base_price: float) -> dict[str, pl.DataFrame]:
+    """The standard profiler frames with ONE symbol's intraday window replaced by a NEAR-flat illiquid
+    path (sub-epsilon jitter) — the degenerate condition that splits the live rust-kernel std (NaN) from
+    the backfill rolling std (finite-tiny). Every other symbol keeps its varying data so a group's normal
+    cells are unaffected; the near-flat symbol is the one that trips an unguarded ``value > threshold``."""
+    frames = build_frames(n_tickers=8, window_min=120, daily_days=60)
+    intraday = frames["minute_agg"]
+    # Rename one existing symbol to ``symbol`` and OVERWRITE only its price columns with a near-flat path
+    # (sub-epsilon jitter), preserving every other column the frame carries (volume / order-flow / quote).
+    target = intraday["symbol"].unique().sort().to_list()[0]
+    jitter = pl.when(pl.int_range(pl.len()).over("symbol") % 2 == 1).then(1e-9).otherwise(0.0)
+    near_flat = intraday.filter(pl.col("symbol") == target).with_columns(
+        pl.lit(symbol).alias("symbol"),
+        *[(pl.lit(base_price) + jitter).alias(col) for col in ("open", "high", "low", "close")],
+    )
+    frames["minute_agg"] = pl.concat(
+        [intraday.filter(pl.col("symbol") != target), near_flat]
+    ).sort(["symbol", "minute"])
+    return frames
+
+
+@pytest.mark.parametrize("group_name", [group.name for group in REGISTRY.groups()])
+def test_compute_latest_parity_on_near_flat_symbol_for_every_group(group_name: str) -> None:
+    """Preventive net for the #122 NaN>threshold bug class across EVERY group, not just the three with a
+    hand-written test above.
+
+    The class: a degenerate near-flat window makes the LIVE ``rust_reductions`` std (or any reduction) emit
+    NaN while the BACKFILL polars rolling form emits a tiny FINITE value; polars orders NaN as the largest
+    float, so an unguarded ``value > threshold`` guard passes for the NaN and the live path emits NaN where
+    backfill emits NULL — a stream-vs-backfill divergence (fixed in technical/bb_position by #122 with an
+    ``is_finite()`` gate). The generic ``test_fp_latest`` per-group check uses only VARYING synthetic data,
+    so it never hits a flat window and would miss a NEW group that reintroduces this class. This injects a
+    near-flat illiquid symbol into the standard frames and holds ``compute_latest`` to ``compute().last``
+    on THAT symbol for every runnable group: any null-vs-value mismatch or non-finite live cell fails."""
+    symbol = "ILLQ"
+    frames = _frames_with_near_flat_symbol(symbol, 5.0)
+    if group_name not in {g.name for g in runnable(frames)}:
+        pytest.skip("group inputs not present in the standard test frames")
+    group = REGISTRY.get_group(group_name)
+    ctx = BatchContext(frames=frames)
+    rolling = group.compute(ctx)
+    if rolling.height == 0 or symbol not in rolling["symbol"].to_list():
+        pytest.skip("group emits no row for the near-flat symbol")
+    latest = rolling["minute"].max()
+    expected = (
+        rolling.filter((pl.col("minute") == latest) & (pl.col("symbol") == symbol))
+        .sort("symbol")
+    )
+    actual = (
+        group.compute_latest(ctx)
+        .filter(pl.col("symbol") == symbol)
+        .sort("symbol")
+        .select(expected.columns)
+    )
+    assert actual.height == expected.height
+    for feature in [c for c in expected.columns if c not in ("symbol", "minute")]:
+        back_val = expected[feature].to_list()[0] if expected.height else None
+        live_val = actual[feature].to_list()[0] if actual.height else None
+        # A non-finite LIVE value is the bug's fingerprint (NaN sailed through an unguarded guard).
+        if live_val is not None:
+            assert math.isfinite(
+                live_val
+            ), f"{group_name}.{feature}: live compute_latest emitted non-finite {live_val} on a near-flat window"
+        # null-vs-value mismatch is the #122 parity break (live NaN/value where backfill is NULL or vice versa).
+        assert (back_val is None) == (
+            live_val is None
+        ), f"{group_name}.{feature}: live={live_val} backfill={back_val} disagree on null-ness (near-flat parity break)"
 
 
 def test_normal_window_values_are_finite_and_present() -> None:
