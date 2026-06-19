@@ -139,12 +139,16 @@ services:
     environment:
       STORE_ROOT: /store
       STATUS_STORE_PATH: /quant-ops/status_dashboard.json
+      # Progress-scorecard snapshot time series (read-WRITE, same ~/.quant-ops mount as the status board).
+      SCORECARD_STORE_PATH: /quant-ops/scorecard_snapshots.json
     ports:
       - "0.0.0.0:8088:8000"     # LAN-accessible: http://192.168.1.32:8088
     volumes:
       - ./STATE.md:/docs/STATE.md:ro
       - ./JOURNAL.md:/docs/JOURNAL.md:ro
       - ./ARCHITECTURE.md:/docs/ARCHITECTURE.md:ro
+      # Documented end-to-end latency baseline — axis D of the /scorecard panel parses its re-measure table.
+      - ./docs/SIM_LATENCY_AUDIT.md:/docs/SIM_LATENCY_AUDIT.md:ro
       # 8-hour progress reports rendered by the /progress page. Dir mount (not a
       # rebuild) so a new report .md is served immediately — content, not code.
       - ./docs/progress:/docs/progress:ro

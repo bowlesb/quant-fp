@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+import scorecard_store
 import status_store
 from feature_grid import CACHE, STORE_ROOT
 from feature_grid_page import FEATURE_GRID_HTML
@@ -29,6 +30,8 @@ from liquidity_bands import band_members, parse_cuts, symbol_history
 from liquidity_bands_page import LIQUIDITY_BANDS_HTML
 from raw_coverage import CACHE as RAW_CACHE
 from raw_coverage_page import RAW_COVERAGE_HTML
+from scorecard import CACHE as SCORECARD_CACHE
+from scorecard_page import SCORECARD_HTML
 from status_page import render_status_page
 
 app = FastAPI(title="Quant Dashboard")
@@ -323,6 +326,39 @@ def raw_coverage_page() -> str:
     return RAW_COVERAGE_HTML
 
 
+@app.get("/api/scorecard")
+def scorecard_json(refresh: bool = False) -> JSONResponse:
+    """SYSTEM PROGRESS scorecard: Ben's six platform axes (A trusted / B deployed / C trust-process health /
+    D latency / E raw-coverage / F open issues), computed read-only from the existing tables/manifests/doc/gh.
+
+    A, C, and the defect/quarantine side of F come from ONE ``feature_trust`` x ``feature_parity_defect`` read
+    (the trust frontier); B from the live bus schema (the deployed fingerprint set); D from the documented
+    end-to-end latency baseline; E from the raw manifests; F's open-PR count from ``gh``. Building through the
+    cache APPENDS a headline snapshot to the append-only time series (de-duped per UTC minute) so the panel can
+    draw each axis's trajectory. ``refresh=1`` bypasses the TTL cache (and writes a fresh snapshot).
+
+    Shape (see docs/SCORECARD.md):
+      {generated_at, axes: {A_trusted, B_deployed, C_process_health, D_latency, E_raw_coverage,
+       F_open_issues}, snapshot}
+    """
+    return JSONResponse(SCORECARD_CACHE.scorecard(STORE_ROOT, force=refresh))
+
+
+@app.get("/api/scorecard/history")
+def scorecard_history_json() -> JSONResponse:
+    """The persisted scorecard SNAPSHOT time series, OLDEST-FIRST (what the panel's sparklines draw from).
+
+    Shape: [{ts, axes: {A_trusted, B_deployed, C_process_health, D_latency, E_raw_coverage, F_open_issues}}, ...]
+    where each axis holds only the headline scalar(s) the trend line needs (see scorecard_store)."""
+    return JSONResponse(scorecard_store.read_snapshots())
+
+
+@app.get("/scorecard", response_class=HTMLResponse)
+def scorecard_page() -> str:
+    """The visual system-progress scorecard (vanilla HTML/JS; fetches /api/scorecard + history client-side)."""
+    return SCORECARD_HTML
+
+
 @app.get("/api/liquidity-bands")
 def liquidity_bands_json(
     days: int = 90, cuts: str | None = None, asof: str | None = None, refresh: bool = False
@@ -540,6 +576,7 @@ def dashboard() -> str:
 </style></head>
 <body>
 <header><h1>Quant Trading System &nbsp; {db_badge} &nbsp;
+<a href="/scorecard" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress scorecard &rarr;</a> &nbsp;
 <a href="/status" style="color:#58a6ff;text-decoration:none;font-size:13px;">Hourly status &rarr;</a> &nbsp;
 <a href="/jobs" style="color:#58a6ff;text-decoration:none;font-size:13px;">Jobs &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
