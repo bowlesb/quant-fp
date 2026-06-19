@@ -1,0 +1,9 @@
+[tool.black]
+line-length = 109
+target-version = ["py312"]
+
+# The repo's formatting basis is black's 2023 stable style (black 23.x). Pin black to
+# requirements-dev.txt's version so every contributor's env formats identically and no one
+# fights spurious reformats of pre-existing lines. The 2024 stable style (black >=24) expands
+# ~50 additional pre-existing files (e.g. the module-docstring trailing-blank-line rule); the
+# settling reformat to a newer style is a separate quiet-window PR, not a per-contributor diff.

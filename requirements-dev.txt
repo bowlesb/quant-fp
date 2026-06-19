@@ -1,0 +1,6 @@
+# Developer tooling pin. Formatting only — not installed into runtime images.
+# black is pinned to the 2023 stable style (matches the repo's current formatting basis at
+# line-length=109, see [tool.black] in pyproject.toml) so every env formats identically and
+# contributors don't fight spurious reformats. Upgrading the major (>=24) is a deliberate
+# settling-reformat PR done in a quiet window, not a silent drift.
+black==23.12.1
