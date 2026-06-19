@@ -21,6 +21,8 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `GET http://<host>:8088/api/feature-grid/thin-live-symbols` | cross-group roll-up: which SYMBOLS are backfill-only (under-represented LIVE) across the most groups (`?limit=N`) |
 | `GET http://<host>:8088/api/feature-grid/timeline` | (group × recent-day × source) presence grid + per-group history-depth & live-horizon (`?days=N`) |
 | `GET http://<host>:8088/api/feature-grid/orderflow-trend` | per-recent-day LIVE-stream symbol breadth across the order-flow groups — is FP_TICK_SYMBOLS coverage widening or stalling (`?days=N`) |
+| `http://<host>:8088/raw-coverage` | RAW-tape coverage (one layer below this grid): per raw layer (bars/trades/quotes) DEPTH + symbols-per-day BREADTH — see `docs/RAW_TAPE_COVERAGE.md` |
+| `GET http://<host>:8088/api/raw-coverage` | raw-tape coverage JSON, per layer (`?days=N`, `days=0`=full) |
 
 All API endpoints accept `?refresh=1` to bypass the 60s TTL cache and re-aggregate. A cold build over the
 live store is ~4s; cached responses are ~1ms. There is a **↻ refresh** button on the page.
