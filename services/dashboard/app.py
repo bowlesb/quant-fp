@@ -23,6 +23,8 @@ from feature_grid import CACHE, STORE_ROOT
 from feature_grid_page import FEATURE_GRID_HTML
 from jobs_page import load_status as load_jobs_status
 from jobs_page import render_jobs_page
+from liquidity_bands import CACHE as BANDS_CACHE
+from liquidity_bands_page import LIQUIDITY_BANDS_HTML
 from raw_coverage import CACHE as RAW_CACHE
 from raw_coverage_page import RAW_COVERAGE_HTML
 from status_page import render_status_page
@@ -302,6 +304,47 @@ def raw_coverage_page() -> str:
     return RAW_COVERAGE_HTML
 
 
+@app.get("/api/liquidity-bands")
+def liquidity_bands_json(window_days: int = 85, refresh: bool = False) -> JSONResponse:
+    """The canonical ADV-rank / liquidity-band reference surface — ONE liquidity partition the research lanes
+    can reference instead of each re-deriving its own (Lane C bands, FeatureInventor top-400, pilot top-500).
+
+    Reduces the most-recent ``window_days`` raw-bar dates to per-symbol RTH dollar volume, computes trailing-
+    20d ADV + each symbol's stable cross-sectional rank, assigns the canonical bands (B1..B5, lo inclusive /
+    hi exclusive by ADV rank — the same cut the overnight boundary adjudication ran on), and returns per-band
+    COMPOSITION (sizes + ADV ranges on the anchor date) + membership STABILITY (point-in-time band turnover
+    over the window). Read-side only (raw bars, store mounted read-only); ~25-30s cold then a 10-min TTL.
+    ``refresh=1`` bypasses the cache.
+
+    Shape (see docs/LIQUIDITY_BANDS.md):
+      {generated_at, store_root, window_days, anchor_date, window_first, window_last, n_dates,
+       n_ranked_symbols, adv_window, min_days_for_rank,
+       bands: [{band, label, rank_lo, rank_hi, n_symbols, adv_min, adv_median, adv_max}],
+       stability: [{band, n_today, retained_5d_pct, retained_20d_pct}]}
+    """
+    return JSONResponse(BANDS_CACHE.surface(STORE_ROOT, window_days=window_days, force=refresh))
+
+
+@app.get("/api/liquidity-bands/symbol/{symbol}")
+def liquidity_bands_symbol_json(symbol: str, window_days: int = 85) -> JSONResponse:
+    """One symbol's current liquidity placement: stable ADV, cross-sectional rank, band, latest trailing-20d
+    ADV. ``found=false`` when the symbol is below the rank floor / absent from the window."""
+    return JSONResponse(BANDS_CACHE.lookup(symbol, STORE_ROOT, window_days=window_days))
+
+
+@app.get("/api/liquidity-bands/members/{band}")
+def liquidity_bands_members_json(band: str, window_days: int = 85, limit: int = 250) -> JSONResponse:
+    """The symbols in one band on the anchor date, ordered by ADV rank (most liquid first), capped at
+    ``limit`` — a band's universe a lane can pull directly instead of re-deriving the cut."""
+    return JSONResponse(BANDS_CACHE.members(band, STORE_ROOT, window_days=window_days, limit=limit))
+
+
+@app.get("/liquidity-bands", response_class=HTMLResponse)
+def liquidity_bands_page() -> str:
+    """The visual liquidity-band surface (vanilla HTML/JS; fetches /api/liquidity-bands client-side)."""
+    return LIQUIDITY_BANDS_HTML
+
+
 class ReactionRequest(BaseModel):
     ts: str
     text: str
@@ -468,7 +511,8 @@ def dashboard() -> str:
 <a href="/jobs" style="color:#58a6ff;text-decoration:none;font-size:13px;">Jobs &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
 <a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a> &nbsp;
-<a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a></h1>
+<a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a> &nbsp;
+<a href="/liquidity-bands" style="color:#58a6ff;text-decoration:none;font-size:13px;">Liquidity bands &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
   <div class="grid" style="margin-bottom:24px;">
