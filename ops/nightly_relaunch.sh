@@ -87,14 +87,16 @@ build_run_cmd() {
   [ -n "$restart" ] || restart="unless-stopped"
   [ -n "$workdir" ] || workdir="/app"
 
-  # Warm-start is OPT-IN (WARM_START=1), default OFF. Reason: warm_start_ring seeds a BAR-ONLY (7-col) ring
-  # but live capture is TICK-ENRICHED (13-col), so FP_WARM_START=1 currently crashes the shard workers
-  # (ShapeError) and silently drops all per-symbol capture (2026-06-17). Until the ring-schema bug is fixed,
-  # the cron relaunches WITHOUT warm-start (cold ring, but capture WORKS); re-enable with WARM_START=1 once
-  # the schema fix lands. Cross-sectional + daily-frame features are clean from minute one either way.
+  # Warm-start is now DEFAULT ON (WARM_START=1). The 7-col-bar-ring vs 13-col-tick-enriched ShapeError that
+  # forced it OFF (2026-06-17) was fixed by the diagonal-concat ring fix (#165) + the source-agnostic
+  # `populated` invariant (#170). Validated 2026-06-19 by the offline equity-relaunch dry-run (real 06-18
+  # bars, 60 syms incl SPY/QQQ/IWM, 391 RTH min): 7-col seed + 13-col tick live minute concat clean, no
+  # ShapeError at scale, populated asserts fire, and the warm first live minute == a never-restarted capture
+  # cell-for-cell. Set WARM_START=0 to force the old cold-ring relaunch (rollback). Cross-sectional +
+  # daily-frame features are clean from minute one either way.
   local cmd=(docker run -d --name "$CONTAINER" --restart "$restart" --network "$network"
              --env-file "$ENV_FILE" -w "$workdir")
-  [ "${WARM_START:-0}" = "1" ] && cmd+=(-e FP_WARM_START=1)
+  [ "${WARM_START:-1}" = "1" ] && cmd+=(-e FP_WARM_START=1)
   if docker inspect "$CONTAINER" >/dev/null 2>&1; then
     # Reproduce each mount (bind: host path; volume: volume name) -> destination, preserving ro/rw.
     while IFS=$'\t' read -r mtype source dest rw; do
