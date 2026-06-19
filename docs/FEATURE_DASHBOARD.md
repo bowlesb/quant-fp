@@ -21,6 +21,7 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `GET http://<host>:8088/api/feature-grid/thin-live-symbols` | cross-group roll-up: which SYMBOLS are backfill-only (under-represented LIVE) across the most groups (`?limit=N`) |
 | `GET http://<host>:8088/api/feature-grid/timeline` | (group × recent-day × source) presence grid + per-group history-depth & live-horizon (`?days=N`) |
 | `GET http://<host>:8088/api/feature-grid/orderflow-trend` | per-recent-day LIVE-stream symbol breadth across the order-flow groups — is FP_TICK_SYMBOLS coverage widening or stalling (`?days=N`) |
+| `GET http://<host>:8088/api/feature-grid/trust-frontier` | TRUST FRONTIER: features split TRUSTED / ELIGIBLE (no open defect, earns trust on the next clean sweep) / BLOCKED (open parity defect) + projected trusted-% |
 | `http://<host>:8088/raw-coverage` | RAW-tape coverage (one layer below this grid): per raw layer (bars/trades/quotes) DEPTH + symbols-per-day BREADTH — see `docs/RAW_TAPE_COVERAGE.md` |
 | `GET http://<host>:8088/api/raw-coverage` | raw-tape coverage JSON, per layer (`?days=N`, `days=0`=full) |
 
@@ -257,6 +258,42 @@ order-flow group — no extra heavy I/O beyond what the grid already does.
   "trend": [
     {"date": "2026-06-18", "n_union": 1054, "n_intersection": 11, "n_live_groups": 7,
      "per_group": {"trade_flow": 1054, "signed_trade_ratio": 803, "...": 0}}
+  ]
+}
+```
+
+### `GET /api/feature-grid/trust-frontier`
+
+The **trust FRONTIER** — how close the feature set is to fully trusted, and *why* the not-yet-trusted ones
+aren't. The grid badge shows each feature's flat lifecycle grade; what it cannot show is that a feature whose
+parity defect has been **cleared** is one clean sweep from TRUSTED (its DIVERGENT badge stays red until the
+next sweep re-grades it). This view joins the binary-trust set (`feature_trust.trust_state = 'TRUSTED'` — the
+consumable predicate downstream agents gate on) against the **OPEN** rows of `feature_parity_defect`
+(read-only, no new source of truth), scoped to the current registry catalog, and splits every feature into:
+
+* `TRUSTED` — has earned binary trust.
+* `ELIGIBLE` — not yet trusted **and no open parity defect**: accruing toward trust, advances to TRUSTED on
+  the next clean settled sweep. This is the frontier the flat badge hides (a defect-cleared DIVERGENT lands
+  here, not in permanent red).
+* `BLOCKED` — still has an open parity defect; needs a fix, does **not** advance on the next sweep (today this
+  is the FP_TICK_SYMBOLS tick-coverage tail — `trade_flow` / `quote_spread` lead the blocked count).
+
+`projected_trusted_pct` = `(trusted + eligible) / total` — where trust lands if every eligible feature passes
+the next clean sweep, i.e. the headline of the coming jump *before* it happens. Per-group rows carry the same
+split (ranked most-blocked-first) plus the `blocked_features` names, so the genuinely-stuck families surface
+on top. No `?days` (it's a point-in-time snapshot); `?refresh=1` bypasses the TTL cache.
+
+```jsonc
+{
+  "generated_at": "2026-06-19T...Z",
+  "n_features": 682, "n_trusted": 106, "n_eligible": 520, "n_blocked": 56, "n_open_defects": 56,
+  "trusted_pct": 15.5, "eligible_pct": 76.2, "blocked_pct": 8.2,
+  "projected_trusted_pct": 91.8,   // if every ELIGIBLE feature passes the next clean sweep
+  "groups": [                       // most-blocked-first
+    {"group": "trade_flow", "layer": "C", "n_features": 28,
+     "n_trusted": 0, "n_eligible": 5, "n_blocked": 23,
+     "trusted_pct": 0.0, "projected_trusted_pct": 17.9,
+     "blocked_features": ["trade_flow_buy_ratio_5m", "..."]}
   ]
 }
 ```

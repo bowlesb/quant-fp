@@ -437,3 +437,56 @@ def test_orderflow_trend_empty_store(tmp_path: Path, fake_oflow_catalog: None) -
     assert view["anchor_date"] is None
     assert view["trend"] == []
     assert view["dates"] == []
+
+
+def test_frontier_state_classification() -> None:
+    # Already binary-trusted -> TRUSTED (a trusted feature has no open defect by construction).
+    assert fg._frontier_state(True, False) == fg.FRONTIER_TRUSTED
+    # An open defect blocks anything not already trusted.
+    assert fg._frontier_state(False, True) == fg.FRONTIER_BLOCKED
+    # No open defect + not trusted -> ELIGIBLE (the key case: a feature whose defect was cleared is one clean
+    # sweep from trusted, NOT permanently red).
+    assert fg._frontier_state(False, False) == fg.FRONTIER_ELIGIBLE
+
+
+def test_build_trust_frontier_splits_eligible_from_blocked(
+    monkeypatch: pytest.MonkeyPatch, fake_catalog: None
+) -> None:
+    # feat_a TRUSTED; feat_b NON_TRUSTED WITH an open defect -> BLOCKED; feat_c NON_TRUSTED with NO open
+    # defect (defect cleared) -> ELIGIBLE. This is the exact live shape the panel makes legible.
+    monkeypatch.setattr(fg, "trusted_feature_names", lambda: {"feat_a"})
+    monkeypatch.setattr(fg, "open_defect_features", lambda: {"feat_b"})
+
+    frontier = fg.build_trust_frontier()
+    assert frontier["n_features"] == 3
+    assert frontier["n_trusted"] == 1
+    assert frontier["n_eligible"] == 1  # feat_c: non-trusted but defect-cleared
+    assert frontier["n_blocked"] == 1   # feat_b: still has an open defect
+    assert frontier["n_open_defects"] == 1
+    # projected = (trusted + eligible) / total = 2/3.
+    assert frontier["projected_trusted_pct"] == round(100.0 * 2 / 3, 1)
+    assert frontier["trusted_pct"] == round(100.0 * 1 / 3, 1)
+
+    by_group = {g["group"]: g for g in frontier["groups"]}
+    # groupX = feat_a (trusted) + feat_b (blocked); groupY = feat_c (eligible).
+    assert by_group["groupX"]["n_blocked"] == 1
+    assert by_group["groupX"]["blocked_features"] == ["feat_b"]
+    assert by_group["groupX"]["n_trusted"] == 1
+    assert by_group["groupX"]["projected_trusted_pct"] == 50.0  # 1 trusted of 2 (feat_b blocked)
+    assert by_group["groupY"]["n_eligible"] == 1
+    assert by_group["groupY"]["projected_trusted_pct"] == 100.0  # feat_c eligible -> projects to trusted
+    # most-blocked group ranks first.
+    assert frontier["groups"][0]["group"] == "groupX"
+
+
+def test_build_trust_frontier_all_eligible_when_no_defects(
+    monkeypatch: pytest.MonkeyPatch, fake_catalog: None
+) -> None:
+    # No open defects + nothing trusted yet -> everything ELIGIBLE, projecting to 100% trusted.
+    monkeypatch.setattr(fg, "trusted_feature_names", lambda: set())
+    monkeypatch.setattr(fg, "open_defect_features", lambda: set())
+    frontier = fg.build_trust_frontier()
+    assert frontier["n_trusted"] == 0
+    assert frontier["n_blocked"] == 0
+    assert frontier["n_eligible"] == 3
+    assert frontier["projected_trusted_pct"] == 100.0

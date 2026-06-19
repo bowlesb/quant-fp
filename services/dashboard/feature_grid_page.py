@@ -131,6 +131,25 @@ FEATURE_GRID_HTML = """<!doctype html>
   .oft .bar.wknd .col { opacity:0.4; }
   .verdict { font-weight:600; }
   .verdict.up { color:var(--green); } .verdict.flat { color:var(--amber); } .verdict.down { color:var(--red); }
+  /* trust frontier: one stacked bar (trusted | eligible | blocked) + a per-group breakdown table */
+  .tf-bar { display:flex; height:26px; border-radius:6px; overflow:hidden; margin:8px 0 4px;
+    border:1px solid var(--border); font-size:11px; font-weight:600; }
+  .tf-bar > div { display:flex; align-items:center; justify-content:center; white-space:nowrap;
+    overflow:hidden; color:#0f1115; }
+  .tf-bar .tf-t { background:#56d364; } .tf-bar .tf-e { background:#e3b341; } .tf-bar .tf-b { background:#ff7b72; }
+  .tf-key { font-size:11px; color:var(--muted); }
+  .tf-key b.tf-t { color:#56d364; } .tf-key b.tf-e { color:#e3b341; } .tf-key b.tf-b { color:#ff7b72; }
+  table.tf { border-collapse:collapse; width:100%; font-size:12px; margin-top:10px; }
+  table.tf th, table.tf td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--border);
+    white-space:nowrap; }
+  table.tf td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  table.tf .gbar { display:inline-block; width:90px; height:9px; border-radius:3px; overflow:hidden;
+    vertical-align:middle; border:1px solid var(--border); }
+  table.tf .gbar i { display:inline-block; height:100%; }
+  table.tf .gbar i.tf-t { background:#56d364; } table.tf .gbar i.tf-e { background:#e3b341; }
+  table.tf .gbar i.tf-b { background:#ff7b72; }
+  table.tf tr.has-blocked td:first-child { color:var(--red); }
+  .tf-blocked { font-family:ui-monospace,Menlo,monospace; font-size:10px; color:var(--muted); }
 </style></head>
 <body>
 <header><h1>Feature Coverage &amp; Trust &nbsp;
@@ -166,11 +185,13 @@ FEATURE_GRID_HTML = """<!doctype html>
       <option value="stream_pct">show: stream %</option>
       <option value="backfill_pct">show: backfill %</option>
     </select>
+    <button id="tfbtn">▸ trust frontier</button>
     <button id="thinbtn">▸ thinnest live tickers</button>
     <button id="tlbtn">▸ depth &amp; recent-day timeline</button>
     <button id="oftbtn">▸ order-flow live coverage trend</button>
     <button id="refresh">↻ refresh</button>
   </div>
+  <div id="tfhost"></div>
   <div id="thinhost"></div>
   <div id="tlhost"></div>
   <div id="ofthost"></div>
@@ -447,8 +468,53 @@ async function toggleOrderflowTrend(force){
 }
 document.getElementById("oftbtn").onclick=()=>toggleOrderflowTrend(false);
 
+let TFOPEN=false;
+function tfseg(n, total, cls, label){
+  if(!n) return "";
+  const w = (100*n/Math.max(1,total)).toFixed(1);
+  // hide the inline count when the segment is too thin to fit the text
+  return "<div class='"+cls+"' style='flex:"+n+"' title='"+label+": "+n+"'>"+(w>6?n:"")+"</div>";
+}
+async function toggleTrustFrontier(force){
+  const host = document.getElementById("tfhost");
+  if(TFOPEN && !force){ TFOPEN=false; host.innerHTML=""; return; }
+  TFOPEN=true;
+  host.innerHTML = "<div class='symcov muted'>loading trust frontier…</div>";
+  const r = await fetch("/api/feature-grid/trust-frontier" + (force?"?refresh=1":""));
+  const f = await r.json();
+  const bar = "<div class='tf-bar'>"+
+    tfseg(f.n_trusted, f.n_features, "tf-t", "trusted")+
+    tfseg(f.n_eligible, f.n_features, "tf-e", "eligible")+
+    tfseg(f.n_blocked, f.n_features, "tf-b", "blocked")+"</div>";
+  let rows="";
+  for(const g of f.groups){
+    const tot=g.n_features||1;
+    const seg=(n,cls)=> n? "<i class='"+cls+"' style='width:"+(100*n/tot)+"%'></i>" : "";
+    const blocked = g.n_blocked? "<div class='tf-blocked'>blocked: "+g.blocked_features.join(" ")+"</div>" : "";
+    rows += "<tr class='"+(g.n_blocked?"has-blocked":"")+"'><td>"+g.group+blocked+"</td>"+
+      "<td class='num'>"+g.n_features+"</td>"+
+      "<td class='num'>"+g.n_trusted+"</td><td class='num'>"+g.n_eligible+"</td><td class='num'>"+g.n_blocked+"</td>"+
+      "<td class='num'>"+g.projected_trusted_pct+"%</td>"+
+      "<td><span class='gbar'>"+seg(g.n_trusted,"tf-t")+seg(g.n_eligible,"tf-e")+seg(g.n_blocked,"tf-b")+"</span></td></tr>";
+  }
+  host.innerHTML =
+    "<div class='symcov'>"+
+    "<span class='closebtn' onclick='toggleTrustFrontier(false)'>✕ close</span>"+
+    "<div class='muted' style='margin-bottom:6px'>How close the "+f.n_features+" features are to fully trusted. "+
+      "<span class='tf-key'><b class='tf-t'>TRUSTED</b> "+f.n_trusted+" ("+f.trusted_pct+"%) · "+
+      "<b class='tf-e'>ELIGIBLE</b> "+f.n_eligible+" ("+f.eligible_pct+"%) — no open defect, earns trust on the "+
+      "next clean settled sweep · <b class='tf-b'>BLOCKED</b> "+f.n_blocked+" ("+f.blocked_pct+"%) — "+f.n_open_defects+
+      " open parity defect(s), needs a fix.</span> If every eligible feature passes the next sweep, trust → "+
+      "<b style='color:#56d364'>"+f.projected_trusted_pct+"%</b>.</div>"+
+    bar+
+    "<table class='tf'><thead><tr><th>group</th><th class='num'>feats</th><th class='num'>trusted</th>"+
+      "<th class='num'>eligible</th><th class='num'>blocked</th><th class='num'>projected</th><th>split</th>"+
+      "</tr></thead><tbody>"+rows+"</tbody></table></div>";
+}
+document.getElementById("tfbtn").onclick=()=>toggleTrustFrontier(false);
+
 document.getElementById("thinbtn").onclick=()=>toggleThin(false);
-document.getElementById("refresh").onclick=()=>{ loadGrid(true); if(THINOPEN) toggleThin(true); if(TLOPEN) toggleTimeline(true); if(OFTOPEN) toggleOrderflowTrend(true); };
+document.getElementById("refresh").onclick=()=>{ loadGrid(true); if(TFOPEN) toggleTrustFrontier(true); if(THINOPEN) toggleThin(true); if(TLOPEN) toggleTimeline(true); if(OFTOPEN) toggleOrderflowTrend(true); };
 document.getElementById("metric").onchange=e=>{ METRIC=e.target.value; renderGrid(); };
 document.getElementById("sortby").onchange=e=>{ SORT=e.target.value; renderGrid(); };
 document.getElementById("trustfilter").onchange=e=>{ TRUSTFILTER=e.target.value; renderGrid(); if(OPENGROUP) openDetail(OPENGROUP); };
