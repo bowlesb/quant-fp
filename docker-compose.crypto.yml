@@ -1,0 +1,40 @@
+# 24/7 CRYPTO capture — an ISOLATED validation harness that exercises the SAME production pipeline
+# (capture -> feature compute -> bus emit) as the equity feature-computer, but against Alpaca's crypto
+# websocket (v1beta3/crypto/us), which trades CONTINUOUSLY. Equity capture only runs 06:30-13:00 PT on
+# weekdays; this gives us a LIVE feed any time (nights / weekends / holidays) to validate fc / features /
+# latency / bus.
+#
+# DELIBERATELY ISOLATED from the live equity fc: its OWN container, OWN store volume (fp_store_crypto, NOT
+# fp_store_real), and a SEPARATE bus namespace (fv:crypto:<SYMBOL>) — so it can NEVER touch the equity fc,
+# its 688-feature fingerprint, its store, or its bus.
+#
+#   docker build -f Dockerfile.fp -t fp-dev .                                   # shared base
+#   docker compose -f docker-compose.crypto.yml up -d --build crypto-capture
+#
+# This is a TEST / VALIDATION harness (prove the pipeline runs live 24/7), NOT a crypto trading strategy.
+name: quant
+
+services:
+  crypto-capture:
+    container_name: crypto-capture
+    build: { context: ., dockerfile: Dockerfile.fp }
+    image: fp-dev
+    restart: unless-stopped
+    mem_limit: 2g
+    env_file: .env
+    environment:
+      PYTHONPATH: "/app"
+      BUS_REDIS_URL: "redis://quant-redis:6379/0"
+      # Publish per-symbol crypto vectors to the SEPARATE fv:crypto:<SYMBOL> bus namespace.
+      FP_BUS: "1"
+      # Liquid crypto pairs (Alpaca slash form). Override here or in .env.
+      FP_CRYPTO_SYMBOLS: "BTC/USD,ETH/USD,SOL/USD,LTC/USD,DOGE/USD"
+      # Prometheus /metrics for the crypto reader (separate port from the equity reader's 9200).
+      CRYPTO_METRICS_PORT: "9300"
+    volumes:
+      - fp_store_crypto:/store          # OWN store volume — never the equity fp_store_real
+      - .:/app                          # bind the working tree (mirrors the equity feature-computer)
+    command: ["python", "-m", "quantlib.features.crypto_capture", "/store"]
+
+volumes:
+  fp_store_crypto:
