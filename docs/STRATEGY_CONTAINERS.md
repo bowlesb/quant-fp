@@ -45,13 +45,13 @@ while True:
 `BusSchema` (`quantlib/bus/{codec,schema}.py`). A container built against a different feature set fails
 **loudly** rather than silently misreading offsets — so a container MUST build from the same `quantlib`
 the producer runs (the `Dockerfile` `COPY quantlib` does this). Live fingerprint today:
-`0xcc8f2aef3dea3bde` over 606 features in 35 groups.
+`0x710bed9e980616f3` over 682 features in 51 groups.
 
 ### What "complete + acceptable" looks like (verified)
 
 Use the inspect CLI (below) to check this for yourself. Observed against the live bus:
 
-- Every frame is **structurally complete**: 606 cells, fingerprint match — never a partial/misaligned
+- Every frame is **structurally complete**: 682 cells, fingerprint match — never a partial/misaligned
   vector.
 - **NaN is expected and normal.** A cell is NaN when its feature is genuinely absent for that
   (symbol, minute). Two honest reasons NaN is high in practice:
