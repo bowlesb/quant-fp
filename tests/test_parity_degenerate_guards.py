@@ -11,6 +11,7 @@ degenerate window; and that normal windows are unaffected.
 from __future__ import annotations
 
 import math
+import random
 from datetime import datetime, timedelta, timezone
 
 import polars as pl
@@ -209,6 +210,84 @@ def test_compute_latest_parity_on_near_flat_symbol_for_every_group(group_name: s
         assert (back_val is None) == (
             live_val is None
         ), f"{group_name}.{feature}: live={live_val} backfill={back_val} disagree on null-ness (near-flat parity break)"
+
+
+def _flow_frame(symbol: str, n: int, n_trades_at, signed_volume_at) -> pl.DataFrame:
+    """A single-symbol frame with VARYING price (a well-conditioned regressand) but caller-controlled
+    FLOW columns — the lever for the degenerate-flow parity cases the price-jitter net cannot reach."""
+    rows = []
+    for i in range(n):
+        close = 100.0 + i * 0.01  # genuine price variation
+        rows.append(
+            {
+                "symbol": symbol,
+                "minute": BASE + timedelta(minutes=i),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 100.0,
+                "n_trades": float(n_trades_at(i)),
+                "signed_volume": float(signed_volume_at(i)),
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def _assert_flow_group_parity(group_name: str, frame: pl.DataFrame, prefix: str) -> None:
+    """The live ``compute_latest`` and backfill ``compute().last`` must agree on null-ness for every
+    ``prefix`` feature on the degenerate-flow window (the #122/#131 class on the FLOW side)."""
+    group = REGISTRY.get_group(group_name)
+    ctx = BatchContext(frames={"minute_agg": frame})
+    rolling = group.compute(ctx).sort("minute")
+    latest = rolling["minute"].max()
+    back = rolling.filter(pl.col("minute") == latest).row(0, named=True)
+    live = group.compute_latest(ctx).row(0, named=True)
+    for col in [c for c in rolling.columns if c.startswith(prefix)]:
+        back_val, live_val = back[col], live[col]
+        if live_val is not None:
+            assert math.isfinite(live_val), f"{col}: live emitted non-finite {live_val} on a degenerate-flow window"
+        assert (back_val is None) == (
+            live_val is None
+        ), f"{col}: live={live_val} backfill={back_val} disagree on null-ness (degenerate-flow parity break)"
+
+
+def test_trade_freq_z_parity_on_constant_count_window() -> None:
+    """A constant trade-COUNT window (illiquid name printing the same count each minute) has a
+    mathematically-0 std, but the backfill rolling form computes ``sqrt(Σv² − (Σv)²/n)`` as a tiny FINITE
+    cancellation residual (~1e-8) while the live rust kernel returns exactly 0.0 — a bare ``std > 0`` guard
+    then passes on backfill (z = 0) and fails on live (NULL). The ``_TFZ_STD_REL_EPS`` relative floor sends
+    BOTH paths to NULL. (Count 3.0 surfaces the residual; an isolated late change keeps the trailing window
+    flat at the as-of minute.)"""
+    frame = _flow_frame("ILLQ", 80, lambda i: 3.0 + (1.0 if i % 29 == 0 else 0.0), lambda i: 5.0)
+    _assert_flow_group_parity("trade_freq_z", frame, "trade_freq_z")
+
+
+def test_kyle_lambda_parity_on_near_flat_signed_volume() -> None:
+    """Kyle's lambda is the OLS slope of price change on SIGNED VOLUME. On a near-flat signed-volume window
+    the x-variance numerator ``denom_x = b*Σx² − (Σx)²`` is a catastrophic-cancellation difference whose
+    sign is machine-eps noise, so the live rust kernel and backfill rolling sums straddle the bare
+    ``denom_x > 0.0`` slope guard — slope finite on one path, NULL on the other. The
+    ``_OLS_DENOM_X_REL_EPS`` floor (mirror of the #131 ``denom_y`` floor) sends both to NULL on a genuinely
+    flat regressor while leaving well-conditioned windows untouched."""
+    rng = random.Random(8)
+    frame = _flow_frame("ILLQ", 80, lambda i: 5.0, lambda i: 10.0 + rng.choice([0.0, 1e-9]))
+    _assert_flow_group_parity("liquidity", frame, "kyle_lambda")
+
+
+def test_kyle_lambda_well_conditioned_signed_volume_unchanged() -> None:
+    """The ``denom_x`` floor must NOT over-null a genuinely-varying signed-volume window: every kyle window
+    stays non-null and live==backfill to float precision."""
+    rng = random.Random(42)
+    frame = _flow_frame("OK", 80, lambda i: 5.0, lambda i: rng.gauss(0.0, 1000.0))
+    group = REGISTRY.get_group("liquidity")
+    ctx = BatchContext(frames={"minute_agg": frame})
+    rolling = group.compute(ctx).sort("minute")
+    back = rolling.filter(pl.col("minute") == rolling["minute"].max()).row(0, named=True)
+    live = group.compute_latest(ctx).row(0, named=True)
+    for col in [c for c in rolling.columns if c.startswith("kyle_lambda")]:
+        assert back[col] is not None, f"{col}: well-conditioned window over-nulled by the denom_x floor"
+        assert math.isclose(back[col], live[col], rel_tol=1e-6, abs_tol=1e-9)
 
 
 def test_normal_window_values_are_finite_and_present() -> None:
