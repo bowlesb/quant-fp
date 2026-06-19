@@ -26,7 +26,7 @@ RUN pip install /tmp/*.whl && rm /tmp/*.whl
 
 COPY quantlib ./quantlib
 COPY services/dashboard/app.py services/dashboard/feature_grid.py services/dashboard/feature_grid_page.py \
-     services/dashboard/status_store.py services/dashboard/status_page.py ./
+     services/dashboard/status_store.py services/dashboard/status_page.py services/dashboard/jobs_page.py ./
 
 # Default store mount (read-only fp_store_real in compose). Overridable per environment.
 ENV STORE_ROOT=/store
@@ -34,6 +34,10 @@ ENV STORE_ROOT=/store
 # The hourly status board's append-only JSON store. Mounted read-write from the host's ~/.quant-ops in
 # compose so the Lead loop (host) and the /status reaction POST (container) share one file.
 ENV STATUS_STORE_PATH=/quant-ops/status_dashboard.json
+
+# The /jobs page's status file, written on the host by ops/collect_jobs_status.py into the SAME
+# ~/.quant-ops mount. Read-only from the container's perspective (the page only renders it).
+ENV JOBS_STATUS_PATH=/quant-ops/jobs_status.json
 
 # task #11: bake build-time git SHA for content-based running==intended checks.
 ARG GIT_SHA=unknown

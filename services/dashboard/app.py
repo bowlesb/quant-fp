@@ -21,6 +21,8 @@ from pydantic import BaseModel
 import status_store
 from feature_grid import CACHE, STORE_ROOT
 from feature_grid_page import FEATURE_GRID_HTML
+from jobs_page import load_status as load_jobs_status
+from jobs_page import render_jobs_page
 from status_page import render_status_page
 
 app = FastAPI(title="Quant Dashboard")
@@ -257,6 +259,25 @@ def status_page() -> str:
     return render_status_page(status_store.read_rows())
 
 
+@app.get("/api/jobs")
+def jobs_json() -> JSONResponse:
+    """The jobs status the /jobs page renders — scheduled crons, running job containers, recent runs.
+
+    Shape (see ops/collect_jobs_status.py): {scheduled, running, recent_runs, collected_at}. Returns an
+    empty-but-valid shape if the host collector has not written jobs_status.json yet.
+    """
+    data = load_jobs_status()
+    if data is None:
+        data = {"scheduled": [], "running": [], "recent_runs": [], "collected_at": None}
+    return JSONResponse(data)
+
+
+@app.get("/jobs", response_class=HTMLResponse)
+def jobs_page() -> str:
+    """Read-only jobs visibility: scheduled crons + last-run status, running job containers, recent runs."""
+    return render_jobs_page(load_jobs_status())
+
+
 PROGRESS_STYLE = """
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background:#0f1115; color:#d7dce2; }
@@ -373,6 +394,7 @@ def dashboard() -> str:
 <body>
 <header><h1>Quant Trading System &nbsp; {db_badge} &nbsp;
 <a href="/status" style="color:#58a6ff;text-decoration:none;font-size:13px;">Hourly status &rarr;</a> &nbsp;
+<a href="/jobs" style="color:#58a6ff;text-decoration:none;font-size:13px;">Jobs &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
 <a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
