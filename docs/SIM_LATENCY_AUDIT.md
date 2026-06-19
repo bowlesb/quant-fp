@@ -177,3 +177,36 @@ Net: the 682/51 fingerprint is latency-stable vs the #125 baseline. The dominant
 (`momentum_run` + `residual_analysis`, ~43% of compute) — and note (see the "Recommended fix" status box
 above) the *buffer-slice* sub-lever already shipped (both groups slice to 75m); what remains is the
 intrinsic `over("symbol")` rolling cost on the slice, which is the still-open, Lead-gated §7 migration.
+
+## Single-shard `--latest` per-group baseline 2026-06-19 (the cheap regression harness)
+
+Every cycle's regression check actually runs the *single-shard* `--latest` profiler, not the full
+N=1000/16 sim — it is ~5× cheaper and runs fine under host load, and it is the one whose top offender
+(`momentum_run`) the prior re-checks re-confirmed. But until now only `momentum_run` had a recorded
+single-shard reference; everything else had to be eyeballed from prose. This table is the diff-able
+baseline for that harness so the *whole* ranking can be diffed, not just the top group.
+
+Run (deployed fingerprint `0x710bed9e980616f3` / 682 / 51, commit ec2b5ef):
+`docker run --rm -v $PWD:/app -w /app fp-dev python -m quantlib.features.profile 93 300 250 5 --latest`
+— 666 features / 46 groups (the single-shard live path excludes the cross-shard gather groups the sim
+adds, so absolute ms are NOT comparable to the sim table above; this table is internally consistent and
+diffs only against ITSELF). Three min-of-5 reps under host load avg ~12 (the order-flow backfill + sibling
+loops at 546% + 402% CPU). Columns: the three reps, then the diff rule.
+
+| group | rep1 | rep2 | rep3 | classification |
+|---|---|---|---|---|
+| `momentum_run` | 137 | 132 | 146 | **STABLE-dominant** — the Lever #2 target; min-of-5 band ~130–180ms |
+| `price_volume` (70 feat) | 50 | 50 | 52 | **STABLE** — high total is feature-count (707 µs/feat), not per-feat cost |
+| `distribution` | 60 | 38 | 35 | CONTENTION-SENSITIVE — 36% swing across identical reps = host load |
+| `liquidity` | 34 | 46 | 32 | CONTENTION-SENSITIVE |
+| `volume_leads_price` | 33 | — | 36 | CONTENTION-SENSITIVE |
+| `residual_analysis` | 17 | 16 | 16 | **STABLE** — second Lever #2 move (→ ReductionGroup) |
+| `clean_momentum` | 23 | — | 18 | mid-tier, mild swing |
+| reduction / reference tail (~30 groups) | ≤ ~10 each | | | at the floor — `round_levels`/`asset_flags`/`multi_day_*` ~1–2ms |
+
+**The diff rule (codify the re-confirm-on-offense discipline):** a group is a real regression ONLY if it
+is in the STABLE column AND rises across ALL three reps. A single-rep spike in a CONTENTION-SENSITIVE group
+(`distribution`, `liquidity`, `volume_leads_price`, the cross-sectional gathers) is host load — re-confirm
+it uncontended (min-of-5, quiet box) before believing it, exactly as the #123 latency-ceiling test does on
+its offenders. On this run no STABLE group rose across all three reps → **NO regression** (consistent with
+the sim re-check above; the same fingerprint, a cheaper independent harness).
