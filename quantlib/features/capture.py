@@ -348,19 +348,30 @@ def process_bars(
             outputs.append((group, out, (time.perf_counter() - group_start) * 1000.0))
     incremental, parity_check, slice_derive = _incremental_config()
     for reduce_input, batch_groups in batchable.items():
+        # Split the bucket: ``incremental_safe`` groups may ride the running sums; the conditioning-sensitive
+        # ones (variance/correlation of raw share volume) stay on the batch fresh-sum recompute even under
+        # FP_INCREMENTAL (their incremental-vs-batch corner divergence breaches the parity self-check — see
+        # ReductionGroup.incremental_safe). The engine is seeded over the SAFE groups ONLY, so its running sums
+        # match exactly what ``step`` assembles.
+        safe_groups = [group for group in batch_groups if group.incremental_safe]
+        unsafe_groups = [group for group in batch_groups if not group.incremental_safe]
         batch_start = time.perf_counter()
+        batched: dict[str, pl.DataFrame] = {}
         if incremental and not parity_check:
-            # Fast path is the source of truth: assemble from the per-bucket incremental running sums via
-            # ``step`` (the SAME ``assemble_from_long`` the batch uses — so warmup/flag null handling is
-            # byte-identical to the batch, store-parity-true). The Rust emit variants are faster but their
-            # warmup representation is not yet gated against the batch, so they are NOT used live (CLAUDE.md).
-            batched = _engine_for(state, reduce_input, batch_groups).step(frame, slice_derive=slice_derive)
+            # Fast path is the source of truth for the safe groups: assemble from the per-bucket incremental
+            # running sums via ``step`` (the SAME ``assemble_from_long`` the batch uses — so warmup/flag null
+            # handling is byte-identical to the batch, store-parity-true). The Rust emit variants are faster but
+            # their warmup representation is not yet gated against the batch, so they are NOT used live (CLAUDE.md).
+            if safe_groups:
+                batched.update(_engine_for(state, reduce_input, safe_groups).step(frame, slice_derive=slice_derive))
+            if unsafe_groups:
+                batched.update(compute_reduction_batch(unsafe_groups, ctx))
         else:
             # Batch is the source of truth (default, and during the parity self-check).
             batched = compute_reduction_batch(batch_groups, ctx)
-            if incremental and parity_check:
-                inc_out = _engine_for(state, reduce_input, batch_groups).step(frame, slice_derive=slice_derive)
-                tol_ratio = _incremental_parity(batched, inc_out)
+            if incremental and parity_check and safe_groups:
+                inc_out = _engine_for(state, reduce_input, safe_groups).step(frame, slice_derive=slice_derive)
+                tol_ratio = _incremental_parity({g.name: batched[g.name] for g in safe_groups}, inc_out)
                 metrics.record_incremental_parity(reduce_input, tol_ratio, tol_ratio > _PARITY_BREACH_RATIO)
         per_ms = (time.perf_counter() - batch_start) * 1000.0 / len(batch_groups)
         for group in batch_groups:

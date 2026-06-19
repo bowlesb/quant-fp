@@ -35,6 +35,13 @@ class VolumeGroup(ReductionGroup):
         InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),
     )
     windows = WINDOWS
+    # volume_zscore divides by std(ddof=1) built as sqrt(Σv² − (Σv)²/n) over RAW share volume (~1e3–1e4).
+    # That cancellation makes the incremental running add/subtract sums round differently from the batch fresh
+    # window sums by ~1e-8 absolute — negligible as a value, but at the n=2 minimal-window z-score (==1/√2) it
+    # crosses the parity self-check breach ratio. Keep the batch fresh-sum recompute under FP_INCREMENTAL until
+    # a centered-moment rewrite closes the corner. (Sandbox: volume_zscore_3m 28x tolerance == 1.5e-8 absolute;
+    # every other window/feature in the group was clean.)
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = [

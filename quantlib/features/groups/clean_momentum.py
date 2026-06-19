@@ -66,6 +66,12 @@ class CleanMomentumScoreGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.TREND_QUALITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
+    # The score blends the OLS R² (r2_("cm_clean")) of close on time, so it inherits trend_quality's
+    # near-perfect-fit conditioning: on a near-linear window R²→1 and the cov²/(var_x·var_y) cancellation makes
+    # the incremental running sums diverge from the batch fresh sums past the parity-breach ratio (sandbox
+    # smooth-walk: clean_momentum_score_5m 96x tolerance; well-conditioned data is ~2x, clean). Keep the batch
+    # fresh-sum recompute under FP_INCREMENTAL until the OLS family gets a centered-residual incremental form.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs: list[FeatureSpec] = []

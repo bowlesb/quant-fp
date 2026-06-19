@@ -28,6 +28,14 @@ class PriceVolumeGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.PRICE_VOLUME
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "high", "low", "close", "volume")),)
+    # pv_correlation is a Pearson corr (cov / √(var_x·var_y)) of one-minute return against RAW share volume
+    # (~1e3–1e4). The covariance/variance are differences of large near-equal sums; the incremental running
+    # sums round differently from the batch fresh sums by ~1e-8 absolute, which at a near-perfect-fit corr
+    # (==1.0 over a 3-minute window) crosses the parity self-check breach ratio. Keep the batch fresh-sum
+    # recompute under FP_INCREMENTAL until a centered-moment rewrite closes the corner. The OBV-slope OLS in
+    # this group is well-conditioned (centered time axis), so the divergence is confined to pv_correlation.
+    # (Sandbox: pv_correlation_3m 34x tolerance == 2.3e-8 absolute; the ratio/vwap/obv features were clean.)
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
