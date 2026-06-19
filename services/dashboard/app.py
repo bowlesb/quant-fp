@@ -186,6 +186,22 @@ def feature_grid_group_json(group: str, refresh: bool = False) -> JSONResponse:
         raise HTTPException(status_code=404, detail=f"unknown group '{group}'") from exc
 
 
+@app.get("/api/feature-grid/{group}/symbols")
+def feature_grid_symbols_json(group: str, refresh: bool = False) -> JSONResponse:
+    """Per-SYMBOL coverage for one group on its latest store date: which tickers the live STREAM captured vs
+    which exist only in BACKFILL — the ticker-representation surface (``backfill_only`` = under-represented
+    LIVE). Same data the group-detail UI's symbol drill-in renders.
+
+    Shape (see docs/FEATURE_DASHBOARD.md):
+      {group, version, stream_date, backfill_date, n_stream, n_backfill, n_both, n_backfill_only,
+       n_stream_only, stream_coverage_pct, both: [...], backfill_only: [...], stream_only: [...]}
+    """
+    try:
+        return JSONResponse(CACHE.symbols(group, STORE_ROOT, force=refresh))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown group '{group}'") from exc
+
+
 @app.get("/feature-grid", response_class=HTMLResponse)
 def feature_grid_page() -> str:
     """The visual coverage + trust grid (vanilla HTML/JS; fetches /api/feature-grid client-side)."""

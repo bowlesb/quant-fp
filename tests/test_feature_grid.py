@@ -179,3 +179,50 @@ def test_build_group_detail_trajectory(tmp_path: Path, monkeypatch: pytest.Monke
 def test_build_group_detail_unknown_group(monkeypatch: pytest.MonkeyPatch, fake_catalog: None) -> None:
     with pytest.raises(KeyError):
         fg.build_group_detail("no_such_group", "/store")
+
+
+def test_latest_partition_date(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    _write_partition(root, "groupX", "backfill", "2026-06-15", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2026-06-17", ["AAA"])
+    assert fg._latest_partition_date(str(root), "groupX", "1.0.0", "backfill") == "2026-06-17"
+    # a source with no partitions returns None (groupX has no stream tree written here).
+    assert fg._latest_partition_date(str(root), "groupX", "1.0.0", "stream") is None
+
+
+def test_build_symbol_coverage_classifies_under_representation(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    # The order-flow story in miniature: backfill agg covers a wide universe on its latest date, but the live
+    # stream's latest date captured only a thin subset -> the rest is under-represented LIVE.
+    _write_partition(root, "groupX", "stream", "2026-06-18", ["AAA", "BBB", "EEE"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB", "CCC", "DDD"])
+
+    cov = fg.build_symbol_coverage("groupX", str(root))
+    assert cov["group"] == "groupX"
+    assert cov["stream_date"] == "2026-06-18"
+    assert cov["backfill_date"] == "2026-06-18"
+    assert cov["n_stream"] == 3 and cov["n_backfill"] == 4
+    assert cov["both"] == ["AAA", "BBB"]
+    # CCC/DDD are in backfill but were not captured live -> under-represented LIVE.
+    assert cov["backfill_only"] == ["CCC", "DDD"]
+    assert cov["n_backfill_only"] == 2
+    # EEE streamed but is absent from today's backfill.
+    assert cov["stream_only"] == ["EEE"]
+    # union = {AAA,BBB,CCC,DDD,EEE} = 5; stream captured 3 -> 60%.
+    assert cov["stream_coverage_pct"] == pytest.approx(60.0, abs=0.1)
+
+
+def test_build_symbol_coverage_uses_each_sources_own_latest_date(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    # Stream lags a day behind backfill: each side compares its OWN freshest captured universe.
+    _write_partition(root, "groupX", "stream", "2026-06-17", ["AAA", "BBB"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB", "CCC"])
+    cov = fg.build_symbol_coverage("groupX", str(root))
+    assert cov["stream_date"] == "2026-06-17"
+    assert cov["backfill_date"] == "2026-06-18"
+    assert cov["backfill_only"] == ["CCC"]
+
+
+def test_build_symbol_coverage_unknown_group(fake_catalog: None) -> None:
+    with pytest.raises(KeyError):
+        fg.build_symbol_coverage("no_such_group", "/store")

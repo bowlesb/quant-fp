@@ -17,8 +17,9 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `http://<host>:8088/feature-grid` | the visual grid (HTML/JS, vanilla, fetches the JSON below) |
 | `GET http://<host>:8088/api/feature-grid` | full grid JSON (groups × periods) |
 | `GET http://<host>:8088/api/feature-grid/{group}` | per-feature detail for one group |
+| `GET http://<host>:8088/api/feature-grid/{group}/symbols` | per-SYMBOL coverage: which tickers are live (stream) vs backfill-only (under-represented LIVE) |
 
-Both API endpoints accept `?refresh=1` to bypass the 60s TTL cache and re-aggregate. A cold build over the
+All API endpoints accept `?refresh=1` to bypass the 60s TTL cache and re-aggregate. A cold build over the
 live store is ~4s; cached responses are ~1ms. There is a **↻ refresh** button on the page.
 
 ## The grid
@@ -123,6 +124,33 @@ backfill, so they are not parity-checkable — the concrete reason trust is bloc
     }
     // ... one row per feature in the group
   ]
+}
+```
+
+Returns `404` for an unknown group.
+
+### `GET /api/feature-grid/{group}/symbols`
+
+Per-SYMBOL coverage for one group — the **ticker-representation** surface. The grid shows a single peak
+symbol *count* per group, which hides *which* names are thin LIVE. The live stream subscribes a far smaller
+universe than backfill agg covers, so an order-flow group can read ~1300 backfill symbols yet only ~50 on the
+live tick stream. `backfill_only` is exactly the set under-represented LIVE. Each source is compared on its
+OWN latest store date (stream and backfill backfill at different cadences).
+
+```jsonc
+{
+  "group": "trade_flow", "version": "1.0.0",
+  "stream_date": "2026-06-18",       // each source's own latest partition date
+  "backfill_date": "2026-06-18",
+  "n_stream": 57,                    // distinct symbols captured on the live stream
+  "n_backfill": 1268,               // distinct symbols in the backfill agg
+  "n_both": 57,
+  "n_backfill_only": 1211,          // in backfill but NOT live -> under-represented LIVE (the headline)
+  "n_stream_only": 0,               // live but absent from today's backfill
+  "stream_coverage_pct": 4.5,       // n_stream / |stream ∪ backfill|
+  "both": ["AAPL", "..."],
+  "backfill_only": ["AABB", "..."], // sorted; the under-represented tickers
+  "stream_only": []
 }
 ```
 
