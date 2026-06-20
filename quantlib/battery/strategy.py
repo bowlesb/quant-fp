@@ -26,7 +26,6 @@ from quantlib.backtest import (
     shuffle_within_groups,
     walk_forward_folds,
 )
-from quantlib.battery.cost import long_short_per_name_cost
 from quantlib.battery.panel import Panel
 from quantlib.battery.result import (
     BacktestResult,
@@ -39,6 +38,7 @@ from quantlib.battery.spec import ArchetypeSpec, Conditioner, Horizon
 from quantlib.research import DEFAULT_LGB
 from quantlib.strategy_core.adapters import PanelCrossSection
 from quantlib.strategy_core.backtest_executor import BacktestExecutor
+from quantlib.strategy_core.cost import long_short_per_name_cost
 from quantlib.strategy_core.cross_sectional_ls import CrossSectionalLS as SharedCrossSectionalLS
 
 WINSOR_Q = 0.005  # per-day symmetric winsorization on the raw return (daily horizons)
