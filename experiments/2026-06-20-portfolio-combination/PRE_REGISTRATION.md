@@ -23,16 +23,26 @@ portfolio may add nothing beyond the baseline — that is a clean, decisive answ
 ## 2. The PRE-COMMITTED signal set (the legs — exact list, CLOSED)
 Each leg is a single per-name score at the decision instant. The set is fixed; no adding/dropping post-result.
 
-| # | Leg | Concrete signal | Source | Horizon-native |
-|---|-----|-----------------|--------|----------------|
-| L1 | **weekly-reversal** | `−rev_1w` (neg trailing 5-day return) | bars (build_weekly) | WEEKLY (5d hold) |
-| L2 | **swing_dc magnitude** | `dc_resp_chunk_slope` (the replicated roughness fingerprint) | swing_dc kernel | INTRADAY (30m) |
-| L3 | **path/vol structure** | the trusted return-shape + vol groups' first PC (volatility, ohlc_vol, efficiency, return_dynamics, price_returns) — a single composite, NOT each feature as a leg | trusted store | INTRADAY (30m) |
-| L4 | **quote-dynamics** | the G0a quote-dynamics composite (spread vol/trend, imbalance mean/trend, depth, intensity, staleness) | quote tape | INTRADAY (30m) |
+**⭐ Option A (Lead-approved, substrate-driven):** the deep S-INTRADAY is built from RAW BARS (L2+L3, both
+bar-derived → the full 397-week common span with S-WEEKLY). **L4 quote-dynamics is DROPPED from the
+confirmatory headline** (quote-tape-bound to 2026-03+ AND already a confirmed cost-killed null #268/#275 — no
+loss); it is kept ONLY as a recent-window (2026-04..06) SECONDARY, never in the deep headline pass claim.
+
+| # | Leg | Concrete signal | Source | Horizon-native | In confirmatory? |
+|---|-----|-----------------|--------|----------------|------------------|
+| L1 | **weekly-reversal** | `−rev_1w` (neg trailing 5-day return) | raw bars (build_weekly) | WEEKLY (5d hold) | YES (S-WEEKLY) |
+| L2 | **swing_dc magnitude** | `dc_resp_chunk_slope` (the replicated roughness fingerprint) | swing_dc kernel on minute bars (DEEP) | DAILY (intraday-family) | YES (S-INTRADAY) |
+| L3 | **path/vol structure** | first PC of the bar-derived return-shape + vol block (trailing realized vol, range, multi-horizon returns, efficiency) computed FROM RAW BARS — ONE composite, fit on the train fold | raw bars (DEEP) | DAILY (intraday-family) | YES (S-INTRADAY) |
+| L4 | **quote-dynamics** | the G0a quote-dynamics composite | quote tape (recent only) | 30m | NO — recent-window secondary only |
 
 NOTE on L3: the path/vol "signal" is a whole family; to avoid each feature being a fishing knob, L3 = ONE
-composite = the first principal component of the standardized L3 feature block (a parameter-free reduction),
-fit ON THE TRAIN FOLD only. This is locked: L3 is one leg, not a feature pile.
+composite = the first principal component of the standardized L3 bar-derived block (a parameter-free
+reduction), fit ON THE TRAIN FOLD only. Locked: L3 is one leg, not a feature pile.
+
+NOTE on S-INTRADAY horizon: deep history has minute bars but the tractable deep cross-section is DAILY-
+rebalanced (score each day from trailing bar structure, book a decile L/S held to the next tradeable day).
+This is the deepest powered form of the intraday-family stream; its P&L is daily → aggregated to weekly to
+align with S-WEEKLY (the §3 common-frequency rule). The recent-window L4 secondary keeps the true 30m form.
 
 ## 3. ⭐ HORIZON COMPATIBILITY — COMBINE AT THE RETURN-STREAM LEVEL (Lead resolution, pre-committed)
 The horizon mismatch is real ONLY for SIGNAL-level averaging (you cannot average a 5-day-hold score and a
