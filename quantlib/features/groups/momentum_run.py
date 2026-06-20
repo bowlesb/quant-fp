@@ -120,6 +120,21 @@ def _global_run_length(present: pl.DataFrame) -> pl.DataFrame:
     return present.with_columns(run_length.cast(pl.Int64).alias("__rl"))
 
 
+def _streak_from_rl_lists(collected: pl.DataFrame, keys: list[str], w: int) -> pl.DataFrame:
+    """The windowed ``longest_streak_{w}m`` from a frame whose ``_rl`` is a per-row LIST of one window's
+    gathered run-length (``__rl``) values. Shared by the rolling backfill path (``_compute_streak``, one list
+    per (symbol, minute)) and the live latest-only path (``_compute_streak_latest``, one list per symbol at T)
+    so the cap ``max_i min(__rl_i, position_in_window_i)`` / float(w) and the ``n>=2`` null guard are a SINGLE
+    source of truth — identical values on both paths by construction. Returns ``keys`` + the feature column
+    (capping a run so it cannot count bars before the window's start; null when fewer than 2 returns)."""
+    capped = pl.col("_rl").list.eval(pl.min_horizontal(pl.element(), pl.element().cum_count())).list.max()
+    n_ret = pl.col("_rl").list.len()
+    return collected.select(
+        *keys,
+        pl.when(n_ret >= 2).then(capped / float(w)).otherwise(None).cast(pl.Float64).alias(f"longest_streak_{w}m"),
+    )
+
+
 @register
 class MomentumRunGroup(FeatureGroup):
     name = "momentum_run"
@@ -198,15 +213,33 @@ class MomentumRunGroup(FeatureGroup):
             collected = present.rolling(index_column="minute", period=f"{w}m", group_by="symbol").agg(
                 pl.col("__rl").alias("_rl")
             )
-            capped = pl.col("_rl").list.eval(pl.min_horizontal(pl.element(), pl.element().cum_count())).list.max()
-            n_ret = pl.col("_rl").list.len()
-            piece = collected.select(
-                "symbol",
-                "minute",
-                pl.when(n_ret >= 2).then(capped / float(w)).otherwise(None).cast(pl.Float64).alias(f"longest_streak_{w}m"),
-            )
+            piece = _streak_from_rl_lists(collected, ["symbol", "minute"], w)
             out = out.join(piece, on=["symbol", "minute"], how="left")
         return out
+
+    def _compute_streak_latest(self, frame: pl.DataFrame, latest: object) -> pl.DataFrame:
+        """The longest_streak columns at the LATEST minute T ONLY — the live-path fast form. ``_compute_streak``
+        rolls the per-window run-length gather over EVERY minute then keeps only T; each window's value at T
+        reads only its trailing ``(T-w, T]`` run-length values, so gather that single slice per window directly
+        (a minute-cutoff filter + per-symbol group, NOT a rolling) and apply the IDENTICAL
+        ``max_i min(__rl_i, position_in_window_i)`` cap (shared ``_streak_from_rl_lists``). The global ``__rl``
+        is computed over the whole ``frame`` first (cumulative run state is history-dependent), exactly as the
+        rolling path does — value-identical to ``_compute_streak(...).filter(==T)`` by construction. ``frame``
+        is the ``_prepared`` frame."""
+        present = self._present_run_lengths(frame)
+        base = frame.filter(pl.col("minute") == latest).select(["symbol", "minute"]).sort("symbol")
+        for w in WINDOWS:
+            window = (
+                present.filter(
+                    (pl.col("minute") > latest - pl.duration(minutes=w)) & (pl.col("minute") <= latest)
+                )
+                .sort("minute")
+                .group_by("symbol", maintain_order=True)
+                .agg(pl.col("__rl").alias("_rl"))
+            )
+            piece = _streak_from_rl_lists(window, ["symbol"], w)
+            base = base.join(piece, on="symbol", how="left")
+        return base.select(["symbol", "minute", *[f"longest_streak_{w}m" for w in WINDOWS]])
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         frame = self._prepared(ctx)
@@ -252,9 +285,11 @@ class MomentumRunGroup(FeatureGroup):
         # Same slice (+ each symbol's prior bar for the window-edge return), same _compute_streak math.
         streak_slice = self._slice_with_prior_bar(frame, LOOKBACK_MINUTES)
         streak_prepared = self._prepared(BatchContext(frames={"minute_agg": streak_slice}))
-        streak_full = self._compute_streak(streak_prepared)
-        latest = streak_full["minute"].max()
-        streak = streak_full.filter(pl.col("minute") == latest)
+        # longest_streak at T ONLY: gather each window's (T-w, T] run-length slice once (not a rolling over
+        # every lookback minute then discard all but T). The global __rl is still computed over the whole
+        # streak slice first (cumulative run state is history-dependent), so the value is identical to the
+        # rolling form filtered to T (shared _streak_from_rl_lists cap math).
+        streak = self._compute_streak_latest(streak_prepared, streak_prepared["minute"].max())
         return skew.join(streak, on=["symbol", "minute"], how="full", coalesce=True).select(
             ["symbol", "minute", *self.feature_names]
         )
