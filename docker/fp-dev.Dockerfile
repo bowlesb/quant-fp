@@ -13,6 +13,8 @@ COPY rust /build/rust
 RUN cd /build/rust && maturin build --release --out /wheels
 
 FROM python:3.12-slim
+# libgomp1 = the OpenMP runtime lightgbm's C extension dlopens at import.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
     polars \
     pytest \
@@ -22,7 +24,8 @@ RUN pip install --no-cache-dir \
     'psycopg[binary]' \
     'httpx>=0.27,<1.0' \
     'alpaca-py>=0.30,<1.0' \
-    'redis>=5,<6'
+    'redis>=5,<6' \
+    lightgbm
 COPY --from=rustbuild /wheels/*.whl /tmp/
 RUN pip install /tmp/*.whl && rm /tmp/*.whl
 WORKDIR /app
