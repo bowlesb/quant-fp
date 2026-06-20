@@ -90,6 +90,15 @@ class WindowedSumState:
         self.windows = tuple(int(w) for w in windows)
         self.n_cols = n_cols
         self.running = np.zeros((len(self.windows), self.n, n_cols), dtype=np.float64)
+        # Neumaier (improved-Kahan) compensation for the running sum. The running ``+=`` / ``-=`` chain on
+        # LARGE-MAGNITUDE columns (raw share volume, its square) accumulates rounding the batch fresh-sum does
+        # not, so the plain running sum drifts past the 1e-9 ABSOLUTE parity tolerance (worst_rel stays ~1e-15
+        # — the float floor — but worst_abs grows with magnitude). ``_comp`` carries the lost low-order bits so
+        # the EFFECTIVE sum ``running + _comp`` tracks the exact window sum to ~machine precision and matches
+        # the batch fresh-sum within tolerance. This is the stable-summation rewrite the ``incremental_safe``
+        # gate referenced; it changes NO algebra (the effective sum is the same mathematical quantity), only
+        # the float-accumulation order, so it is value-improving and parity-true, not a value change.
+        self._comp = np.zeros_like(self.running)
         self._buf_epoch: list[int] = []
         self._buf_vals: list[np.ndarray] = []
         self._oldest = [0] * len(self.windows)  # per-window index of the oldest minute still in the sum
@@ -111,13 +120,26 @@ class WindowedSumState:
         self._buf_epoch.append(int(minute_epoch))
         self._buf_vals.append(values)
         for wi, w in enumerate(self.windows):
-            self.running[wi] += values  # the new minute is in every window (epoch == T > T - w)
+            self._neumaier_add(wi, values)  # the new minute is in every window (epoch == T > T - w)
             cutoff = minute_epoch - w * 60
             oldest = self._oldest[wi]
             while oldest <= index and self._buf_epoch[oldest] <= cutoff:  # minute at/under T-w left the window
-                self.running[wi] -= self._buf_vals[oldest]
+                self._neumaier_add(wi, -self._buf_vals[oldest])
                 oldest += 1
             self._oldest[wi] = oldest
+
+    def _neumaier_add(self, wi: int, addend: np.ndarray) -> None:
+        """Neumaier-compensated ``self.running[wi] += addend``: accumulate into ``running[wi]`` while routing
+        the per-element rounding loss into ``_comp[wi]``, so the EFFECTIVE sum ``running + _comp`` stays
+        exact to ~machine precision through the long add/expire chain (vs a plain ``+=`` that drifts on
+        large-magnitude columns). Pure float-order change; the mathematical sum is unchanged."""
+        current = self.running[wi]
+        total = current + addend
+        # Neumaier: when |current| >= |addend| the low bits lost are in addend, else in current.
+        big_current = np.abs(current) >= np.abs(addend)
+        loss = np.where(big_current, (current - total) + addend, (addend - total) + current)
+        self._comp[wi] += loss
+        self.running[wi] = total
 
     def trim(self) -> None:
         """Drop buffered minutes older than the longest window (bound memory). Call after each update."""
@@ -142,6 +164,11 @@ class WindowedSumState:
         delta = float(delta_minutes)
         if delta == 0.0:
             return
+        # Realize the Neumaier compensation into ``running`` before the in-place axis shift, so the shift acts
+        # on the full effective sum and ``_comp`` does not go stale for the OLS columns (rebase mutates
+        # ``running`` directly). The correction is folded in and re-accumulated by subsequent adds from here.
+        self.running += self._comp
+        self._comp = np.zeros_like(self.running)
         for matrix in (self.running.reshape(-1, self.running.shape[-1]), *self._buf_vals):
             for b_i, x_i, y_i, xy_i, xx_i in time_ols_cols:
                 b_col = matrix[..., b_i]
@@ -152,8 +179,18 @@ class WindowedSumState:
                 matrix[..., x_i] = x_col - delta * b_col
 
     def sums(self, window: int) -> np.ndarray:
-        """The current ``(n_symbols, n_cols)`` running sum for ``window`` (minutes)."""
-        return self.running[self.windows.index(window)]
+        """The current ``(n_symbols, n_cols)`` running sum for ``window`` (minutes) — the Neumaier-corrected
+        EFFECTIVE sum ``running + _comp`` (the compensation carries the low-order bits the long add/expire
+        chain would otherwise lose on large-magnitude columns), so it matches the batch fresh-sum to
+        ~machine precision."""
+        wi = self.windows.index(window)
+        return self.running[wi] + self._comp[wi]
+
+    def corrected(self) -> np.ndarray:
+        """The full ``(n_windows, n_symbols, n_cols)`` Neumaier-corrected running-sum array ``running + _comp``
+        — the value the emit path must read so every assembled feature uses the compensated (parity-true)
+        sum, not the drifting raw ``running``."""
+        return self.running + self._comp
 
     def observed_span_minutes(self) -> float:
         """How many minutes of history the state has ABSORBED: latest folded minute − earliest folded minute,
@@ -226,7 +263,8 @@ class WindowedSumState:
                     if oldest < len(self._buf_vals)
                     else np.zeros((self.n, self.n_cols), dtype=np.float64)
                 )
-                if not np.allclose(self.running[wi], expected, rtol=1e-9, atol=1e-9, equal_nan=True):
+                effective = self.running[wi] + self._comp[wi]  # the Neumaier-corrected sum (what consumers read)
+                if not np.allclose(effective, expected, rtol=1e-9, atol=1e-9, equal_nan=True):
                     raise IncrementInvariantError(
                         f"window {w}: running sum diverged from its buffered in-window minutes"
                     )
@@ -669,7 +707,7 @@ class IncrementalEngine:
         latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
         return emit_numpy(
             self.groups,
-            self.state.running,
+            self.state.corrected(),
             self.symbols or [],
             self.windows,
             self.col_index,
@@ -689,7 +727,7 @@ class IncrementalEngine:
         self._fold_latest(frame, latest, slice_derive=True)
         assert self.state is not None
         latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
-        return emit_rust(self.groups, self.state.running, self.symbols or [], self.asm_plan, latest_frame, latest)
+        return emit_rust(self.groups, self.state.corrected(), self.symbols or [], self.asm_plan, latest_frame, latest)
 
     def step_rust_unified(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
         """UNIFIED single-pass twin of ``step_rust``: fold the new minute, then assemble EVERY reduction
@@ -702,14 +740,14 @@ class IncrementalEngine:
         assert self.state is not None
         latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
         return emit_rust_unified(
-            self.groups, self.state.running, self.symbols or [], self.asm_plan, latest_frame, latest
+            self.groups, self.state.corrected(), self.symbols or [], self.asm_plan, latest_frame, latest
         )
 
     def _running_long(self) -> pl.DataFrame:
         """The running sums as a LONG (symbol, window, <value-col sum>) frame — the exact shape
         ``assemble_from_long`` expects, so the SAME assemble code runs as in the batch (NO pivot to build it)."""
         assert self.state is not None
-        running = self.state.running  # (n_windows, n_symbols, n_cols)
+        running = self.state.corrected()  # (n_windows, n_symbols, n_cols), Neumaier-corrected
         n_win, n_sym, _ = running.shape
         data: dict[str, object] = {
             "symbol": (self.symbols or []) * n_win,
