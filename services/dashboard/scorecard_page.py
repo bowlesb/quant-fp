@@ -1,6 +1,6 @@
 """The SYSTEM PROGRESS scorecard — Ben's six platform axes (A-F) with a sparkline trend each.
 
-Vanilla HTML/JS (no build step), same dark theme as ``raw_coverage_page`` / ``feature_grid_page``. Fetches
+Vanilla HTML/JS (no build step), same dark theme as ``raw_coverage_page``. Fetches
 ``/api/scorecard`` (current values) and ``/api/scorecard/history`` (the persisted snapshot time series) client-
 side and renders six collapsible axis cards: each shows the current headline value + sub-stats + a small
 sparkline drawn from the snapshot history, so the TRAJECTORY of each axis reads off at a glance — the thing

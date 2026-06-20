@@ -1,6 +1,6 @@
 """The visual RAW-TAPE coverage surface — a standalone page on the dashboard.
 
-Vanilla HTML/JS (no build step), same dark theme as ``feature_grid_page``. Fetches ``/api/raw-coverage``
+Vanilla HTML/JS (no build step), same dark theme as the other panels. Fetches ``/api/raw-coverage``
 client-side and renders, per raw layer (bars / trades / quotes): a DEPTH header (earliest→latest span, #
 dates, # symbols), a BREADTH bar chart (distinct symbols per day over time — the thin-trades / shallow-quotes
 gaps read off at a glance), and a date-coverage timeline strip (one tick per acquired date, gaps visible).

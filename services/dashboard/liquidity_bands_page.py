@@ -1,6 +1,6 @@
 """The visual LIQUIDITY-BAND reference surface — a standalone page on the dashboard.
 
-Vanilla HTML/JS (no build step), same dark theme as ``raw_coverage_page`` / ``feature_grid_page``. Fetches
+Vanilla HTML/JS (no build step), same dark theme as ``raw_coverage_page``. Fetches
 ``/api/liquidity-bands`` client-side and renders the canonical ADV-rank bands every research lane otherwise
 re-derives ad hoc:
   * BAND SIZES over time — a stacked per-date bar of how many symbols sit in each band (the universe a

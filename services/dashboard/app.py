@@ -17,12 +17,12 @@ import markdown
 import psycopg
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import scorecard_store
 import status_store
 from feature_grid import CACHE, STORE_ROOT
-from feature_grid_page import FEATURE_GRID_HTML
 from jobs_page import load_status as load_jobs_status
 from jobs_page import render_jobs_page
 from liquidity_bands import CACHE as BANDS_CACHE
@@ -38,7 +38,6 @@ from status_page import render_status_page
 from store_glimpse import CACHE as GLIMPSE_CACHE
 from store_glimpse_cache import read_drill as read_glimpse_drill
 from store_glimpse_cache import read_glimpse
-from store_glimpse_page import STORE_GLIMPSE_HTML
 from store_grid_cache import read_drill as read_grid_drill
 from store_grid_cache import read_grid_gzip, read_meta as read_grid_meta
 from universe_coverage import CACHE as UNIVERSE_CACHE
@@ -328,12 +327,6 @@ def feature_grid_symbol_depth_json(group: str, limit: int = 200, refresh: bool =
         raise HTTPException(status_code=404, detail=f"unknown group '{group}'") from exc
 
 
-@app.get("/feature-grid", response_class=HTMLResponse)
-def feature_grid_page() -> str:
-    """The visual coverage + trust grid (vanilla HTML/JS; fetches /api/feature-grid client-side)."""
-    return FEATURE_GRID_HTML
-
-
 @app.get("/api/raw-coverage")
 def raw_coverage_json(days: int = 90, refresh: bool = False) -> JSONResponse:
     """RAW-TAPE coverage: what raw Alpaca history exists per layer (minute bars / tick trades / tick quotes) —
@@ -458,12 +451,6 @@ def store_glimpse_drill_json(
         except KeyError:
             raise HTTPException(status_code=404, detail=f"unknown feature group: {group}")
     return JSONResponse(read_glimpse_drill(group, days=days, limit=limit))
-
-
-@app.get("/store-glimpse", response_class=HTMLResponse)
-def store_glimpse_page() -> str:
-    """The visual feature-store glimpse grid (vanilla HTML/JS; fetches /api/store-glimpse client-side)."""
-    return STORE_GLIMPSE_HTML
 
 
 @app.get("/api/store-grid/matrix")
@@ -770,8 +757,7 @@ def dashboard() -> str:
 <a href="/status" style="color:#58a6ff;text-decoration:none;font-size:13px;">Hourly status &rarr;</a> &nbsp;
 <a href="/jobs" style="color:#58a6ff;text-decoration:none;font-size:13px;">Jobs &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
-<a href="/store-glimpse" style="color:#58a6ff;text-decoration:none;font-size:13px;">Store glimpse &rarr;</a> &nbsp;
-<a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a> &nbsp;
+<a href="/store-grid/" style="color:#58a6ff;text-decoration:none;font-size:13px;">Store coverage grid &rarr;</a> &nbsp;
 <a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a> &nbsp;
 <a href="/liquidity-bands" style="color:#58a6ff;text-decoration:none;font-size:13px;">Liquidity bands &rarr;</a> &nbsp;
 <a href="/sector-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Sector coverage &rarr;</a> &nbsp;
@@ -792,3 +778,14 @@ def dashboard() -> str:
   </div>
 </div>
 </body></html>"""
+
+
+# The React store-coverage grid SPA (services/dashboard/frontend), built to static assets by the Dockerfile's
+# node stage into /app/frontend/store-grid. Mounted LAST (after every /api/* route is declared) at /store-grid
+# with html=True so index.html serves at the mount root and client-side asset paths resolve. The /api/store-grid/*
+# JSON routes are unaffected — they live under /api, a different prefix, and are matched by their explicit routes
+# before this mount. STATICFILES_DIR is overridable; if the build is absent (e.g. a non-Docker dev run that
+# skipped `npm run build`), the mount is simply skipped so the rest of the dashboard still boots.
+STATICFILES_DIR = Path(os.environ.get("STORE_GRID_STATIC_DIR", "/app/frontend/store-grid"))
+if STATICFILES_DIR.is_dir():
+    app.mount("/store-grid", StaticFiles(directory=STATICFILES_DIR, html=True), name="store-grid")

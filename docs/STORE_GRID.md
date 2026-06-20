@@ -91,13 +91,36 @@ every level, must make the parent→child relationship obvious by combining:
   is unmistakable;
 - **tighter / slightly smaller child rows** so they read as detail under the summary.
 
-Keep this treatment **consistent across all drill levels**. In React this is a styled expansion panel (header
-chip + indented, shaded, tighter body) — cheap to do well.
+Keep this treatment **consistent across all drill levels**. Implemented in `DrillPanel.tsx`: the panel header
+is a chip naming the parent ticker + group/trust counts; each group row is a tighter child row with a binary
+trust pill; expanding a group reveals a further-indented, distinctly-shaded nested card whose own header chip
+names *its* parent (the group) — the same treatment one level down.
+
+## React SPA (PR 2)
+
+The grid UI is a Vite + React + TypeScript SPA in `services/dashboard/frontend/`, built to static assets by
+the Dockerfile's `webbuild` (node) stage and served by the dashboard FastAPI app at **`/store-grid`** (a
+`StaticFiles` mount, `html=True`). Components:
+
+- **`CanvasHeatmap.tsx`** — a **canvas** renderer (never DOM-per-cell): dates down the rows (newest at top),
+  tickers across the columns, cell darkness = coverage, consuming `/api/store-grid/matrix` (gzip pass-through).
+  Only the visible column/row window is painted each frame (horizontal virtualization), so it stays smooth at
+  392 × 11.4k. Hover → tooltip; click a column → the drill panel; a search jump scrolls + highlights a column.
+- **`App.tsx`** — fetches the matrix + polls `/api/store-grid/meta` for the **"as of HH:MM:SS"** staleness,
+  re-pulling the matrix only when a newer build exists. The binary-trust overlay is a single toggle (trusted
+  green / untrusted grey — no other states). The **only** loading state is the genuine first-ever boot (the
+  API's `503 {booting}`); there is no recurring "warming".
+- **`Tooltip.tsx`** / **`DrillPanel.tsx`** — the hover readout and the nested drill described above.
+
+This SPA **replaces both** old server-rendered pages: `/feature-grid` and `/store-glimpse` (and their page
+modules `feature_grid_page.py` / `store_glimpse_page.py`) are deleted. The underlying `feature_grid.py`
+store-introspection logic (reused by the worker, `store_glimpse.py`, and `scorecard.py`) and the
+`/api/feature-grid/*` + `/api/store-glimpse/*` JSON routes are kept.
 
 ## Deployment
 
 The `store-glimpse-worker` service **replaces the host cron** `ops/collect_store_glimpse.py` (the
-`1-58/3 * * * *` crontab line). On deploy: bring up the worker (`docker compose up -d store-glimpse-worker`),
-confirm its log shows a first matrix write, then remove that crontab line (`crontab -e`) — see the cron
-registry in `docs/OPERATIONS.md`. The old group×date `/store-glimpse` page is removed in a follow-up PR (the
-React SPA grid); this PR ships the worker + API + the kill of the recurring "warming" path.
+`1-58/3 * * * *` crontab line). On deploy: rebuild + bring up the dashboard and the worker
+(`docker compose up -d --build dashboard store-glimpse-worker`), confirm the worker log shows a first matrix
+write, open `/store-grid` to confirm the React grid serves, then remove that crontab line (`crontab -e`) — see
+the cron registry in `docs/OPERATIONS.md`.
