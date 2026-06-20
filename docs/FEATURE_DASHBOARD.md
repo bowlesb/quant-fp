@@ -242,6 +242,16 @@ and/or backfill land for this group, and how far back does each source's history
 * **Depth** — per group, `backfill_earliest` + `backfill_span_days` (how far back history reaches) and
   `stream_horizon_days` (how many recent **weekdays** the live stream captured **unbroken** from the anchor,
   skipping weekends) — history depth and live horizon side by side.
+* **Coverage-DROP detector** — per group, a `stream_drop` verdict (`detect_stream_drop`): the most-recent
+  day that captured any stream symbols (`recent`) vs the group's in-window busiest day (`baseline` =
+  `stream_peak`). When `recent / baseline` falls at/under the thinning ratio (≤ `DROP_THINNING_RATIO` 0.6)
+  or the severe ratio (≤ `DROP_SEVERE_RATIO` 0.4) — and the baseline is large enough to matter
+  (≥ `DROP_MIN_BASELINE_SYMBOLS` 100) — the group is flagged `thinning`/`drop`. The verdicts roll up into a
+  window-level `drop_alerts` summary (severe-first), and the page shows a ⚠ DROP / ▼ thin **badge** on the
+  group row plus a banner — so a stream group thinning over time is **surfaced**, not just dimmer cells to
+  eyeball. Per-group/own-scale (a thin order-flow group and a full-universe bar group are each judged
+  relative to themselves); stream only (backfill is settled). NO extra store I/O — pure read of the counts
+  already gathered for the heat.
 
 `?days=N` sets the window (default 21, capped at `TIMELINE_MAX_DAYS`). Read-side only: reuses the same
 one-pass per-date symbol read the grid already pays for, so it is no extra store I/O.
@@ -257,10 +267,18 @@ one-pass per-date symbol read the grid already pays for, so it is no extra store
      "backfill_earliest": "2024-01-02", "backfill_latest": "2026-06-18", "backfill_span_days": 899,
      "stream_earliest": "2026-06-15", "stream_latest": "2026-06-18", "stream_horizon_days": 4,
      "stream_peak": 1054, "backfill_peak": 1268,    // in-window busiest day per source (heat denominator)
+     // RECENT live capture vs the group's own in-window peak — ok / thinning / drop / no_stream
+     "stream_drop": {"status": "ok", "recent": 1054, "recent_date": "2026-06-18",
+                     "baseline": 1054, "ratio": 1.0},
      "days": [
        {"date": "2026-06-18", "stream": 1054, "backfill": 1268, "provenance": "both"},
        {"date": "2026-06-14", "stream": 0, "backfill": 0, "provenance": "absent"}      // weekend
      ]}
+  ],
+  // window-level roll-up: groups whose live capture thinned vs their own peak (severe-first)
+  "drop_alerts": [
+    {"group": "asset_flags", "status": "drop", "recent": 2820, "recent_date": "2026-06-18",
+     "baseline": 10381, "ratio": 0.272}
   ]
 }
 ```
