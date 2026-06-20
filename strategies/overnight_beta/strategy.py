@@ -41,6 +41,7 @@ from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from quantlib.strategy_core.production_execution import ProductionOrderIntent, make_client_order_id
 from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.overnight_beta_model import OvernightBetaModel
+from strategies.lib.stale_entry import StaleEntryTracker, is_order_not_found
 from strategies.overnight_beta.contract import STRATEGY_NAME
 from strategies.overnight_beta.position_store import PositionStore
 
@@ -154,6 +155,9 @@ class OvernightBetaStrategy:
         self._model = model
         self._panel = panel_loader
         self._last_rebalance: dt.date | None = None
+        # bounded detector for legs whose close-auction entry never landed (genuinely not-found): stops
+        # the every-tick broker re-query spin without ever expiring a live/in-flight order.
+        self._stale_entries = StaleEntryTracker()
 
     def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
         """Mirror a captured auction fill into the durable StrategyState ledger (the migration SoT). A
@@ -266,12 +270,18 @@ class OvernightBetaStrategy:
     def manage_and_flatten(self) -> None:
         """Capture close-auction fills, then at/after the open submit the OPG flatten + log slippage."""
         clock = self._clock()
+        now = dt.datetime.now(dt.timezone.utc)
         for pos in self._store.list_entered():
             enter_coid = str(pos["enter_order_id"])
             symbol = str(pos["symbol"])
-            enter_order = self._fetch(enter_coid)
+            enter_order, not_found = self._fetch_with_status(enter_coid)
             if enter_order is None:
+                # a still-unfilled entry that's GENUINELY not-found (the leg never landed) is abandoned
+                # after a bounded streak; a transient miss just re-checks next cycle.
+                if not_found and pos["enter_fill_price"] is None:
+                    self._abandon_if_entry_dead(enter_coid, symbol, now)
                 continue
+            self._stale_entries.reset(enter_coid)  # found -> clear any not-found streak
             filled = order_filled(enter_order)
             if filled is not None and pos["enter_fill_price"] is None:
                 fill_price, qty = filled
@@ -347,6 +357,32 @@ class OvernightBetaStrategy:
             return cast(Order, self._trading.get_order_by_client_id(coid))
         except APIError:
             return None
+
+    def _fetch_with_status(self, coid: str) -> tuple[Order | None, bool]:
+        """Look up an order, distinguishing GENUINELY not-found (40410000) from a transient error. Returns
+        ``(order, genuinely_not_found)`` — only a genuine not-found feeds the stale-entry tracker."""
+        try:
+            return cast(Order, self._trading.get_order_by_client_id(coid)), False
+        except APIError as exc:
+            if is_order_not_found(exc):
+                return None, True
+            logger.warning("enter lookup transient error for %s (%s)", coid, exc)
+            return None, False
+
+    def _abandon_if_entry_dead(self, enter_coid: str, symbol: str, now: dt.datetime) -> bool:
+        """Terminate a leg whose unfilled close-auction entry is GENUINELY not-found for a bounded streak
+        (N consecutive over >= M seconds) and stop re-querying it. Returns True iff abandoned this cycle."""
+        if self._stale_entries.record_not_found(enter_coid, now):
+            logger.warning(
+                "ABANDON: enter %s (%s) genuinely not-found x%d — never landed; marking leg terminal",
+                enter_coid,
+                symbol,
+                self._stale_entries.streak_count(enter_coid),
+            )
+            self._store.mark_abandoned(enter_coid)
+            self._stale_entries.forget(enter_coid)
+            return True
+        return False
 
     def cycle(self) -> None:
         self.manage_and_flatten()

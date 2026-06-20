@@ -20,6 +20,7 @@ from quantlib.bus.schema import default_schema
 from quantlib.bus.vector import FeatureVector
 from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from strategies.lib.reversion_model import VwapReversionModel
+from strategies.lib.stale_entry import StaleEntryTracker
 from strategies.reversion.strategy import (
     ReversionConfig,
     ReversionStrategy,
@@ -272,6 +273,11 @@ class InMemoryStore:
             "closed",
         )
 
+    def mark_abandoned(self, entry_order_id: str) -> None:
+        bet = self._bets[entry_order_id]
+        if bet["status"] in ("open", "filled", "closing"):
+            bet["status"], bet["realized_pnl"] = "closed", 0
+
     def list_open(self) -> list[dict[str, object]]:
         return [b for b in self._bets.values() if b["status"] in ("open", "filled", "closing")]
 
@@ -302,6 +308,7 @@ def _strategy(
     strategy._state = None  # type: ignore[attr-defined]
     strategy._state_store = None  # type: ignore[attr-defined]
     strategy._pending_close_logged = set()  # type: ignore[attr-defined]
+    strategy._stale_entries = StaleEntryTracker()  # type: ignore[attr-defined]
     strategy._model = VwapReversionModel(window_m=WINDOW_M, sensitivity=400.0)  # type: ignore[attr-defined]
     strategy._latest_by_symbol = {}  # type: ignore[attr-defined]
     strategy._last_bet_ts = None  # type: ignore[attr-defined]
@@ -330,6 +337,30 @@ def test_place_then_manage_finalizes_bet() -> None:
     assert closed["status"] == "closed"
     assert closed["realized_pnl"] == pytest.approx((191.5 - 190.0) * expected_qty)
     assert len(trading.submitted) == 2  # BUY + SELL
+
+
+def test_stale_not_found_entry_is_abandoned_and_stops_spinning() -> None:
+    """The reconcile-spin fix on reversion: an entry order genuinely not-found at the broker is re-checked
+    a bounded few times then abandoned (closed), after which the manage loop never queries it again."""
+    config = _config(hold_sec=900)
+    trading = FakeTradingClient(fill_price=190.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+    strategy._stale_entries = StaleEntryTracker(min_checks=2, min_seconds=0.0)  # type: ignore[attr-defined]
+
+    # a bet recorded in the store but whose order is NOT at the broker (it never landed) -> not-found.
+    dead_coid = "reversion-20260616T150000-AAPL-buy"
+    store.record_open("AAPL", "buy", 50.0, dead_coid, NOW, NOW + dt.timedelta(seconds=900), 0.7)
+    assert store.count_open() == 1
+
+    strategy.manage_open_bets()  # 1st not-found (streak=1) -> still open
+    assert store.count_open() == 1
+    strategy.manage_open_bets()  # 2nd consecutive -> terminal -> abandoned
+    assert store.count_open() == 0
+    assert store._bets[dead_coid]["status"] == "closed"
+    assert store._bets[dead_coid]["realized_pnl"] == 0  # no position ever taken
+    # the spin stops: a closed bet is no longer in list_open, so it's never re-queried.
+    assert dead_coid not in {b["entry_order_id"] for b in store.list_open()}
 
 
 def test_no_bet_when_nothing_clears_threshold() -> None:

@@ -10,6 +10,7 @@ Two tables (via the reusable ``StrategyStore``):
 All access is via ``StrategyStore``'s parameterized helpers (short-lived autocommit connections); the
 container author never touches global DB config.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -56,9 +57,19 @@ CREATE TABLE IF NOT EXISTS {schema}.slippage_log (
 """
 
 _OPEN_COLUMNS = (
-    "id", "rebalance_date", "symbol", "leg", "beta", "target_notional",
-    "enter_order_id", "enter_ts", "enter_ref_price", "enter_fill_price", "enter_qty",
-    "exit_order_id", "status",
+    "id",
+    "rebalance_date",
+    "symbol",
+    "leg",
+    "beta",
+    "target_notional",
+    "enter_order_id",
+    "enter_ts",
+    "enter_ref_price",
+    "enter_fill_price",
+    "enter_qty",
+    "exit_order_id",
+    "status",
 )
 
 
@@ -137,6 +148,17 @@ class PositionStore:
             (exit_ts, exit_fill_price, realized_pnl, enter_order_id),
         )
 
+    def mark_abandoned(self, enter_order_id: str) -> None:
+        """Terminate a leg whose close-auction entry never landed at the broker (genuinely not-found):
+        advance it to 'flattened' with zero realized PnL (no position was ever taken), so manage stops
+        re-querying a dead order forever. Backward-readable (existing status column/values)."""
+        self._store.execute(
+            f"""UPDATE {self._schema}.positions
+                   SET status = 'flattened', realized_pnl = 0
+                 WHERE enter_order_id = %s AND status = 'entered'""",
+            (enter_order_id,),
+        )
+
     def log_slippage(
         self, symbol: str, auction: str, side: str, ref_price: float, fill_price: float, order_id: str
     ) -> None:
@@ -145,7 +167,15 @@ class PositionStore:
             f"""INSERT INTO {self._schema}.slippage_log
                     (symbol, auction, side, ref_price, fill_price, slippage_bps, order_id)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-            (symbol, auction, side, ref_price, fill_price, slippage_bps(side, ref_price, fill_price), order_id),
+            (
+                symbol,
+                auction,
+                side,
+                ref_price,
+                fill_price,
+                slippage_bps(side, ref_price, fill_price),
+                order_id,
+            ),
         )
 
     def list_entered(self) -> list[dict[str, object]]:
@@ -157,9 +187,7 @@ class PositionStore:
         )
 
     def count_entered(self) -> int:
-        rows = self._store.query(
-            f"SELECT count(*) FROM {self._schema}.positions WHERE status = 'entered'"
-        )
+        rows = self._store.query(f"SELECT count(*) FROM {self._schema}.positions WHERE status = 'entered'")
         return int(cast(int, rows[0][0])) if rows else 0
 
     def mean_slippage_bps(self) -> dict[str, float]:

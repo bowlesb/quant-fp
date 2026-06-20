@@ -23,6 +23,7 @@ from quantlib.bus.publisher import BusPublisher
 from quantlib.bus.schema import default_schema
 from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from strategies.lib.model import MockMLModel
+from strategies.lib.stale_entry import StaleEntryTracker
 from strategies.smoke.strategy import (
     SmokeConfig,
     SmokeStrategy,
@@ -307,6 +308,12 @@ class InMemoryStore:
         bet["realized_pnl"] = realized_pnl
         bet["status"] = "closed"
 
+    def mark_abandoned(self, entry_order_id: str) -> None:
+        bet = self._bets[entry_order_id]
+        if bet["status"] in ("open", "filled", "closing"):
+            bet["status"] = "closed"
+            bet["realized_pnl"] = 0
+
     def list_open(self) -> list[dict[str, object]]:
         return [b for b in self._bets.values() if b["status"] in ("open", "filled", "closing")]
 
@@ -339,6 +346,7 @@ def _strategy(config: SmokeConfig, trading: FakeTradingClient, store: InMemorySt
     strategy._last_symbol = "AAPL"  # type: ignore[attr-defined]
     strategy._last_vector = None  # type: ignore[attr-defined]
     strategy._last_bet_ts = None  # type: ignore[attr-defined]
+    strategy._stale_entries = StaleEntryTracker()  # type: ignore[attr-defined]
     return strategy
 
 
@@ -369,6 +377,86 @@ def test_place_then_manage_finalizes_bet() -> None:
     assert len(trading.submitted) == 2  # BUY + SELL
     sell = trading.submitted[1]
     assert sell.filled_qty == pytest.approx(expected_qty)  # sells exactly the filled qty
+
+
+class _CountingFakeTradingClient(FakeTradingClient):
+    """A FakeTradingClient that counts get_order_by_client_id calls — to prove the broker GET-rate drops
+    once a dead entry is abandoned (the spin stops)."""
+
+    get_calls: int = 0
+
+    def get_order_by_client_id(self, client_order_id: str) -> FakeOrder:
+        self.get_calls += 1
+        return super().get_order_by_client_id(client_order_id)
+
+
+def test_stale_not_found_entry_is_abandoned_and_stops_spinning() -> None:
+    """The reconcile-spin fix: a bet whose entry order is GENUINELY not-found is re-checked a bounded few
+    times, then abandoned (marked closed) — after which the manage loop never queries the broker for it
+    again (the GET-rate drops to zero), instead of spinning ~4 GETs/sec forever."""
+    config = _config(hold_sec=900)
+    trading = _CountingFakeTradingClient(fill_price=190.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+    # a low threshold so the test resolves quickly (2 checks over >=0s); the live default is 5 over 30s.
+    strategy._stale_entries = StaleEntryTracker(min_checks=2, min_seconds=0.0)  # type: ignore[attr-defined]
+
+    # inject an OPEN bet whose entry order the broker will report not-found (it never landed).
+    dead_coid = "smoke-20260616T150000-AAPL-buy"
+    trading.not_found_coids.add(dead_coid)
+    store.record_open("AAPL", "buy", 50.0, dead_coid, NOW, NOW + dt.timedelta(seconds=900))
+    assert store.count_open() == 1
+
+    # tick 1: 1st not-found (streak=1) -> not yet terminal, still open.
+    strategy.manage_open_bets()
+    assert store.count_open() == 1
+    # tick 2: 2nd consecutive not-found -> terminal -> abandoned (closed), no position taken.
+    strategy.manage_open_bets()
+    assert store.count_open() == 0
+    closed = store._bets[dead_coid]
+    assert closed["status"] == "closed" and closed["realized_pnl"] == 0
+
+    # THE SPIN STOPS: further manage cycles must NOT query the broker for the (now-closed) dead bet.
+    calls_after_abandon = trading.get_calls
+    for _ in range(10):
+        strategy.manage_open_bets()
+    assert trading.get_calls == calls_after_abandon  # zero additional GETs -> the spin is gone
+
+
+def test_transient_then_found_entry_is_not_abandoned() -> None:
+    """A live order that momentarily 404s on a race (then reappears) is NEVER wrongly expired: a reset
+    breaks the not-found streak so only a CONSECUTIVE genuine-not-found run can terminate a bet."""
+    config = _config(hold_sec=900)
+    trading = FakeTradingClient(fill_price=190.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+    strategy._stale_entries = StaleEntryTracker(min_checks=2, min_seconds=0.0)  # type: ignore[attr-defined]
+
+    coid = "smoke-20260616T150000-AAPL-buy"
+    trading.not_found_coids.add(coid)
+    # a far-future hold (relative to the real wall clock the manage loop uses) so the bet stays open after
+    # the entry fills, isolating the abandon-vs-fill behavior from the time-based close.
+    far_future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3650)
+    store.record_open("AAPL", "buy", 50.0, coid, NOW, far_future)
+
+    strategy.manage_open_bets()  # 1st not-found (streak=1)
+    assert store.count_open() == 1
+    # the order "appears" now (the race resolved) -> the entry fills, the streak resets.
+    trading.not_found_coids.discard(coid)
+    trading._by_coid[coid] = FakeOrder(
+        id="broker-x",
+        client_order_id=coid,
+        filled_avg_price=190.0,
+        filled_qty=50.0 / 190.0,
+        status=OrderStatus.FILLED,
+        qty=50.0 / 190.0,
+        filled_at=NOW,
+    )
+    strategy.manage_open_bets()  # the entry now fills -> NOT abandoned, the bet is live
+    bet = store._bets[coid]
+    assert bet["status"] == "filled"  # a real filled position, never expired (abandon -> 'closed')
+    assert bet.get("qty") is not None  # the entry actually filled a real quantity
+    assert strategy._stale_entries.streak_count(coid) == 0  # type: ignore[attr-defined]  # streak cleared
 
 
 def test_is_order_not_found_detects_code() -> None:
