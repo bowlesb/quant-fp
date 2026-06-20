@@ -5,6 +5,11 @@ tickers it cares about, decides paper bets from each vector, and records its boo
 schema. The first one is `smoke-strategy` — deliberately trivial, its job is to prove the apparatus end
 to end before real edge is added. This doc is the contract for writing the next one.
 
+**Related docs:** a container's decision logic should be the write-once `decide()` from
+`STRATEGY_BATTERY_PORTABILITY.md` (so the same code backtests in the battery and runs live);
+`STRATEGY_EXECUTION_ABSTRACTION.md` is the gated design for the production-real STATE + Executor + Feed
+those decisions run on.
+
 A new container needs to do four things, none of which require touching any global DB or feature-pipeline
 internals:
 
