@@ -62,12 +62,35 @@ window (the published run's 20-day window vs the currently-available backfill) a
 matches. (HONEST NOTE: a perfect numeric reproduction needs the exact original panel; the verdict-level
 reproduction is what certifies the abstraction is faithful.)
 
-### 3.2 laneC overnight 1d: full-univ HIT → liquid-1500 COLLAPSE
-<!-- RESULTS PENDING — the 18-month full-universe deep-panel build is running; numbers filled on completion. -->
-Expected (the published verdict to reproduce): full-universe 1d HIT (IC ≈ 0.035, NW t ≈ 3.89,
-breakeven ≈ 22bps) that COLLAPSES on the liquid-1500 (IC ≈ 0.011, edge ≈ +0.007, NW t ≈ 1.20,
-breakeven ≈ 4.12). The `by_stratum` liquidity breakdown should show the edge concentrating in the
-illiquid tail (the trap #1 signature).
+### 3.2 laneC overnight 1d: full-univ HIT → liquid-1500 COLLAPSE — REPRODUCED ✓
+GBM over the 18-month full-universe daily overnight panel (2024-12-01..2026-06-17), then the same on
+the liquid-1500:
+
+| universe | rows | IC | edge_vs_shuffle | NW t | breakeven_bps | Sharpe | verdict |
+|---|---|---|---|---|---|---|---|
+| **FULL** | 638,510 | +0.03345 | +0.03504 | **+3.944** | **21.5** | 4.91 | **PASS (HIT)** |
+| **liquid-1500** | 295,706 | +0.01514 | +0.01608 | **+1.836** | **4.59** | 0.57 | **FAIL (collapse)** |
+
+Published verdict: full-univ HIT (IC ≈ 0.035, NW t ≈ 3.89, breakeven ≈ 22bps) → liquid-1500 COLLAPSE
+(IC ≈ 0.011, edge ≈ +0.007, NW t ≈ 1.20, breakeven ≈ 4.12).
+
+**REPRODUCED.** Full-univ matches almost exactly (IC 0.0335 vs 0.035; NW t 3.94 vs 3.89; breakeven
+21.5 vs 22). On the tradeable liquid-1500 the edge COLLAPSES exactly as published: **NW t 3.94 → 1.84**
+(below 2.0), **breakeven 21.5 → 4.59bps** (below realistic overnight cost), Sharpe 4.91 → 0.57, verdict
+flips **HIT → FAIL**. The battery independently re-derives the team's "statistically real but
+economically non-tradeable" conclusion — without being told the answer.
+
+The `by_stratum` liquidity breakdown shows the trap #1 signature (on the FULL universe the edge is
+STRONGEST in the illiquid tail, which is why restricting to liquid names kills it):
+
+| stratum (FULL universe) | IC | NW t | breakeven_bps | n_names |
+|---|---|---|---|---|
+| liq_low (illiquid) | +0.03661 | **+5.65** | 22.7 | 4,852 |
+| liq_mid | +0.02750 | +2.86 | 19.8 | 4,118 |
+| liq_high (liquid) | +0.02658 | +2.35 | 17.1 | 2,771 |
+
+The liquid-1500 run was 36s on the cached panel (in budget); the one-time full-universe deep build
+(377s panel reduce) is cached thereafter.
 
 ---
 
@@ -81,6 +104,23 @@ over the panel) AND `PaperExecutorStub` (live-shaped, idempotent on `client_orde
 Also pinned: `StrategyState.apply_fill` transitions (open / weighted-avg / realize-P&L / partial-then-
 complete), the append-only fill-ledger recompute == positions (REQ-S2), the BacktestExecutor sub-$1
 REJECT (faithful to Alpaca, REQ-X2/X3), and PaperExecutor idempotency (REQ-X4).
+
+**Existing-container fit CONFIRMED** (verified against the live code, not asserted): the three
+`strategies/` containers already separate a pure decision from an execution harness, so re-expressing
+them in this shape lifts their decision logic UNCHANGED —
+- `overnight_beta`: `OvernightBetaModel.select_legs(returns_by_name, market_returns)`
+  (`strategies/lib/overnight_beta_model.py:61`) IS already the cross-sectional `decide` (pure, returns
+  long/short legs) — a direct drop-in for the battery's archetype 1.
+- `reversion`/`smoke`: `Model.predict(vector)` (`strategies/lib/{reversion_model,model}.py`) +
+  `select_candidate(...)` are the pure decision; `evaluate_bet_gate(...)`
+  (`strategies/{reversion,smoke}/strategy.py`) is execution-policy that STAYS in the Executor; the
+  `ReversionStrategy`/`SmokeStrategy` class is the harness.
+
+So the re-expression is: lift `predict`/`select_candidate`/`select_legs` into `decide()`; the
+gate/cadence/cap stays in the `Executor`/`Runner`; the bespoke `BetStore`/`PositionStore` becomes the
+typed `StrategyState` + a `PgStateStore` (a schema-shape change, not a logic rewrite). It is a
+mechanical refactor, NOT a rewrite — proposed as its own PR (no live-container behavior change without
+its own PR + a per-container parity test).
 
 ---
 
