@@ -37,6 +37,7 @@ Known caveats (documented, lower-severity — audit 2026-06-19):
     correct fix; until then, liquid-cut results are mildly survivorship-optimistic (acceptable for the
     null/HIT-direction verdicts the battery reproduces, NOT for a deployable liquid-only edge claim).
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -47,7 +48,13 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
+from quantlib.data.realized_cost import realized_half_spread_bps
+
 STORE = os.environ.get("STORE_ROOT", "/store")
+
+# Stage 1: use the REALIZED per-name half-spread measured from the quote tape as the backtest cost term
+# (replacing the flat stub). On by default; set USE_REALIZED_COST=0 to revert to the legacy stub/store path.
+USE_REALIZED_COST = os.environ.get("USE_REALIZED_COST", "1") == "1"
 
 # RTH boundary minutes in UTC (bars are tz-aware UTC; ET RTH 09:30-16:00 == 13:30-20:00 UTC).
 OPEN_HM = 1330  # 09:30 ET open print
@@ -438,6 +445,29 @@ def build_intraday_panel(
     return full
 
 
+def _attach_realized_half_spread(feats: pl.DataFrame, date_iso: str) -> pl.DataFrame:
+    """Attach a ``half_spread_bps`` column MEASURED from the quote tape at each sample minute (Stage 1
+    truth). Measured per distinct sample minute present in ``feats``; a name with no measurable quotes is
+    left null (downstream coalesces to the store column / flat stub). No-op (null column) when disabled."""
+    if not USE_REALIZED_COST or feats.height == 0:
+        return feats.with_columns(pl.lit(None, dtype=pl.Float64).alias("half_spread_bps"))
+    measured: list[pl.DataFrame] = []
+    for minute in feats["minute"].unique().to_list():
+        at_ts = minute if minute.tzinfo is not None else minute.replace(tzinfo=dt.timezone.utc)
+        syms = feats.filter(pl.col("minute") == minute)["symbol"].to_list()
+        realized = realized_half_spread_bps(STORE, date_iso, syms, at_ts)
+        if realized.height:
+            measured.append(
+                realized.with_columns(pl.lit(minute).alias("minute")).rename(
+                    {"realized_half_spread_bps": "half_spread_bps"}
+                )
+            )
+    if not measured:
+        return feats.with_columns(pl.lit(None, dtype=pl.Float64).alias("half_spread_bps"))
+    table = pl.concat(measured, how="vertical")
+    return feats.join(table, on=["symbol", "minute"], how="left")
+
+
 def _build_intraday_date(
     date_iso: str, feature_groups: dict[str, list[str]], horizons_min: list[int], spread_col: str
 ) -> pl.DataFrame | None:
@@ -467,16 +497,19 @@ def _build_intraday_date(
     )
     if feats.height == 0:
         return None
-    # half-spread (bps): real order-flow column where present, else the ADV proxy.
+    # half-spread (bps), in PRECEDENCE: (1) REALIZED, measured directly from the quote tape at the entry
+    # instant (Stage 1 truth — replaces the flat stub; the G0 finding that the 3.0bps stub undercharges
+    # ~2.6x), (2) the store quote_spread column where the tape is unavailable, (3) the flat stub last.
+    feats = _attach_realized_half_spread(feats, date_iso)
     spread = _load_spread_for_date(date_iso, spread_col)
     if spread is not None:
         feats = (
             feats.join(spread, on=["symbol", "minute"], how="left")
-            .with_columns((pl.col(spread_col) / 2.0).alias("half_spread_bps"))
+            .with_columns(
+                pl.coalesce(pl.col("half_spread_bps"), pl.col(spread_col) / 2.0).alias("half_spread_bps")
+            )
             .drop(spread_col)
         )
-    else:
-        feats = feats.with_columns(pl.lit(DEFAULT_HALF_SPREAD_BPS).alias("half_spread_bps"))
     feats = feats.with_columns(pl.col("half_spread_bps").fill_null(DEFAULT_HALF_SPREAD_BPS))
     for horizon in horizons_min:
         fwd = _forward_excess(bars, sample_ts, horizon)
