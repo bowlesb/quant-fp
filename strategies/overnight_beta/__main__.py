@@ -5,6 +5,7 @@
 certification used — parity by construction) to build the trailing daily-return panel for beta estimation.
 Secrets (Alpaca keys, DB password) from the environment, never logged. PAPER ONLY; OBETA_ENABLED=0 by default.
 """
+
 from __future__ import annotations
 
 import glob
@@ -12,9 +13,13 @@ import os
 
 import numpy as np
 import polars as pl
+import redis
 from alpaca.trading.client import TradingClient
 
+from quantlib.bus.compat import publish_contract
+from quantlib.bus.publisher import DEFAULT_REDIS_URL
 from strategies.lib.overnight_beta_model import OvernightBetaModel
+from strategies.overnight_beta.contract import STRATEGY_FEATURES, STRATEGY_NAME
 from strategies.overnight_beta.position_store import PositionStore
 from strategies.overnight_beta.strategy import (
     OvernightBetaConfig,
@@ -54,29 +59,35 @@ class StorePanelLoader(PanelLoader):
         if not files:
             return None
         frames = []
-        for f in files[-(self._panel_days + 5):]:
+        for f in files[-(self._panel_days + 5) :]:
             df = pl.read_parquet(f)
             if df.height == 0:
                 continue
             df = df.with_columns(
-                (pl.col("ts").dt.hour().cast(pl.Int32) * 60 + pl.col("ts").dt.minute().cast(pl.Int32)).alias("m")
+                (pl.col("ts").dt.hour().cast(pl.Int32) * 60 + pl.col("ts").dt.minute().cast(pl.Int32)).alias(
+                    "m"
+                )
             ).filter((pl.col("m") >= 810) & (pl.col("m") < 1200))
             if df.height == 0:
                 continue
             date = os.path.basename(os.path.dirname(f)).split("=")[1]
             frames.append(
-                pl.DataFrame({
-                    "date": [date],
-                    "open": [float(df.sort("m")["open"][0])],
-                    "close": [float(df.sort("m")["close"][-1])],
-                    "dollar_vol": [float((df["close"] * df["volume"]).sum())],
-                })
+                pl.DataFrame(
+                    {
+                        "date": [date],
+                        "open": [float(df.sort("m")["open"][0])],
+                        "close": [float(df.sort("m")["close"][-1])],
+                        "dollar_vol": [float((df["close"] * df["volume"]).sum())],
+                    }
+                )
             )
         return pl.concat(frames) if frames else None
 
     def _all_dailies(self) -> dict[str, pl.DataFrame]:
         out: dict[str, pl.DataFrame] = {}
-        symbols = [os.path.basename(d).split("=")[1] for d in glob.glob(os.path.join(self._root, "symbol=*"))]
+        symbols = [
+            os.path.basename(d).split("=")[1] for d in glob.glob(os.path.join(self._root, "symbol=*"))
+        ]
         for s in symbols:
             d = self._daily(s)
             if d is not None and d.height >= self._panel_days // 2:
@@ -92,10 +103,10 @@ class StorePanelLoader(PanelLoader):
             (s for s in dailies if s != self._market),
             key=lambda s: -float(dailies[s]["dollar_vol"].median()),
         )[: self._top_n]
-        mkt_ret = dailies[self._market]["close"].pct_change().drop_nulls().to_numpy()[-self._panel_days:]
+        mkt_ret = dailies[self._market]["close"].pct_change().drop_nulls().to_numpy()[-self._panel_days :]
         returns_by_name: dict[str, np.ndarray] = {}
         for s in liquid:
-            r = dailies[s]["close"].pct_change().drop_nulls().to_numpy()[-self._panel_days:]
+            r = dailies[s]["close"].pct_change().drop_nulls().to_numpy()[-self._panel_days :]
             if len(r) == len(mkt_ret):
                 returns_by_name[s] = r
         return returns_by_name, mkt_ret
@@ -115,6 +126,10 @@ def main() -> None:
     store = PositionStore(DB_KWARGS)
     model = OvernightBetaModel(beta_window=config.beta_window, quantile=config.quantile)
     panel = StorePanelLoader(STORE_BARS, MARKET_SYMBOL, PANEL_DAYS, UNIVERSE_TOP_N)
+    # publish the (empty) bus-feature contract so the pre-deploy gate sees this strategy as present (B3) —
+    # overnight_beta reads no per-minute bus features, only a daily-return panel from the store.
+    bus = redis.Redis.from_url(os.environ.get("BUS_REDIS_URL", DEFAULT_REDIS_URL))
+    publish_contract(bus, STRATEGY_NAME, STRATEGY_FEATURES)
     strategy = OvernightBetaStrategy(config, trading, store, model, panel)
     strategy.run()
 

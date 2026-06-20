@@ -6,6 +6,7 @@ Each stream is trimmed to a bounded length (approximate MAXLEN) so total Redis m
 regardless of uptime. Publishing is best-effort from the producer's side (see the capture hook): a bus
 outage must never stall or crash the feature pipeline.
 """
+
 from __future__ import annotations
 
 import os
@@ -14,6 +15,7 @@ from collections.abc import Iterable
 import redis
 
 from quantlib.bus.codec import encode
+from quantlib.bus.registry import RedisSchemaBackend, SchemaRegistry, schema_key
 from quantlib.bus.schema import BusSchema, default_schema
 
 DEFAULT_REDIS_URL = os.environ.get("BUS_REDIS_URL", "redis://redis:6379/0")
@@ -40,6 +42,8 @@ class BusPublisher:
         self._schema = schema or default_schema()
         self._maxlen = maxlen
         self._prefix = prefix
+        self._registry = SchemaRegistry(RedisSchemaBackend(self._redis), compiled_schema=self._schema)
+        self._schema_published = False
 
     @property
     def schema(self) -> BusSchema:
@@ -48,7 +52,21 @@ class BusPublisher:
     def ping(self) -> bool:
         return bool(self._redis.ping())
 
+    def ensure_schema_published(self) -> None:
+        """Publish-then-emit (B1): SET + CONFIRM ``bus:schema:<fp>`` BEFORE the first frame of this
+        fingerprint, so no consumer can see a frame whose schema isn't yet resolvable. Guarded by a flag —
+        run once per process (the publisher's schema is fixed for its life), zero steady-state cost."""
+        if self._schema_published:
+            return
+        self._registry.publish(self._schema)
+        if self._redis.get(schema_key(self._schema.fingerprint)) is None:  # confirm the write landed
+            raise RuntimeError(
+                f"failed to confirm bus:schema for fingerprint {self._schema.fingerprint:#018x} before emit"
+            )
+        self._schema_published = True
+
     def publish(self, symbol: str, minute: object, values: object) -> None:
+        self.ensure_schema_published()
         frame = encode(symbol, minute, values, self._schema)  # type: ignore[arg-type]
         self._redis.xadd(
             stream_key(symbol, self._prefix), {FRAME_FIELD: frame}, maxlen=self._maxlen, approximate=True
@@ -56,6 +74,7 @@ class BusPublisher:
 
     def publish_many(self, items: Iterable[tuple[str, object, object]]) -> int:
         """Pipeline a batch of (symbol, minute, values) into one Redis round-trip. Returns the count."""
+        self.ensure_schema_published()
         pipe = self._redis.pipeline(transaction=False)
         count = 0
         for symbol, minute, values in items:

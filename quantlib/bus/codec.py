@@ -15,6 +15,7 @@ Encode accepts either a name->value mapping (missing/unknown names -> NaN / igno
 numpy array (the fast producer path: no per-name lookup). Decode validates magic + fingerprint so a
 schema-mismatched frame fails loudly instead of silently misaligning offsets.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -23,8 +24,10 @@ from collections.abc import Mapping
 
 import numpy as np
 
+from quantlib.bus.registry import SchemaRegistry
 from quantlib.bus.schema import BusSchema
 from quantlib.bus.vector import FeatureVector
+from quantlib.bus.view import FeatureView
 
 MAGIC = b"FVB1"
 _HEADER_FMT = "<4sQqIH"
@@ -92,3 +95,30 @@ def decode(buf: bytes, schema: BusSchema) -> FeatureVector:
     symbol = buf[symbol_start:payload_start].decode("utf-8")
     array = np.frombuffer(buf, dtype="<f8", count=n_features, offset=payload_start)
     return FeatureVector(schema, symbol, _us_to_datetime(minute_us), array, fingerprint)
+
+
+def decode_view(buf: bytes, registry: SchemaRegistry, *, blocking: bool = True) -> FeatureView:
+    """Unpack a frame into a ``FeatureView``, resolving its schema BY FINGERPRINT (resolve-not-reject).
+
+    The fingerprint is no longer required to equal a single compiled schema — the registry resolves the
+    frame's own schema (cached per fingerprint). The magic check and the n_features length guard STAY: a
+    non-``FVB1`` frame is corruption, and a header n_features that disagrees with the resolved schema is a
+    genuine misalignment we must never index past. Per-name alignment is then validated at access time
+    (``FeatureView.value`` / ``to_model_vector`` raise ``MissingFeature``), so the loud-failure property is
+    preserved exactly where it matters and dropped only for a benign superset. ``blocking`` uses the
+    registry's retry-with-backoff (B1) so a not-yet-propagated publish self-heals instead of raising.
+    """
+    magic, fingerprint, minute_us, n_features, symbol_len = struct.unpack_from(_HEADER_FMT, buf, 0)
+    if magic != MAGIC:
+        raise ValueError(f"bad magic {magic!r} (not a feature-vector-bus frame)")
+    schema = registry.resolve_blocking(fingerprint) if blocking else registry.resolve(fingerprint)
+    if n_features != schema.n_features:
+        raise ValueError(
+            f"n_features mismatch: frame={n_features} resolved-schema={schema.n_features} "
+            f"(fingerprint {fingerprint:#018x})"
+        )
+    symbol_start = HEADER_SIZE
+    payload_start = symbol_start + symbol_len
+    symbol = buf[symbol_start:payload_start].decode("utf-8")
+    array = np.frombuffer(buf, dtype="<f8", count=n_features, offset=payload_start)
+    return FeatureView(schema, symbol, _us_to_datetime(minute_us), array, fingerprint)

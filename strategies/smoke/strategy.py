@@ -21,6 +21,7 @@ place NO orders), and market-hours-only.
 Transient bus/broker/db errors must NOT crash the loop: we catch the SPECIFIC client exceptions and
 continue. We never catch bare Exception.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -28,11 +29,10 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from typing import cast
 
 import psycopg
 import redis
-from typing import cast
-
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -40,16 +40,20 @@ from alpaca.trading.models import Clock, Order
 from alpaca.trading.requests import MarketOrderRequest
 
 from quantlib.bus.consumer import BusConsumer
-from quantlib.bus.vector import FeatureVector
+from quantlib.bus.view import FeatureView
 from strategies.lib.model import MockMLModel, Model
 from strategies.smoke.bet_store import BetStore
+from strategies.smoke.contract import (
+    MODEL_FOLD_FEATURES,
+    SAMPLE_FEATURES,
+    STRATEGY_FEATURES,
+    STRATEGY_NAME,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("smoke-strategy")
 
 DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "SPY", "AMD"]
-SAMPLE_FEATURES = ["ret_1m", "volume_zscore_5m"]
-MODEL_FOLD_FEATURES = ["ret_1m", "volume_zscore_5m"]
 COID_PREFIX = "smoke_"
 EXIT_SUFFIX = "_exit"
 ORDER_NOT_FOUND_CODE = 40410000
@@ -194,8 +198,15 @@ class SmokeStrategy:
         self._store = store
         self._model = model if model is not None else MockMLModel(MODEL_FOLD_FEATURES)
         self._last_symbol: str | None = None
-        self._last_vector: FeatureVector | None = None
+        self._last_vector: FeatureView | None = None
         self._last_bet_ts: dt.datetime | None = None
+
+    def publish_contract(self) -> None:
+        """Publish this strategy's declared (name, version) feature contract to the bus so the pre-deploy
+        compat gate sees what is actually running (B3 — a strategy that doesn't publish fails the gate
+        closed)."""
+        self._consumer.publish_contract(STRATEGY_NAME, STRATEGY_FEATURES)
+        logger.info("published feature contract for '%s': %s", STRATEGY_NAME, STRATEGY_FEATURES)
 
     def market_open(self) -> bool:
         """Broker clock — only trade during regular hours; outside, consume + log only."""
@@ -250,7 +261,7 @@ class SmokeStrategy:
 
     def consume_and_sample(self) -> None:
         """Poll the bus and log a sample of real features for the latest vector per symbol."""
-        vectors = self._consumer.poll(block_ms=self._config.loop_block_ms, count=200)
+        vectors = self._consumer.poll_views(block_ms=self._config.loop_block_ms, count=200)
         if not vectors:
             return
         for vector in vectors:
@@ -261,7 +272,10 @@ class SmokeStrategy:
         rendered = " ".join(f"{name}={value:+.5f}" for name, value in samples.items())
         logger.info(
             "SAMPLE %s @ %s | %s (%d vectors this poll)",
-            latest.symbol, latest.minute.isoformat(), rendered, len(vectors),
+            latest.symbol,
+            latest.minute.isoformat(),
+            rendered,
+            len(vectors),
         )
 
     def _model_allows(self) -> bool:
@@ -278,14 +292,18 @@ class SmokeStrategy:
         if prediction.probability <= self._config.model_threshold:
             logger.info(
                 "no bet: model p=%.3f <= threshold %.3f (%s %s)",
-                prediction.probability, self._config.model_threshold,
-                prediction.symbol, prediction.model,
+                prediction.probability,
+                self._config.model_threshold,
+                prediction.symbol,
+                prediction.model,
             )
             return False
         logger.info(
             "model OK: p=%.3f > threshold %.3f (%s %s)",
-            prediction.probability, self._config.model_threshold,
-            prediction.symbol, prediction.model,
+            prediction.probability,
+            self._config.model_threshold,
+            prediction.symbol,
+            prediction.model,
         )
         return True
 
@@ -327,7 +345,11 @@ class SmokeStrategy:
         self._last_bet_ts = now
         logger.info(
             "BET placed: BUY $%.2f notional %s coid=%s broker_id=%s hold=%ds",
-            notional, symbol, coid, str(order.id), self._config.hold_sec,
+            notional,
+            symbol,
+            coid,
+            str(order.id),
+            self._config.hold_sec,
         )
 
     def manage_open_bets(self) -> None:
@@ -404,7 +426,9 @@ class SmokeStrategy:
         new_coid = exit_coid_for(entry_order_id, retry)
         logger.warning(
             "CLOSE exit %s not found at broker; re-submitting fresh exit %s for %s",
-            previous_exit, new_coid, symbol,
+            previous_exit,
+            new_coid,
+            symbol,
         )
         self._store.update_exit_coid(entry_order_id, new_coid)
         bet["exit_order_id"] = new_coid
@@ -445,7 +469,11 @@ class SmokeStrategy:
         self._store.record_close(entry_order_id, exit_ts, exit_price, realized)
         logger.info(
             "BET closed: %s entry=%.4f exit=%.4f qty=%g pnl=%+.4f",
-            symbol, entry_price_value, exit_price, qty, realized,
+            symbol,
+            entry_price_value,
+            exit_price,
+            qty,
+            realized,
         )
 
     def cycle(self) -> None:
@@ -458,10 +486,17 @@ class SmokeStrategy:
         logger.info(
             "smoke strategy starting: symbols=%s enabled=%s interval=%ds notional=$%.0f hold=%ds "
             "caps[concurrent=%d total_notional=$%.0f] model[use=%s threshold=%.2f]",
-            self._config.symbols, self._config.enabled, self._config.bet_interval_sec,
-            self._config.notional_usd, self._config.hold_sec, self._config.max_concurrent,
-            self._config.max_total_notional_usd, self._config.use_model, self._config.model_threshold,
+            self._config.symbols,
+            self._config.enabled,
+            self._config.bet_interval_sec,
+            self._config.notional_usd,
+            self._config.hold_sec,
+            self._config.max_concurrent,
+            self._config.max_total_notional_usd,
+            self._config.use_model,
+            self._config.model_threshold,
         )
+        self.publish_contract()
         self.reconcile_on_startup()
         while True:
             try:
