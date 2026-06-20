@@ -39,8 +39,19 @@ from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_
 _USE_RUST_ASSEMBLE = bool(os.environ.get("FP_RUST_ASSEMBLE")) and os.environ.get("FP_RUST_ASSEMBLE") != "0"
 
 # Statistic codes shared with the Rust ``assemble_canonical`` kernel (kind byte). The OLS codes' order
-# (slope, corr, r2, mean_y) matches the kernel's 3..=6 arm.
-_STAT_CODE = {"sum": 0, "mean": 1, "std": 2, "slope": 3, "corr": 4, "r2": 5, "mean_y": 6}
+# (slope, corr, r2, mean_y) matches the kernel's 3..=6 arm; ``resid_std`` (7) is the OLS residual-std
+# stat the kernel's 7 arm computes.
+_STAT_CODE = {"sum": 0, "mean": 1, "std": 2, "slope": 3, "corr": 4, "r2": 5, "mean_y": 6, "resid_std": 7}
+
+# OLS residual-std (``resid_std``) degenerate guards — the residual_analysis group's two thresholds, baked
+# into the shared stat so backfill/live-batch/incremental compute them identically (the §7 Lever-2 move that
+# folds residual_analysis onto the reduction fast path). ``MIN_POINTS`` = the minimum paired count for a
+# meaningful residual distribution; ``REL_RESID_FLOOR`` = a relative residual-spread cutoff (a near-perfectly
+# linear window's residual variance collapses to f32 noise of the price level — a meaningless ~1e-6%% reading
+# whose low bits are accumulation-order-sensitive, so gate on resid_std exceeding this fraction of mean price
+# to make the value well-defined and identical on every path). These mirror residual_analysis's old constants.
+_RESID_MIN_POINTS = 4.0
+_RESID_REL_FLOOR = 1e-6
 
 # Relative floor on each OLS variance numerator (``denom_x = b*Σx² − (Σx)²`` for slope/corr/r2's defined-guard,
 # ``denom_y = b*Σy² − (Σy)²`` for corr/r2) — the SIGN-at-threshold trap from #122/#131. On a near-flat
@@ -87,7 +98,7 @@ def pt_(name: str) -> pl.Expr:
 
 
 # OLS (regression) accessors — used inside assemble() to reference a regression's canonical stat columns.
-OLS_STATS = ("slope", "corr", "r2", "mean_y")
+OLS_STATS = ("slope", "corr", "r2", "mean_y", "resid_std")
 
 
 def slope_(name: str, w: int) -> pl.Expr:
@@ -104,6 +115,10 @@ def r2_(name: str, w: int) -> pl.Expr:
 
 def mean_y_(name: str, w: int) -> pl.Expr:
     return pl.col(f"__mean_y_{name}_{w}")
+
+
+def resid_std_(name: str, w: int) -> pl.Expr:
+    return pl.col(f"__resid_std_{name}_{w}")
 
 
 def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[str, pl.Expr]:
@@ -128,6 +143,20 @@ def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[st
         out["r2"] = pl.when(perfect).then(pl.lit(1.0)).otherwise(r2)
     if "mean_y" in stats:
         out["mean_y"] = pl.when(b > 0).then(sy / b).otherwise(None)
+    if "resid_std" in stats:
+        # OLS residual std (percent of mean y) from the SAME six sums — the exact centered-sum algebra the
+        # hand-written residual_analysis used (Σ.._c = Σ.. − Σa·Σb/n), so the difference-of-sums rounds
+        # identically. Σr² = syy_c − slope·sxy_c (clipped ≥0); resid_var = Σr²/n; std% = √resid_var/ȳ·100.
+        sxx_c = sxx - sx * sx / b
+        sxy_c = sxy - sx * sy / b
+        syy_c = syy - sy * sy / b
+        slope_r = sxy_c / sxx_c
+        ssr = (syy_c - slope_r * sxy_c).clip(lower_bound=0.0)
+        mean_y = sy / b
+        resid_var = ssr / b
+        resid_floor = (_RESID_REL_FLOOR * mean_y).pow(2)
+        resid_defined = (b >= _RESID_MIN_POINTS) & (sxx_c > 0.0) & (resid_var > resid_floor)
+        out["resid_std"] = pl.when(resid_defined).then(resid_var.sqrt() / mean_y * 100.0).otherwise(None)
     return out
 
 
@@ -201,10 +230,11 @@ class ReductionGroup(FeatureGroup):
         and therefore does NOT call ``prepare``. Default: identity (no extra columns)."""
         return frame
 
-    @abstractmethod
     def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
         """{column_name: (expr_over_input, stats, windows)} — the value to reduce, which stats each needs
-        ("mean"|"std"|"sum"), and the windows (in minutes) for that column (each column may differ)."""
+        ("mean"|"std"|"sum"), and the windows (in minutes) for that column (each column may differ). Default
+        none — a regression-ONLY group (e.g. residual_analysis) declares just ``regressions()``."""
+        return {}
 
     def points(self) -> dict[str, pl.Expr]:
         """{name: expr_over_input} — at-T scalar columns referenced via pt_() in assemble(). Default none."""
@@ -731,6 +761,23 @@ def _ols_stat_numpy(
         out["r2"] = np.where(perfect, 1.0, r2)
     if "mean_y" in stats:
         out["mean_y"] = np.where(b > 0, np.divide(sy, b, out=np.zeros_like(sy), where=b > 0), np.nan)
+    if "resid_std" in stats:
+        # numpy twin of _ols_stat_exprs' resid_std — the exact centered-sum residual-std algebra; np.nan==null.
+        safe_b = np.where(b > 0, b, 1.0)
+        sxx_c = sxx - sx * sx / safe_b
+        sxy_c = sxy - sx * sy / safe_b
+        syy_c = syy - sy * sy / safe_b
+        nonflat = sxx_c > 0.0
+        slope_r = np.divide(sxy_c, sxx_c, out=np.zeros_like(sxy_c), where=nonflat)
+        ssr = np.clip(syy_c - slope_r * sxy_c, 0.0, None)
+        mean_y = np.divide(sy, safe_b, out=np.zeros_like(sy), where=b > 0)
+        resid_var = ssr / safe_b
+        resid_floor = (_RESID_REL_FLOOR * mean_y) ** 2
+        resid_defined = (b >= _RESID_MIN_POINTS) & nonflat & (resid_var > resid_floor)
+        std_pct = np.divide(
+            np.sqrt(resid_var), mean_y, out=np.zeros_like(resid_var), where=resid_defined
+        ) * 100.0
+        out["resid_std"] = np.where(resid_defined, std_pct, np.nan)
     return out
 
 
