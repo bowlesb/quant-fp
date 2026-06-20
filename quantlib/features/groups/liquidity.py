@@ -80,12 +80,20 @@ class LiquidityGroup(ReductionGroup):
 
     def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
         dollar = pl.col("close") * pl.col("volume")
-        abs_ret = (pl.col("close") / _prev_close() - 1.0).abs()
+        # Amihud = |return| / dollar-volume is UNDEFINED on a no-trade minute (dollar == 0): the ratio
+        # overflows to +Inf, which is never a valid illiquidity value and POISONS the trailing-window mean
+        # (one zero-volume minute makes amihud +Inf for the whole window). It also breaks live-vs-backfill
+        # parity: the incremental running-sum does Inf − Inf = NaN when that minute ages out, so the stream
+        # path emits NaN where backfill recovers a finite value. Emit NULL (mathematically-undefined) on a
+        # non-positive dollar-volume minute so it is EXCLUDED from the rolling mean on BOTH paths.
+        amihud = pl.when(dollar > 0.0).then((pl.col("close") / _prev_close() - 1.0).abs() / dollar).otherwise(
+            pl.lit(None, dtype=pl.Float64)
+        )
         both = _dp().is_not_null() & _dp_lag().is_not_null()
         dp_z = pl.when(both).then(_dp()).otherwise(0.0)
         dpl_z = pl.when(both).then(_dp_lag()).otherwise(0.0)
         return {
-            "amihud": (abs_ret / dollar, ("mean",), WINDOWS),
+            "amihud": (amihud, ("mean",), WINDOWS),
             "pair": (both.cast(pl.Float64), ("sum",), WINDOWS),
             "dpz": (dp_z, ("sum",), WINDOWS),
             "dplz": (dpl_z, ("sum",), WINDOWS),
