@@ -29,9 +29,117 @@ from quantlib.features.groups.liquidity import LiquidityGroup
 from quantlib.features.groups.price_levels import PriceLevelGroup
 from quantlib.features.groups.price_returns import PriceReturnGroup
 from quantlib.features.incremental import IncrementalEngine
-from quantlib.features.stateful import ExtremaSpec, ExtremaState, StatefulEngine
+from quantlib.features.stateful import (
+    CumulativeSpec,
+    CumulativeState,
+    ExtremaSpec,
+    ExtremaState,
+    StatefulEngine,
+)
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
+
+
+def _two_session_stream(n_sym: int = 6, n_min: int = 30, seed: int = 5) -> pl.DataFrame:
+    """A 2-trading-session OHLCV stream (sessions one day apart, both at 13:30 UTC = 09:30 ET) so the
+    session-cumulative reset is exercised; a third of symbols skip random minutes (sparse, to exercise the
+    absent-bar / absent-at-T arm)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for day in (dt.date(2026, 6, 15), dt.date(2026, 6, 16)):
+        start = dt.datetime(day.year, day.month, day.day, 13, 30, tzinfo=dt.timezone.utc)
+        price = {s: 50.0 + s * 7 for s in range(n_sym)}
+        for mi in range(n_min):
+            minute = start + dt.timedelta(minutes=mi)
+            for s in range(n_sym):
+                if s % 3 == 1 and rng.random() < 0.35:  # sparse symbols skip ~35% of minutes
+                    continue
+                price[s] *= 1.0 + rng.standard_normal() * 0.004
+                close = price[s]
+                high = close * (1.0 + abs(rng.standard_normal()) * 0.002)
+                low = close * (1.0 - abs(rng.standard_normal()) * 0.002)
+                opn = close * (1.0 + rng.standard_normal() * 0.001)
+                vol = 1e5 + rng.random() * 4e6
+                rows.append(
+                    {"symbol": f"S{s}", "minute": minute, "open": opn, "high": high, "low": low,
+                     "close": close, "volume": vol, "sdate": day}
+                )
+    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))).sort(
+        ["symbol", "minute"]
+    )
+
+
+def test_cumulative_state_fold_equals_reseed_and_matches_session_groupby() -> None:
+    """⭐ P3 KIND invariant for the session-cumulative kind (docs/P3_RUST_RESIDENT_FOLD.md): the running
+    cum-max / cum-min / cum-sum / first at the latest minute equals the batch per-(symbol, ET-session)
+    ``group_by`` aggregate (the oracle = what runner/dumper/gap_fill's compute computes), AND folding one
+    minute == re-seeding with it appended, cell-for-cell — including across the SESSION RESET boundary and
+    for SPARSE symbols (absent bars do not fold)."""
+    stream = _two_session_stream()
+    symbols = sorted(stream["symbol"].unique().to_list())
+    specs = [
+        CumulativeSpec(alias="run_high", source="high", reduce="max"),
+        CumulativeSpec(alias="run_low", source="low", reduce="min"),
+        CumulativeSpec(alias="run_dollar", source="_dvol", reduce="sum"),
+        CumulativeSpec(alias="sess_open", source="open", reduce="first"),
+    ]
+    stream = stream.with_columns((pl.col("close") * pl.col("volume")).alias("_dvol"))
+    minutes = sorted(stream["minute"].unique())
+
+    def sources_at(minute: dt.datetime) -> tuple[list[object], dict[str, np.ndarray]]:
+        # symbol-aligned to ``symbols`` (NaN / None where the symbol is absent this minute)
+        row = stream.filter(pl.col("minute") == minute)
+        present = {r["symbol"]: r for r in row.iter_rows(named=True)}
+        sdates: list[object] = [present[s]["sdate"] if s in present else None for s in symbols]
+        cols: dict[str, np.ndarray] = {}
+        for col in ("high", "low", "_dvol", "open"):
+            cols[col] = np.array(
+                [present[s][col] if s in present else np.nan for s in symbols], dtype=np.float64
+            )
+        return sdates, cols
+
+    def fold_through(upto: int) -> CumulativeState:
+        state = CumulativeState(symbols, specs)
+        for minute in minutes[: upto + 1]:
+            sdates, cols = sources_at(minute)
+            state.fold(int(minute.timestamp()), sdates, cols)
+        return state
+
+    # ORACLE: the batch per-(symbol, sdate) group_by aggregate, at the latest minute's session.
+    latest = minutes[-1]
+    latest_sdate = stream.filter(pl.col("minute") == latest)["sdate"][0]
+    session_rows = stream.filter(pl.col("sdate") == latest_sdate)
+    oracle = (
+        session_rows.sort(["symbol", "minute"])
+        .group_by("symbol", maintain_order=True)
+        .agg(
+            pl.col("high").max().alias("run_high"),
+            pl.col("low").min().alias("run_low"),
+            pl.col("_dvol").sum().alias("run_dollar"),
+            pl.col("open").first().alias("sess_open"),
+        )
+    )
+    oracle_map = {r["symbol"]: r for r in oracle.iter_rows(named=True)}
+    final = fold_through(len(minutes) - 1)
+    for spec in specs:
+        got = final.value(spec.alias)
+        for si, sym in enumerate(symbols):
+            want = oracle_map[sym][spec.alias] if sym in oracle_map else None
+            if want is None:
+                assert np.isnan(got[si]), f"{spec.alias} {sym}: expected NaN, got {got[si]}"
+            else:
+                assert abs(got[si] - want) <= 1e-9 * (1 + abs(want)), f"{spec.alias} {sym}: {got[si]} vs {want}"
+
+    # fold == reseed at every minute boundary (incl the session-reset minute)
+    for ti in range(1, len(minutes)):
+        appended = fold_through(ti)
+        incremental = fold_through(ti - 1)
+        sdates, cols = sources_at(minutes[ti])
+        incremental.fold(int(minutes[ti].timestamp()), sdates, cols)
+        for spec in specs:
+            assert np.allclose(
+                appended.value(spec.alias), incremental.value(spec.alias), rtol=1e-12, atol=1e-12, equal_nan=True
+            ), f"{spec.alias} @min{ti}"
 
 
 def _stream(n_sym: int = 8, n_min: int = 90, seed: int = 13) -> pl.DataFrame:
