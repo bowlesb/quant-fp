@@ -47,18 +47,23 @@ BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
 # count and cross-product running sums round across the corr defined-guard differently from the batch fresh sum
 # when the paired series collapse on a sparse window. ``price_volume`` reverts to gated (was #155 True): its
 # ``pv_correlation`` regresses return on RAW share volume and breaches BEYOND the b==2 perfect-fit corner the
-# n==2 guard closed (77x tolerance + 6 null mismatches in the sweep). The shared centered-denom kernel
-# (fingerprint-affecting, Lead-coordinated) is the queued follow-up to widen incremental coverage here.
+# n==2 guard closed (77x tolerance + 6 null mismatches in the sweep). ``market_beta`` regresses each symbol's
+# return on SPY's broadcast return; on a gappy symbol the few paired bars give a near-constant SPY-return x, so
+# the corr denominator collapses the SAME way — the real-06-18 A/B (test_market_beta_breaches_on_real_gappy_
+# spy_regressor) flagged market_corr_*=±1 / idio_vol_*=0 where batch NULLs on MO/SLB. The shared centered-denom
+# kernel (fingerprint-affecting, Lead-coordinated) is the queued follow-up to widen incremental coverage here.
 #
-# NOT gated (verified parity-clean on the SAME adversarial sweep, worst < 6e-4x tolerance, no null mismatch):
-# market_beta, distribution, volatility — their std/market-return-regressor algebra does NOT collapse the way
-# the correlation-of-two-sparse-series groups do. The task's draft gate list named these three; the empirical
-# engine-vs-batch sweep does not support gating them, so they stay on the incremental fast path.
+# NOT gated (verified parity-clean on the real-06-18 gappy A/B, no null mismatch, worst < 4e-4x tolerance):
+# distribution, volatility — their power-sum-moment / std algebra does NOT collapse the way the correlation-of-
+# two-sparse-series groups do. The task's draft gate list also named market_beta with these; the SYNTHETIC
+# gappy sweep cleared all three, but the REAL-DATA A/B reconciliation showed market_beta breaches (the synthetic
+# had no SPY regressor so its corr-denom was never exercised) while distribution/volatility stayed clean.
 INCREMENTAL_UNSAFE = {
     "volume",
     "return_dynamics",
     "volume_leads_price",
     "price_volume",
+    "market_beta",
 }
 # Genuinely safe sum-ratio / time-axis-OLS groups that ride the incremental fast path. trend_quality and
 # clean_momentum regress close on a CENTERED TIME axis (x always spreads with the minutes, never collapses on a
@@ -415,6 +420,75 @@ def test_gappy_denom_group_breaches_raw_so_gate_is_load_bearing(group_name: str)
     assert breached, (
         f"{group_name} expected to breach engine-vs-batch on a gappy near-constant-return walk "
         "(the gappy-denom conditioning the incremental_safe=False gate guards against)"
+    )
+
+
+def _gappy_market_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -> list[list[dict]]:
+    """A gappy walk WITH a dense ``SPY`` market symbol — the regime ``market_beta`` regresses over and the only
+    one that exercises its SPY-broadcast corr denominator. SPY prints every minute (so ``_mret`` is non-null);
+    the satellite symbols are SPARSE (skip most minutes) and drift at a ~fixed tiny rate, so over a trailing
+    window a satellite's few paired (SPY-return, own-return) bars collapse to a near-constant SPY-return x —
+    denom_x/denom_y = b·Σx²−(Σx)² becomes a difference of float-noise, and incremental's running sum rounds it
+    across the corr defined-guard differently from the batch fresh sum (market_corr/idio_vol null-vs-finite).
+
+    This is the gap the smooth ``_gappy_corr_minutes`` walk could NOT exercise: it carries no SPY symbol, so
+    ``market_beta``'s ``_mret`` is all-null and the SPY-regressor denom is never hit — which is exactly why the
+    SYNTHETIC sweep cleared market_beta while the real-06-18 A/B (dense SPY + gappy MO/SLB) breached it."""
+    rng = np.random.default_rng(seed)
+    price = {s: 100.0 + s for s in range(n_sym)}
+    spy = 400.0
+    out: list[list[dict]] = []
+    for mi in range(n_min):
+        minute_iso = (BASE + dt.timedelta(minutes=mi)).isoformat()
+        spy *= 1.0 + 1e-3 + rng.standard_normal() * 1e-9  # ~constant SPY return -> the broadcast x collapses
+        bars: list[dict] = [{"S": "SPY", "o": spy, "c": spy, "h": spy * 1.0001, "l": spy * 0.9999,
+                             "v": 1_000_000.0, "t": minute_iso}]
+        for s in range(n_sym):
+            if not (mi == 0 or rng.random() < present_p):
+                continue
+            price[s] *= 1.0 + 1e-3 + rng.standard_normal() * 1e-9
+            c = price[s]
+            bars.append({"S": f"S{s}", "o": c, "c": c, "h": c * 1.0001, "l": c * 0.9999,
+                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+        out.append(bars)
+    return out
+
+
+def test_market_beta_breaches_on_real_gappy_spy_regressor() -> None:
+    """``market_beta``'s ``incremental_safe = False`` is LOAD-BEARING and is the case the SYNTHETIC gappy sweep
+    MISSED: feeding a gappy walk WITH a dense SPY regressor through batch vs IncrementalEngine, the SPY-broadcast
+    corr denominator collapses on a sparse satellite symbol and the engine emits market_corr=±1 / idio_vol=0
+    where batch NULLs — a real null/non-null divergence (reproduced on real 06-18 bars for MO/SLB). The earlier
+    smooth ``_gappy_corr_minutes`` walk carried no SPY symbol, so it could not surface this; this test is the
+    regression that catches it where the synthetic could not. Comparing the engine DIRECTLY against the batch
+    (no gate) must breach, which is exactly WHY the group is routed to batch live."""
+    group = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == "market_beta"]
+    assert group, "market_beta missing from registry"
+    assert not group[0].incremental_safe, "market_beta must be incremental_safe=False"
+    breached = False
+    for seed in (7, 17, 29):
+        walk = _gappy_market_minutes(n_sym=12, n_min=70, present_p=0.45, seed=seed)
+        ring = MinuteRing(maxlen=120)
+        engine: IncrementalEngine | None = None
+        for bars in walk:
+            ring.push(_bars_to_frame(bars))
+            frame = ring.materialize()
+            ctx = BatchContext(frames={"minute_agg": frame})
+            batch = compute_reduction_batch(group, ctx)
+            if engine is None:
+                engine = IncrementalEngine(group)
+            inc = engine.step(frame, slice_derive=True)
+            try:
+                if _worst_tol_ratio(batch, inc) > _PARITY_BREACH_RATIO:
+                    breached = True
+            except AssertionError:  # null/non-null mismatch -> the corr-denom straddle
+                breached = True
+        if breached:
+            break
+    assert breached, (
+        "market_beta expected to breach engine-vs-batch on a gappy walk with a dense SPY regressor "
+        "(the SPY-broadcast corr-denom conditioning the incremental_safe=False gate guards against — "
+        "the case the smooth no-SPY synthetic sweep missed)"
     )
 
 
