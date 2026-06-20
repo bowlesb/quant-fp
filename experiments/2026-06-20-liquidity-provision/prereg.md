@@ -16,30 +16,40 @@ possible for the first time — the exact data we lacked when I DEFERRED this av
 ## ⚠️ THE FILL MODEL IS THE WHOLE EXPERIMENT — frozen, falsifiable spec (written as an EXACT rule)
 
 A naive LP backtest assumes "I post at the bid, I get filled, I earn the spread" — FANTASY. The exact rule
-below is FROZEN before any P&L is computed. NO bar-only fill assumptions anywhere — every fill decision is
-off the tick NBBO quote stream.
+below is FROZEN before any P&L is computed. Fills are constructed off REAL TRADE PRINTS (not inferred
+displayed-size decay) — no bar-only fill assumptions anywhere.
 
-### EXACT FILL RULE (the simulation, step by step)
-We replay each name's tick quote stream `{t_k: bid_k, bidsz_k, ask_k, asksz_k}`. We continuously post a
-passive BUY at the prevailing best bid `B` (and symmetrically a SELL at the best ask `A`); consider the BUY
-leg (the SELL is the mirror):
-1. **Post** at price `B` at tick `k`, joining the BACK of the FIFO queue → queue-ahead `Q0 = bidsz_k`
-   (the displayed size already resting at `B`).
-2. **A fill event requires the touch to come to us.** Walk forward tick by tick. Our resting BUY at `B`
-   gets trade-through only when the best bid DROPS to `<= B` later — operationally, the first tick `j>k`
-   where `bid_j <= B` AND the level `B` is being consumed. Since we lack the trade-print tape joined yet,
-   the pre-committed conservative PROXY for "size traded through our level" in the interval is the DECREASE
-   in displayed size at our price plus the size that disappeared when the bid ticked down through `B`:
-   `consumed = max(0, Q0 - bidsz_at_B_now) + (bidsz_when_bid_breaks_below_B)`. This is the size that left
-   the `B` level — an upper bound on what traded, so it OVER-states our fill chance (conservative AGAINST a
-   null, i.e. it can't manufacture a fake null; if anything it's generous to LP, and we still expect LP to
-   lose — making a null robust).
-3. **Queue-position fill fraction (frozen):** `fill_frac = clip( (consumed - Q0) / OUR_SIZE , 0, 1 )` for
-   back-of-queue (we fill only AFTER the `Q0` ahead of us is consumed); a mid-queue sensitivity uses
-   `(consumed - Q0/2)`. **Verdict uses BACK-OF-QUEUE.** `OUR_SIZE` is pinned per the capacity section.
-4. **Fill price = `B`** (we earn `mid - B` = the half-spread at fill vs the contemporaneous mid). If the
-   bid never reaches us within a max-resting horizon `R` (frozen `R = 30 min`), the order is CANCELLED —
-   no fill, no P&L, capital idle (we record the idle time = the opportunity cost / capacity drag).
+### FEED NATURE (small ask #2 — stated up front, bounds the queue realism)
+The quote stream is the **consolidated SIP NBBO** (Alpaca's SIP-sourced data — verified: each tick names the
+posting exchange, 15 distinct bid/ask exchange codes, tape C). So `bidsz`/`asksz` is the AGGREGATE displayed
+size at the national best bid/offer across venues, not a single book. Consequence for the queue model: we
+place ourselves at the NBBO touch and reason about aggregate FIFO, but we do NOT see our position within any
+one venue's book — so the back-of-queue FIFO is an approximation against the aggregate touch size, NOT a
+literal single-venue queue. Stated so the reader knows how literally to take the queue fraction (we lean
+pessimistic precisely because aggregate-FIFO cannot model how far back a real order sits in a specific venue).
+
+### EXACT FILL RULE — off REAL TRADE PRINTS (the required hardening, frozen)
+We replay each name's tick quote stream `{t_k: bid_k, bidsz_k, ask_k, asksz_k}` JOINED to the **real trade
+tape** `{ts, price, size}` (379d / complete breadth / SAME 2024-12-12→2026-06-18 window as quotes — verified
+present, 7,688 names). We continuously post a passive BUY at the prevailing best bid `B` (SELL at best ask
+`A` mirrors); the BUY leg:
+1. **Post** at price `B` at tick `k` → queue-ahead `Q0 = bidsz_k` (aggregate displayed size at `B`).
+2. **A fill requires a REAL TRADE PRINT at/through our level.** Walk forward; our resting BUY at `B` accrues
+   `traded_through = Σ size` of every trade print with `price <= B` that occurs while the NBBO bid is still
+   at/above `B` (a sell-initiated execution hitting our price). This is the ACTUAL executed size + the ACTUAL
+   fill TIMING (the print `ts`) — NOT displayed-size decay. **This removes the cancel/trade confound:** a
+   cancellation shrinks `bidsz` but generates NO print, so it never triggers or mis-times a fill. (The
+   earlier displayed-decay proxy is REJECTED per the design audit — decay conflates cancels, which DOMINATE
+   on lit quotes, with trades, and can manufacture a FALSE-POSITIVE median because a phantom cancel-"fill"
+   carries a non-trade markout the median gate cannot catch. Prints only.)
+3. **Queue-position fill fraction (frozen):** `fill_frac = clip( (traded_through − Q0) / OUR_SIZE , 0, 1 )`
+   for back-of-queue (we fill only the residual after the `Q0` of real prints ahead of us execute); a
+   mid-queue sensitivity uses `(traded_through − Q0/2)`. **Verdict uses BACK-OF-QUEUE.** `OUR_SIZE` per the
+   capacity section. The fill TIME = the print `ts` at which cumulative `traded_through` crosses `Q0` (real
+   timing, from prints).
+4. **Fill price = `B`** → earn `(mid − B)/mid` = the half-spread vs the contemporaneous mid at the fill
+   print. If `traded_through` never exceeds `Q0` within a max-resting horizon `R` (frozen `R = 30 min`),
+   CANCEL — no fill, no P&L, idle time recorded (opportunity cost / capacity drag).
 
 ### (B) ADVERSE SELECTION — calibrated to OBSERVED post-fill drift, NOT a free parameter
 The adverse-selection cost is NOT a tunable haircut — it is MEASURED from the tape: for every simulated
@@ -70,6 +80,13 @@ matter. Pre-registered reporting, per name:
   `OUR_SIZE` ≤ the displayed depth (we don't move the market). Names failing either are reported as
   "no capacity" not "no edge." Expectation: only the tightest, deepest mega-caps even qualify — and those
   have the SMALLEST spread to earn (the capacity/edge tension is itself the finding).
+- **FILL-RATE SANITY CHECK (small ask #1 — a phantom-fill diagnostic):** report per name our simulated
+  filled SHARES/day as a fraction of the name's ACTUAL total traded volume/day. A real LP at $10k/quote on a
+  mega-cap should capture a SMALL fraction of daily volume; if the sim fills materially more than realistic
+  participation (e.g. > a few % of daily volume), that is the phantom-fill problem surfacing (we'd be
+  "filling" more than the tape supports) — a visible red-flag diagnostic, reported alongside the verdict,
+  not buried. With the trade-print join this should be self-limiting (we can't fill more than printed), but
+  it is reported as the explicit check that the join is doing its job.
 
 ## HYPOTHESES (pre-registered — 2)
 
@@ -119,10 +136,17 @@ universe, under back-of-queue fills + observed-markout adverse selection + takin
 - **NON-ROBUST** (reported, not promoted) iff a positive median appears ONLY at an optimistic fill/queue
   setting (mid-queue, passive exit), or ONLY on names below the capacity floor, or ONLY in one OOS half.
 
-## RUN PLAN (gated on the Lead's read of THIS pre-reg)
-Build (`build_fills.py`) replays the per-name quote stream → simulates two-sided (H1) / conditional (H2)
-quoting under the fill model, emitting a per-fill ledger (fill ts, side, price, displayed size, post-fill
-adverse mid path, exit). Screen (`screen.py`) = the net-per-fill median gate + shuffle + OOS + FDR. Reuses
-the #205/#212 host-mounted resumable cache + chunked-subprocess infra (the quote replay is heavier than the
-bar build, so chunking by name/day is essential). Research-only: NO quantlib / NO fingerprint; READ-ONLY
-stores; bounded NAMED `--rm` sandboxes (kill by ID). I send the Lead this pre-reg for read BEFORE building.
+## RUN PLAN (gated on the Lead's read of THIS AMENDED pre-reg)
+Build (`build_fills.py`) JOINS the per-name quote stream to the real trade tape (both 379d, same window) →
+simulates two-sided (H1) / conditional (H2) quoting under the trade-print fill rule, emitting a per-fill
+ledger (fill ts from the print, side, price, Q0 displayed size, traded_through, post-fill adverse mid path,
+exit). Screen (`screen.py`) = the net-per-fill MEDIAN gate + shuffle + OOS + FDR + the fill-rate-vs-volume
+sanity diagnostic. Reuses the #205/#212 host-mounted resumable cache + chunked-subprocess infra (the
+quote+trade replay is heavier than the bar build → chunk by name/day is essential). Research-only: NO
+quantlib / NO fingerprint; READ-ONLY stores; bounded NAMED `--rm` sandboxes (kill by ID).
+
+**FALLBACK (only if the trade↔quote ts alignment proves harder than expected mid-build):** run the
+displayed-decay proxy BUT (a) label any positive median PROVISIONAL + non-promotable until the trade-print
+rejoin, and (b) report the cancel/trade ambiguity as a first-class FALSE-POSITIVE caveat (NOT as
+conservatism). The real print join is strongly preferred and is the plan; the tape is verified present so I
+expect the join to land cleanly.
