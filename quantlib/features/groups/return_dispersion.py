@@ -29,6 +29,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
     lagged,
 )
 from quantlib.features.registry import register
@@ -51,6 +52,10 @@ class ReturnDispersionGroup(FeatureGroup):
         InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),
         InputSpec(name="daily", columns=("symbol", "date", "close")),
     )
+    # Per-session cache of the DAILY-horizon returns keyed by the daily-snapshot content token. The daily
+    # snapshot is fixed all day, so its per-(symbol, date) daily returns are identical every minute — the
+    # intraday half (_minute_returns) still recomputes per minute. Mirrors multi_day / daily_beta.
+    _daily_cache: tuple[tuple[int, int, object, float], pl.DataFrame] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         specs: list[FeatureSpec] = []
@@ -108,11 +113,18 @@ class ReturnDispersionGroup(FeatureGroup):
         ).select(["symbol", "minute", *[f"_ret_{_tag(w, False)}" for w in MINUTE_WINDOWS]])
 
     def _daily_returns(self, ctx: BatchContext) -> pl.DataFrame:
-        daily = ctx.frame("daily").select(["symbol", "date", "close"]).sort(["symbol", "date"])
+        source = ctx.frame("daily")
+        token = daily_snapshot_token(source)
+        cached = self._daily_cache
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
-        return daily.with_columns(
+        result = daily.with_columns(
             [(pl.col("_asof") / pl.col("_asof").shift(w).over("symbol") - 1.0).alias(f"_ret_{_tag(w, True)}") for w in DAY_WINDOWS]
         ).select(["symbol", "date", *[f"_ret_{_tag(w, True)}" for w in DAY_WINDOWS]])
+        self._daily_cache = (token, result)
+        return result
 
     def _market_by_minute(self, returns: pl.DataFrame, tags: list[str]) -> pl.DataFrame:
         """The GATHER: per minute, the std + IQR of the universe's returns over each tag (nulls auto-excluded
