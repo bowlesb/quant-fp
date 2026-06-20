@@ -19,6 +19,7 @@ Safety (all enforced before any order): kill switch (``OBETA_ENABLED=0`` default
 NOTHING), market-hours gating, max names per leg, max total gross notional, paper-only. Transient
 bus/broker/db errors are caught specifically; bare ``except`` is never used.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -32,11 +33,15 @@ import numpy as np
 import psycopg
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide
 from alpaca.trading.models import Clock, Order
-from alpaca.trading.requests import MarketOrderRequest
 
+from quantlib.strategy_core.execution import Fill, OrderState
+from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
+from quantlib.strategy_core.production_execution import ProductionOrderIntent, make_client_order_id
+from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.overnight_beta_model import OvernightBetaModel
+from strategies.overnight_beta.contract import STRATEGY_NAME
 from strategies.overnight_beta.position_store import PositionStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -54,12 +59,12 @@ COID_PREFIX = "obeta_"
 class OvernightBetaConfig:
     """Runtime config + risk caps, env-driven (fail-safe defaults). PAPER ONLY."""
 
-    notional_usd: float            # $ per leg-name (dollar-neutral)
+    notional_usd: float  # $ per leg-name (dollar-neutral)
     max_names_per_leg: int
     max_gross_notional_usd: float
-    rebalance_days: int            # rebalance the beta quintiles every N trading days (~21 = monthly)
-    beta_window: int               # trailing days for the beta OLS (60 = certified)
-    quantile: float                # leg fraction (0.2 = quintile, certified)
+    rebalance_days: int  # rebalance the beta quintiles every N trading days (~21 = monthly)
+    beta_window: int  # trailing days for the beta OLS (60 = certified)
+    quantile: float  # leg fraction (0.2 = quintile, certified)
     enabled: bool
     exclude: tuple[str, ...]
     loop_sleep_sec: int
@@ -67,7 +72,9 @@ class OvernightBetaConfig:
     @classmethod
     def from_env(cls) -> OvernightBetaConfig:
         exclude_env = os.environ.get("OBETA_EXCLUDE", "").strip()
-        exclude = tuple(s.strip().upper() for s in exclude_env.split(",") if s.strip()) or tuple(DEFAULT_EXCLUDE)
+        exclude = tuple(s.strip().upper() for s in exclude_env.split(",") if s.strip()) or tuple(
+            DEFAULT_EXCLUDE
+        )
         return cls(
             notional_usd=float(os.environ.get("OBETA_NOTIONAL_USD", "100")),
             max_names_per_leg=int(os.environ.get("OBETA_MAX_NAMES_PER_LEG", "20")),
@@ -132,13 +139,42 @@ class OvernightBetaStrategy:
         store: PositionStore,
         model: OvernightBetaModel,
         panel_loader: "PanelLoader",
+        state_store: PgStateStore | None = None,
     ) -> None:
         self._config = config
         self._trading = trading
         self._store = store
+        # the production execution+state layer, additive ALONGSIDE the retained bespoke position-store +
+        # slippage_log (the same pattern proven live on smoke #220 / reversion #222): broker calls go
+        # through PaperAlpacaExecutor (G2 coid) and every captured auction fill is mirrored into the durable
+        # StrategyState ledger (the SoT migration). The slippage_log deliverable is untouched.
+        self._executor = PaperAlpacaExecutor(trading)
+        self._state_store = state_store
+        self._state = state_store.load(STRATEGY_NAME) if state_store is not None else None
         self._model = model
         self._panel = panel_loader
         self._last_rebalance: dt.date | None = None
+
+    def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
+        """Mirror a captured auction fill into the durable StrategyState ledger (the migration SoT). A
+        no-op when no state store is wired, so the change is additive and the decisions are unchanged."""
+        if self._state is None or self._state_store is None:
+            return
+        if any(existing.client_order_id == coid for existing in self._state.fills):
+            return  # idempotent on coid (restart-safe; never double-counts a leg)
+        fill = Fill(
+            symbol=symbol,
+            side=side,
+            weight=0.0,
+            fill_price=price,
+            cost_bps=0.0,
+            client_order_id=coid,
+            filled_qty=qty,
+            avg_price=price,
+            status=OrderState.FILLED,
+        )
+        self._state.apply_fill(fill)
+        self._state_store.append_fill(STRATEGY_NAME, fill)
 
     def _clock(self) -> Clock:
         return cast(Clock, self._trading.get_clock())
@@ -169,18 +205,29 @@ class OvernightBetaStrategy:
         long_names, short_names, betas = legs
         n = len(long_names) + len(short_names)
         gate = evaluate_enter_gate(
-            self._config, bool(clock.is_open), mtc, self._store.count_entered(),
-            self._gross_notional_estimate(), n,
+            self._config,
+            bool(clock.is_open),
+            mtc,
+            self._store.count_entered(),
+            self._gross_notional_estimate(),
+            n,
         )
         if not gate.allowed:
             logger.debug("no enter: %s", gate.reason)
             return
         ts = dt.datetime.now(dt.timezone.utc)
-        for leg, names, side in (("long", long_names, OrderSide.BUY), ("short", short_names, OrderSide.SELL)):
+        for leg, names, side in (
+            ("long", long_names, OrderSide.BUY),
+            ("short", short_names, OrderSide.SELL),
+        ):
             for symbol in names:
                 self._submit_close_auction(today, symbol, leg, betas.get(symbol, float("nan")), side, ts)
         self._last_rebalance = today
-        logger.info("ENTERED overnight beta L/S: %d long / %d short via CLS auction", len(long_names), len(short_names))
+        logger.info(
+            "ENTERED overnight beta L/S: %d long / %d short via CLS auction",
+            len(long_names),
+            len(short_names),
+        )
 
     def _select_legs(self) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, float]] | None:
         returns_by_name, market_returns = self._panel.load()
@@ -199,20 +246,22 @@ class OvernightBetaStrategy:
     def _submit_close_auction(
         self, today: dt.date, symbol: str, leg: str, beta: float, side: OrderSide, ts: dt.datetime
     ) -> None:
-        coid = f"{COID_PREFIX}{today.isoformat()}_{symbol}_{leg}"
+        order_side = "buy" if side == OrderSide.BUY else "sell"
+        coid = make_client_order_id(STRATEGY_NAME, ts, symbol, order_side)
         ref = self._panel.last_close(symbol)
         target = self._config.notional_usd if side == OrderSide.BUY else -self._config.notional_usd
         self._store.record_enter(today, symbol, leg, beta, target, coid, ts, ref if ref is not None else 0.0)
-        try:
-            self._trading.submit_order(
-                MarketOrderRequest(
-                    symbol=symbol, notional=self._config.notional_usd, side=side,
-                    time_in_force=TimeInForce.CLS, client_order_id=coid,
-                )
-            )
-        except APIError as exc:
-            if "client_order_id" not in str(exc) and "unique" not in str(exc).lower():
-                logger.warning("CLS submit failed for %s (%s)", symbol, exc)
+        intent = ProductionOrderIntent(
+            strategy_id=STRATEGY_NAME,
+            symbol=symbol,
+            side=order_side,
+            decision_ts=ts,
+            notional=self._config.notional_usd,
+            tif="cls",
+        )
+        record = self._executor.submit(intent)
+        if record.state == OrderState.REJECTED:
+            logger.warning("CLS submit rejected for %s (coid=%s)", symbol, coid)
 
     def manage_and_flatten(self) -> None:
         """Capture close-auction fills, then at/after the open submit the OPG flatten + log slippage."""
@@ -230,6 +279,7 @@ class OvernightBetaStrategy:
                 ref = float(cast(float, pos["enter_ref_price"]))
                 side = "buy" if str(pos["leg"]) == "long" else "sell"
                 self._store.log_slippage(symbol, "close", side, ref, fill_price, enter_coid)
+                self._book_fill(symbol, side, enter_coid, qty, fill_price)
             # Flatten at the OPEN auction once the market is open (the OPG window).
             if bool(clock.is_open) and pos["exit_order_id"] is None and pos["enter_fill_price"] is not None:
                 self._submit_open_auction_flatten(pos)
@@ -242,19 +292,24 @@ class OvernightBetaStrategy:
         qty = float(cast(float, pos["enter_qty"]))
         # Flatten: a long leg sells, a short leg buys back.
         flatten_side = OrderSide.SELL if str(pos["leg"]) == "long" else OrderSide.BUY
-        exit_coid = f"{enter_coid}_exit"
+        flatten_side_str = "sell" if flatten_side == OrderSide.SELL else "buy"
+        flatten_ts = dt.datetime.now(dt.timezone.utc)
+        # the flatten is its OWN G2 coid (the opposite side, the open-auction ts); the store keys the exit
+        # on it and reads it back, and the executor submits under it (idempotent, attributable to us, G1).
+        intent = ProductionOrderIntent(
+            strategy_id=STRATEGY_NAME,
+            symbol=symbol,
+            side=flatten_side_str,
+            decision_ts=flatten_ts,
+            qty=qty,
+            tif="opg",
+        )
+        exit_coid = intent.client_order_id
         ref = self._panel.last_open(symbol)
         self._store.mark_exit_submitted(enter_coid, exit_coid, ref if ref is not None else 0.0)
-        try:
-            self._trading.submit_order(
-                MarketOrderRequest(
-                    symbol=symbol, qty=qty, side=flatten_side,
-                    time_in_force=TimeInForce.OPG, client_order_id=exit_coid,
-                )
-            )
-        except APIError as exc:
-            if "client_order_id" not in str(exc) and "unique" not in str(exc).lower():
-                logger.warning("OPG flatten failed for %s (%s)", symbol, exc)
+        record = self._executor.submit(intent)
+        if record.state == OrderState.REJECTED:
+            logger.warning("OPG flatten rejected for %s (coid=%s)", symbol, exit_coid)
 
     def _capture_flatten(self, pos: dict[str, object]) -> None:
         exit_coid = str(pos["exit_order_id"])
@@ -273,10 +328,18 @@ class OvernightBetaStrategy:
         side = "sell" if str(pos["leg"]) == "long" else "buy"
         ref = float(cast(float, pos["exit_ref_price"]))
         self._store.log_slippage(symbol, "open", side, ref, exit_fill, exit_coid)
-        self._store.record_flatten(str(pos["enter_order_id"]), dt.datetime.now(dt.timezone.utc), exit_fill, realized)
+        self._store.record_flatten(
+            str(pos["enter_order_id"]), dt.datetime.now(dt.timezone.utc), exit_fill, realized
+        )
+        self._book_fill(symbol, side, exit_coid, qty, exit_fill)
         logger.info(
             "FLATTENED %s %s: enter=%.4f exit=%.4f pnl=%+.4f | mean slippage %s",
-            str(pos["leg"]), symbol, enter_fill, exit_fill, realized, self._store.mean_slippage_bps(),
+            str(pos["leg"]),
+            symbol,
+            enter_fill,
+            exit_fill,
+            realized,
+            self._store.mean_slippage_bps(),
         )
 
     def _fetch(self, coid: str) -> Order | None:
@@ -293,9 +356,14 @@ class OvernightBetaStrategy:
         logger.info(
             "overnight-beta starting: enabled=%s notional=$%.0f/leg max_names=%d max_gross=$%.0f "
             "rebalance=%dd beta_window=%d quantile=%.2f excluded=%d names",
-            self._config.enabled, self._config.notional_usd, self._config.max_names_per_leg,
-            self._config.max_gross_notional_usd, self._config.rebalance_days, self._config.beta_window,
-            self._config.quantile, len(self._config.exclude),
+            self._config.enabled,
+            self._config.notional_usd,
+            self._config.max_names_per_leg,
+            self._config.max_gross_notional_usd,
+            self._config.rebalance_days,
+            self._config.beta_window,
+            self._config.quantile,
+            len(self._config.exclude),
         )
         while True:
             try:

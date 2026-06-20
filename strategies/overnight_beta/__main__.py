@@ -18,8 +18,12 @@ from alpaca.trading.client import TradingClient
 
 from quantlib.bus.compat import publish_contract
 from quantlib.bus.publisher import DEFAULT_REDIS_URL
+from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.overnight_beta_model import OvernightBetaModel
+from strategies.lib.pg_ledger import FILLS_TABLE_DDL, PgFillLedger
+from strategies.lib.store import StrategyStore
 from strategies.overnight_beta.contract import STRATEGY_FEATURES, STRATEGY_NAME
+from strategies.overnight_beta.position_store import STRATEGY as LEDGER_STRATEGY
 from strategies.overnight_beta.position_store import PositionStore
 from strategies.overnight_beta.strategy import (
     OvernightBetaConfig,
@@ -124,13 +128,17 @@ def main() -> None:
     config = OvernightBetaConfig.from_env()
     trading = TradingClient(os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], paper=True)
     store = PositionStore(DB_KWARGS)
+    # the durable StrategyState fill ledger (the migration SoT), additive in the SAME strat_overnightbeta
+    # schema alongside the untouched positions + slippage_log tables (backward-readable: an OLD-path
+    # rollback ignores it). LEDGER_STRATEGY matches the position-store's schema name (no underscore).
+    state_store = PgStateStore(PgFillLedger(StrategyStore(LEDGER_STRATEGY, [FILLS_TABLE_DDL], DB_KWARGS)))
     model = OvernightBetaModel(beta_window=config.beta_window, quantile=config.quantile)
     panel = StorePanelLoader(STORE_BARS, MARKET_SYMBOL, PANEL_DAYS, UNIVERSE_TOP_N)
     # publish the (empty) bus-feature contract so the pre-deploy gate sees this strategy as present (B3) —
     # overnight_beta reads no per-minute bus features, only a daily-return panel from the store.
     bus = redis.Redis.from_url(os.environ.get("BUS_REDIS_URL", DEFAULT_REDIS_URL))
     publish_contract(bus, STRATEGY_NAME, STRATEGY_FEATURES)
-    strategy = OvernightBetaStrategy(config, trading, store, model, panel)
+    strategy = OvernightBetaStrategy(config, trading, store, model, panel, state_store=state_store)
     strategy.run()
 
 
