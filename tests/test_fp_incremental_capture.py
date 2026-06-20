@@ -39,13 +39,31 @@ from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
 
-# Only ``volume`` remains gated: its variance-family std (sqrt(Σv²−(Σv)²/n) vs backfill rolling_std_by) is a
-# batch-vs-canonical FORMULA gap (Lead-owned centered-std batch change). The OLS-corner groups (price_volume's
-# pv_correlation, trend_quality/clean_momentum's r2) are now parity-true via the n==2 perfect-fit guard
-# (_OLS_PERFECT_FIT_COUNT) + the time-OLS origin-rebase, so they ride the incremental fast path.
-INCREMENTAL_UNSAFE = {"volume"}
-# n==2-guard-fixed (now incremental_safe): they ride the incremental fast path.
-INCREMENTAL_FLIPPED = {"price_volume", "trend_quality", "clean_momentum"}
+# The conditioning-sensitive groups gated to the batch fresh-sum recompute, each DEMONSTRATED to breach the
+# engine-vs-batch parity self-check on a gappy/near-flat walk by test_gappy_denom_group_breaches_raw_so_gate_is_
+# load_bearing below (worst ratio + null/non-null mismatch recorded there). ``volume`` (variance-family std:
+# power-sum sqrt vs backfill rolling_std_by FORMULA gap) is the original. ``return_dynamics`` (lagged-return
+# autocorrelation) and ``volume_leads_price`` (lagged-volume×return correlation) breach because the OLS pairing
+# count and cross-product running sums round across the corr defined-guard differently from the batch fresh sum
+# when the paired series collapse on a sparse window. ``price_volume`` reverts to gated (was #155 True): its
+# ``pv_correlation`` regresses return on RAW share volume and breaches BEYOND the b==2 perfect-fit corner the
+# n==2 guard closed (77x tolerance + 6 null mismatches in the sweep). The shared centered-denom kernel
+# (fingerprint-affecting, Lead-coordinated) is the queued follow-up to widen incremental coverage here.
+#
+# NOT gated (verified parity-clean on the SAME adversarial sweep, worst < 6e-4x tolerance, no null mismatch):
+# market_beta, distribution, volatility — their std/market-return-regressor algebra does NOT collapse the way
+# the correlation-of-two-sparse-series groups do. The task's draft gate list named these three; the empirical
+# engine-vs-batch sweep does not support gating them, so they stay on the incremental fast path.
+INCREMENTAL_UNSAFE = {
+    "volume",
+    "return_dynamics",
+    "volume_leads_price",
+    "price_volume",
+}
+# Genuinely safe sum-ratio / time-axis-OLS groups that ride the incremental fast path. trend_quality and
+# clean_momentum regress close on a CENTERED TIME axis (x always spreads with the minutes, never collapses on a
+# gappy window) — well-conditioned — and were proven parity-true on degenerate walks by the tests below.
+INCREMENTAL_FLIPPED = {"trend_quality", "clean_momentum"}
 
 
 def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float = 0.02) -> list[list[dict]]:
@@ -173,9 +191,9 @@ def test_ols_near_perfect_fit_is_parity_true(slice_derive: bool) -> None:
     OLS R²/correlation family fits near-perfectly (R²→1, the b==2 corner is exact) — the historical breach
     source. With the time-OLS origin-rebase (PR #132) and the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT:
     r2=1.0 / corr=sign(cov) at b==2), the IncrementalEngine now agrees with the batch CELL-FOR-CELL on the
-    flipped OLS groups (trend_quality, clean_momentum, price_volume's pv_correlation) — well under the breach
-    ratio on BOTH the live slice-derive and the whole-buffer paths. This is the parity proof gating their
-    ``incremental_safe = True`` flip."""
+    flipped TIME-axis-OLS groups (trend_quality, clean_momentum) — well under the breach ratio on BOTH the live
+    slice-derive and the whole-buffer paths. This is the parity proof gating their ``incremental_safe = True``
+    flip. (``price_volume`` is gated to batch — its pv_correlation regresses on raw volume, not time.)"""
     smooth = _stream_minutes(n_sym=8, n_min=20, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
     flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_FLIPPED]
     assert {g.name for g in flipped} == INCREMENTAL_FLIPPED, "flipped OLS groups missing from registry"
@@ -327,6 +345,100 @@ def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
         except AssertionError:
             breached = True
     assert breached, "volume variance-family breach expected (gate is load-bearing)"
+
+
+def _gappy_corr_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -> list[list[dict]]:
+    """A GAPPY, near-constant-return stream: symbols skip most minutes (sparse presence) and the price drifts at
+    a ~fixed tiny rate, so a trailing window holds only a few bars whose one-minute returns are ~equal. This is
+    the conditioning case the 19 smooth-synthetic walks miss: the correlation kernel's paired series (a return
+    against its own lag / against lagged volume) collapse to ~constant over the sparse window, so the corr
+    denominator √(var_x·var_y) is a difference of near-equal running sums — the incremental running sums round
+    it across the corr defined-guard differently from the batch fresh sum, so incremental emits a value where
+    batch emits NULL (or disagrees past the breach ratio). Re-paired counts under sparse presence amplify it."""
+    rng = np.random.default_rng(seed)
+    price = {s: 100.0 + s for s in range(n_sym)}
+    out: list[list[dict]] = []
+    for mi in range(n_min):
+        minute_iso = (BASE + dt.timedelta(minutes=mi)).isoformat()
+        bars: list[dict] = []
+        for s in range(n_sym):
+            present = mi == 0 or rng.random() < present_p
+            price[s] *= 1.0 + 1e-3 + rng.standard_normal() * 1e-9  # ~constant return -> corr denom collapses
+            if not present:
+                continue
+            c = price[s]
+            bars.append({"S": f"S{s}", "o": c, "c": c, "h": c * 1.0001, "l": c * 0.9999,
+                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+        if not bars:  # a real feed always carries >=1 symbol per minute
+            c = price[0]
+            bars.append({"S": "S0", "o": c, "c": c, "h": c, "l": c, "v": 1000.0, "t": minute_iso})
+        out.append(bars)
+    return out
+
+
+@pytest.mark.parametrize("group_name", ["return_dynamics", "volume_leads_price", "price_volume"])
+def test_gappy_denom_group_breaches_raw_so_gate_is_load_bearing(group_name: str) -> None:
+    """Each correlation-family group's ``incremental_safe = False`` is LOAD-BEARING: on a gappy near-constant-
+    return walk (sparse presence collapses the corr-kernel paired series over the window) the IncrementalEngine
+    running sums round across the corr defined-guard differently from the batch fresh sums, so the raw engine
+    output DIVERGES from the batch — a null/non-null mismatch at the corr floor or a value disagreement past the
+    breach ratio. Comparing the engine DIRECTLY against the batch (no gate) must breach, which is exactly WHY
+    the group is routed to batch live. This is the conditioning case the smooth-synthetic parity walks miss.
+
+    (The companion sweep behind this gate also confirmed market_beta / distribution / volatility do NOT breach
+    on the same regimes — worst < 6e-4x tolerance — so they are intentionally NOT in INCREMENTAL_UNSAFE.)"""
+    group = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == group_name]
+    assert group, f"{group_name} missing from registry"
+    assert not group[0].incremental_safe, f"{group_name} must be incremental_safe=False"
+    breached = False
+    for seed in (7, 17, 29):  # a few sparse seeds — the breach is regime-robust across them
+        walk = _gappy_corr_minutes(n_sym=12, n_min=28, present_p=0.40, seed=seed)
+        ring = MinuteRing(maxlen=120)
+        engine: IncrementalEngine | None = None
+        for bars in walk:
+            if not bars:
+                continue
+            ring.push(_bars_to_frame(bars))
+            frame = ring.materialize()
+            ctx = BatchContext(frames={"minute_agg": frame})
+            batch = compute_reduction_batch(group, ctx)
+            if engine is None:
+                engine = IncrementalEngine(group)
+            inc = engine.step(frame, slice_derive=True)
+            # The breach surfaces as EITHER a null/non-null mismatch at the corr floor (the helper asserts on it)
+            # OR a value disagreement past the breach ratio; both mean the gate is load-bearing.
+            try:
+                if _worst_tol_ratio(batch, inc) > _PARITY_BREACH_RATIO:
+                    breached = True
+            except AssertionError:
+                breached = True
+    assert breached, (
+        f"{group_name} expected to breach engine-vs-batch on a gappy near-constant-return walk "
+        "(the gappy-denom conditioning the incremental_safe=False gate guards against)"
+    )
+
+
+def test_gappy_denom_groups_stay_on_batch_under_incremental(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """On the gappy near-constant-return walk the unsafe groups stay on the batch path under FP_INCREMENTAL, so
+    their output is BYTE-IDENTICAL to the no-flag batch output (frame_equal, not merely within tolerance) — the
+    routing the ``incremental_safe = False`` gate produces. (This is the integration counterpart to the raw
+    per-group breach above: the gate converts that breach into a no-op by serving the batch recompute.)"""
+    walk = _gappy_corr_minutes(n_sym=12, n_min=28, present_p=0.40, seed=17)
+
+    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
+    monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
+    batch = _run(walk, str(tmp_path / "batch"))
+
+    monkeypatch.setenv("FP_INCREMENTAL", "1")
+    monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
+    monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
+    inc = _run(walk, str(tmp_path / "inc"))
+
+    keys = ["symbol", "minute"]
+    for name in INCREMENTAL_UNSAFE:
+        assert name in batch, f"{name} expected in reduction output"
+        assert batch[name].sort(keys).equals(inc[name].sort(keys)), \
+            f"{name} must be byte-identical to batch under FP_INCREMENTAL (it stays on the batch path)"
 
 
 def test_incremental_parity_helper() -> None:
