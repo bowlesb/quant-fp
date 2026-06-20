@@ -60,6 +60,19 @@ names are breadth-covered, so re-fetching that window adds nothing. The high-val
 Trades need no width work (0 missing); the only trades gap is B3-B5 *depth* (~63d), a lower priority than the
 quote core.
 
+### UPDATE 2026-06-20 — LIQUID-HEAD zero-quote gap (the 11 SPDR sector ETFs)
+
+After the B4 mid-band widen (PR #217) landed, a residual gap surfaced at the very TOP of the ranking: a
+handful of high-ADV names with full bars but ZERO quotes AND ZERO trades. These are the **11 SPDR sector
+ETFs** — `XLK, XLE, XLF, XLV, XLI, XLP, XLU, XLY, XLC, XLB, XLRE` (ADV rank ~49-674) — which sit outside the
+trades+quotes universe the deep-backfill ranked, so they were never fetched. They are the HIGHEST-value
+missing quotes on the tape: the canonical market-regime / sector-rotation conditioners, and the names any
+quote-spread cost model wants first. `quantlib/data/liquid_head_quote_gap.py` computes this set
+deterministically (liquid head minus already-quoted); `ops/quote_fill_liquid_head.sh` fetches their quotes
+over the full span (guard-named `quant-backfill-quotes-sectoretf`, idempotent, memory-bounded). This is the
+liquid-HEAD sibling of `b4_quote_widen.py` (the rank 2000-4000 mid band); together they close the breadth gap
+from both ends.
+
 ## Ranked backfill-priority lists
 
 ### WIDTH — most-liquid tradeable names with ZERO quote tape (top 30 of 2433; the B4 cheap win)
