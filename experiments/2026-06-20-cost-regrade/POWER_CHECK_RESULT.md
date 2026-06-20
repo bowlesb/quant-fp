@@ -1,5 +1,11 @@
 # Pre-run POWER CHECK — the liquid-head universe is too thin to power the re-grade (decided BEFORE any $)
 
+> **Disposition principle (Ben, applies to ALL hunt results):** a $-null is a MODEL/strategy question
+> ("the current model doesn't TRADE this signal yet, on the current data"), NOT a feature-inclusion gate.
+> Features are included LIBERALLY and KEPT in the store/bus regardless of $-value (cheap to carry; future
+> data + feature-interactions may make a model use them). Below, "null" / "structurally limited" describe
+> what a MODEL can trade — never "shelve/throw out the feature."
+
 **Date:** 2026-06-20  **Stage:** the Lead-required power check, pre-committed BEFORE any P&L number.
 **Outcome:** BOTH pre-committed boundaries (<2.0bps, fallback <3.0bps) yield a cross-section too thin for the
 {2,5,10}%-cut robustness gate. Reporting to the Lead before running — NOT improvising a new universe (that
@@ -24,9 +30,11 @@ Realized half-spread in the liquid-200 (n=1909 over 10 dates): p10=1.85, median=
   less (consistent with Stage 1's before/after: the trusted baseline took a −22% headline haircut under
   realized cost).
 
-So the cost-measurement-artifact hypothesis is STRUCTURALLY LIMITED: the genuinely-overcharged names are a
-~20% minority, and isolating them collapses the cross-section below the power floor. The broad liquid head is
-mostly UNDER-charged by the old stub, so accurate cost hurts it.
+So the cost-measurement-artifact hypothesis (that a MODEL would TRADE these signals once cost is accurate) is
+STRUCTURALLY LIMITED: the genuinely-overcharged names are a ~20% minority, and isolating them collapses the
+cross-section below the power floor. The broad liquid head is mostly UNDER-charged by the old stub, so a model
+trading it nets less under accurate cost. (This is about what a model TRADES — the features themselves stay
+included/retained regardless; see the disposition note below.)
 
 ## The decision (honest, pre-$, routed to the Lead)
 The pre-reg's universe rule + its one pre-committed fallback BOTH fail the power check. Per the discipline,
@@ -37,15 +45,18 @@ forbids). Two principled paths, for the Lead's gate-read:
   is the strict apples-to-apples re-grade: SAME universe G0a used, the ONLY change is flat-3bps → measured
   per-name half-spread. It is well-powered (4-20 names/side) and lets accurate cost act name-by-name (cheaper
   for the 22%, dearer for the 78%) — which is exactly the per-name truth Stage 1 delivers. The catch: since
-  78% get DEARER, the prior is that G0a stays null (more-null), not revived — but it is the powered,
-  pre-registerable test that actually answers "was G0a's net-death a cost-measurement artifact?" honestly.
-- **Option B — declare the re-grade STRUCTURALLY UNABLE to revive an edge and route to #2 now.** The power
-  check already shows the only universe where cheaper cost helps (the <3bps minority) is too thin to trade
-  cross-sectionally, and the broad universe is mostly under-charged. That is itself a decisive, publishable
-  result: the null streak is NOT rescued by accurate cost at any powered universe → strongest exhaustion
-  confirmation → proceed to #2 (#205 weekly reversal).
+  78% get DEARER, the prior is that the MODEL still doesn't trade G0a profitably under accurate cost — but it
+  is the powered, pre-registerable test that actually answers "does a model trade the quote-alpha signal once
+  cost is measured per-name?" honestly.
+- **Option B — conclude the re-grade can't establish a TRADEABLE quote-alpha signal at a powered universe and
+  route to #2 now.** The power check already shows the only universe where cheaper cost helps (the <3bps
+  minority) is too thin to trade cross-sectionally, and the broad universe is mostly under-charged. That is a
+  decisive result about what the MODEL can TRADE → proceed to #2 (#205 weekly reversal).
 
-**My recommendation: run Option A** (it's powered, strictly apples-to-apples, cheap — reuses the G0a panel +
-the merged realized_cost), THEN route to #2 regardless of its outcome (a pass would be a real edge; the
-expected null is the exhaustion confirmation). Option A converts the structural argument of Option B into an
-actual measured number, which is more decisive. Awaiting the Lead's gate-read on A vs B before any $-number.
+**My recommendation: run Option A** (powered, strictly apples-to-apples, cheap — reuses the G0a panel +
+the merged realized_cost), THEN route to #2 regardless of its outcome. **Disposition framing (per Ben):** a
+$-null here means *the current model doesn't trade the quote-dynamics signal yet under accurate cost* — NOT
+that the feature is worthless. The quote-dynamics features remain fully INCLUDABLE/retained in the store for
+future data + feature-interactions; the $-test is a MODEL/strategy question (what to trade on), decoupled
+from feature inclusion. A pass = the model gains a tradeable signal; a null = the model doesn't use it yet,
+feature kept, revisit as data/interactions grow. Awaiting the Lead's gate-read on A vs B before any $-number.

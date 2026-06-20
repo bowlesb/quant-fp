@@ -5,8 +5,15 @@
 (AAPL/NVDA/MSFT realized ~0.7-1.9 bps). Some prior nulls may be a COST-MEASUREMENT artifact: real gross
 signal that "died net" was charged ~2-4x its true cost at exactly the liquid names where it lives. This
 re-grades a FIXED set of nulls under the now-accurate per-name cost, restricted to a pre-committed liquid-head
-universe. **A null staying null is the strongest exhaustion confirmation we can produce — and is the
-expected, publishable outcome.**
+universe. **A null staying null is a decisive, publishable result about what a MODEL can TRADE — and is the
+expected outcome.**
+
+> **DISPOSITION PRINCIPLE (Ben — applies to this and ALL hunt results).** A $-null is a MODEL/strategy
+> question ("the current model doesn't TRADE this signal yet, on the current data"), NOT a feature-inclusion
+> gate. Feature inclusion (store/bus/fingerprint) is LIBERAL and DECOUPLED from $-value — any parity-true,
+> cheap feature is included and KEPT, because future data + feature-interactions may make a model use it.
+> So everywhere below, "null" describes what a model trades, NEVER "shelve / throw out / dead-end the
+> feature." The quote-dynamics / swing_dc / path-geometry features stay retained regardless of this test.
 
 ## 0. ⚠️ THIS IS THE HIGHEST-FOOLING-RISK TEST WE'VE DESIGNED — anti-fooling is locked BEFORE any numbers
 Re-grading nulls under more-favorable cost is textbook p-hacking. Every guard below is pre-committed; none
@@ -82,9 +89,10 @@ across cuts, per-day t still significant). The window split is fixed BEFORE runn
 coverage step makes them a clean break). No pass is reported without replication.
 
 ## 7. PRE-COMMITTED NULL BRANCH (the expected, decisive outcome)
-If N1 stays null under accurate liquid-head cost (and N2-N6 remain ineligible), that is the STRONGEST
-exhaustion confirmation we can produce: the null streak was NOT a cost-measurement artifact even at the names
-where edge could most plausibly survive. That is a clean, publishable, decisive result → proceed to **#2: the
+If N1 stays null under accurate liquid-head cost (and N2-N6 remain ineligible), the decisive read is: a MODEL
+does NOT gain a tradeable quote-alpha signal from accurate cost, even at the names where edge could most
+plausibly survive — the quote-dynamics features stay INCLUDED/retained (this is a what-to-trade verdict, not
+a feature-inclusion one). That is a clean, publishable result → proceed to **#2: the
 #205 weekly-reversal hunt** (the turnover/horizon attack on the actual cause of death — cost amortized over a
 multi-day hold), carrying the survivorship-haircut discipline (the deep panel is 0/400 delisted).
 
