@@ -1,5 +1,14 @@
 # Monday Collect-and-Save Plan — real-time capture without read/write contention
 
+> **ARCHIVED 2026-06-20 — historical reference only.** This was the one-time forward-looking plan
+> (authored 2026-06-13) for the FIRST live market-open capture milestone (definition-of-done #6/#7).
+> Live sharded capture has been running daily for over a week; the current operational reality lives in
+> `docs/OPERATIONS.md` (cron registry + relaunch), `docs/SESSION_WARMUP.md` (warm-start), the live state
+> in `~/.quant-ops/SYSTEM_LOG.md` (the per-Monday plan is now Lead-maintained there), and the T+1
+> backfill==live verification is `docs/PARITY_PLAYBOOK.md` / `docs/PARITY_COVERAGE.md`. The
+> partition-disjoint, no-contention write design described below is implemented and proven in
+> `tests/test_fp_sharding.py`. Kept for history; NOT the current design of record.
+
 The plan for market open: capture every ticker every minute, compute all features, and **save them to
 the feature store without DB read/write slowdowns or concurrency issues** (definition-of-done #6), so
 that on Tuesday the backfill can be diffed against what we collected live (#7).
