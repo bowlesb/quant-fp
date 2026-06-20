@@ -35,6 +35,8 @@ from scorecard_page import SCORECARD_HTML
 from sector_coverage import CACHE as SECTOR_CACHE
 from sector_coverage_page import SECTOR_COVERAGE_HTML
 from status_page import render_status_page
+from store_glimpse import CACHE as GLIMPSE_CACHE
+from store_glimpse_page import STORE_GLIMPSE_HTML
 from universe_coverage import CACHE as UNIVERSE_CACHE
 from universe_coverage_page import UNIVERSE_COVERAGE_HTML
 
@@ -407,6 +409,44 @@ def universe_coverage_page() -> str:
     return UNIVERSE_COVERAGE_HTML
 
 
+@app.get("/api/store-glimpse")
+def store_glimpse_json(days: int = 30, refresh: bool = False) -> JSONResponse:
+    """The LIVE feature-store GLIMPSE grid: DATE rows × FEATURE-GROUP columns, each cell carrying coverage
+    fraction (the cell DARKNESS = n_symbols-that-date / captured-universe) + trust hue (green=trusted /
+    amber=pending / red=divergent / grey=ungraded). Plus a per-date Total column and an expandable
+    per-feature breakdown. Reuses the #221/#223 grid's gathered counts + the feature_trust read — no new
+    heavy store I/O. ``days`` clips the row window (most-recent first); ``refresh=1`` bypasses the TTL cache.
+
+    Shape (see docs/STORE_GLIMPSE.md):
+      {generated_at, store_root, anchor_date, days, universe_size,
+       summary: {n_groups, n_features, n_dates, n_trusted, trusted_pct, trust_counts},
+       groups: [{group, version, n_features, trust_hue, trust_counts, features: [...]}],
+       dates: ["2026-06-20", ...],
+       cells: {date: {group: {coverage, n_symbols, hue}, ..., "__total__": {...}}}}
+    """
+    return JSONResponse(GLIMPSE_CACHE.glimpse(STORE_ROOT, days=days, force=refresh))
+
+
+@app.get("/api/store-glimpse/{group}/tickers")
+def store_glimpse_drill_json(
+    group: str, days: int = 30, limit: int = 500, refresh: bool = False
+) -> JSONResponse:
+    """The drill-down for one (date × group) cell: a TICKER × DATE presence grid for THAT group — one row per
+    ticker, one box per date, shaded by provenance (both / stream / backfill / absent). Lazy (only on a cell
+    click) + paginated (``limit`` rows, ranked most-covered first; the universe is ~7.3k). 404 for an
+    unknown group. ``days`` sets the date window; ``refresh=1`` bypasses the TTL cache."""
+    try:
+        return JSONResponse(GLIMPSE_CACHE.drill(group, STORE_ROOT, days=days, limit=limit, force=refresh))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown feature group: {group}")
+
+
+@app.get("/store-glimpse", response_class=HTMLResponse)
+def store_glimpse_page() -> str:
+    """The visual feature-store glimpse grid (vanilla HTML/JS; fetches /api/store-glimpse client-side)."""
+    return STORE_GLIMPSE_HTML
+
+
 @app.get("/api/scorecard")
 def scorecard_json(refresh: bool = False) -> JSONResponse:
     """SYSTEM PROGRESS scorecard: Ben's six platform axes (A trusted / B deployed / C trust-process health /
@@ -661,6 +701,7 @@ def dashboard() -> str:
 <a href="/status" style="color:#58a6ff;text-decoration:none;font-size:13px;">Hourly status &rarr;</a> &nbsp;
 <a href="/jobs" style="color:#58a6ff;text-decoration:none;font-size:13px;">Jobs &rarr;</a> &nbsp;
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
+<a href="/store-glimpse" style="color:#58a6ff;text-decoration:none;font-size:13px;">Store glimpse &rarr;</a> &nbsp;
 <a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a> &nbsp;
 <a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a> &nbsp;
 <a href="/liquidity-bands" style="color:#58a6ff;text-decoration:none;font-size:13px;">Liquidity bands &rarr;</a> &nbsp;
