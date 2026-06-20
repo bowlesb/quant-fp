@@ -29,6 +29,25 @@ interface Props {
   highlightCol: string | null;
   onHoverChange: (cell: HoverCell | null) => void;
   onToggleExpand: (groupKey: string) => void;
+  onOpenDetail: (columnKey: string) => void;
+}
+
+// The contiguous display-column span [start, end) covered by each EXPANDED group (its own column + its
+// feature sub-columns) — used to outline the expansion as one block.
+function expandedSpans(displayCols: DisplayColumn[]): { groupKey: string; start: number; end: number }[] {
+  const spans: { groupKey: string; start: number; end: number }[] = [];
+  let current: { groupKey: string; start: number; end: number } | null = null;
+  displayCols.forEach((dc, c) => {
+    if (dc.kind === "group" && dc.expanded && dc.groupKey) {
+      current = { groupKey: dc.groupKey, start: c, end: c + 1 };
+      spans.push(current);
+    } else if (dc.kind === "feature" && current && dc.groupKey === current.groupKey) {
+      current.end = c + 1;
+    } else {
+      current = null;
+    }
+  });
+  return spans;
 }
 
 function buildDisplayColumns(matrix: StoreGridMatrix, expanded: Set<string>): DisplayColumn[] {
@@ -82,12 +101,14 @@ export function CanvasHeatmap({
   highlightCol,
   onHoverChange,
   onToggleExpand,
+  onOpenDetail,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [viewport, setViewport] = useState({ scrollTop: 0, width: 0, height: 0 });
 
   const displayCols = useMemo(() => buildDisplayColumns(matrix, expandedGroups), [matrix, expandedGroups]);
+  const spans = useMemo(() => expandedSpans(displayCols), [displayCols]);
   const nDates = matrix.dates.length;
   const nCols = displayCols.length;
   const contentWidth = nCols * CELL.w;
@@ -139,12 +160,11 @@ export function CanvasHeatmap({
     const { firstRow, lastRow } = visibleRows;
     const offY = viewport.scrollTop;
 
-    // Faint band behind any expanded group's feature sub-columns so the expansion reads against the white.
-    displayCols.forEach((dc, c) => {
-      if (dc.kind === "feature") {
-        ctx.fillStyle = "rgba(31,111,235,0.05)";
-        ctx.fillRect(c * CELL.w, 0, CELL.w, cssH);
-      }
+    // Distinct background band behind each EXPANDED group (its column + its feature sub-columns), so the
+    // expansion reads as one block against the white field.
+    spans.forEach((span) => {
+      ctx.fillStyle = "rgba(31,111,235,0.07)";
+      ctx.fillRect(span.start * CELL.w, 0, (span.end - span.start) * CELL.w, cssH);
     });
 
     for (let row = firstRow; row < lastRow; row++) {
@@ -160,6 +180,14 @@ export function CanvasHeatmap({
       }
     }
 
+    // Crisp accent OUTLINE around each expanded group's block, so it reads unmistakably as belonging to that
+    // one group, set apart from the neighbouring groups.
+    ctx.strokeStyle = COLORS.accent;
+    ctx.lineWidth = 1.5;
+    spans.forEach((span) => {
+      ctx.strokeRect(span.start * CELL.w - 0.5, 0.5, (span.end - span.start) * CELL.w, cssH - 1);
+    });
+
     if (highlightCol != null) {
       const c = displayCols.findIndex((dc) => dc.groupKey === highlightCol && dc.kind === "group");
       if (c >= 0) {
@@ -168,7 +196,7 @@ export function CanvasHeatmap({
         ctx.strokeRect(c * CELL.w - 0.5, 0, CELL.w + 1, cssH);
       }
     }
-  }, [matrix, displayCols, nCols, highlightCol, viewport, visibleRows, contentWidth]);
+  }, [matrix, displayCols, spans, nCols, highlightCol, viewport, visibleRows, contentWidth]);
 
   const colAt = useCallback(
     (clientX: number, clientY: number): { row: number; col: number } | null => {
@@ -237,6 +265,17 @@ export function CanvasHeatmap({
     <div className="heatmap-frame">
       <div className="col-header" style={{ paddingLeft: 58 }}>
         <div className="col-header-inner" style={{ width: contentWidth }}>
+          {/* A bracket + group-name chip spanning each expanded group's columns, so the feature sub-columns
+              read unmistakably as belonging to that one group. */}
+          {spans.map((span) => (
+            <div
+              key={`span-${span.groupKey}`}
+              className="col-span-bracket"
+              style={{ left: span.start * CELL.w, width: (span.end - span.start) * CELL.w }}
+            >
+              <span className="col-span-name">{span.groupKey}</span>
+            </div>
+          ))}
           {displayCols.map((dc, c) => (
             <div
               key={dc.key}
@@ -247,7 +286,13 @@ export function CanvasHeatmap({
                 (highlightCol === dc.groupKey && dc.kind === "group" ? " active" : "")
               }
               style={{ left: c * CELL.w, width: CELL.w }}
-              title={dc.label + (dc.expandable ? " — click column to expand features" : "")}
+              title={
+                dc.kind === "feature"
+                  ? `${dc.label} — click for ${dc.groupKey} detail`
+                  : dc.label +
+                    (dc.expandable ? " — click header for detail (click a cell to expand features)" : "")
+              }
+              onClick={() => onOpenDetail(dc.kind === "feature" ? (dc.groupKey as string) : dc.key)}
             >
               <span>
                 {dc.kind === "group" && dc.expandable ? (dc.expanded ? "▾ " : "▸ ") : ""}

@@ -56,6 +56,30 @@ def fake_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sg, "universe_size", lambda: 4)
     monkeypatch.setattr(sg, "RAW_TIERS", [])
     monkeypatch.setattr(sg, "_raw_layer_counts", lambda root, window: {})
+    # build_group_info() touches the live registry + the guide YAML — stub it to a fixed shape so the matrix
+    # tests stay isolated to the coverage math.
+    monkeypatch.setattr(
+        sg,
+        "build_group_info",
+        lambda: {
+            "groupX": {
+                "docstring": "X",
+                "type": "t",
+                "layer": "B",
+                "n_features": 2,
+                "features": [{"name": "feat_a", "description": "a"}],
+                "guide": {"value": "honest measure of X"},
+            },
+            "groupY": {
+                "docstring": "Y",
+                "type": "t",
+                "layer": "C",
+                "n_features": 1,
+                "features": [{"name": "feat_c", "description": "c"}],
+                "guide": None,
+            },
+        },
+    )
 
 
 def test_fully_trusted_groups_requires_all_features() -> None:
@@ -91,6 +115,11 @@ def test_coverage_against_fixed_universe(
     assert grid["columns"][1]["trusted"] is False
     # Each group carries its features for the horizontal expand.
     assert grid["columns"][0]["features"] == ["feat_a", "feat_b"]
+
+    # The per-group detail-panel info is baked into the matrix (registry-derived + curated guide).
+    info = grid["group_info"]
+    assert info["groupX"]["guide"]["value"] == "honest measure of X"
+    assert info["groupY"]["guide"] is None  # honest stub, not fabricated
 
     cov = grid["coverage"][0]
     # groupX 4/4 -> 255; groupY 1/4 -> round(255*0.25). Both against the FIXED universe of 4.

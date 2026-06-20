@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BootingError, fetchMatrix, fetchMeta } from "./api";
-import type { GridMeta, StoreGridMatrix } from "./types";
+import type { GridColumn, GridMeta, StoreGridMatrix } from "./types";
 import { CanvasHeatmap, type HoverCell, type DisplayColumn } from "./CanvasHeatmap";
 import { Tooltip } from "./Tooltip";
+import { GroupDetailPanel } from "./GroupDetailPanel";
 
 // The worker rebuilds every 10 min; a 60s meta poll is plenty. The matrix blob is only re-fetched when its
 // generated_at advances.
@@ -24,8 +25,7 @@ export function App() {
   const [booting, setBooting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<HoverCell | null>(null);
-  const [query, setQuery] = useState("");
-  const [highlightCol, setHighlightCol] = useState<string | null>(null);
+  const [detailKey, setDetailKey] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const matrixGeneratedAt = useRef<string | null>(null);
 
@@ -73,23 +73,7 @@ export function App() {
     return () => window.clearInterval(id);
   }, []);
 
-  const runSearch = useCallback(() => {
-    if (!matrix) return;
-    const needle = query.trim().toLowerCase();
-    if (!needle) {
-      setHighlightCol(null);
-      return;
-    }
-    const exact = matrix.columns.find((c) => c.kind === "group" && c.key.toLowerCase() === needle);
-    const partial = matrix.columns.find((c) => c.kind === "group" && c.key.toLowerCase().includes(needle));
-    const hit = exact ?? partial;
-    if (!hit) {
-      setError(`no feature-group matches "${query.trim()}"`);
-      return;
-    }
-    setError(null);
-    setHighlightCol(hit.key);
-  }, [matrix, query]);
+  const openDetail = useCallback((columnKey: string) => setDetailKey(columnKey), []);
 
   const toggleExpand = useCallback((groupKey: string) => {
     setExpandedGroups((prev) => {
@@ -147,6 +131,9 @@ export function App() {
     return out;
   }, [matrix, expandedGroups]);
 
+  const detailColumn: GridColumn | null =
+    matrix && detailKey ? matrix.columns.find((c) => c.key === detailKey) ?? null : null;
+
   if (booting && !matrix) {
     return (
       <div className="boot-screen">
@@ -179,20 +166,6 @@ export function App() {
       </header>
 
       <div className="controls">
-        <div className="search">
-          <input
-            type="text"
-            placeholder="search a feature group (e.g. candlestick)"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") runSearch();
-            }}
-            spellCheck={false}
-          />
-          <button onClick={runSearch}>Find</button>
-        </div>
-
         {matrix && (
           <div className="legend">
             <span className="legend-item">
@@ -221,14 +194,23 @@ export function App() {
           <CanvasHeatmap
             matrix={matrix}
             expandedGroups={expandedGroups}
-            highlightCol={highlightCol}
+            highlightCol={detailKey}
             onHoverChange={setHover}
             onToggleExpand={toggleExpand}
+            onOpenDetail={openDetail}
           />
         )}
       </div>
 
       {matrix && <Tooltip hover={hover} matrix={matrix} displayCols={displayCols} />}
+
+      {detailColumn && (
+        <GroupDetailPanel
+          column={detailColumn}
+          info={matrix?.group_info[detailColumn.key]}
+          onClose={() => setDetailKey(null)}
+        />
+      )}
     </div>
   );
 }
