@@ -157,6 +157,7 @@ function render(view){
   const groups = view.groups||[];
   const dates = view.dates||[];
   const cells = view.cells||{};
+  if(view.warming){ document.getElementById('content').innerHTML='<div class="empty">warming… the background worker is precomputing the grid. This page refreshes automatically.</div>'; return; }
   if(!dates.length){ document.getElementById('content').innerHTML='<div class="empty">no captured dates in the store yet.</div>'; return; }
 
   // header row: corner + each group (with its expanded feature columns inline) + Total

@@ -37,19 +37,40 @@ and date"): one row per ticker, one box per date, shaded by provenance — `both
 `absent`. **Lazy** (only fetched on a cell click) and **paginated** (`limit` rows, default 500, ranked
 most-covered first; the universe is ~7.3k). Served by `GET /api/store-glimpse/{group}/tickers`.
 
-## Live refresh
+## Live refresh — precompute-on-a-schedule + persistent (Redis) cache
 
-The page **auto-refreshes every 30s** so it always reflects the current store. The refresh is cheap: a
-60s TTL cache (`StoreGlimpseCache`) makes a repeat fetch instant (a cached hit returns in microseconds).
+The page **auto-refreshes every 30s** so it always reflects the current store, and that refresh is
+**instant (sub-200ms) and always warm** because the heavy build runs OFF the request path.
+
+Even windowed, a cold grid build is ~38–50s (and the per-group drills add ~55s) — far too slow for an
+interactive refresh. So the build is a **scheduled background job**, exactly mirroring the `/jobs` collector
+pattern (`ops/collect_jobs_status.py` precomputes on a cron → the page just reads):
+
+  * **Worker** — `ops/collect_store_glimpse.py` runs on a cron every 3 min. The build needs quantlib/polars +
+    the `/store` mount, none of which the host carries, so the wrapper execs `python -m store_glimpse_cache`
+    INSIDE `quant-dashboard-1` (the same docker-exec pattern `ops/healthcheck.sh` uses into `feature-computer`).
+    `store_glimpse_cache.write_glimpse()` builds the grid + every group's top-N ticker drill once and writes
+    each as a JSON blob to **Redis** (the bus's `quant-redis`), under stable keys with a 1h TTL.
+  * **Cache store = Redis** — chosen over the flat-JSON-file pattern because it serves the ~200 KiB grid +
+    multi-MB drill set sub-ms, is reachable from both the worker's docker-exec context and the dashboard
+    process, survives dashboard restarts, and adds **no new dependency** (`redis` is already a dashboard
+    requirement, pulled by `quantlib.bus` since #211 — so the #234 dep-closure guard stays green). No
+    schema/format/fingerprint change to the feature store: this is a read-side cache only.
+  * **Read path** — `/api/store-glimpse` and `/api/store-glimpse/{group}/tickers` call
+    `store_glimpse_cache.read_glimpse` / `read_drill`, a single Redis GET. On a **cold cache** (worker not run
+    yet) or an **unreachable Redis**, they return a small `warming` payload (the page shows "warming…")
+    rather than hanging the request on the live build. `?refresh=1` is the manual escape hatch: it forces a
+    live in-process build (the old `StoreGlimpseCache` path) for when the worker is down and a fresh grid is
+    needed immediately.
 
 ## Performance — windowed read
 
-Unlike the #221 grid (which reads every group's whole multi-year backfill history), the glimpse is
+Unlike the #221 grid (which reads every group's whole multi-year backfill history), the glimpse build is
 **windowed**: it finds the store anchor from directory names (no parquet read), then reads symbol *counts*
 only for the dates **in the grid window** — so a 30-row grid pays ≤30 dates/source/group, not the full
 history. The per-partition reads reuse `feature_grid`'s bounded evenly-spaced file sampling (a 7k-file
-stream partition is ~12 reads, not 7k). A cold build is a once-per-TTL cost; every live auto-refresh in
-between is a cached, microsecond hit.
+stream partition is ~12 reads, not 7k). This keeps the *worker's* build cost bounded; the request path
+itself pays only the sub-ms Redis read.
 
 Read-side only. No schema/format/fingerprint change. No new third-party import — the dashboard import
 closure (guarded by the #234 static dep-closure test) is unchanged.

@@ -25,6 +25,7 @@ TRUST_LOG=/home/ben/.quant-validation/trust_random_check.log
 JOBS_LOG=/home/ben/.quant-ops/collect_jobs_status.log
 COMPACT_LOG=/home/ben/.quant-validation/compact_stream.log
 LATE_SWEEP_LOG=/home/ben/.quant-validation/daily_lifecycle_late.log
+GLIMPSE_LOG=/home/ben/.quant-ops/collect_store_glimpse.log
 
 # Each managed entry is a match-substring (presence test) + its crontab comment + its crontab line.
 # Times are SYSTEM LOCAL TIME (America/Los_Angeles / PT); the crontab has no TZ override.
@@ -40,6 +41,15 @@ LINES+=("45 14 * * 6 cd $REPO && ops/trust_random_check.sh >> $TRUST_LOG 2>&1")
 MATCHES+=("ops/collect_jobs_status.py")
 COMMENTS+=("# every 5 min (off-:00) refresh the /jobs dashboard's jobs_status.json — READ-ONLY collector")
 LINES+=("3-58/5 * * * * cd $REPO && python3 ops/collect_jobs_status.py >> $JOBS_LOG 2>&1")
+
+# Every 3 min on the :01/:04/... cadence (off-:00, staggered from the other collectors). PRECOMPUTE the
+# /store-glimpse grid + per-group ticker drills into the persistent (Redis) cache so the page serves sub-ms
+# instead of paying the ~50s build on each refresh. The build needs quantlib/polars + the /store mount, so
+# this wrapper execs `python -m store_glimpse_cache` INSIDE quant-dashboard-1 (same docker-exec pattern
+# healthcheck uses) — read-only w.r.t. the store, idempotent (just overwrites the Redis blobs). ~105s/run < 3m.
+MATCHES+=("ops/collect_store_glimpse.py")
+COMMENTS+=("# every 3 min (off-:00) precompute the /store-glimpse grid + drills into the Redis cache — execs python -m store_glimpse_cache in quant-dashboard-1; READ-ONLY store, idempotent")
+LINES+=("1-58/3 * * * * cd $REPO && python3 ops/collect_store_glimpse.py >> $GLIMPSE_LOG 2>&1")
 
 # 22:33 PT weekdays — well after the 18:30 PT daily_lifecycle sweep (which READS stream partitions) and far
 # off RTH; only folds days STRICTLY BEFORE today (fc writes only today's partition). Idempotent + atomic +
