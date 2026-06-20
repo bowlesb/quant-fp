@@ -133,21 +133,33 @@ class MomentumRunGroup(FeatureGroup):
             )
         return specs
 
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+    def _prepared(self, ctx: BatchContext) -> pl.DataFrame:
+        """The sorted (symbol, minute, close) input with the per-bar epoch + one-minute return both halves read."""
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
         if frame.height == 0:
-            schema = {"symbol": pl.String, "minute": pl.Datetime("us", "UTC"), **{name: pl.Float64 for name in self.feature_names}}
-            return pl.DataFrame(schema=schema)
-        frame = frame.with_columns(
+            return frame
+        return frame.with_columns(
             pl.col("minute").dt.epoch("s").cast(pl.Float64).alias("__epoch"),
             (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("__ret"),
         )
-        # residual_skew: each window's standardized third residual moment over a WINDOW-LOCAL fit (point-in-time).
+
+    def _empty(self) -> pl.DataFrame:
+        schema = {"symbol": pl.String, "minute": pl.Datetime("us", "UTC"), **{name: pl.Float64 for name in self.feature_names}}
+        return pl.DataFrame(schema=schema)
+
+    def _compute_skew(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """The residual_skew columns: each window's standardized third residual moment over a WINDOW-LOCAL fit
+        (point-in-time). ``frame`` is the ``_prepared`` frame."""
         out = frame.select(["symbol", "minute"]).sort(["symbol", "minute"])
         for w in WINDOWS:
             out = out.join(_residual_skew_window(frame, w), on=["symbol", "minute"], how="left")
-        # longest_streak: vectorized over the present-return rows' global run length, capped per window so a
-        # run cannot count bars before the window's start: max_i min(__rl_i, position_in_window_i).
+        return out
+
+    def _compute_streak(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """The longest_streak columns: vectorized over the present-return rows' global run length, capped per
+        window so a run cannot count bars before the window's start (max_i min(__rl_i, position_in_window_i)).
+        ``frame`` is the ``_prepared`` frame."""
+        out = frame.select(["symbol", "minute"]).sort(["symbol", "minute"])
         present = self._present_run_lengths(frame)
         for w in WINDOWS:
             collected = present.rolling(index_column="minute", period=f"{w}m", group_by="symbol").agg(
@@ -161,6 +173,15 @@ class MomentumRunGroup(FeatureGroup):
                 pl.when(n_ret >= 2).then(capped / float(w)).otherwise(None).cast(pl.Float64).alias(f"longest_streak_{w}m"),
             )
             out = out.join(piece, on=["symbol", "minute"], how="left")
+        return out
+
+    def compute(self, ctx: BatchContext) -> pl.DataFrame:
+        frame = self._prepared(ctx)
+        if frame.height == 0:
+            return self._empty()
+        skew = self._compute_skew(frame)
+        streak = self._compute_streak(frame)
+        out = skew.join(streak, on=["symbol", "minute"], how="left")
         return out.select(["symbol", "minute", *self.feature_names])
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
@@ -188,12 +209,14 @@ class MomentumRunGroup(FeatureGroup):
         skew = self.compute_latest_on_window(ctx, LOOKBACK_MINUTES).select(
             ["symbol", "minute", *[f"residual_skew_{w}m" for w in WINDOWS]]
         )
+        # The streak half needs ONLY longest_streak — compute it directly (not via the full compute(), which
+        # would redundantly recompute the window-local residual_skew gather on this slice and throw it away).
+        # Same slice (+ each symbol's prior bar for the window-edge return), same _compute_streak math.
         streak_slice = self._slice_with_prior_bar(frame, LOOKBACK_MINUTES)
-        streak_full = self.compute(BatchContext(frames={"minute_agg": streak_slice}))
+        streak_prepared = self._prepared(BatchContext(frames={"minute_agg": streak_slice}))
+        streak_full = self._compute_streak(streak_prepared)
         latest = streak_full["minute"].max()
-        streak = streak_full.filter(pl.col("minute") == latest).select(
-            ["symbol", "minute", *[f"longest_streak_{w}m" for w in WINDOWS]]
-        )
+        streak = streak_full.filter(pl.col("minute") == latest)
         return skew.join(streak, on=["symbol", "minute"], how="full", coalesce=True).select(
             ["symbol", "minute", *self.feature_names]
         )
