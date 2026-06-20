@@ -233,10 +233,12 @@ The **time/depth** legibility view. The grid collapses every multi-day row onto 
 per-group detail lists raw date arrays — neither answers, at a glance, "on each of the last N days did stream
 and/or backfill land for this group, and how far back does each source's history reach". This does:
 
-* **Presence grid** — `days` columns (most-recent first, ending at the latest store date). Each `(group, day)`
-  cell carries the stream/backfill symbol counts and a `provenance` class: `both`, `stream_only` (not yet
-  parity-checkable), `backfill_only` (settled, no live capture that day), `absent` (neither — e.g. a weekend).
-  So live-vs-backfill provenance per `(group, day)` reads straight off the grid.
+* **Coverage-volume grid** — `days` columns (most-recent first, ending at the latest store date). Each
+  `(group, day)` cell carries the stream/backfill symbol counts and a `provenance` class: `both`,
+  `stream_only` (not yet parity-checkable), `backfill_only` (settled, no live capture that day), `absent`
+  (neither — e.g. a weekend). The page renders each source's half with **brightness ∝ that day's symbol
+  count vs the group's own in-window peak** (`stream_peak` / `backfill_peak`), so a row reads as a
+  coverage-VOLUME heat sparkline — *thinning/thickening* of capture is legible, not just present/absent.
 * **Depth** — per group, `backfill_earliest` + `backfill_span_days` (how far back history reaches) and
   `stream_horizon_days` (how many recent **weekdays** the live stream captured **unbroken** from the anchor,
   skipping weekends) — history depth and live horizon side by side.
@@ -254,6 +256,7 @@ one-pass per-date symbol read the grid already pays for, so it is no extra store
     {"group": "calendar", "version": "1.0.0", "layer": "B", "n_features": 9,
      "backfill_earliest": "2024-01-02", "backfill_latest": "2026-06-18", "backfill_span_days": 899,
      "stream_earliest": "2026-06-15", "stream_latest": "2026-06-18", "stream_horizon_days": 4,
+     "stream_peak": 1054, "backfill_peak": 1268,    // in-window busiest day per source (heat denominator)
      "days": [
        {"date": "2026-06-18", "stream": 1054, "backfill": 1268, "provenance": "both"},
        {"date": "2026-06-14", "stream": 0, "backfill": 0, "provenance": "absent"}      // weekend
