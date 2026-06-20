@@ -87,31 +87,24 @@ def weekly_rebalance_days(days: list[str]) -> list[tuple[int, str, str]]:
 
 
 def build_daily_cache(days: list[str]) -> pl.DataFrame:
-    """The slow step, made crash-survivable: scan each trading day once → its per-symbol daily aggregate,
-    APPENDING to daily_cache.parquet incrementally (bounded memory, resumable). On a re-run, days already in
-    the cache are skipped, so a killed build resumes instead of restarting from zero."""
-    cache_path = f"{OUT_DIR}/daily_cache.parquet"
-    done: set[str] = set()
-    if os.path.exists(cache_path):
-        done = set(pl.read_parquet(cache_path, columns=["date"])["date"].unique().to_list())
-        print(f"resuming: {len(done)} days already cached", flush=True)
+    """The slow step, made crash-survivable AND memory-bounded: scan each trading day once → its per-symbol
+    daily aggregate, written to its OWN partition file ``daily_cache/<date>.parquet``. Flat memory (each day
+    is written then dropped — never an in-RAM accumulation of the whole panel), and resumable (a re-run skips
+    days whose partition already exists, so a killed build resumes from where it stopped). The final lazy
+    scan over the partition dir assembles the daily frame once, at the end."""
+    cache_dir = f"{OUT_DIR}/daily_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    done = {p[:-8] for p in os.listdir(cache_dir) if p.endswith(".parquet")}
     pending = [d for d in days if d not in done]
-    batch: list[pl.DataFrame] = []
-    written = len(done)
+    if done:
+        print(f"resuming: {len(done)} day-partitions already cached, {len(pending)} pending", flush=True)
     for i, day in enumerate(pending):
         dd = day_daily(day)
         if dd.height:
-            batch.append(dd)
-        if len(batch) >= 60 or i == len(pending) - 1:
-            if batch:
-                chunk = pl.concat(batch, how="vertical_relaxed")
-                if os.path.exists(cache_path):
-                    chunk = pl.concat([pl.read_parquet(cache_path), chunk], how="vertical_relaxed")
-                chunk.write_parquet(cache_path)
-                written += len(batch)
-                batch = []
-            print(f"  cached {written}/{len(days)} days", flush=True)
-    return pl.read_parquet(cache_path).filter(pl.col("date").is_in(set(days)))
+            dd.write_parquet(f"{cache_dir}/{day}.parquet")  # one small file/day; memory does NOT grow
+        if (i + 1) % 60 == 0 or i == len(pending) - 1:
+            print(f"  cached {len(done) + i + 1}/{len(days)} days", flush=True)
+    return pl.scan_parquet(f"{cache_dir}/*.parquet").filter(pl.col("date").is_in(set(days))).collect()
 
 
 def build() -> None:
