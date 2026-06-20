@@ -33,6 +33,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
 )
 from quantlib.features.registry import register
 
@@ -51,6 +52,11 @@ class OvernightBetaGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "open", "close")),
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
     )
+    # Per-session cache of the daily features keyed by the daily-snapshot content token. The snapshot is
+    # fixed for the whole trading day, so its derived per-(symbol, date) overnight/intraday betas are
+    # identical every minute — compute once, broadcast each minute (the recompute-every-minute over the
+    # full 200-day daily history was the group's cost). Mirrors daily_beta / multi_day / prior_day.
+    _daily_cache: tuple[tuple[int, int, object, float], pl.DataFrame] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         return [
@@ -94,11 +100,20 @@ class OvernightBetaGroup(FeatureGroup):
         return pl.when(mkt_var > 0).then(cov_roll / mkt_var).otherwise(None).alias(out)
 
     def _daily_features(self, ctx: BatchContext) -> pl.DataFrame:
-        daily = (
-            ctx.frame("daily")
-            .select(["symbol", "date", "open", "close"])
-            .sort(["symbol", "date"])
-        )
+        """Per (symbol, date) rolling-60d overnight/intraday betas to SPY. Cached on the daily-snapshot
+        identity so the (identical-all-day) daily features are computed once, not per minute."""
+        source = ctx.frame("daily")
+        token = daily_snapshot_token(source)
+        cached = self._daily_cache
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        result = self._compute_daily_features(source)
+        self._daily_cache = (token, result)
+        return result
+
+    def _compute_daily_features(self, source: pl.DataFrame) -> pl.DataFrame:
+        """The actual per-(symbol, date) daily feature computation (the cached body)."""
+        daily = source.select(["symbol", "date", "open", "close"]).sort(["symbol", "date"])
         prev_close = pl.col("close").shift(1).over("symbol")
         daily = daily.with_columns(
             (pl.col("open") / prev_close - 1.0).alias("on_ret"),
