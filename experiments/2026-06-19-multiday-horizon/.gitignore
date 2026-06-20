@@ -1,1 +1,5 @@
 weekly_panel.parquet
+daily_cache.parquet
+.RUN_COMPLETE
+screen_console.txt
+__pycache__/

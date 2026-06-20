@@ -38,6 +38,8 @@ REV_DAYS = 5  # trailing/forward week = 5 trading days
 VOL_DAYS = 20  # trailing realized-vol / ADV window
 ENTRY_ET_MIN = 9 * 60 + 35  # 09:35 ET tradeable Monday entry (never the Friday close)
 MIN_PRICE = 1.0  # $1 floor
+CANDIDATE_ADV_FLOOR = 5_000_000.0  # $5M/day dollar-volume floor to count a liquid day
+CANDIDATE_MIN_LIQUID_DAYS = 60  # a symbol needs this many in-span liquid days to enter the candidate set
 
 
 def list_days() -> list[str]:
@@ -47,39 +49,31 @@ def list_days() -> list[str]:
     return [d for d in days if SPAN_START <= d <= SPAN_END]
 
 
-def daily_close_dollarvol(symbol: str, day: str) -> tuple[float, float] | None:
-    """RTH last close + RTH dollar volume for one (symbol, day), or None if no RTH bars. ET-anchored."""
-    pattern = f"{STORE}/raw/bars/symbol={symbol}/date={day}/*.parquet"
+def day_daily(day: str) -> pl.DataFrame:
+    """ONE scan over ALL symbols for ONE day → per-symbol (symbol, close=RTH last, dvol=RTH dollar volume,
+    entry=first RTH bar close >=09:35 ET). Per-DAY batching (one hive scan reads every symbol that day) keeps
+    the multi-year build to ~one scan per trading day instead of millions of per-(symbol,day) opens.
+    ET-anchored Int32-cast (the #197 DST/Int8 fix)."""
+    pattern = f"{STORE}/raw/bars/symbol=*/date={day}/*.parquet"
     if not glob.glob(pattern):
-        return None
-    df = pl.scan_parquet(pattern, hive_partitioning=True).select(["ts", "close", "volume"]).collect()
-    if df.height == 0:
-        return None
+        return pl.DataFrame()
+    lazy = pl.scan_parquet(pattern, hive_partitioning=True).select(["symbol", "ts", "close", "volume"])
     et = pl.col("ts").dt.convert_time_zone("America/New_York")
     etm = et.dt.hour().cast(pl.Int32) * 60 + et.dt.minute().cast(pl.Int32)
-    rth = df.filter((etm >= 9 * 60 + 30) & (etm < 16 * 60)).sort("ts")
-    if rth.height == 0:
-        return None
-    close = float(rth["close"][-1])
-    dvol = float((rth["close"] * rth["volume"]).sum())
-    return close, dvol
-
-
-def tradeable_open(symbol: str, day: str) -> float | None:
-    """The tradeable entry price = first RTH bar close at/after 09:35 ET on ``day`` (the Monday entry)."""
-    pattern = f"{STORE}/raw/bars/symbol={symbol}/date={day}/*.parquet"
-    if not glob.glob(pattern):
-        return None
-    df = pl.scan_parquet(pattern, hive_partitioning=True).select(["ts", "close"]).collect()
-    if df.height == 0:
-        return None
-    et = pl.col("ts").dt.convert_time_zone("America/New_York")
-    etm = et.dt.hour().cast(pl.Int32) * 60 + et.dt.minute().cast(pl.Int32)
-    at = df.filter(etm >= ENTRY_ET_MIN).sort("ts")
-    if at.height == 0:
-        return None
-    price = float(at["close"][0])
-    return price if price >= MIN_PRICE else None
+    rth = lazy.with_columns(etm.alias("_etm")).filter(
+        (pl.col("_etm") >= 9 * 60 + 30) & (pl.col("_etm") < 16 * 60)
+    )
+    out = (
+        rth.sort("ts")
+        .group_by("symbol")
+        .agg(
+            pl.col("close").last().alias("close"),
+            (pl.col("close") * pl.col("volume")).sum().alias("dvol"),
+            pl.col("close").filter(pl.col("_etm") >= ENTRY_ET_MIN).first().alias("entry"),
+        )
+        .collect()
+    )
+    return out.with_columns(pl.lit(day).alias("date"))
 
 
 def weekly_rebalance_days(days: list[str]) -> list[tuple[int, str, str]]:
@@ -92,38 +86,71 @@ def weekly_rebalance_days(days: list[str]) -> list[tuple[int, str, str]]:
     return out
 
 
+def build_daily_cache(days: list[str]) -> pl.DataFrame:
+    """The slow step, made crash-survivable: scan each trading day once → its per-symbol daily aggregate,
+    APPENDING to daily_cache.parquet incrementally (bounded memory, resumable). On a re-run, days already in
+    the cache are skipped, so a killed build resumes instead of restarting from zero."""
+    cache_path = f"{OUT_DIR}/daily_cache.parquet"
+    done: set[str] = set()
+    if os.path.exists(cache_path):
+        done = set(pl.read_parquet(cache_path, columns=["date"])["date"].unique().to_list())
+        print(f"resuming: {len(done)} days already cached", flush=True)
+    pending = [d for d in days if d not in done]
+    batch: list[pl.DataFrame] = []
+    written = len(done)
+    for i, day in enumerate(pending):
+        dd = day_daily(day)
+        if dd.height:
+            batch.append(dd)
+        if len(batch) >= 60 or i == len(pending) - 1:
+            if batch:
+                chunk = pl.concat(batch, how="vertical_relaxed")
+                if os.path.exists(cache_path):
+                    chunk = pl.concat([pl.read_parquet(cache_path), chunk], how="vertical_relaxed")
+                chunk.write_parquet(cache_path)
+                written += len(batch)
+                batch = []
+            print(f"  cached {written}/{len(days)} days", flush=True)
+    return pl.read_parquet(cache_path).filter(pl.col("date").is_in(set(days)))
+
+
 def build() -> None:
     days = list_days()
     print(f"trading days {len(days)} {days[0]}..{days[-1]}", flush=True)
-    # Liquid universe = top-N by ADV on a recent reference day in-span (the bars' only historical universe).
-    ref = days[len(days) // 2]
-    bar_syms = [p.split("symbol=")[1].split("/")[0] for p in glob.glob(f"{STORE}/raw/bars/symbol=*")]
-    # NOTE: full run ranks ADV per-week; this stub uses a single mid-span ADV ranking for the smoke pipeline.
-    advs = []
-    for sym in bar_syms:
-        cd = daily_close_dollarvol(sym, ref)
-        if cd is not None:
-            advs.append((sym, cd[1]))
-    advs.sort(key=lambda kv: kv[1], reverse=True)
-    universe = [sym for sym, _ in advs[:N_SYMBOLS]]
-    print(f"universe={len(universe)} (top-{N_SYMBOLS} ADV @ {ref})", flush=True)
-
-    # Per-symbol daily close series across the span (one scan per symbol).
+    daily = build_daily_cache(days)
+    # Candidate set: a symbol needs CANDIDATE_MIN_LIQUID_DAYS in-span days over the ADV floor.
+    liq = daily.filter(pl.col("dvol") >= CANDIDATE_ADV_FLOOR).group_by("symbol").len()
+    candidates = set(liq.filter(pl.col("len") >= CANDIDATE_MIN_LIQUID_DAYS)["symbol"].to_list())
+    daily = daily.filter(pl.col("symbol").is_in(candidates))
     closes: dict[str, dict[str, float]] = {}
-    for sym in universe:
-        series = {}
-        for day in days:
-            cd = daily_close_dollarvol(sym, day)
-            if cd is not None:
-                series[day] = cd[0]
-        closes[sym] = series
+    dvols: dict[str, dict[str, float]] = {}
+    entries: dict[str, dict[str, float]] = {}
+    for sym, grp in daily.group_by("symbol"):
+        s = sym[0] if isinstance(sym, tuple) else sym
+        closes[s] = dict(zip(grp["date"].to_list(), grp["close"].to_list()))
+        dvols[s] = dict(zip(grp["date"].to_list(), grp["dvol"].to_list()))
+        entries[s] = dict(zip(grp["date"].to_list(), grp["entry"].to_list()))
+    candidates = list(closes.keys())
+    print(
+        f"candidates={len(candidates)} (>= {CANDIDATE_MIN_LIQUID_DAYS} days over ${CANDIDATE_ADV_FLOOR/1e6:.0f}M ADV)",
+        flush=True,
+    )
 
     rebal = weekly_rebalance_days(days)
     rows = []
     for friday_idx, friday, monday in rebal:
         window_prior = days[friday_idx - VOL_DAYS : friday_idx + 1]
         fwd_end = days[friday_idx + 1 + REV_DAYS] if friday_idx + 1 + REV_DAYS < len(days) else None
-        for sym in universe:
+        # POINT-IN-TIME universe: trailing-20d ADV as of THIS Friday (no future liquidity peeking), top-N.
+        adv_now = []
+        for sym in candidates:
+            dser = dvols[sym]
+            trailing = [dser[d] for d in window_prior if d in dser]
+            if len(trailing) >= VOL_DAYS // 2:
+                adv_now.append((sym, float(np.mean(trailing))))
+        adv_now.sort(key=lambda kv: kv[1], reverse=True)
+        universe = {sym: adv for sym, adv in adv_now[:N_SYMBOLS]}
+        for sym, adv20 in universe.items():
             series = closes[sym]
             if friday not in series or days[friday_idx - REV_DAYS] not in series:
                 continue
@@ -137,7 +164,9 @@ def build() -> None:
                 continue
             rets = np.diff(np.log(prior_closes))
             vol_20d = float(np.std(rets)) if len(rets) >= 5 else float("nan")
-            entry = tradeable_open(sym, monday)
+            entry = entries[sym].get(monday)
+            if entry is not None and entry < MIN_PRICE:
+                entry = None
             disappeared = 1 if (fwd_end is not None and fwd_end not in series) else 0
             y_fwd = None
             if entry is not None and fwd_end is not None and fwd_end in series:
@@ -151,6 +180,7 @@ def build() -> None:
                     "symbol": sym,
                     "rev_1w": rev_1w,
                     "vol_20d": vol_20d,
+                    "size": float(np.log(adv20)),  # log trailing-ADV = the size/liquidity control
                     "y_fwd_1w": y_fwd,
                     "disappeared": disappeared,
                 }
