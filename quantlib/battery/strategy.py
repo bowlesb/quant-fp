@@ -147,11 +147,17 @@ class CrossSectionalLS:
                 liq = panel.volume * panel.entry_close
             return _top_tercile_per_group(liq, panel.minute_epoch)
         if cond == Conditioner.UP_DOWN_MARKET:
-            # default: take only UP-market days (a regime split; both directions reported in by_regime)
+            # take only UP-market days (a regime split; both directions reported in by_regime).
+            # up_market_day = sign of TODAY's open->close median — known only AT the close. For the
+            # close-entering horizons (overnight/2d/3d) that's point-in-time; for EOD (enters 09:35,
+            # resolves at today's close) today's regime is a LOOK-AHEAD, so condition on the PRIOR
+            # day's regime instead (the same one-day shift the EOD features get in _features_as_of_entry).
             up = panel.extra.get("up_market_day")
-            if up is not None:
-                return up.astype(bool)
-            return keep
+            if up is None:
+                return keep
+            if self.spec.horizon == Horizon.EOD and panel.cadence == "daily":
+                return self._prior_day_per_symbol(up.astype(bool), panel.symbol_code)
+            return up.astype(bool)
         if cond == Conditioner.SECTOR:
             # sector restriction needs a populated sector_map; absent -> no restriction (reported)
             return keep
@@ -186,6 +192,18 @@ class CrossSectionalLS:
             same_symbol = symbol_code[1:] == symbol_code[:-1]
             shifted[1:][same_symbol] = panel.feature_matrix[:-1][same_symbol]
         return shifted
+
+    @staticmethod
+    def _prior_day_per_symbol(flag: np.ndarray, symbol_code: np.ndarray) -> np.ndarray:
+        """The prior trading day's boolean flag per contiguous symbol block (the same one-day shift
+        `_features_as_of_entry` applies). The first row of each symbol has no prior -> False (not
+        selected), so a same-day look-ahead can never enter the conditioner."""
+        out = np.zeros_like(flag, dtype=bool)
+        n = flag.size
+        if n > 1:
+            same_symbol = symbol_code[1:] == symbol_code[:-1]
+            out[1:][same_symbol] = flag[:-1][same_symbol]
+        return out
 
     def _run(self, sub: "_Subset", panel: Panel) -> BacktestResult:
         spec = self.spec
@@ -266,10 +284,14 @@ class CrossSectionalLS:
                 )
                 pred = booster.predict(test_X)
             else:
-                # raw fast path: the per-name score IS the SHARED decision core's score (the leading
-                # feature), so the battery ranks on exactly what a live container's decide() would —
-                # backtest==live by construction. See docs/STRATEGY_BATTERY_PORTABILITY.md.
-                pred = self._shared_core_score(test_X)
+                # raw fast path: an equal-weight columnar COMPOSITE of ALL features in the set (the
+                # per-timestamp z-score of each column, averaged). This tests the WHOLE feature set —
+                # NOT just column 0 — so an empty leaderboard honestly means "no feature in this set
+                # (nor their equal-weight composite) carries a rank signal", never "column 0 was flat".
+                # It is the same columnar score applied batch (here) and per-event (a live container's
+                # decide()), so backtest==live by construction. The GBM mode (use_gbm=True) is the
+                # opt-in non-linear combiner; the fast path is the linear screen over the full set.
+                pred = self._composite_score(test_X, train_X)
             for j, i in enumerate(te):
                 preds.append(float(pred[j]))
                 labels.append(float(sub.y[i]))
@@ -277,13 +299,25 @@ class CrossSectionalLS:
                 rows.append(int(sub.row_idx[i]))
         return preds, labels, groups, rows
 
-    def _shared_core_score(self, test_X: np.ndarray) -> np.ndarray:
-        """Score the test rows through the SHARED `CrossSectionalLS` decision core (the same object a
-        live container runs), so the battery's raw-path signal is production-identical by construction.
-        The leading feature column is the signal the core ranks on (named 'signal' in a one-feature
-        cross-section view); the core's score == what decide() ranks, == what the live cycle ranks."""
+    def _composite_score(self, test_X: np.ndarray, train_X: np.ndarray) -> np.ndarray:
+        """The raw fast-path signal = an equal-weight composite of ALL features (not just column 0).
+
+        Each feature column is standardized to a z-score using the TRAIN fold's mean/std (no test
+        leakage), then the per-row composite is the mean z across columns. A feature set with no
+        column carrying a rank signal — and no equal-weight combination of them — produces a flat
+        composite, so the null is honest about the WHOLE set. The composite is built from a
+        `PanelCrossSection` exposing the standardized columns and scored through the SHARED
+        `CrossSectionalLS` core (frac-rank of the composite), so the same columnar expression runs
+        batch (here) and per-event in a live container. Sign-naive (no labels used) — directionality
+        is left to the GBM mode or a signed `signal_feature`; this is the linear whole-set SCREEN."""
+        mean = np.nanmean(train_X, axis=0)
+        std = np.nanstd(train_X, axis=0)
+        std = np.where(std > 0, std, 1.0)
+        z = (test_X - mean) / std
+        composite = np.nanmean(np.where(np.isfinite(z), z, np.nan), axis=1)
+        composite = np.where(np.isfinite(composite), composite, 0.0)
         symbols = [str(i) for i in range(test_X.shape[0])]
-        cross_section = PanelCrossSection(symbols, _epoch_to_dt(0), test_X[:, :1], {"signal": 0})
+        cross_section = PanelCrossSection(symbols, _epoch_to_dt(0), composite.reshape(-1, 1), {"signal": 0})
         core = SharedCrossSectionalLS(frac=self.spec.frac, signal_feature="signal")
         return core.score(cross_section)
 
