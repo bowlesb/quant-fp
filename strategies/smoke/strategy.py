@@ -41,6 +41,10 @@ from alpaca.trading.requests import MarketOrderRequest
 
 from quantlib.bus.consumer import BusConsumer
 from quantlib.bus.view import FeatureView
+from quantlib.strategy_core.execution import Fill, OrderState
+from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
+from quantlib.strategy_core.production_execution import ProductionOrderIntent, make_client_order_id
+from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.model import MockMLModel, Model
 from strategies.smoke.bet_store import BetStore
 from strategies.smoke.contract import (
@@ -191,15 +195,44 @@ class SmokeStrategy:
         trading: TradingClient,
         store: BetStore,
         model: Model | None = None,
+        state_store: PgStateStore | None = None,
     ) -> None:
         self._config = config
         self._consumer = consumer
         self._trading = trading
         self._store = store
+        # the production execution+state layer, running ALONGSIDE the bespoke bet-store (which is retained
+        # unchanged for backward-readability + clean rollback): broker calls go through PaperAlpacaExecutor,
+        # and every captured fill is also booked into the durable StrategyState ledger (the SoT migration).
+        self._executor = PaperAlpacaExecutor(trading)
+        self._state_store = state_store
+        self._state = state_store.load(STRATEGY_NAME) if state_store is not None else None
         self._model = model if model is not None else MockMLModel(MODEL_FOLD_FEATURES)
         self._last_symbol: str | None = None
         self._last_vector: FeatureView | None = None
         self._last_bet_ts: dt.datetime | None = None
+
+    def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
+        """Mirror a captured fill into the durable StrategyState ledger (the migration SoT). A no-op when
+        no state store is wired (the bespoke bets table remains the record), so the change is additive and
+        the loop's behavior/decisions are unchanged."""
+        if self._state is None or self._state_store is None:
+            return
+        fill = Fill(
+            symbol=symbol,
+            side=side,
+            weight=0.0,
+            fill_price=price,
+            cost_bps=0.0,
+            client_order_id=coid,
+            filled_qty=qty,
+            avg_price=price,
+            status=OrderState.FILLED,
+        )
+        if any(existing.client_order_id == coid for existing in self._state.fills):
+            return  # idempotent: a coid already booked is never double-counted (restart-safe)
+        self._state.apply_fill(fill)
+        self._state_store.append_fill(STRATEGY_NAME, fill)
 
     def publish_contract(self) -> None:
         """Publish this strategy's declared (name, version) feature contract to the bus so the pre-deploy
@@ -327,28 +360,20 @@ class SmokeStrategy:
             return
         symbol = str(self._last_symbol)
         notional = self._config.notional_usd
-        coid = f"{COID_PREFIX}{symbol}_{now.strftime('%Y%m%dT%H%M%S')}"
+        coid = make_client_order_id(STRATEGY_NAME, now, symbol, "buy")
         hold_until = now + dt.timedelta(seconds=self._config.hold_sec)
         self._store.record_open(symbol, "buy", notional, coid, now, hold_until)
-        order = cast(
-            Order,
-            self._trading.submit_order(
-                MarketOrderRequest(
-                    symbol=symbol,
-                    notional=notional,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                    client_order_id=coid,
-                )
-            ),
+        intent = ProductionOrderIntent(
+            strategy_id=STRATEGY_NAME, symbol=symbol, side="buy", decision_ts=now, notional=notional
         )
+        record = self._executor.submit(intent)
         self._last_bet_ts = now
         logger.info(
             "BET placed: BUY $%.2f notional %s coid=%s broker_id=%s hold=%ds",
             notional,
             symbol,
             coid,
-            str(order.id),
+            record.broker_order_id,
             self._config.hold_sec,
         )
 
@@ -364,6 +389,7 @@ class SmokeStrategy:
                     if filled_qty is not None:
                         filled_price = float(order.filled_avg_price)
                         self._store.mark_filled(entry_order_id, filled_price, filled_qty)
+                        self._book_fill(str(bet["symbol"]), "buy", entry_order_id, filled_qty, filled_price)
                         bet["entry_price"] = filled_price
                         bet["qty"] = filled_qty
             hold_until = bet["hold_until"]
@@ -387,6 +413,7 @@ class SmokeStrategy:
             return None
         entry_price_value = float(entry_order.filled_avg_price)
         self._store.mark_filled(entry_order_id, entry_price_value, filled_qty)
+        self._book_fill(str(bet["symbol"]), "buy", entry_order_id, filled_qty, entry_price_value)
         bet["entry_price"] = entry_price_value
         bet["qty"] = filled_qty
         return entry_price_value, filled_qty
@@ -467,6 +494,7 @@ class SmokeStrategy:
         realized = (exit_price - entry_price_value) * qty
         exit_ts = exit_order.filled_at or dt.datetime.now(dt.timezone.utc)
         self._store.record_close(entry_order_id, exit_ts, exit_price, realized)
+        self._book_fill(symbol, "sell", exit_coid, qty, exit_price)
         logger.info(
             "BET closed: %s entry=%.4f exit=%.4f qty=%g pnl=%+.4f",
             symbol,
