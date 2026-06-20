@@ -20,6 +20,7 @@ import pytest
 
 from quantlib.features import BatchContext, REGISTRY, run_group
 from quantlib.features.compare import runnable
+from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.profile import build_frames
 
 BASE = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
@@ -315,3 +316,72 @@ def test_normal_window_values_are_finite_and_present() -> None:
         last["bb_position_20m"]
     )
     assert last["rsi_14m"] is not None and math.isfinite(last["rsi_14m"])
+
+
+def _zero_volume_frame(symbol: str, n: int, zero_at: int) -> pl.DataFrame:
+    """A well-conditioned VARYING-price window with one NO-TRADE minute (volume == 0) at ``zero_at`` — the
+    Amihud degenerate case. Price still moves at the zero-volume minute so |return| != 0, i.e. the ratio is
+    a non-zero / zero = +Inf (not 0/0)."""
+    rows = []
+    for i in range(n):
+        close = 100.0 + i * 0.05  # genuine price variation -> non-zero one-minute returns
+        rows.append(
+            {
+                "symbol": symbol,
+                "minute": BASE + timedelta(minutes=i),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 0.0 if i == zero_at else 1000.0,
+                "signed_volume": 0.0 if i == zero_at else 100.0,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def test_amihud_no_inf_on_zero_volume_minute() -> None:
+    """A single no-trade minute (volume == 0) makes ``|return| / dollar-volume`` = non-zero / 0 = +Inf, which
+    is never a valid illiquidity value AND poisons the trailing-window mean for the whole window. Backfill
+    ``rolling_mean_by`` and the live kernel must both emit a finite/null amihud (NO +/-inf) across every
+    window after the guard."""
+    group = REGISTRY.get_group("liquidity")
+    ctx = BatchContext(frames={"minute_agg": _zero_volume_frame("ILLQ", 60, zero_at=20)})
+    rolling = group.compute(ctx)
+    for col in [c for c in rolling.columns if c.startswith("amihud_illiq")]:
+        _assert_finite_or_null(rolling, col)
+
+
+def test_amihud_parity_across_zero_volume_minute_all_paths() -> None:
+    """The zero-volume minute is BOTH a value bug (+Inf) and a live-vs-backfill PARITY break: the incremental
+    running-sum does ``Inf − Inf = NaN`` when that minute ages out of the window, so the STREAM path emits NaN
+    where backfill (a fresh rolling mean) recovers a finite value. Hold all three paths — backfill ``compute``,
+    live aggregate ``compute_latest``, and the incremental engine — finite and equal (or jointly null) at every
+    minute, including the minutes AFTER the zero-volume minute leaves the short windows."""
+    frame = _zero_volume_frame("ILLQ", 60, zero_at=20)
+    group = REGISTRY.get_group("liquidity")
+    rolling = group.compute(BatchContext(frames={"minute_agg": frame})).sort(["symbol", "minute"])
+    minutes = sorted(frame["minute"].unique())
+    engine = IncrementalEngine([group])
+    amihud_cols = [c for c in rolling.columns if c.startswith("amihud_illiq")]
+
+    for ti, minute in enumerate(minutes):
+        buffer = frame.filter(pl.col("minute") <= minute)
+        inc = engine.step(buffer)[group.name].row(0, named=True)
+        if ti not in (20, 25, 30, 45, len(minutes) - 1):
+            continue
+        ctx = BatchContext(frames={"minute_agg": buffer})
+        live = group.compute_latest(ctx).row(0, named=True)
+        back = rolling.filter(pl.col("minute") == minute).row(0, named=True)
+        for col in amihud_cols:
+            for label, val in (("backfill", back[col]), ("compute_latest", live[col]), ("incremental", inc[col])):
+                assert val is None or math.isfinite(
+                    val
+                ), f"min{ti} {col}: {label} emitted non-finite {val} on/after a zero-volume minute"
+            assert (back[col] is None) == (live[col] is None) == (
+                inc[col] is None
+            ), f"min{ti} {col}: null-ness disagrees back={back[col]} live={live[col]} inc={inc[col]}"
+            if back[col] is not None:
+                assert math.isclose(back[col], live[col], rel_tol=1e-6, abs_tol=1e-12) and math.isclose(
+                    back[col], inc[col], rel_tol=1e-6, abs_tol=1e-12
+                ), f"min{ti} {col}: back={back[col]} live={live[col]} inc={inc[col]} diverge"
