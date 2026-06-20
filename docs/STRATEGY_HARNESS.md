@@ -109,3 +109,12 @@ capacity / partial-fill gap.
 `quantlib/battery/` (the panel loader + walk-forward), never the reverse. The live containers import the
 same `strategy_core` — so there is exactly one home for the decision the harness validates and the
 container runs.
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Strategy research harness & edge hunt*. See also:
+[STRATEGY_BATTERY_RESULTS](STRATEGY_BATTERY_RESULTS.md) ·
+[STRATEGY_BATTERY_PORTABILITY](STRATEGY_BATTERY_PORTABILITY.md) · [EXPLORATION_PIPELINE](EXPLORATION_PIPELINE.md) ·
+[MODELLING_AGENT](MODELLING_AGENT.md) · the features it tests [FEATURE_PLATFORM](FEATURE_PLATFORM.md) · the
+execution it ports to [STRATEGY_EXECUTION_ABSTRACTION](STRATEGY_EXECUTION_ABSTRACTION.md).

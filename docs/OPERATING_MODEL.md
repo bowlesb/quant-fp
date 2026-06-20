@@ -185,3 +185,11 @@ No job runs unless its compute (memory/time/resources) is planned AND justified 
 relative to other objectives. The Lead budgets compute across workstreams; jobs are memory-bounded
 (sharded/`--processes 1` for the heavy tick materialize), logged, and monitored to completion. Verify-first:
 don't spend deep-backfill compute on a feature until it's deterministic or parity-verified.
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Agent operating model & ops*. See also:
+[OPERATIONS](OPERATIONS.md) · [RESPONSIBILITY_MAP](RESPONSIBILITY_MAP.md) ·
+[MAINTENANCE_PROTOCOL](MAINTENANCE_PROTOCOL.md) · [VERIFICATION_CULTURE](VERIFICATION_CULTURE.md) ·
+[ROADMAP](ROADMAP.md) · [AUTONOMOUS_BACKLOG](AUTONOMOUS_BACKLOG.md).

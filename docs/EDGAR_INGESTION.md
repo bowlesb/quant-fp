@@ -104,3 +104,9 @@ which can mis-map a renamed ticker); the Phase-2 event-clock feature kind.
 Alt-data (filings) is exactly the breadth-over-depth, edge-hunt direction — it's orthogonal signal a
 modelling agent can't get from price/volume alone, and the event-clock kind is a clean, parity-true
 addition to the platform. Phase 1 (collect) is low-risk and starts the data accruing immediately.
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *EDGAR & news ingestion*. See also:
+[EDGAR_PLAN](EDGAR_PLAN.md) · [NEWS_INGESTION](NEWS_INGESTION.md) · the raw tape it joins [BACKFILL](BACKFILL.md).

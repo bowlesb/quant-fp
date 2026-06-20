@@ -168,3 +168,11 @@ LEAD's long run, not a subagent's.
 `ops/nightly_relaunch.{sh,py}` is a SEPARATE operational concern — it reseeds the universe and relaunches
 the live capture container with a warm start for a clean session; it does not acquire/materialize/validate
 and is intentionally left out of the dispatcher.
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Data, raw tape & backfill*. See also:
+[RAW_TAPE_COVERAGE](RAW_TAPE_COVERAGE.md) · [STORE_PROVENANCE](STORE_PROVENANCE.md) ·
+[VECTOR_BACKFILL](VECTOR_BACKFILL.md) · [MARKET_DATA_STREAMS](MARKET_DATA_STREAMS.md) ·
+[CORPORATE_ACTIONS_PARITY](CORPORATE_ACTIONS_PARITY.md) · the parity it feeds [TRUST_REDESIGN](TRUST_REDESIGN.md).

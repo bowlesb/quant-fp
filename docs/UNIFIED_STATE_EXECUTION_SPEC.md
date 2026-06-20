@@ -128,3 +128,11 @@ floor IS the Python-per-group-frame model this removes).
   per-group-Python-frame model itself. Only the abstraction (A-cache eliminates A-recompute; B-fold +
   Rust-resident eliminates the per-group frame-build) crosses toward <100ms. One investment, both wins
   (latency + fast-by-declaration cheap features).
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *State & incremental execution*. See also:
+[STATE_ABSTRACTION](STATE_ABSTRACTION.md) · [INCREMENTAL_INTEGRATION](INCREMENTAL_INTEGRATION.md) ·
+[INCREMENTAL_READINESS](INCREMENTAL_READINESS.md) · [P3_RUST_RESIDENT_FOLD](P3_RUST_RESIDENT_FOLD.md) · the
+features it computes [FEATURE_PLATFORM](FEATURE_PLATFORM.md) · the latency it serves [LATENCY_PLAN](LATENCY_PLAN.md).
