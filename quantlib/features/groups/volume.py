@@ -21,8 +21,14 @@ WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
 
 # A volume std below this fraction of the window mean is a degenerate constant-volume window where the
 # z-score is undefined (and a bare `std > 0` / exact `std == 0` guard diverges stream-vs-backfill on
-# float rounding); we emit NULL there so both paths agree (parity).
-_VOL_STD_REL_EPS = 1e-9
+# float rounding); we emit NULL there so both paths agree (parity). The floor must be ABOVE the std float
+# noise the two paths disagree by: on a genuinely-constant window the live power-sum std is EXACTLY 0.0
+# while backfill `rolling_std_by` (Welford, sliding add/remove) leaves a residue ~ a few * 1e-9 of the mean
+# (measured 2.8e-6 on volume==1000, i.e. ~2.8e-9 relative). A 1e-9 floor sits AT that noise level, so the
+# residue lands ABOVE it (backfill passes -> z=0) while the live 0.0 lands below (-> NULL): a null/non-null
+# parity break. 1e-6 swallows the Welford residue with ~1000x margin and stays far below any real volume
+# z-score (genuine intraday volume std/mean is O(0.1-1)), so well-conditioned windows are untouched.
+_VOL_STD_REL_EPS = 1e-6
 
 
 @register
