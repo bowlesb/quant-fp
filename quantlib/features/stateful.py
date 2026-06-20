@@ -101,6 +101,92 @@ class ExtremaSpec:
     op: str  # "max" | "min"
 
 
+@dataclass(frozen=True)
+class CumulativeSpec:
+    """One session-cumulative accumulator the group needs: ``alias`` = the running ``reduce`` of ``source``
+    over the bars SINCE the session open (the accumulator RESETS at each new ET-session-date). ``reduce`` is
+    ``"max"`` | ``"min"`` | ``"sum"`` | ``"first"`` (first = the session-open value). The session-cumulative
+    kind for runner_state (cum-max high / cum-sum dollar / first open), dumper_state (cum-min low), and
+    gap_fill_state (first open) — a per-(symbol, ET-session) running reduce, the sequential-hot B kind from
+    docs/P3_RUST_RESIDENT_FOLD.md."""
+
+    alias: str
+    source: str
+    reduce: str  # "max" | "min" | "sum" | "first"
+
+
+_CUMULATIVE_IDENTITY = {"max": -np.inf, "min": np.inf, "sum": 0.0, "first": np.nan}
+
+
+class CumulativeState:
+    """Session-cumulative KIND: one running ``reduce`` per (symbol, spec) over the bars since the session
+    open, RESET when the ET-session-date rolls over. ``fold(minute)`` updates each accumulator from this
+    minute's present bars (max/min/sum/first); ``value(alias)`` reads the accumulator. The running reduce at
+    the LAST bar of a session equals the session's reduce by construction, so this is parity-true by the
+    universal kind invariant ``seed(H); fold(m) == seed(H + m)`` (the SAME identity PR #267/#269/#266 proved
+    cell-for-cell for runner/dumper/gap_fill: multi-session, sparse-absent-at-T, first-bar-of-session,
+    run-then-pullback). Reset-on-session-rollover is keyed by the ET-session-date the caller supplies per
+    minute (so DST + the 09:30 boundary are resolved ONCE by the shared session-column derivation, not per
+    spec). NaN (absent bar) does not update the accumulator — the reduce is over PRESENT bars only, exactly
+    what the batch per-session ``group_by`` aggregate computes."""
+
+    def __init__(self, symbols: list[str], specs: list[CumulativeSpec]) -> None:
+        self.symbols = list(symbols)
+        self.n = len(self.symbols)
+        self.specs = list(specs)
+        # one running accumulator per (spec, symbol), seeded to the reduce identity; the active session date
+        # per symbol (None until the first bar) so a new session resets the accumulators for that symbol.
+        self._acc = [
+            np.full(self.n, _CUMULATIVE_IDENTITY[spec.reduce], dtype=np.float64) for spec in self.specs
+        ]
+        self._session: list[object] = [None] * self.n
+        self._latest_epoch: int | None = None
+
+    def fold(self, minute_epoch: int, session_dates: list[object], sources: dict[str, np.ndarray]) -> None:
+        """Advance every accumulator one minute. ``session_dates`` is the ET-session-date per symbol at this
+        minute (the reset key — when it differs from the symbol's active session the accumulators reset before
+        this minute folds in). ``sources`` maps each spec's ``source`` to its ``(n_symbols,)`` value column
+        (NaN where the bar is absent — not folded)."""
+        self._latest_epoch = int(minute_epoch)
+        for sym_i in range(self.n):
+            sdate = session_dates[sym_i]
+            if sdate is None:
+                continue  # no bar this minute for this symbol (absent) — nothing to fold
+            if sdate != self._session[sym_i]:
+                self._session[sym_i] = sdate
+                for si, spec in enumerate(self.specs):
+                    self._acc[si][sym_i] = _CUMULATIVE_IDENTITY[spec.reduce]
+        for si, spec in enumerate(self.specs):
+            values = sources[spec.source]
+            acc = self._acc[si]
+            for sym_i in range(self.n):
+                value = values[sym_i]
+                if value != value:  # NaN -> absent bar, skip
+                    continue
+                if spec.reduce == "max":
+                    if value > acc[sym_i]:
+                        acc[sym_i] = value
+                elif spec.reduce == "min":
+                    if value < acc[sym_i]:
+                        acc[sym_i] = value
+                elif spec.reduce == "sum":
+                    acc[sym_i] += value
+                else:  # "first" — set once per session (identity is NaN, so the first present bar fills it)
+                    if acc[sym_i] != acc[sym_i]:
+                        acc[sym_i] = value
+
+    def value(self, alias: str) -> np.ndarray:
+        """The session-cumulative accumulator for ``alias`` at the latest folded minute. A symbol whose
+        accumulator is still the reduce identity (no present bar this session) reads NaN."""
+        si = next(i for i, spec in enumerate(self.specs) if spec.alias == alias)
+        spec = self.specs[si]
+        out = self._acc[si].astype(np.float64, copy=True)
+        identity = _CUMULATIVE_IDENTITY[spec.reduce]
+        if identity == identity:  # finite identity (max/min/sum) -> a never-updated cell is "no data" => NaN
+            out = np.where(out == identity, np.nan, out)
+        return out
+
+
 class _CodedBuffer:
     """A trailing buffer prepared ONCE per minute for the Rust stateful kernels: (symbol, minute)-sorted with
     an ascending integer symbol code (block order == sorted symbols) and minute-epoch, plus the symbol-source
