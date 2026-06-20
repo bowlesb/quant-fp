@@ -1,0 +1,7 @@
+*.parquet
+daily_cache/
+fills/
+.RUN_COMPLETE
+screen_console.txt
+screen_results.csv
+__pycache__/
