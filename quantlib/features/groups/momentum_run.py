@@ -74,24 +74,35 @@ def _residual_skew_window(frame: pl.DataFrame, w: int) -> pl.DataFrame:
     gathered = frame.rolling(index_column="minute", period=f"{w}m", group_by="symbol").agg(
         pl.col("close").alias("__c"), pl.col("__epoch").alias("__ep")
     )
+    return _residual_skew_from_lists(gathered, ["symbol", "minute"], col)
+
+
+def _residual_skew_from_lists(gathered: pl.DataFrame, keys: list[str], col: str) -> pl.DataFrame:
+    """The window-local standardized third residual moment from a frame whose ``__c`` (closes) / ``__ep``
+    (epochs) are per-row LIST columns of one window's gathered bars. Shared by the rolling backfill path
+    (``_residual_skew_window``, one list per (symbol, minute)) and the live latest-only path
+    (``_compute_skew_latest``, one list per symbol at T) so the OLS + m3/m2**1.5 algebra is a SINGLE source of
+    truth — identical values on both paths by construction. Returns ``keys`` + the ``col`` value (null where
+    undefined: n < MIN_POINTS, zero x-variance, or a residual spread below REL_RESID_FLOOR of the window mean
+    price)."""
     close_list = pl.col("__c")
     x_axis = (pl.col("__ep") - pl.col("__ep").list.min()) / 60.0  # window-relative minutes (gap-aware)
-    gathered = gathered.with_columns(x_axis.alias("__x"))
+    out = gathered.with_columns(x_axis.alias("__x"))
     xc = pl.col("__x") - pl.col("__x").list.mean()  # center on the window's own mean (origin-invariant residuals)
     yc = close_list - close_list.list.mean()
-    gathered = gathered.with_columns(xc.alias("__xc"), yc.alias("__yc"), close_list.list.mean().alias("__my"))
+    out = out.with_columns(xc.alias("__xc"), yc.alias("__yc"), close_list.list.mean().alias("__my"))
     sxx_c = (pl.col("__xc") * pl.col("__xc")).list.sum()
     sxy_c = (pl.col("__xc") * pl.col("__yc")).list.sum()
-    gathered = gathered.with_columns(sxx_c.alias("__sxxc"), (sxy_c / sxx_c).alias("__slope"))
+    out = out.with_columns(sxx_c.alias("__sxxc"), (sxy_c / sxx_c).alias("__slope"))
     resid = pl.col("__yc") - pl.col("__slope") * pl.col("__xc")
-    gathered = gathered.with_columns(resid.alias("__r"))
+    out = out.with_columns(resid.alias("__r"))
     m2 = (pl.col("__r") * pl.col("__r")).list.mean()
     m3 = (pl.col("__r") * pl.col("__r") * pl.col("__r")).list.mean()
-    gathered = gathered.with_columns(m2.alias("__m2"), m3.alias("__m3"), close_list.list.len().alias("__n"))
+    out = out.with_columns(m2.alias("__m2"), m3.alias("__m3"), close_list.list.len().alias("__n"))
     resid_var_floor = (REL_RESID_FLOOR * pl.col("__my")).pow(2)  # (rel_eps · price)^2 — near-linear cutoff
     defined = (pl.col("__n") >= MIN_POINTS) & (pl.col("__sxxc") > 0.0) & (pl.col("__m2") > resid_var_floor)
     value = pl.when(defined).then(pl.col("__m3") / pl.col("__m2").clip(lower_bound=0.0).pow(1.5)).otherwise(None)
-    return gathered.select("symbol", "minute", value.cast(pl.Float64).alias(col))
+    return out.select(*keys, value.cast(pl.Float64).alias(col))
 
 
 def _global_run_length(present: pl.DataFrame) -> pl.DataFrame:
@@ -155,6 +166,28 @@ class MomentumRunGroup(FeatureGroup):
             out = out.join(_residual_skew_window(frame, w), on=["symbol", "minute"], how="left")
         return out
 
+    def _compute_skew_latest(self, frame: pl.DataFrame, latest: object) -> pl.DataFrame:
+        """The residual_skew columns at the LATEST minute T ONLY — the live-path fast form. The full
+        ``_compute_skew`` runs a rolling gather over EVERY minute of the lookback slice then keeps only T;
+        each window's value at T depends only on the trailing ``(T-w, T]`` bars, so gather that single slice
+        per window directly (a minute-cutoff filter + per-symbol group, NOT a rolling) and run the IDENTICAL
+        window-local OLS + standardized-third-moment. Value-identical to ``_compute_skew(...).filter(==T)`` by
+        construction (same window bars, same origin, same algebra), at one gather/window instead of one
+        per minute. ``frame`` is the ``_prepared`` frame."""
+        base = frame.filter(pl.col("minute") == latest).select(["symbol", "minute"]).sort("symbol")
+        for w in WINDOWS:
+            col = f"residual_skew_{w}m"
+            window = (
+                frame.filter(
+                    (pl.col("minute") > latest - pl.duration(minutes=w)) & (pl.col("minute") <= latest)
+                )
+                .group_by("symbol", maintain_order=True)
+                .agg(pl.col("close").alias("__c"), pl.col("__epoch").alias("__ep"))
+            )
+            piece = _residual_skew_from_lists(window, ["symbol"], col)
+            base = base.join(piece, on="symbol", how="left")
+        return base.select(["symbol", "minute", *[f"residual_skew_{w}m" for w in WINDOWS]])
+
     def _compute_streak(self, frame: pl.DataFrame) -> pl.DataFrame:
         """The longest_streak columns: vectorized over the present-return rows' global run length, capped per
         window so a run cannot count bars before the window's start (max_i min(__rl_i, position_in_window_i)).
@@ -206,9 +239,14 @@ class MomentumRunGroup(FeatureGroup):
         frame = ctx.frame("minute_agg")
         if frame.height == 0:
             return self.compute(ctx)
-        skew = self.compute_latest_on_window(ctx, LOOKBACK_MINUTES).select(
-            ["symbol", "minute", *[f"residual_skew_{w}m" for w in WINDOWS]]
-        )
+        # residual_skew at T ONLY: gather each window's trailing (T-w, T] slice once (not a rolling over every
+        # lookback minute then discard all but T). Value-identical to the rolling form filtered to T — the
+        # window bars, the window-local origin, and the OLS+m3/m2**1.5 algebra are the SAME (shared
+        # _residual_skew_from_lists). The deepest window only reads the last max(WINDOWS) minutes, so the tight
+        # LOOKBACK_MINUTES slice is a safe (and sufficient) input bound for the gathers.
+        skew_slice = frame.filter(pl.col("minute") >= frame["minute"].max() - pl.duration(minutes=LOOKBACK_MINUTES))
+        skew_prepared = self._prepared(BatchContext(frames={"minute_agg": skew_slice}))
+        skew = self._compute_skew_latest(skew_prepared, skew_prepared["minute"].max())
         # The streak half needs ONLY longest_streak — compute it directly (not via the full compute(), which
         # would redundantly recompute the window-local residual_skew gather on this slice and throw it away).
         # Same slice (+ each symbol's prior bar for the window-edge return), same _compute_streak math.
