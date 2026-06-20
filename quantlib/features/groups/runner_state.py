@@ -165,13 +165,57 @@ class RunnerStateGroup(FeatureGroup):
             ["symbol", "minute", *names]
         )
 
+    def _assemble_latest(self, ctx: BatchContext, latest: object) -> pl.DataFrame:
+        """Latest-minute live form: the running since-open state AT T is the aggregate over T's OWN session
+        up to and including T. Because T is the latest minute, "up to T" is the whole current session in the
+        buffer, so the running ``cum_max``/``cum_sum``/``first`` at T equal a SINGLE per-(symbol, session)
+        ``max``/``sum``/``first`` — reduce each symbol's current session ONCE (NOT a per-minute cumulative
+        scan over ~390 bars) and emit T's row. Value-identical to ``_assemble(...).filter(minute == T)`` by
+        construction: a running max/sum/first at the LAST bar of a window equals the window's max/sum/first;
+        same RTH filter, same partition, same feature algebra."""
+        names = [spec.name for spec in self.declare()]
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "open", "high", "close", "volume"])
+        et_minute = et_minute_of_day(pl.col("minute"))
+        frame = frame.with_columns(
+            pl.col("minute").dt.convert_time_zone("America/New_York").dt.date().alias("sdate"),
+            et_minute.alias("_etm"),
+        )
+        latest_sdate = pl.lit(latest).dt.convert_time_zone("America/New_York").dt.date()
+        session = frame.filter(
+            (pl.col("_etm") >= OPEN_MINUTE)
+            & (pl.col("sdate") == latest_sdate)
+            & (pl.col("minute") <= latest)
+        ).sort(["symbol", "minute"])
+        agg = session.group_by("symbol", maintain_order=True).agg(
+            pl.col("high").max().alias("_run_high"),
+            (pl.col("close") * pl.col("volume")).sum().alias("_run_dollar"),
+            pl.col("open").first().alias("_sess_open"),
+            pl.col("close").last().alias("close"),
+            pl.col("sdate").first().alias("sdate"),
+            pl.col("minute").last().alias("minute"),
+        )
+        joined = agg.join(
+            self._prev_close(ctx),
+            left_on=["symbol", "sdate"],
+            right_on=["symbol", "date"],
+            how="left",
+        )
+        early_move = pl.col("_run_high") / pl.col("prev_close") - 1.0
+        in_band = (pl.col("prev_close") >= BAND_LO) & (pl.col("prev_close") <= BAND_HI)
+        feats = joined.with_columns(
+            early_move.alias("runner_early_move"),
+            (pl.col("_sess_open") / pl.col("prev_close") - 1.0).alias("runner_gap_open"),
+            (pl.col("close") / pl.col("_run_high") - 1.0).alias("runner_pullback_from_high"),
+            pl.col("_run_dollar").log1p().alias("runner_log_dollar_vol"),
+            in_band.cast(pl.Int8).alias("runner_in_band"),
+            (in_band & (early_move >= ACTIVE_EARLY_MOVE)).cast(pl.Int8).alias("runner_is_active"),
+        ).select(["symbol", "minute", *names])
+        keys = ctx.frame("minute_agg").select(["symbol", "minute"]).filter(pl.col("minute") == latest)
+        return keys.join(feats, on=["symbol", "minute"], how="left").select(["symbol", "minute", *names])
+
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         return self._assemble(ctx, ctx.frame("minute_agg").select(["symbol", "minute"]))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Latest-minute: the running reduce runs over the FULL session buffer (cum_max/cum_sum intact);
-        only the output keys filter to the latest minute, so compute_latest == compute().last.
-        """
-        keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = keys["minute"].max()
-        return self._assemble(ctx, keys.filter(pl.col("minute") == latest))
+        latest = ctx.frame("minute_agg")["minute"].max()
+        return self._assemble_latest(ctx, latest)
