@@ -13,6 +13,8 @@
 #   - trust_random_check : weekly RANDOM trust re-check (docs/TRUST_REDESIGN.md), Sat 14:45 PT.
 #   - collect_jobs_status: refresh the /jobs dashboard's jobs_status.json every 5 min (off-:00), READ-ONLY.
 #   - compact_stream     : nightly fold of SETTLED stream partitions' per-minute files, 22:33 PT weekdays.
+#   - late re-sweep      : 23:30 PT weekday re-acquire + re-sweep once Alpaca's illiquid tail has settled
+#                          (the 18:30 sweep often RawNotSettled-SKIPs) — the trust-jump unblock.
 #
 #   ops/install_crons.sh --dry-run   # show what WOULD change; change nothing
 #   ops/install_crons.sh             # install any missing managed cron
@@ -22,6 +24,7 @@ REPO="${REPO:-/home/ben/quant-fp}"
 TRUST_LOG=/home/ben/.quant-validation/trust_random_check.log
 JOBS_LOG=/home/ben/.quant-ops/collect_jobs_status.log
 COMPACT_LOG=/home/ben/.quant-validation/compact_stream.log
+LATE_SWEEP_LOG=/home/ben/.quant-validation/daily_lifecycle_late.log
 
 # Each managed entry is a match-substring (presence test) + its crontab comment + its crontab line.
 # Times are SYSTEM LOCAL TIME (America/Los_Angeles / PT); the crontab has no TZ override.
@@ -44,6 +47,17 @@ LINES+=("3-58/5 * * * * cd $REPO && python3 ops/collect_jobs_status.py >> $JOBS_
 MATCHES+=("ops/compact_stream.sh")
 COMMENTS+=("# 22:33 PT weekdays fold SETTLED stream partitions' per-minute files (docs/STREAM_COMPACTION.md) — idempotent, reader-transparent, settled-days-only")
 LINES+=("33 22 * * 1-5 cd $REPO && ops/compact_stream.sh >> $COMPACT_LOG 2>&1")
+
+# 23:30 PT weekdays — LATE re-acquire + re-sweep. Alpaca's illiquid-tail SIP historical bars often have not
+# settled by the 18:30 PT sweep (~5h post-close) so it RawNotSettled-SKIPs (06-17=65%/06-18=56% < the 90%
+# assert_tail_settled gate) → 0 newly-trusted. By 23:30 PT (~10.5h post-close) the tail has settled; this
+# re-runs the SAME chained daily_lifecycle.sh (idempotent re-acquire re-fetches the 0-row manifest entries
+# left at 18:30, then re-sweeps to grade). The direct trust-jump unblock. Off RTH, after the 22:33 compaction.
+# MATCH on the unique LATE log path (NOT "ops/daily_lifecycle.sh", which the existing 18:30 line already
+# carries — matching the script name would see it "present" and never install this second line).
+MATCHES+=("daily_lifecycle_late.log")
+COMMENTS+=("# 23:30 PT weekdays LATE re-acquire + re-sweep (docs/OPERATIONS.md) — Alpaca tail settles after the 18:30 sweep; idempotent, no fingerprint")
+LINES+=("30 23 * * 1-5 cd $REPO && ops/daily_lifecycle.sh >> $LATE_SWEEP_LOG 2>&1")
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
