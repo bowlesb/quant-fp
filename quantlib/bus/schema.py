@@ -7,9 +7,11 @@ each offset means. The fingerprint is a deterministic 64-bit blake2b over the or
 ``group:feature:version`` lines — identical across processes and re-implementable in any language, so a
 non-Python container can validate it is decoding against the schema it was built for.
 """
+
 from __future__ import annotations
 
 import hashlib
+import json
 import struct
 from dataclasses import dataclass
 from functools import lru_cache
@@ -60,6 +62,22 @@ class BusSchema:
             raise KeyError(f"unknown feature '{name}'")
         return self._offset_by_name[name]
 
+    def offsets(self) -> dict[str, int]:
+        """The full name -> offset map (a copy) — safe for callers that may mutate."""
+        return dict(self._offset_by_name)
+
+    def offset_map(self) -> dict[str, int]:
+        """The schema's name -> offset map by REFERENCE (no copy) — the per-frame hot path. The map is
+        owned by the schema, which is cached per fingerprint, so a FeatureView shares it without copying
+        694 entries on every frame. Treat as read-only."""
+        return self._offset_by_name
+
+    def field(self, name: str) -> BusField | None:
+        """The field for ``name`` (group, offset, version) or None if absent — version-aware lookup the
+        compat gate uses to check a consumed feature's version, not just its presence."""
+        offset = self._offset_by_name.get(name)
+        return None if offset is None else self.fields[offset]
+
     def has(self, name: str) -> bool:
         return name in self._offset_by_name
 
@@ -73,6 +91,40 @@ class BusSchema:
         if group not in self._fields_by_group:
             raise KeyError(f"unknown group '{group}'")
         return self._fields_by_group[group]
+
+    def to_json(self) -> str:
+        """Serialize the layout for publishing to ``bus:schema:<fp>`` — the producer writes this so any
+        consumer can rebuild a fingerprint-faithful schema for a frame it didn't compile against."""
+        payload = {
+            "fingerprint": self.fingerprint,
+            "n_features": self.n_features,
+            "fields": [
+                {"name": field.name, "offset": field.offset, "group": field.group, "version": field.version}
+                for field in self.fields
+            ],
+        }
+        return json.dumps(payload, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, text: str) -> BusSchema:
+        """Rebuild a schema from its published JSON. The reconstructed schema recomputes the SAME
+        fingerprint from the fields (it does not trust the serialized one) — so a tampered/garbled payload
+        whose fields don't hash to the advertised fingerprint is caught loudly, not silently misaligned."""
+        payload = json.loads(text)
+        fields = [
+            BusField(
+                group=entry["group"], name=entry["name"], offset=entry["offset"], version=entry["version"]
+            )
+            for entry in sorted(payload["fields"], key=lambda entry: entry["offset"])
+        ]
+        schema = cls(fields)
+        advertised = int(payload["fingerprint"])
+        if schema.fingerprint != advertised:
+            raise ValueError(
+                f"schema JSON fingerprint {advertised:#018x} != recomputed {schema.fingerprint:#018x} "
+                "(corrupt or tampered bus:schema payload)"
+            )
+        return schema
 
 
 @lru_cache(maxsize=1)

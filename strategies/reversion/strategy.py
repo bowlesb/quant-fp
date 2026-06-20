@@ -21,6 +21,7 @@ max concurrent, max total open notional (bounds ACTUAL exposure inclusive of the
 ONE-bet-per-symbol so it never stacks longs on the same stretched name. All bets PAPER-only and tiny.
 Transient bus/broker/db errors are caught specifically and the loop continues; never a bare except.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -40,9 +41,10 @@ from alpaca.trading.models import Clock, Order
 from alpaca.trading.requests import MarketOrderRequest
 
 from quantlib.bus.consumer import BusConsumer
-from quantlib.bus.vector import FeatureVector
+from quantlib.bus.view import FeatureView
 from strategies.lib.reversion_model import VwapReversionModel
 from strategies.reversion.bet_store import BetStore
+from strategies.reversion.contract import STRATEGY_NAME, contract_for
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("reversion-strategy")
@@ -134,7 +136,7 @@ class Candidate:
 
 def select_candidate(
     model: VwapReversionModel,
-    latest_by_symbol: dict[str, FeatureVector],
+    latest_by_symbol: dict[str, FeatureView],
     threshold: float,
     excluded: set[str],
 ) -> Candidate | None:
@@ -182,12 +184,19 @@ class ReversionStrategy:
         self._trading = trading
         self._store = store
         self._model = model
-        self._latest_by_symbol: dict[str, FeatureVector] = {}
+        self._latest_by_symbol: dict[str, FeatureView] = {}
         self._last_bet_ts: dt.datetime | None = None
 
     def market_open(self) -> bool:
         clock = cast(Clock, self._trading.get_clock())
         return bool(clock.is_open)
+
+    def publish_contract(self) -> None:
+        """Publish this strategy's declared (name, version) feature contract — derived from the constructed
+        model — so the pre-deploy compat gate reads what is actually running (B3)."""
+        contract = contract_for(self._model)
+        self._consumer.publish_contract(STRATEGY_NAME, contract)
+        logger.info("published feature contract for '%s': %s", STRATEGY_NAME, contract)
 
     def reconcile_on_startup(self) -> None:
         """Resume managing bets left open by a prior run: capture any missed entry fill and close anything
@@ -220,7 +229,7 @@ class ReversionStrategy:
 
     def consume(self) -> None:
         """Poll the bus and keep the LATEST vector per symbol (the score set for this cycle)."""
-        vectors = self._consumer.poll(block_ms=self._config.loop_block_ms, count=200)
+        vectors = self._consumer.poll_views(block_ms=self._config.loop_block_ms, count=200)
         if not vectors:
             return
         for vector in vectors:
@@ -229,9 +238,12 @@ class ReversionStrategy:
         deviation = latest.value(self._model.feature_name)
         logger.info(
             "SAMPLE %s @ %s | %s=%+.5f (%d vectors this poll, %d symbols tracked)",
-            latest.symbol, latest.minute.isoformat(), self._model.feature_name,
+            latest.symbol,
+            latest.minute.isoformat(),
+            self._model.feature_name,
             deviation if np.isfinite(deviation) else float("nan"),
-            len(vectors), len(self._latest_by_symbol),
+            len(vectors),
+            len(self._latest_by_symbol),
         )
 
     def maybe_place_bet(self) -> None:
@@ -277,8 +289,13 @@ class ReversionStrategy:
         self._last_bet_ts = now
         logger.info(
             "BET placed: BUY $%.2f notional %s p=%.3f dev=%+.5f coid=%s broker_id=%s hold=%ds",
-            notional, symbol, candidate.probability, candidate.deviation, coid,
-            str(order.id), self._config.hold_sec,
+            notional,
+            symbol,
+            candidate.probability,
+            candidate.deviation,
+            coid,
+            str(order.id),
+            self._config.hold_sec,
         )
 
     def manage_open_bets(self) -> None:
@@ -362,7 +379,11 @@ class ReversionStrategy:
         self._store.record_close(entry_order_id, exit_ts, exit_price, realized)
         logger.info(
             "BET closed: %s entry=%.4f exit=%.4f qty=%g pnl=%+.4f",
-            symbol, entry_price_value, exit_price, qty, realized,
+            symbol,
+            entry_price_value,
+            exit_price,
+            qty,
+            realized,
         )
 
     def cycle(self) -> None:
@@ -375,11 +396,18 @@ class ReversionStrategy:
         logger.info(
             "reversion strategy starting: symbols=%s enabled=%s interval=%ds notional=$%.0f hold=%ds "
             "caps[concurrent=%d total_notional=$%.0f] model[vwap_window=%dm sensitivity=%.0f threshold=%.2f]",
-            self._config.symbols, self._config.enabled, self._config.bet_interval_sec,
-            self._config.notional_usd, self._config.hold_sec, self._config.max_concurrent,
-            self._config.max_total_notional_usd, self._config.vwap_window_m, self._config.sensitivity,
+            self._config.symbols,
+            self._config.enabled,
+            self._config.bet_interval_sec,
+            self._config.notional_usd,
+            self._config.hold_sec,
+            self._config.max_concurrent,
+            self._config.max_total_notional_usd,
+            self._config.vwap_window_m,
+            self._config.sensitivity,
             self._config.threshold,
         )
+        self.publish_contract()
         self.reconcile_on_startup()
         while True:
             try:
