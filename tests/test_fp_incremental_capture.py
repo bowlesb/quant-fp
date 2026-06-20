@@ -353,7 +353,14 @@ def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
                 breached = True
         except AssertionError:
             breached = True
-    assert breached, "volume variance-family breach expected (gate is load-bearing)"
+    # P2 (Neumaier stable summation): the variance power sum sqrt(Σv²−(Σv)²/n) on the incremental running sums
+    # now matches the batch fresh window sum (the running add/subtract carries its rounding loss in ``_comp``),
+    # so the near-constant-volume degenerate-variance null-flip is closed. volume keeps incremental_safe=False
+    # until the LEAD sequences the flip; this test now PROVES parity-green, inverting the former assertion.
+    assert not breached, (
+        "volume engine-vs-batch is now CLEAN on the degenerate near-constant-variance window after the P2 "
+        "Neumaier stable-summation fix (the former variance-family null-flip breach is closed)"
+    )
 
 
 def _gappy_corr_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -> list[list[dict]]:
@@ -385,22 +392,14 @@ def _gappy_corr_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -> 
     return out
 
 
-@pytest.mark.parametrize("group_name", ["return_dynamics", "volume_leads_price", "price_volume"])
-def test_gappy_denom_group_breaches_raw_so_gate_is_load_bearing(group_name: str) -> None:
-    """Each correlation-family group's ``incremental_safe = False`` is LOAD-BEARING: on a gappy near-constant-
-    return walk (sparse presence collapses the corr-kernel paired series over the window) the IncrementalEngine
-    running sums round across the corr defined-guard differently from the batch fresh sums, so the raw engine
-    output DIVERGES from the batch — a null/non-null mismatch at the corr floor or a value disagreement past the
-    breach ratio. Comparing the engine DIRECTLY against the batch (no gate) must breach, which is exactly WHY
-    the group is routed to batch live. This is the conditioning case the smooth-synthetic parity walks miss.
-
-    (The companion sweep behind this gate also confirmed market_beta / distribution / volatility do NOT breach
-    on the same regimes — worst < 6e-4x tolerance — so they are intentionally NOT in INCREMENTAL_UNSAFE.)"""
+def _gappy_corr_breaches(group_name: str) -> bool:
+    """Run a group DIRECTLY (engine vs batch, no gate) over a few sparse gappy near-constant-return walks and
+    report whether it breaches the production self-check ratio on ANY of them — the shared body for both the
+    P2-now-clean groups and the still-load-bearing ones."""
     group = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == group_name]
     assert group, f"{group_name} missing from registry"
-    assert not group[0].incremental_safe, f"{group_name} must be incremental_safe=False"
     breached = False
-    for seed in (7, 17, 29):  # a few sparse seeds — the breach is regime-robust across them
+    for seed in (7, 17, 29):  # a few sparse seeds — the breach (where present) is regime-robust across them
         walk = _gappy_corr_minutes(n_sym=12, n_min=28, present_p=0.40, seed=seed)
         ring = MinuteRing(maxlen=120)
         engine: IncrementalEngine | None = None
@@ -414,16 +413,37 @@ def test_gappy_denom_group_breaches_raw_so_gate_is_load_bearing(group_name: str)
             if engine is None:
                 engine = IncrementalEngine(group)
             inc = engine.step(frame, slice_derive=True)
-            # The breach surfaces as EITHER a null/non-null mismatch at the corr floor (the helper asserts on it)
-            # OR a value disagreement past the breach ratio; both mean the gate is load-bearing.
             try:
                 if _worst_tol_ratio(batch, inc) > _PARITY_BREACH_RATIO:
                     breached = True
             except AssertionError:
                 breached = True
-    assert breached, (
-        f"{group_name} expected to breach engine-vs-batch on a gappy near-constant-return walk "
-        "(the gappy-denom conditioning the incremental_safe=False gate guards against)"
+    return breached
+
+
+@pytest.mark.parametrize("group_name", ["return_dynamics", "volume_leads_price"])
+def test_gappy_denom_group_now_clean_after_p2_neumaier(group_name: str) -> None:
+    """⭐ P2 PROOF (stable summation): on the gappy near-constant-return walk these corr-family groups USED to
+    breach engine-vs-batch (their ``incremental_safe=False`` was the gate). The Neumaier-compensated running
+    sum (``_comp`` carries the add/expire rounding loss) now makes the corr-kernel power-sum denominator match
+    the batch fresh sum, so engine-vs-batch is CLEAN — the former breach is CLOSED. They keep
+    ``incremental_safe=False`` until the LEAD sequences the enablement flip; this asserts the parity is now
+    green so that flip is unblocked."""
+    assert not _gappy_corr_breaches(group_name), (
+        f"{group_name} engine-vs-batch is now CLEAN on the gappy walk after the P2 Neumaier fix "
+        "(former incremental_safe=False breach closed)"
+    )
+
+
+@pytest.mark.parametrize("group_name", ["price_volume"])
+def test_gappy_denom_group_still_breaches_gate_load_bearing(group_name: str) -> None:
+    """``price_volume``'s ``incremental_safe=False`` is STILL LOAD-BEARING after P2: its breach on the gappy
+    near-constant-return walk is NOT purely a summation-rounding effect (Neumaier closed return_dynamics /
+    volume_leads_price but not this one — the cross-product corr-denom straddle here survives stable summation),
+    so the gate must stay. Comparing the engine DIRECTLY against the batch (no gate) must still breach."""
+    assert _gappy_corr_breaches(group_name), (
+        f"{group_name} expected to STILL breach engine-vs-batch on the gappy walk after P2 — its gate remains "
+        "load-bearing (stable summation alone does not close this corr-denom straddle)"
     )
 
 
