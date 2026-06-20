@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { StoreGridMatrix } from "./types";
-import { CELL, COLORS } from "./theme";
+import { CELL, COLORS, cellColor } from "./theme";
 
 // Hovered cell identity passed up for the tooltip.
 export interface HoverCell {
@@ -19,29 +19,6 @@ interface Props {
   onPickTicker: (colIndex: number) => void;
   // Imperative scroll target: when this changes the heatmap scrolls that column into view (search jump).
   scrollToCol: number | null;
-}
-
-// Parse "#rrggbb" once into [r,g,b] so the per-cell paint is integer math, not string work.
-function hexToRgb(hex: string): [number, number, number] {
-  const value = parseInt(hex.slice(1), 16);
-  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
-}
-
-const COVERAGE_RGB = hexToRgb(COLORS.coverageHue);
-const TRUSTED_RGB = hexToRgb(COLORS.trusted);
-const UNTRUSTED_RGB = hexToRgb(COLORS.untrusted);
-
-// Cell fill for a coverage byte (0..255) + trust bit, as an rgba string. Coverage maps to ALPHA (brightness
-// on the dark bg) so light = sparse, opaque = full. Hue is the trust colour when the overlay is on, else the
-// neutral coverage blue. Byte 0 (absent) returns null = paint nothing (bg shows through).
-function cellFill(coverageByte: number, trustedBit: number, overlay: boolean): string | null {
-  if (coverageByte <= 0) return null;
-  const alpha = 0.12 + 0.88 * (coverageByte / 255); // floor so even thin coverage is visible
-  let rgb = COVERAGE_RGB;
-  if (overlay) {
-    rgb = trustedBit ? TRUSTED_RGB : UNTRUSTED_RGB;
-  }
-  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
 }
 
 export function CanvasHeatmap({
@@ -137,7 +114,7 @@ export function CanvasHeatmap({
       const trustedRow = matrix.trusted[row];
       const y = row * CELL.h - offY;
       for (let col = firstCol; col < lastCol; col++) {
-        const fill = cellFill(coverageRow[col], trustedRow[col], trustOverlay);
+        const fill = cellColor(coverageRow[col], trustedRow[col], trustOverlay);
         if (fill == null) continue;
         ctx.fillStyle = fill;
         ctx.fillRect(col * CELL.w - offX, y, CELL.w - CELL.gap, CELL.h - CELL.gap);
@@ -147,7 +124,10 @@ export function CanvasHeatmap({
     if (highlightCol != null) {
       const x = highlightCol * CELL.w - offX;
       if (x >= -CELL.w && x <= cssW) {
-        ctx.strokeStyle = COLORS.link;
+        // A soft wash down the column + a crisp accent outline so the active ticker reads at a glance.
+        ctx.fillStyle = "rgba(108,182,255,0.10)";
+        ctx.fillRect(x - 1, 0, CELL.w + 2, cssH);
+        ctx.strokeStyle = COLORS.accent;
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x - 0.5, 0, CELL.w + 1, cssH);
       }
@@ -195,20 +175,61 @@ export function CanvasHeatmap({
     [cellAt, onPickTicker],
   );
 
+  // Date labels for the visible rows only, positioned at their row's screen Y (content Y − scrollTop). We label
+  // the first row of each MONTH plus a sampled cadence, so the rail reads as a real time axis without 392
+  // stacked labels. The labels live in a fixed left gutter that does not scroll (positions are recomputed).
+  const dateLabels = useMemo(() => {
+    const { firstRow, lastRow } = visibleWindow;
+    const labels: { y: number; text: string; major: boolean }[] = [];
+    let lastMonth = "";
+    for (let row = firstRow; row < lastRow; row++) {
+      const date = matrix.dates[row];
+      if (!date) continue;
+      const month = date.slice(0, 7);
+      const isMonthStart = month !== lastMonth;
+      lastMonth = month;
+      const major = isMonthStart;
+      if (!major && row % 6 !== 0) continue;
+      labels.push({
+        y: row * CELL.h - viewport.scrollTop,
+        text: major ? date.slice(0, 7) : date.slice(8),
+        major,
+      });
+    }
+    return labels;
+  }, [visibleWindow, matrix.dates, viewport.scrollTop]);
+
   return (
     <div className="heatmap-frame">
-      <div
-        ref={scrollRef}
-        className="heatmap-scroll"
-        onMouseMove={onMouseMove}
-        onMouseLeave={() => onHoverChange(null)}
-        onClick={onClick}
-      >
-        {/* Spacer establishes the full scrollable content size so native scrollbars are correct. */}
-        <div style={{ width: contentWidth, height: contentHeight }} />
+      <div className="date-gutter" aria-hidden>
+        {dateLabels.map((label, idx) => (
+          <div
+            key={idx}
+            className={label.major ? "date-tick major" : "date-tick"}
+            style={{ top: label.y }}
+          >
+            {label.text}
+          </div>
+        ))}
       </div>
-      {/* The canvas overlays the viewport (it does not scroll); it repaints the visible window on scroll. */}
-      <canvas ref={canvasRef} className="heatmap-canvas" style={{ width: viewport.width, height: viewport.height }} />
+      <div className="heatmap-body">
+        <div
+          ref={scrollRef}
+          className="heatmap-scroll"
+          onMouseMove={onMouseMove}
+          onMouseLeave={() => onHoverChange(null)}
+          onClick={onClick}
+        >
+          {/* Spacer establishes the full scrollable content size so native scrollbars are correct. */}
+          <div style={{ width: contentWidth, height: contentHeight }} />
+        </div>
+        {/* The canvas overlays the viewport (it does not scroll); it repaints the visible window on scroll. */}
+        <canvas
+          ref={canvasRef}
+          className="heatmap-canvas"
+          style={{ width: viewport.width, height: viewport.height }}
+        />
+      </div>
     </div>
   );
 }

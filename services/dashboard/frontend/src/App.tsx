@@ -133,16 +133,34 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="topbar-left">
-          <h1>Feature-store coverage grid</h1>
+          <div className="brand">
+            <span className="brand-mark" />
+            <h1>Feature-store coverage</h1>
+          </div>
           {matrix && (
-            <span className="dims">
-              {matrix.summary.n_dates} dates × {matrix.summary.n_tickers.toLocaleString()} tickers ×{" "}
-              {matrix.summary.n_groups} groups
-            </span>
+            <div className="chips">
+              <span className="chip">
+                <strong>{matrix.summary.n_tickers.toLocaleString()}</strong> tickers
+              </span>
+              <span className="chip">
+                <strong>{matrix.summary.n_dates}</strong> dates
+              </span>
+              <span className="chip">
+                <strong>{matrix.summary.n_groups}</strong> groups
+              </span>
+              <span className="chip trust">
+                <strong>{matrix.summary.n_trusted_groups}</strong>/{matrix.summary.n_groups} trusted
+              </span>
+            </div>
           )}
         </div>
         <div className="topbar-right">
-          {meta && <span className="asof">{formatAsOf(meta.generated_at)}</span>}
+          {meta && (
+            <span className="asof" title={`generated ${meta.generated_at}`}>
+              <span className="pulse" />
+              {formatAsOf(meta.generated_at)}
+            </span>
+          )}
         </div>
       </header>
 
@@ -160,29 +178,29 @@ export function App() {
           />
           <button onClick={runSearch}>Jump</button>
         </div>
-        <label className="trust-toggle">
-          <input
-            type="checkbox"
-            checked={trustOverlay}
-            onChange={(event) => setTrustOverlay(event.target.checked)}
-          />
-          Binary trust overlay
-        </label>
+        <button
+          className={trustOverlay ? "toggle on" : "toggle"}
+          onClick={() => setTrustOverlay((value) => !value)}
+          title="Colour cells by binary trust instead of plain coverage"
+        >
+          <span className="toggle-dot" />
+          Trust overlay
+        </button>
         {matrix && (
           <div className="legend">
-            <span className="legend-item">
-              <span className="swatch coverage-low" /> sparse
-            </span>
-            <span className="legend-item">
-              <span className="swatch coverage-high" /> full coverage
-            </span>
-            {trustOverlay && (
+            {!trustOverlay ? (
+              <span className="legend-item">
+                <em className="ramp-end">sparse</em>
+                <span className="ramp coverage-ramp" />
+                <em className="ramp-end">full</em>
+              </span>
+            ) : (
               <>
                 <span className="legend-item">
-                  <span className="swatch trusted" /> all trusted
+                  <span className="ramp trusted-ramp" /> all trusted
                 </span>
                 <span className="legend-item">
-                  <span className="swatch untrusted" /> some untrusted
+                  <span className="ramp untrusted-ramp" /> some untrusted
                 </span>
               </>
             )}
@@ -200,17 +218,6 @@ export function App() {
       {error && <div className="banner-error">{error}</div>}
 
       <div className="grid-region">
-        <div className="date-rail">
-          {/* Date labels are sampled (every Nth row) so the rail is legible without 392 stacked labels. */}
-          {matrix &&
-            matrix.dates.map((date, idx) =>
-              idx % 5 === 0 ? (
-                <div key={date} className="date-label" style={{ top: idx * 7 }}>
-                  {date.slice(5)}
-                </div>
-              ) : null,
-            )}
-        </div>
         {matrix && (
           <CanvasHeatmap
             matrix={matrix}
