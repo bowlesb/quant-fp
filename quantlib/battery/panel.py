@@ -29,6 +29,13 @@ half-spread carried as a column for the realistic cost model.
 The `Panel` itself is label-agnostic: it carries features + the execution prices + the
 cost column; each `Strategy` derives its own forward/path label from the SAME resident
 arrays (a shifted self-join for vectorizable labels; the Rust forward scan in Phase 1).
+
+Known caveats (documented, lower-severity — audit 2026-06-19):
+  - SURVIVORSHIP / universe look-ahead: the liquid-universe cut (`universe_top` by mean ADV) is
+    computed over the WHOLE date range, so a name must survive the range to be selected — the same
+    survivorship caveat the B4/laneC findings carry. A point-in-time-as-of-each-day universe is the
+    correct fix; until then, liquid-cut results are mildly survivorship-optimistic (acceptable for the
+    null/HIT-direction verdicts the battery reproduces, NOT for a deployable liquid-only edge claim).
 """
 from __future__ import annotations
 
@@ -491,8 +498,9 @@ def panel_from_intraday_frame(feat: pl.DataFrame, feature_names: list[str]) -> P
 
 
 def _forward_excess(bars: pl.DataFrame, sample_ts: pl.Series, horizon: int) -> pl.DataFrame:
-    """close[t+h]/close[t]-1 by exact-timestamp lookup, then cross-sectional EXCESS vs the
-    per-minute median (breadth-floored). The ``build_dataset`` forward_returns + excess, fused."""
+    """close[t+h]/close[t]-1 by exact-timestamp lookup (with the $1 floor on BOTH legs), then
+    cross-sectional EXCESS vs the per-minute median (breadth-floored). The ``build_dataset``
+    forward_returns + excess, fused."""
     base = bars.rename({"ts": "minute", "close": "entry_c"}).select(["symbol", "minute", "entry_c"])
     fwd = (
         bars.with_columns((pl.col("ts") - pl.duration(minutes=horizon)).alias("minute"))
@@ -500,7 +508,16 @@ def _forward_excess(bars: pl.DataFrame, sample_ts: pl.Series, horizon: int) -> p
         .select(["symbol", "minute", "fwd_c"])
     )
     joined = base.join(fwd, on=["symbol", "minute"], how="inner").filter(pl.col("minute").is_in(sample_ts))
-    joined = joined.with_columns(((pl.col("fwd_c") / pl.col("entry_c")) - 1.0).alias("raw"))
+    # $1 price-integrity floor on BOTH legs (mirrors the daily _ratio_with_floor): a sub-$1 entry OR
+    # forward print is a bad/odd-lot print that manufactures fake returns (the Lane C / B4 trap), so
+    # null the raw return rather than let it leak into the cross-section. The breadth count below uses
+    # raw.count(), which ignores these nulls — so a nulled penny print also cannot satisfy the floor.
+    joined = joined.with_columns(
+        pl.when((pl.col("entry_c") >= MIN_PRICE) & (pl.col("fwd_c") >= MIN_PRICE))
+        .then((pl.col("fwd_c") / pl.col("entry_c")) - 1.0)
+        .otherwise(None)
+        .alias("raw")
+    )
     counts = joined.group_by("minute").agg(pl.col("raw").count().alias("n"))
     med = joined.group_by("minute").agg(pl.col("raw").median().alias("med"))
     out = joined.join(counts, on="minute").join(med, on="minute")

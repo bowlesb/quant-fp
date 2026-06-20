@@ -25,7 +25,7 @@ import numpy as np
 
 from quantlib.strategy_core import CrossSection
 from quantlib.strategy_core.cost import cost_curve, long_short_per_name_cost
-from quantlib.strategy_core.execution import BookState, Clock, Fill, OrderIntent
+from quantlib.strategy_core.execution import BookState, Clock, Fill, OrderIntent, OrderState
 
 # A flat slippage added on top of the per-name half-spread (bps, one-way), the laneC/baseline default.
 DEFAULT_SLIPPAGE_BPS = 1.0
@@ -43,21 +43,44 @@ class BacktestExecutor:
 
     def execute(self, intents: list[OrderIntent], cross_section: CrossSection, clock: Clock) -> list[Fill]:
         """Per-event reference fill: book each intent at the cross-section's entry price + its per-name
-        half-spread. Updates the book to the intents' target weights (a full rebalance to target)."""
+        half-spread. Faithfully mimics Alpaca's outcomes (REQ-X2): a sub-$1 / non-finite-price name is
+        REJECTED (as Alpaca would); otherwise FILLED at the tradeable entry. (The columnar batch path
+        `run_vectorized` is the fast equivalent for the cross-sectional basket; this per-event path is
+        the reference the conformance test pins against a real PaperExecutor.)"""
         fills: list[Fill] = []
         new_weights: dict[str, float] = {}
         for intent in intents:
             price = cross_section.feature_for(intent.symbol, "entry_close")
             half_spread = cross_section.feature_for(intent.symbol, "half_spread_bps")
+            if not np.isfinite(price) or price < 1.0:
+                fills.append(
+                    Fill(
+                        symbol=intent.symbol,
+                        side=intent.side,
+                        weight=intent.target_weight,
+                        fill_price=float("nan"),
+                        cost_bps=0.0,
+                        client_order_id=intent.client_order_id,
+                        filled_qty=0.0,
+                        avg_price=0.0,
+                        status=OrderState.REJECTED,
+                    )
+                )
+                continue
             cost_bps = (half_spread if np.isfinite(half_spread) else 0.0) + self._slippage_bps
             new_weights[intent.symbol] = intent.target_weight
+            qty = abs(intent.notional / price) if intent.notional else abs(intent.target_weight)
             fills.append(
                 Fill(
                     symbol=intent.symbol,
                     side=intent.side,
                     weight=intent.target_weight,
-                    fill_price=float(price) if np.isfinite(price) else float("nan"),
+                    fill_price=float(price),
                     cost_bps=cost_bps,
+                    client_order_id=intent.client_order_id,
+                    filled_qty=qty,
+                    avg_price=float(price),
+                    status=OrderState.FILLED,
                 )
             )
         self._book = BookState(weights=new_weights)

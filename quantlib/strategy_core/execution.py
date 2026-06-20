@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Protocol
 
 from quantlib.strategy_core import CrossSection, TargetPosition
@@ -31,34 +32,59 @@ from quantlib.strategy_core import CrossSection, TargetPosition
 @dataclass(frozen=True)
 class OrderIntent:
     """What the strategy WANTS to transact this step — broker-agnostic. The Executor turns it into a
-    simulated fill (backtest) or a real broker order (live). Same intent in; only the fill differs."""
+    simulated fill (backtest) or a real broker order (live). Same intent in; only the fill differs.
+
+    `client_order_id` is the DETERMINISTIC idempotency key (REQ-X4): submitting the same logical
+    intent twice is a no-op at the broker and a single state entry."""
 
     symbol: str
     side: str  # "buy" | "sell"
     target_weight: float  # desired dollar-neutral book weight (basket) ...
     notional: float | None = None  # ... or an absolute notional (single-name)
+    client_order_id: str = ""
     reason: str = ""
 
     @classmethod
-    def from_target(cls, target: TargetPosition) -> "OrderIntent":
+    def from_target(
+        cls, target: TargetPosition, *, minute: dt.datetime | None = None, strategy_id: str = "cs_ls"
+    ) -> "OrderIntent":
+        side = "buy" if target.target_weight >= 0 else "sell"
+        stamp = minute.strftime("%Y%m%dT%H%M%S") if minute is not None else "t"
         return cls(
             symbol=target.symbol,
-            side="buy" if target.target_weight >= 0 else "sell",
+            side=side,
             target_weight=target.target_weight,
+            client_order_id=f"{strategy_id}_{target.symbol}_{stamp}_{side}",
             reason=f"score={target.score:.5f}",
         )
 
 
+class OrderState(str, Enum):
+    """The full Alpaca order lifecycle (REQ-X3) — partials and rejects are first-class, not time-outs."""
+
+    NEW = "new"
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    CANCELED = "canceled"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
 @dataclass(frozen=True)
 class Fill:
-    """A realized fill. In backtest the price/cost come from the panel's tradeable entry + half-spread;
-    live they come from the broker's fill report."""
+    """A realized fill EVENT. In backtest the price/cost come from the panel's tradeable entry +
+    half-spread; live they come from the broker's fill report. `filled_qty` is cumulative (so a
+    partial then a complete are two Fills with growing qty); `status` carries the lifecycle (REQ-X3)."""
 
     symbol: str
     side: str
-    weight: float
+    weight: float  # the target weight this fill is reaching toward (basket bookkeeping)
     fill_price: float
     cost_bps: float
+    client_order_id: str = ""
+    filled_qty: float = 0.0
+    avg_price: float = 0.0
+    status: OrderState = OrderState.FILLED
 
 
 @dataclass

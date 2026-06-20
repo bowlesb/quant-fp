@@ -60,7 +60,14 @@ class BusCrossSection:
     `FeatureVector` per symbol. Per-name reads use the vector's own O(1) name->offset accessor — the
     SAME by-name addressing the backtest uses, so the decision reads identical inputs both sides.
 
-    `latest_by_symbol` is exactly what `ReversionStrategy._latest_by_symbol` already maintains."""
+    `latest_by_symbol` is exactly what `ReversionStrategy._latest_by_symbol` already maintains.
+
+    Caveat (lower-severity, audit 2026-06-19): `feature(name)` over a symbol absent from
+    `latest_by_symbol` yields NaN for that name — fine for the backtest (the panel includes every
+    graded symbol) and for a single-name `predict`, but a future CROSS-SECTIONAL archetype run LIVE
+    must ensure its symbol set is fully populated for the cross-section it ranks (a partially-warmed
+    bus minute would silently shrink the cross-section). The live container's warmup gate (don't bet
+    until the needed features are finite, per docs/STRATEGY_CONTAINERS.md) is where that is enforced."""
 
     def __init__(self, latest_by_symbol: dict[str, object]) -> None:
         # value type is quantlib.bus.vector.FeatureVector; typed as object to avoid importing the bus
