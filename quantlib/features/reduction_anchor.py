@@ -7,9 +7,10 @@ residual_analysis (docs/CENTERED_STD_DESIGN.md, PROVEN: centering drops the std 
 
 THE PARITY-CRITICAL CONTRACT: the anchor is a per-symbol CONSTANT read IDENTICALLY by the backfill batch
 path AND the live/incremental path — derived from the same per-session-fixed ``daily`` snapshot the
-daily-broadcast groups (daily_beta) already read, log10-ROUNDED so it tracks each symbol's magnitude without
-being data-noise-sensitive (centering only needs the right ORDER OF MAGNITUDE — a measured global anchor is
-CATASTROPHIC on small-volume symbols, so it MUST be per-symbol-scale). Because both paths center on the SAME
+daily-broadcast groups (daily_beta) already read, rounded to 2 SIGNIFICANT FIGURES so it tracks each symbol's
+magnitude closely (``|v−a|/v`` <= ~0.05 — enough to condition the squared sums) without being data-noise-
+sensitive (a measured global anchor is CATASTROPHIC on small-volume symbols, so it MUST be per-symbol-scale;
+a nearest-power-of-ten anchor was too coarse). Because both paths center on the SAME
 per-symbol constant and the variance/OLS are SHIFT-INVARIANT, the centered result is VALUE-IDENTICAL to the
 raw form in exact arithmetic — only the float conditioning changes (so trust is preserved, fp unchanged).
 
@@ -58,7 +59,8 @@ def attach_volume_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFra
     the live seed path apply, so the anchor column is identical in both — the parity-critical invariant.
 
     ``daily`` is the per-session-fixed snapshot (symbol, date, volume); the anchor uses each symbol's LATEST
-    daily volume (the prior completed day in production), log10-rounded. A symbol not in ``daily`` gets 0.0.
+    daily volume (the prior completed day in production), rounded to 2 sig figs. A symbol not in ``daily``
+    gets 0.0.
     """
     latest = (
         daily.select(["symbol", "date", "volume"])
