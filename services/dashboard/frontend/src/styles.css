@@ -1,0 +1,441 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-alt: #13161c;
+  --border: #262b35;
+  --text: #d7dce2;
+  --muted: #8b949e;
+  --link: #58a6ff;
+  --trusted: #3fb950;
+  --untrusted: #7d8590;
+  --coverage: #6ea8ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-left {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.topbar h1 {
+  font-size: 16px;
+  margin: 0;
+  font-weight: 600;
+}
+.home-link {
+  color: var(--link);
+  text-decoration: none;
+  font-size: 12px;
+}
+.dims {
+  color: var(--muted);
+  font-size: 12px;
+}
+.asof {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- controls ---- */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.search {
+  display: flex;
+  gap: 6px;
+}
+.search input {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  width: 280px;
+}
+.search input:focus {
+  outline: none;
+  border-color: var(--link);
+}
+.search button,
+.drill-close {
+  background: #1f6feb33;
+  border: 1px solid var(--link);
+  color: var(--link);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.search button:hover {
+  background: #1f6feb55;
+}
+.trust-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.legend {
+  display: flex;
+  gap: 14px;
+  margin-left: auto;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.swatch.coverage-low {
+  background: rgba(110, 168, 255, 0.18);
+}
+.swatch.coverage-high {
+  background: rgba(110, 168, 255, 1);
+}
+.swatch.trusted {
+  background: var(--trusted);
+}
+.swatch.untrusted {
+  background: var(--untrusted);
+}
+
+.legend-notes {
+  display: flex;
+  gap: 24px;
+  padding: 6px 20px;
+  color: var(--muted);
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.depth-note {
+  font-style: italic;
+}
+
+.banner-error {
+  background: #f8514922;
+  border-bottom: 1px solid #f85149;
+  color: #f85149;
+  padding: 8px 20px;
+  font-size: 12px;
+}
+
+/* ---- grid region ---- */
+.grid-region {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.date-rail {
+  position: relative;
+  width: 52px;
+  flex: 0 0 52px;
+  border-right: 1px solid var(--border);
+  background: var(--panel-alt);
+  overflow: hidden;
+}
+.date-label {
+  position: absolute;
+  right: 6px;
+  font-size: 9px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.heatmap-frame {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.heatmap-scroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  cursor: crosshair;
+}
+.heatmap-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+/* ---- tooltip ---- */
+.tooltip {
+  position: fixed;
+  z-index: 30;
+  background: #0b0d11;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  pointer-events: none;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  min-width: 170px;
+}
+.tooltip-ticker {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tooltip-label {
+  color: var(--muted);
+}
+.tooltip-hint {
+  margin-top: 5px;
+  color: var(--muted);
+  font-style: italic;
+  font-size: 11px;
+}
+.trust-yes {
+  color: var(--trusted);
+}
+.trust-no {
+  color: var(--untrusted);
+}
+
+/* ---- drill panel: a first-class NESTED, contained card owned by the clicked ticker ---- */
+.drill-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 440px;
+  max-width: 90vw;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  z-index: 20;
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.45);
+}
+.drill-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-alt);
+}
+/* The header CHIP: names the parent this panel belongs to, so the nesting owner is unmistakable. */
+.drill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #1f6feb22;
+  border: 1px solid var(--link);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.drill-chip-kind {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.drill-chip-name {
+  color: var(--link);
+  font-weight: 700;
+}
+.drill-chip-sm {
+  padding: 2px 8px;
+}
+.drill-chip-sm .drill-chip-name {
+  font-size: 12px;
+}
+.drill-header-meta {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.drill-close {
+  margin-left: auto;
+  padding: 2px 9px;
+  font-size: 16px;
+  line-height: 1;
+}
+.drill-body {
+  overflow: auto;
+  padding: 10px 14px 24px;
+}
+.drill-status {
+  color: var(--muted);
+  padding: 10px 2px;
+}
+.drill-error {
+  color: #f85149;
+}
+
+.drill-group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.drill-group-row {
+  border-bottom: 1px solid var(--border);
+}
+.drill-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  /* TIGHTER child rows than the parent grid spacing. */
+  padding: 6px 4px;
+  cursor: pointer;
+  font-size: 12.5px;
+  text-align: left;
+}
+.drill-group-head:hover {
+  background: #ffffff08;
+}
+.drill-caret {
+  color: var(--muted);
+  width: 12px;
+}
+.drill-group-name {
+  font-weight: 600;
+}
+.drill-group-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.trust-pill {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.trust-pill.yes {
+  background: #3fb95022;
+  color: var(--trusted);
+  border: 1px solid #3fb95066;
+}
+.trust-pill.no {
+  background: #7d859022;
+  color: var(--untrusted);
+  border: 1px solid #7d859066;
+}
+
+/* Deeper NEST: indented + distinct background shade + its own header chip — the same treatment one level down. */
+.drill-nested {
+  margin: 4px 4px 10px 18px;
+  padding: 8px 10px;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--link);
+  border-radius: 6px;
+}
+.drill-nested-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.drill-date-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.drill-date-chip {
+  background: #6ea8ff18;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* ---- first-boot screen (the ONLY loading state) ---- */
+.boot-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+.boot-card {
+  text-align: center;
+  max-width: 420px;
+  padding: 32px;
+}
+.boot-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+}
+.boot-sub {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.boot-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--link);
+  border-radius: 50%;
+  margin: 0 auto;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

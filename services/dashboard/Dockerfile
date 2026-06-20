@@ -14,6 +14,16 @@ RUN pip install --no-cache-dir maturin
 COPY rust /build/rust
 RUN cd /build/rust && maturin build --release --out /wheels
 
+# Node stage: build the React store-coverage grid SPA (services/dashboard/frontend) to static assets. Deps come
+# from the committed lockfile (`npm ci` = deterministic, lockfile-exact), then `npm run build` emits ./dist,
+# which the runtime stage copies in. This is a pure read-side UI build — no feature-compute, no fingerprint risk.
+FROM node:20-slim AS webbuild
+WORKDIR /web
+COPY services/dashboard/frontend/package.json services/dashboard/frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY services/dashboard/frontend/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 WORKDIR /app
 # Dashboard web deps + the quantlib runtime deps the introspection import chain needs (polars/numpy +
@@ -28,6 +38,9 @@ COPY quantlib ./quantlib
 # Copy ALL dashboard modules via glob so a newly-added panel can never be silently dropped from the
 # image (a hardcoded list previously omitted liquidity_bands/raw_coverage, crashing app.py's imports).
 COPY services/dashboard/*.py ./
+
+# The built React store-coverage grid SPA (from the webbuild stage). app.py mounts this at /store-grid.
+COPY --from=webbuild /web/dist ./frontend/store-grid
 
 # Default store mount (read-only fp_store_real in compose). Overridable per environment.
 ENV STORE_ROOT=/store
