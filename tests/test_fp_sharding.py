@@ -136,8 +136,17 @@ def test_sharded_market_context_identical_via_index_replication() -> None:
 
 def test_cross_sectional_rank_via_reduce_identical() -> None:
     single, sharded = _single_process(10), _sharded(10)
-    assert REDUCE_GROUPS == ("cross_sectional_rank", "breadth")
+    assert REDUCE_GROUPS == ("cross_sectional_rank", "breadth", "market_turbulence")
     _assert_same(single["cross_sectional_rank"], sharded["cross_sectional_rank"])
+
+
+def test_market_turbulence_via_reduce_identical() -> None:
+    # market_turbulence is a whole-market GATHER (universe mean |return| / realized vol): per-shard it
+    # would reduce only ~1/N of the universe and emit N different "market-wide" turbulence values per
+    # minute. Routed through the reduce it must equal the single-process value over ALL symbols — the
+    # live↔backfill parity the per-shard form would break.
+    single, sharded = _single_process(10), _sharded(10)
+    _assert_same(single["market_turbulence"], sharded["market_turbulence"])
 
 
 def test_breadth_via_reduce_identical() -> None:
