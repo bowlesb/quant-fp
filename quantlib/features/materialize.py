@@ -20,7 +20,7 @@ from quantlib.features.backfill_bars import (
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
-from quantlib.features.loaders import load_minute_agg, load_reference
+from quantlib.features.loaders import load_filings, load_minute_agg, load_reference
 from quantlib.features.raw_loaders import (
     load_raw_minute_agg,
     load_raw_tick_enriched_minute_agg,
@@ -67,6 +67,7 @@ def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
         "minute_agg": backfill_bars(day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
+        "filings": load_filings(day),
     }
     return _write_all(root, day, "backfill", frames)
 
@@ -84,6 +85,7 @@ def materialize_from_raw(
         "minute_agg": load_raw_minute_agg(raw_root, day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
+        "filings": load_filings(day),
     }
     return _write_all(root, day, "backfill", frames, shard=shard)
 
@@ -105,6 +107,7 @@ def materialize_from_raw_full(
         "trades": load_raw_trades(raw_root, day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
+        "filings": load_filings(day),
     }
     return _write_all(root, day, "backfill", frames, shard=shard)
 
@@ -123,6 +126,7 @@ def materialize_from_raw_bar_groups(
         "minute_agg": load_raw_minute_agg(raw_root, day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
+        "filings": load_filings(day),
     }
     return _write_all(root, day, "backfill", frames, only_groups=only_groups)
 
@@ -153,6 +157,7 @@ def materialize_from_raw_groups(
         "trades": load_raw_trades(raw_root, day, symbols),
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
+        "filings": load_filings(day),
     }
     return _write_all(root, day, "backfill", frames, only_groups=only_groups, shard=shard)
 
@@ -165,7 +170,11 @@ def materialize_minute(
     group for those dates. Each (group, source, date) partition is independent, so a repair fans out
     in parallel across dates/groups with no contention and no global lock (atomic per partition).
     """
-    frames = {"minute_agg": load_minute_agg(day, source), "reference": load_reference()}
+    frames = {
+        "minute_agg": load_minute_agg(day, source),
+        "reference": load_reference(),
+        "filings": load_filings(day),
+    }
     ctx = BatchContext(frames=frames)
     groups = [
         g for g in runnable(frames) if only_groups is None or g.name in only_groups

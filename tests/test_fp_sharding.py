@@ -68,7 +68,18 @@ def _snapshots() -> dict[str, pl.DataFrame]:
             for d in range(10)
         ]
     )
-    return {"reference": reference, "daily": daily}
+    # EDGAR filings snapshot: a few per symbol so edgar_filing_frequency (a per-symbol DB-join group) is
+    # runnable in BOTH the single-process and sharded paths — proving the new join source is shard-invariant.
+    filings = pl.DataFrame(
+        [
+            {"symbol": symbol, "form_type": ("8-K", "10-Q", "4")[d % 3],
+             "available_at": BASE - timedelta(days=d * 20 + off)}
+            for off, symbol in enumerate(SYMBOLS)
+            for d in range(4)
+        ],
+        schema={"symbol": pl.String, "form_type": pl.String, "available_at": pl.Datetime("us", "UTC")},
+    )
+    return {"reference": reference, "daily": daily, "filings": filings}
 
 
 def _single_process(n_minutes: int) -> dict[str, pl.DataFrame]:
@@ -136,8 +147,26 @@ def test_sharded_market_context_identical_via_index_replication() -> None:
 
 def test_cross_sectional_rank_via_reduce_identical() -> None:
     single, sharded = _single_process(10), _sharded(10)
-    assert REDUCE_GROUPS == ("cross_sectional_rank", "breadth")
+    assert REDUCE_GROUPS == ("cross_sectional_rank", "breadth", "market_turbulence", "sector_return", "sector_beta")
     _assert_same(single["cross_sectional_rank"], sharded["cross_sectional_rank"])
+
+
+def test_market_turbulence_via_reduce_identical() -> None:
+    # market_turbulence is a whole-market GATHER (universe mean |return| / realized vol): per-shard it
+    # would reduce only ~1/N of the universe and emit N different "market-wide" turbulence values per
+    # minute. Routed through the reduce it must equal the single-process value over ALL symbols — the
+    # live↔backfill parity the per-shard form would break.
+    single, sharded = _single_process(10), _sharded(10)
+    _assert_same(single["market_turbulence"], sharded["market_turbulence"])
+
+
+def test_sector_aggregates_via_reduce_identical() -> None:
+    # sector_return / sector_beta are whole-universe GATHERs grouped by GICS sector: per-shard each would
+    # see only ~1/N of a sector and emit N different sector aggregates per minute. Routed through the reduce
+    # they must equal the single-process value computed over EVERY symbol in the sector.
+    single, sharded = _single_process(10), _sharded(10)
+    for group in ("sector_return", "sector_beta"):
+        _assert_same(single[group], sharded[group])
 
 
 def test_breadth_via_reduce_identical() -> None:

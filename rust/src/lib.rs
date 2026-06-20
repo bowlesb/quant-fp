@@ -499,9 +499,41 @@ fn time_lag_gather(
 ///                 4 = corr    (idx0..5 = b, x, y, xy, xx, yy)
 ///                 5 = r2      (idx0..5 = b, x, y, xy, xx, yy)
 ///                 6 = mean_y  (idx0..5 = b, x, y, xy, xx, yy)
+///                 7 = resid_std (idx0..5 = b, x, y, xy, xx, yy) — OLS residual std, percent of mean y
 ///   idx0..idx5 — value-col indices into ``running``'s last axis; only the ones the kind needs are read.
 /// Returns a (n_symbols, n_out) row-major matrix; column j holds the kind[j] statistic over window win[j],
 /// one value per symbol, NaN where the (numpy/polars) emit is null.
+/// OLS residual std (percent of mean y) from the six paired sums — the rust twin of declarative.py's
+/// ``_ols_stat_exprs``/``_ols_stat_numpy`` ``resid_std`` (the residual_analysis Lever-2 stat). Uses the EXACT
+/// centered-sum algebra (Σ.._c = Σ.. − Σa·Σb/n) the hand-written group used so the difference-of-sums rounds
+/// identically. Σr² = syy_c − slope·sxy_c (clipped ≥0); resid_var = Σr²/n; std% = √resid_var/ȳ·100. NaN
+/// (==null) where n < 4 (``_RESID_MIN_POINTS``), the x-axis is flat (sxx_c ≤ 0), or resid_var is below the
+/// relative floor (``_RESID_REL_FLOOR``² of mean y²) — mirrors declarative.py's resid_defined guard.
+fn resid_std_pct(b: f64, sx: f64, sy: f64, sxy: f64, sxx: f64, syy: f64) -> f64 {
+    if b <= 0.0 {
+        return f64::NAN;
+    }
+    let sxx_c = sxx - sx * sx / b;
+    let sxy_c = sxy - sx * sy / b;
+    let syy_c = syy - sy * sy / b;
+    if !(sxx_c > 0.0) {
+        return f64::NAN;
+    }
+    let slope = sxy_c / sxx_c;
+    let mut ssr = syy_c - slope * sxy_c;
+    if ssr < 0.0 {
+        ssr = 0.0;
+    }
+    let mean_y = sy / b;
+    let resid_var = ssr / b;
+    let floor = (1e-6 * mean_y) * (1e-6 * mean_y); // _RESID_REL_FLOOR² · ȳ²
+    if b >= 4.0 && resid_var > floor {
+        resid_var.sqrt() / mean_y * 100.0
+    } else {
+        f64::NAN
+    }
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn assemble_canonical<'py>(
@@ -556,8 +588,8 @@ fn assemble_canonical<'py>(
                     };
                 }
             }
-            3..=6 => {
-                // OLS: the six paired sums b, x, y, xy, xx, yy -> slope/corr/r2/mean_y
+            3..=7 => {
+                // OLS: the six paired sums b, x, y, xy, xx, yy -> slope/corr/r2/mean_y/resid_std
                 let (cb, cx, cy, cxy, cxx, cyy) =
                     (idx0[j], idx1[j], idx2[j], idx3[j], idx4[j], idx5[j]);
                 for s in 0..n_sym {
@@ -567,6 +599,13 @@ fn assemble_canonical<'py>(
                     let sxy = plane[[s, cxy]];
                     let sxx = plane[[s, cxx]];
                     let syy = plane[[s, cyy]];
+                    // resid_std (kind 7) uses the EXACT centered-sum residual-std algebra (Σ.._c = Σ.. −
+                    // Σa·Σb/n) the hand-written residual_analysis used, so the difference-of-sums rounds
+                    // identically to the polars/numpy twins; computed separately below from these same sums.
+                    if k == 7 {
+                        out[[s, j]] = resid_std_pct(b, sx, sy, sxy, sxx, syy);
+                        continue;
+                    }
                     let denom_x = b * sxx - sx * sx;
                     let denom_y = b * syy - sy * sy;
                     let cov_n = b * sxy - sx * sy;

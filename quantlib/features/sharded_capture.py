@@ -47,12 +47,14 @@ INDEX_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "IWM")
 # Each shard worker exposes /metrics here (Prometheus scrapes BASE + shard_id) — keep in sync with the
 # feature-capture job in config/prometheus/prometheus.yml.
 WORKER_METRICS_BASE_PORT = 9201
-# Groups that depend on the WHOLE universe at a minute — run in the gather phase, not per shard. Both are
+# Groups that depend on the WHOLE universe at a minute — run in the gather phase, not per shard. All are
 # universe-wide GATHER reduces: cross_sectional_rank percentiles over all symbols; breadth counts the
-# up/down fraction of the whole market (+ each sector). Run per-shard they would see only ~1/8 of the
-# universe and produce 8 different "market-wide" values per minute, breaking live↔backfill parity — so
-# they MUST run once in the reader's gather phase over every symbol.
-REDUCE_GROUPS: tuple[str, ...] = ("cross_sectional_rank", "breadth")
+# up/down fraction of the whole market (+ each sector); market_turbulence means |trailing return| and
+# realized vol over the whole universe; sector_return/sector_beta aggregate each GICS sector's mean return
+# over every symbol in it. Run per-shard they would see only ~1/8 of the universe and produce 8 different
+# "market/sector-wide" values per minute, breaking live↔backfill parity — so they MUST run once in the
+# reader's gather phase over every symbol.
+REDUCE_GROUPS: tuple[str, ...] = ("cross_sectional_rank", "breadth", "market_turbulence", "sector_return", "sector_beta")
 # Slack minutes on top of the reduce groups' deepest declared window — leaves the leading-edge lookback
 # the reduce path needs (e.g. the bar exactly ``window`` ago) defined, exactly as the full buffer did.
 REDUCE_WINDOW_SLACK = 30
