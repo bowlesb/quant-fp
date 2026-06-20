@@ -58,7 +58,6 @@ from quantlib.features.groups import (  # noqa: F401
     size_entropy,
     subminute_gap_fano,
     swing,
-    swing_dc,
     technical,
     tick_runlength,
     trade_flow,
