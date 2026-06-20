@@ -27,3 +27,6 @@ rust/target/
 .worktrees/
 experiments/*/cache/
 experiments/*/data/
+experiments/*/_panel_shards/
+experiments/*/conddir/
+experiments/*/samples/
