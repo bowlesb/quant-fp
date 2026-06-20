@@ -1,28 +1,31 @@
 import type { StoreGridMatrix } from "./types";
-import type { HoverCell } from "./CanvasHeatmap";
+import type { DisplayColumn, HoverCell } from "./CanvasHeatmap";
 
 interface Props {
   hover: HoverCell | null;
   matrix: StoreGridMatrix;
-  trustOverlay: boolean;
+  displayCols: DisplayColumn[];
 }
 
-// Floating tooltip pinned near the cursor, naming the hovered cell's group / date / coverage% / trust. Only
-// shown over a covered cell (coverage byte > 0); empty cells get nothing.
-export function Tooltip({ hover, matrix, trustOverlay }: Props) {
+// Floating tooltip near the cursor naming the hovered cell's column / kind / date / coverage% / trust. Only
+// shown over a covered cell (coverage byte > 0).
+export function Tooltip({ hover, matrix, displayCols }: Props) {
   if (!hover) return null;
-  const coverageByte = matrix.coverage[hover.rowIndex]?.[hover.colIndex] ?? 0;
-  if (coverageByte <= 0) return null;
-  const trustedBit = matrix.group_trusted[hover.colIndex] ?? 0;
-  const group = matrix.groups[hover.colIndex];
+  const dc = displayCols[hover.displayCol];
+  if (!dc) return null;
+  const byte = matrix.coverage[hover.rowIndex]?.[dc.coverageCol] ?? 0;
+  if (byte <= 0) return null;
   const date = matrix.dates[hover.rowIndex];
-  const universe = matrix.universe[hover.rowIndex] ?? 0;
-  const coveragePct = Math.round((coverageByte / 255) * 100);
-  const tickersCovered = Math.round((coverageByte / 255) * universe);
+  const universe = matrix.universe_size;
+  const coveragePct = Math.round((byte / 255) * 100);
+  const tickers = Math.round((byte / 255) * universe);
 
-  // Keep the tooltip on-screen: flip to the left of the cursor near the right edge.
+  const kindLabel =
+    dc.kind === "raw" ? "raw tape layer" : dc.kind === "feature" ? "feature" : "feature group";
+  const trustLabel = dc.kind === "raw" ? null : dc.trusted ? "trusted" : "untrusted";
+
   const margin = 14;
-  const flipLeft = hover.clientX > window.innerWidth - 240;
+  const flipLeft = hover.clientX > window.innerWidth - 250;
   const style: React.CSSProperties = {
     top: hover.clientY + margin,
     left: flipLeft ? undefined : hover.clientX + margin,
@@ -31,7 +34,10 @@ export function Tooltip({ hover, matrix, trustOverlay }: Props) {
 
   return (
     <div className="tooltip" style={style}>
-      <div className="tooltip-ticker">{group}</div>
+      <div className="tooltip-title">
+        {dc.label}
+        <span className="tooltip-kind">{kindLabel}</span>
+      </div>
       <div className="tooltip-row">
         <span className="tooltip-label">date</span>
         <span>{date}</span>
@@ -39,17 +45,18 @@ export function Tooltip({ hover, matrix, trustOverlay }: Props) {
       <div className="tooltip-row">
         <span className="tooltip-label">coverage</span>
         <span>
-          {coveragePct}% &middot; {tickersCovered.toLocaleString()}/{universe.toLocaleString()} tickers
+          {coveragePct}% &middot; {tickers.toLocaleString()}/{universe.toLocaleString()} tickers
         </span>
       </div>
-      <div className="tooltip-row">
-        <span className="tooltip-label">trust</span>
-        <span className={trustedBit ? "trust-yes" : "trust-no"}>
-          {trustedBit ? "trusted group" : "untrusted group"}
-        </span>
-      </div>
-      <div className="tooltip-hint">click for the per-ticker breakdown</div>
-      {!trustOverlay && <div className="tooltip-hint">toggle trust overlay to colour by trust</div>}
+      {trustLabel && (
+        <div className="tooltip-row">
+          <span className="tooltip-label">trust</span>
+          <span className={dc.trusted ? "trust-yes" : "trust-no"}>{trustLabel}</span>
+        </div>
+      )}
+      {dc.kind === "group" && dc.expandable && (
+        <div className="tooltip-hint">click the column to expand its features</div>
+      )}
     </div>
   );
 }

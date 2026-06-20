@@ -80,13 +80,20 @@ def _fake_grid() -> dict[str, object]:
         "generated_at": "2026-06-20T00:00:00Z",
         "anchor_date": "2026-06-18",
         "lookback_days": 5,
-        "groups": ["groupX", "groupY"],
-        "group_trusted": [1, 0],
+        "universe_size": 4,
+        "columns": [
+            {"key": "bars", "label": "minute bars", "kind": "raw", "trusted": False, "features": []},
+            {"key": "groupX", "label": "groupX", "kind": "group", "trusted": True, "features": ["feat_a"]},
+            {"key": "groupY", "label": "groupY", "kind": "group", "trusted": False, "features": ["feat_c"]},
+        ],
         "summary": {
             "n_dates": 3,
+            "n_columns": 3,
             "n_groups": 2,
             "n_trusted_groups": 1,
+            "n_raw": 1,
             "mean_coverage_pct": 75.0,
+            "universe_size": 4,
         },
     }
 
@@ -117,7 +124,7 @@ def test_write_then_read_round_trip(patched: FakeMongo) -> None:
     # The grid reads back as the EXACT gzip bytes the writer stored (route serves them with Content-Encoding).
     blob = sgc.read_grid_gzip()
     assert blob is not None
-    assert json.loads(gzip.decompress(blob))["groups"] == ["groupX", "groupY"]
+    assert [c["key"] for c in json.loads(gzip.decompress(blob))["columns"]] == ["bars", "groupX", "groupY"]
 
     # Meta reads back without the Mongo _id.
     meta = sgc.read_meta()

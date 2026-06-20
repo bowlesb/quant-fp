@@ -1,45 +1,49 @@
-// Shapes returned by the dashboard's /api/store-grid/* endpoints (see services/dashboard/store_grid.py).
+// Shapes returned by the dashboard's /api/store-grid/* endpoints (see services/dashboard/store_grid.py, v3).
 
-export interface GridLegend {
-  coverage_scale: string;
-  trust_overlay: string;
-  depth_note: string;
+import type { ColumnKind } from "./theme";
+
+export interface GridColumn {
+  key: string;
+  label: string;
+  kind: ColumnKind; // "raw" (tape layer) | "group" (feature group)
+  trusted: boolean; // groups only: true iff all the group's features are trusted
+  features: string[]; // groups only: the feature inventory, for the horizontal expand
 }
 
 export interface GridSummary {
   n_dates: number;
+  n_columns: number;
   n_groups: number;
   n_trusted_groups: number;
+  n_raw: number;
   mean_coverage_pct: number;
+  universe_size: number;
 }
 
-// The matrix endpoint serves `coverage` as nested byte rows: rows aligned to `dates`, columns to `groups`.
-// coverage[i][j] is a 0..255 darkness byte = the fraction of date i's captured tickers that have group j.
-// group_trusted[j] is the binary trust bit for column j (1 = all the group's features trusted). universe[i]
-// is date i's captured-universe size (the coverage denominator). group_coverage_pct[j] is the group's mean
-// coverage over the dates it appears.
+// `coverage[i][j]` is a 0..255 byte = (tickers with column j on date i) / universe_size. Columns are raw
+// layers first (the substrate), then feature groups trusted-first. group columns carry their `features`.
 export interface StoreGridMatrix {
   generated_at: string;
   store_root: string;
   anchor_date: string | null;
   lookback_days: number;
+  universe_size: number;
   n_groups: number;
   n_trusted_groups: number;
   dates: string[];
-  groups: string[];
-  group_trusted: number[];
+  columns: GridColumn[];
   coverage: number[][];
-  universe: number[];
-  group_coverage_pct: number[];
+  column_coverage_pct: number[];
   summary: GridSummary;
-  legend: GridLegend;
 }
 
 export interface GridMeta {
   generated_at: string;
   anchor_date: string | null;
   lookback_days: number;
+  universe_size: number;
   n_dates: number;
+  n_columns: number;
   n_groups: number;
   n_trusted_groups: number;
   mean_coverage_pct: number;
@@ -49,7 +53,7 @@ export interface GridMeta {
   build_seconds: number;
 }
 
-// One (date x group) cell's per-ticker breakdown: which tickers have that group's features on that date.
+// One (date x group) cell's per-ticker breakdown (the secondary drill, still available on a group cell click).
 export interface CellDrill {
   generated_at: string | null;
   group: string;
@@ -62,7 +66,6 @@ export interface CellDrill {
   tickers: string[];
 }
 
-// The matrix / meta endpoints return 503 with this body before the worker's first build lands.
 export interface BootingResponse {
   booting: true;
   detail?: string;

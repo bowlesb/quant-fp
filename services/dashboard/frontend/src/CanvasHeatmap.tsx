@@ -2,45 +2,102 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { StoreGridMatrix } from "./types";
 import { CELL, COLORS, cellColor } from "./theme";
 
-// Hovered cell identity passed up for the tooltip.
+// A display column is either a base column (raw layer or group) or a feature sub-column of an expanded group.
+// `coverageCol` indexes matrix.coverage[date] for this column's byte — for a feature sub-column that's its
+// parent GROUP's coverage index (features share the group's coverage by construction).
+export interface DisplayColumn {
+  kind: "raw" | "group" | "feature";
+  key: string;
+  label: string;
+  trusted: boolean;
+  coverageCol: number;
+  groupKey: string | null;
+  expandable: boolean;
+  expanded: boolean;
+}
+
 export interface HoverCell {
-  rowIndex: number; // date index
-  colIndex: number; // group index
+  rowIndex: number;
+  displayCol: number;
   clientX: number;
   clientY: number;
 }
 
 interface Props {
   matrix: StoreGridMatrix;
-  trustOverlay: boolean;
-  // The group column to highlight (search jump / active drill), or null.
-  highlightCol: number | null;
+  expandedGroups: Set<string>;
+  highlightCol: string | null;
   onHoverChange: (cell: HoverCell | null) => void;
-  // A click picks a (date row, group col) cell -> opens the per-ticker drill for that group+date.
-  onPickCell: (rowIndex: number, colIndex: number) => void;
+  onToggleExpand: (groupKey: string) => void;
 }
 
-export function CanvasHeatmap({ matrix, trustOverlay, highlightCol, onHoverChange, onPickCell }: Props) {
+function buildDisplayColumns(matrix: StoreGridMatrix, expanded: Set<string>): DisplayColumn[] {
+  const out: DisplayColumn[] = [];
+  matrix.columns.forEach((col, idx) => {
+    if (col.kind === "group") {
+      const isExpanded = expanded.has(col.key);
+      out.push({
+        kind: "group",
+        key: col.key,
+        label: col.label,
+        trusted: col.trusted,
+        coverageCol: idx,
+        groupKey: col.key,
+        expandable: col.features.length > 0,
+        expanded: isExpanded,
+      });
+      if (isExpanded) {
+        col.features.forEach((feature) => {
+          out.push({
+            kind: "feature",
+            key: `${col.key}::${feature}`,
+            label: feature,
+            trusted: col.trusted,
+            coverageCol: idx,
+            groupKey: col.key,
+            expandable: false,
+            expanded: false,
+          });
+        });
+      }
+    } else {
+      out.push({
+        kind: "raw",
+        key: col.key,
+        label: col.label,
+        trusted: false,
+        coverageCol: idx,
+        groupKey: null,
+        expandable: false,
+        expanded: false,
+      });
+    }
+  });
+  return out;
+}
+
+export function CanvasHeatmap({
+  matrix,
+  expandedGroups,
+  highlightCol,
+  onHoverChange,
+  onToggleExpand,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [viewport, setViewport] = useState({ scrollTop: 0, width: 0, height: 0 });
 
+  const displayCols = useMemo(() => buildDisplayColumns(matrix, expandedGroups), [matrix, expandedGroups]);
   const nDates = matrix.dates.length;
-  const nGroups = matrix.groups.length;
-  const contentWidth = nGroups * CELL.w;
+  const nCols = displayCols.length;
+  const contentWidth = nCols * CELL.w;
   const contentHeight = nDates * CELL.h;
 
-  // Track the scroll container's size + vertical scroll offset; only the visible rows are painted (the ~63
-  // group columns all fit, so only the date axis needs windowing).
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
     const measure = () =>
-      setViewport({
-        scrollTop: node.scrollTop,
-        width: node.clientWidth,
-        height: node.clientHeight,
-      });
+      setViewport({ scrollTop: node.scrollTop, width: node.clientWidth, height: node.clientHeight });
     measure();
     const onScroll = () => measure();
     node.addEventListener("scroll", onScroll, { passive: true });
@@ -59,12 +116,13 @@ export function CanvasHeatmap({ matrix, trustOverlay, highlightCol, onHoverChang
     return { firstRow, lastRow };
   }, [viewport, nDates]);
 
-  // Paint the visible rows × all group columns onto a viewport-sized canvas overlay (no full-content bitmap).
+  // Paint visible rows × all display columns onto a viewport-tall canvas overlay. White background (cleared)
+  // == zero coverage; a present cell darkens toward its column colour.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const dpr = globalThis.devicePixelRatio ?? 1;
-    const cssW = contentWidth; // the canvas is exactly the (few) columns wide; the body scrolls vertically
+    const cssW = contentWidth;
     const cssH = viewport.height;
     if (cssW === 0 || cssH === 0) return;
     const pxW = Math.round(cssW * dpr);
@@ -81,29 +139,38 @@ export function CanvasHeatmap({ matrix, trustOverlay, highlightCol, onHoverChang
     const { firstRow, lastRow } = visibleRows;
     const offY = viewport.scrollTop;
 
+    // Faint band behind any expanded group's feature sub-columns so the expansion reads against the white.
+    displayCols.forEach((dc, c) => {
+      if (dc.kind === "feature") {
+        ctx.fillStyle = "rgba(31,111,235,0.05)";
+        ctx.fillRect(c * CELL.w, 0, CELL.w, cssH);
+      }
+    });
+
     for (let row = firstRow; row < lastRow; row++) {
       const coverageRow = matrix.coverage[row];
       const y = row * CELL.h - offY;
-      for (let col = 0; col < nGroups; col++) {
-        const fill = cellColor(coverageRow[col], matrix.group_trusted[col], trustOverlay);
+      for (let c = 0; c < nCols; c++) {
+        const dc = displayCols[c];
+        const byte = coverageRow[dc.coverageCol] ?? 0;
+        const fill = cellColor(byte, dc.kind === "raw" ? "raw" : "group", dc.trusted);
         if (fill == null) continue;
         ctx.fillStyle = fill;
-        ctx.fillRect(col * CELL.w, y, CELL.w - CELL.gap, CELL.h - CELL.gap);
+        ctx.fillRect(c * CELL.w, y, CELL.w - CELL.gap, CELL.h - CELL.gap);
       }
     }
 
     if (highlightCol != null) {
-      const x = highlightCol * CELL.w;
-      ctx.fillStyle = "rgba(108,182,255,0.10)";
-      ctx.fillRect(x - 1, 0, CELL.w + 2, cssH);
-      ctx.strokeStyle = COLORS.accent;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x - 0.5, 0, CELL.w + 1, cssH);
+      const c = displayCols.findIndex((dc) => dc.groupKey === highlightCol && dc.kind === "group");
+      if (c >= 0) {
+        ctx.strokeStyle = COLORS.accent;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(c * CELL.w - 0.5, 0, CELL.w + 1, cssH);
+      }
     }
-  }, [matrix, trustOverlay, highlightCol, viewport, visibleRows, contentWidth, nGroups]);
+  }, [matrix, displayCols, nCols, highlightCol, viewport, visibleRows, contentWidth]);
 
-  // Map a mouse position to a (row, col).
-  const cellAt = useCallback(
+  const colAt = useCallback(
     (clientX: number, clientY: number): { row: number; col: number } | null => {
       const node = scrollRef.current;
       if (!node) return null;
@@ -112,34 +179,40 @@ export function CanvasHeatmap({ matrix, trustOverlay, highlightCol, onHoverChang
       const localY = clientY - rect.top + node.scrollTop;
       const col = Math.floor(localX / CELL.w);
       const row = Math.floor(localY / CELL.h);
-      if (col < 0 || col >= nGroups || row < 0 || row >= nDates) return null;
+      if (col < 0 || col >= nCols || row < 0 || row >= nDates) return null;
       return { row, col };
     },
-    [nGroups, nDates],
+    [nCols, nDates],
   );
 
   const onMouseMove = useCallback(
     (event: React.MouseEvent) => {
-      const hit = cellAt(event.clientX, event.clientY);
+      const hit = colAt(event.clientX, event.clientY);
       if (!hit) {
         onHoverChange(null);
         return;
       }
-      onHoverChange({ rowIndex: hit.row, colIndex: hit.col, clientX: event.clientX, clientY: event.clientY });
+      onHoverChange({
+        rowIndex: hit.row,
+        displayCol: hit.col,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
     },
-    [cellAt, onHoverChange],
+    [colAt, onHoverChange],
   );
 
+  // Clicking anywhere in an expandable GROUP column toggles its horizontal feature expand.
   const onClick = useCallback(
     (event: React.MouseEvent) => {
-      const hit = cellAt(event.clientX, event.clientY);
-      if (hit) onPickCell(hit.row, hit.col);
+      const hit = colAt(event.clientX, event.clientY);
+      if (!hit) return;
+      const dc = displayCols[hit.col];
+      if (dc.kind === "group" && dc.expandable && dc.groupKey) onToggleExpand(dc.groupKey);
     },
-    [cellAt, onPickCell],
+    [colAt, displayCols, onToggleExpand],
   );
 
-  // Date labels for the visible rows only, positioned at their row's screen Y (content Y − scrollTop). Month
-  // starts are bold; a sampled cadence fills between — a real time axis without a label per row.
   const dateLabels = useMemo(() => {
     const { firstRow, lastRow } = visibleRows;
     const labels: { y: number; text: string; major: boolean }[] = [];
@@ -162,21 +235,24 @@ export function CanvasHeatmap({ matrix, trustOverlay, highlightCol, onHoverChang
 
   return (
     <div className="heatmap-frame">
-      {/* Group-name column headers — angled so all ~63 fit. A fixed header row above the scrolling body. */}
-      <div className="group-header" style={{ paddingLeft: 58 }}>
-        <div className="group-header-inner" style={{ width: contentWidth }}>
-          {matrix.groups.map((group, col) => (
+      <div className="col-header" style={{ paddingLeft: 58 }}>
+        <div className="col-header-inner" style={{ width: contentWidth }}>
+          {displayCols.map((dc, c) => (
             <div
-              key={group}
+              key={dc.key}
               className={
-                "group-label" +
-                (matrix.group_trusted[col] ? " trusted" : "") +
-                (highlightCol === col ? " active" : "")
+                "col-label" +
+                ` k-${dc.kind}` +
+                (dc.trusted ? " trusted" : dc.kind === "group" ? " untrusted" : "") +
+                (highlightCol === dc.groupKey && dc.kind === "group" ? " active" : "")
               }
-              style={{ left: col * CELL.w, width: CELL.w }}
-              title={`${group}${matrix.group_trusted[col] ? " · trusted" : ""}`}
+              style={{ left: c * CELL.w, width: CELL.w }}
+              title={dc.label + (dc.expandable ? " — click column to expand features" : "")}
             >
-              <span>{group}</span>
+              <span>
+                {dc.kind === "group" && dc.expandable ? (dc.expanded ? "▾ " : "▸ ") : ""}
+                {dc.label}
+              </span>
             </div>
           ))}
         </div>
@@ -198,10 +274,8 @@ export function CanvasHeatmap({ matrix, trustOverlay, highlightCol, onHoverChang
             onMouseLeave={() => onHoverChange(null)}
             onClick={onClick}
           >
-            {/* Spacer establishes the full scrollable content height so the native scrollbar is correct. */}
             <div style={{ width: contentWidth, height: contentHeight }} />
           </div>
-          {/* The canvas overlays the columns; it repaints the visible rows on vertical scroll. */}
           <canvas
             ref={canvasRef}
             className="heatmap-canvas"
