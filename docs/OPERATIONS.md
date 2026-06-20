@@ -72,7 +72,7 @@ so fc captured almost no RTH on 06-16/06-17. Fixed 2026-06-18 → 05:11 PT pre-m
 | `*/5 * * * *` | `ops/healthcheck.sh --json` | fc freshness/health logging | benign (log only) | `~/.quant-healthcheck/healthcheck.jsonl` |
 | `2-59/6 * * * *` | `feature_scan --json` | feature sanity scan | benign | `~/.quant-healthcheck/feature_scan.jsonl` |
 | `*/3 * * * *` | `ops/live_monitor.sh` | restart EXITED critical containers; mem/disk guard pauses EVERY non-protected heavy/backfill job (name-pattern, not one hardcoded name) under pressure | conservative (only restarts dead; pauses ONLY non-PROTECTED job-pattern containers — never capture/strategies/store/infra) | `~/.quant-ops/live_monitor.jsonl` |
-| `11 5 * * 1-5` | `ops/nightly_relaunch.sh $(date +%F)` | **05:11 PT pre-market clean recreate of fc for the session** (must be before the 06:30 PT open) | DESTRUCTIVE (rm -f fc) — see guardrail | `~/.quant-validation/nightly_relaunch.log` + §1 health check |
+| `11 5 * * 1-5` | `UNIVERSE_MAX_SYMBOLS=100000 ops/nightly_relaunch.sh $(date +%F)` | **05:11 PT pre-market clean recreate of fc for the session** (must be before the 06:30 PT open). The `UNIVERSE_MAX_SYMBOLS=100000` prefix is REQUIRED — without it the reseed silently re-caps the universe at `seed_universe`'s default 3000 (see note below). | DESTRUCTIVE (rm -f fc) — see guardrail | `~/.quant-validation/nightly_relaunch.log` + §1 health check |
 | `30 18 * * 1-5` | `ops/daily_lifecycle.sh` | 18:30 PT post-close parity sweep + trust ledger | benign (read/backfill) | `~/.quant-validation/daily_lifecycle.log` |
 | `30 23 * * 1-5` | `ops/daily_lifecycle.sh` | **23:30 PT LATE re-acquire + re-sweep.** Alpaca's illiquid-tail SIP historical bars often have NOT settled by 18:30 PT (~5h post-close), so the 18:30 sweep `RawNotSettled`-SKIPs (06-17=65% / 06-18=56% < the 90% `assert_tail_settled` gate) and grades nothing → 0 newly-trusted. By 23:30 PT (~10.5h post-close) the tail has settled; this re-run re-acquires the now-landed tail (idempotent: `raw_backfill` re-fetches the empty 0-row manifest entries left at 18:30) + re-sweeps to grade the day. The direct trust-jump unblock. | benign + idempotent (re-acquire manifest-skips already-on-disk; the sweep upserts — a day already graded at 18:30 just refreshes in place; still `RawNotSettled`-SKIPs cleanly if the tail is somehow <90%). Off RTH, after the 22:33 compaction. | `~/.quant-validation/daily_lifecycle_late.log` |
 | `45 14 * * 6` | `ops/trust_random_check.sh` | weekly RANDOM re-check of TRUSTED features on a random recent clean day; un-trusts clean-day failures (docs/TRUST_REDESIGN.md) | conservative (only un-trusts on a positive clean-day disagreement; re-runs an idempotent sweep) | `~/.quant-validation/trust_random_check.log` |
@@ -80,6 +80,15 @@ so fc captured almost no RTH on 06-16/06-17. Fixed 2026-06-18 → 05:11 PT pre-m
 | `33 22 * * 1-5` | `ops/compact_stream.sh` | 22:33 PT fold each SETTLED stream partition's ~thousands of per-minute files into one `data-compacted.parquet` (docs/STREAM_COMPACTION.md) — runs after the 18:30 sweep, off RTH | benign (idempotent + atomic + reader-transparent; only days `< today`, never the partition fc is writing; NO schema/format/fingerprint change) | `~/.quant-validation/compact_stream.log` |
 
 **Keep this table updated whenever a cron is added/changed/removed.** A cron that isn't here doesn't exist.
+
+**⚠️ `nightly_relaunch` universe cap — REQUIRED override.** `nightly_relaunch.sh` reseeds `universe_membership`
+via `quantlib.features.seed_universe`, whose default `UNIVERSE_MAX_SYMBOLS=3000`. The relaunch line therefore
+MUST carry `UNIVERSE_MAX_SYMBOLS=100000` (the full ~7.3k filtered common-stock + index-ETF set) — the script
+forwards the env var into the reseed container when set. This was a real oversight: from 06-16 through 06-20 the
+cron line lacked the override, so every pre-market relaunch silently re-capped membership from ~11336 → 3000.
+`ops/install_crons.sh` now AUDITS for this (non-mutating, loud warning) but does NOT auto-edit the destructive,
+hand-managed relaunch line — the coordinator applies the one-line live-crontab edit. The canonical line is the
+table row above. Verify with `crontab -l | grep nightly_relaunch` (expect the `UNIVERSE_MAX_SYMBOLS=100000` prefix).
 
 The random trust re-check is the safety net behind 1-day trust (docs/TRUST_REDESIGN.md): it re-grades a
 random recent clean day and un-trusts any TRUSTED feature that now falls below its per-type threshold,
