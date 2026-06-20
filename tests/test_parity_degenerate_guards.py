@@ -107,6 +107,92 @@ def test_volume_zscore_no_nan_on_constant_volume() -> None:
     assert early["volume_zscore_5m"] is None
 
 
+def _nonconstant_then_constant_volume(symbol: str, n: int, settle_at: int) -> pl.DataFrame:
+    """A VARYING-volume prefix (so the window carries real variance) followed by a perfectly-CONSTANT volume
+    tail. Once the prefix ages out of a window, the window is constant -> std should be 0. This is the case
+    that breaks volume_zscore parity: the live power-sum std is EXACTLY 0.0, but backfill ``rolling_std_by``
+    (Welford, sliding add/remove) leaves a tiny non-zero residue (~a few * 1e-9 of the mean), so a too-tight
+    relative null-floor sends the two paths to OPPOSITE branches (backfill z=0, live NULL). A from-the-start
+    constant window does NOT reproduce it (both paths give residue 0)."""
+    rows = []
+    price = 100.0
+    for i in range(n):
+        price += 0.05
+        vol = 1000.0 if i >= settle_at else (500.0 + (i % 7) * 137.0)
+        rows.append(
+            {
+                "symbol": symbol,
+                "minute": BASE + timedelta(minutes=i),
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": vol,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def test_volume_zscore_parity_on_constant_tail_after_varying_prefix() -> None:
+    """The volume_zscore null/non-null parity break (sweep-found): backfill ``rolling_std_by`` leaves a
+    Welford residue on a window that became constant after a varying prefix, while the live power-sum std is
+    exactly 0.0 -> the two straddle the relative std null-floor -> backfill emits z=0 where live/incremental
+    emit NULL. Hold backfill == compute_latest == incremental on null-ness for every volume_zscore window."""
+    frame = _nonconstant_then_constant_volume("ILLQ", 90, settle_at=30)
+    group = REGISTRY.get_group("volume")
+    rolling = group.compute(BatchContext(frames={"minute_agg": frame})).sort(["symbol", "minute"])
+    minutes = sorted(frame["minute"].unique())
+    engine = IncrementalEngine([group])
+    z_cols = [c for c in rolling.columns if c.startswith("volume_zscore")]
+    # sample late minutes where the varying prefix has fully aged out of the shorter windows
+    for ti, minute in enumerate(minutes):
+        buffer = frame.filter(pl.col("minute") <= minute)
+        inc = engine.step(buffer)[group.name].row(0, named=True)
+        if ti not in (45, 60, 75, len(minutes) - 1):
+            continue
+        ctx = BatchContext(frames={"minute_agg": buffer})
+        live = group.compute_latest(ctx).row(0, named=True)
+        back = rolling.filter(pl.col("minute") == minute).row(0, named=True)
+        for col in z_cols:
+            for label, val in (("backfill", back[col]), ("compute_latest", live[col]), ("incremental", inc[col])):
+                assert val is None or math.isfinite(
+                    val
+                ), f"min{ti} {col}: {label} emitted non-finite {val} on a constant-volume window"
+            assert (back[col] is None) == (live[col] is None) == (
+                inc[col] is None
+            ), f"min{ti} {col}: null-ness disagrees back={back[col]} live={live[col]} inc={inc[col]}"
+
+
+def test_volume_zscore_well_conditioned_unchanged() -> None:
+    """The raised std floor must NOT over-null a genuinely-varying volume window: every zscore stays non-null
+    and live==backfill to float precision."""
+    rng = random.Random(11)
+    rows = []
+    price = 100.0
+    for i in range(90):
+        price += 0.05
+        rows.append(
+            {
+                "symbol": "OK",
+                "minute": BASE + timedelta(minutes=i),
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 1000.0 + rng.gauss(0.0, 300.0),
+            }
+        )
+    frame = pl.DataFrame(rows)
+    group = REGISTRY.get_group("volume")
+    ctx = BatchContext(frames={"minute_agg": frame})
+    rolling = group.compute(ctx).sort("minute")
+    back = rolling.filter(pl.col("minute") == rolling["minute"].max()).row(0, named=True)
+    live = group.compute_latest(ctx).row(0, named=True)
+    for col in [c for c in rolling.columns if c.startswith("volume_zscore")]:
+        assert back[col] is not None, f"{col}: well-conditioned window over-nulled by the std floor"
+        assert math.isclose(back[col], live[col], rel_tol=1e-6, abs_tol=1e-9)
+
+
 def _near_flat(symbol: str, base_price: float, n: int) -> pl.DataFrame:
     """A NEAR-flat window (sub-epsilon float jitter, NOT exactly constant) — the residual parity case the
     exact-zero-std tests miss. Backfill ``rolling_std_by`` yields a tiny FINITE std here while live
