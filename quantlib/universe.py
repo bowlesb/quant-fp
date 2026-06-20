@@ -9,6 +9,12 @@ result per day in universe_membership gives backtests a point-in-time universe
 import re
 from dataclasses import dataclass
 
+# Primary US listing venues the seed keeps — full-tape, liquid names. OTC = pink/grey markets (no SIP
+# depth), BATS = the test/secondary venue Alpaca tags some names with; both dropped. Pure data, no I/O,
+# so both the Alpaca-backed seeding job (quantlib.features.seed_universe) and the monitoring dashboard's
+# universe-coverage panel can share it without pulling the trading SDK.
+KEEP_EXCHANGES = {"NASDAQ", "NYSE", "AMEX", "ARCA"}
+
 # ETF/ETN/leveraged detector by issuer/product name (a curated ETF reference list is the
 # eventual fix). Excludes these from a single-stock cross-sectional universe so leveraged/
 # inverse/VIX-futures products don't dominate the model's tails or distort the cross-section.

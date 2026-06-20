@@ -22,11 +22,8 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest
 
-from quantlib.universe import is_etf_like
+from quantlib.universe import KEEP_EXCHANGES, is_etf_like
 
-# Primary US listing venues we keep — full-tape, liquid names. OTC = pink/grey markets (no SIP depth),
-# BATS = the test/secondary venue Alpaca tags some names with; both dropped for night 1.
-KEEP_EXCHANGES = {"NASDAQ", "NYSE", "AMEX", "ARCA"}
 MAX_SYMBOLS = int(os.environ.get("UNIVERSE_MAX_SYMBOLS", "3000"))
 PLACEHOLDER_ADV = 1_000_000.0  # stand-in until real ADV$ ranking lands from backfill history
 

@@ -8,6 +8,9 @@ the ``fp-dev`` image, which carries every dependency) but CRASHES the dashboard'
 image on rebuild. This happened twice in one session: ``redis`` (pulled by ``quantlib.bus``
 since #211, fixed reactively in #231) and ``alpaca-py`` (pulled by
 ``quantlib.features.seed_universe`` via the #227 universe-coverage panel, fixed in #232).
+The alpaca pull was later removed at the root by decoupling the panel from the trading SDK
+(KEEP_EXCHANGES moved to the pure ``quantlib.universe`` module), so ``alpaca-py`` is no longer
+in the dashboard requirements; the redis pull remains and anchors the non-vacuousness check.
 
 This test reproduces what the dashboard image actually carries WITHOUT a docker build: it walks
 the static import closure of every ``services/dashboard/*.py`` module (following first-party
@@ -34,11 +37,11 @@ REQUIREMENTS_TXT = DASHBOARD_DIR / "requirements.txt"
 WHEEL_TOP_LEVEL = "quant_tick"
 
 # Import-name -> requirements distribution-name, for the cases where they differ. Most packages
-# import under their distribution name (fastapi, redis, numpy, polars, markdown, psycopg); these
-# are the exceptions present in this image.
-IMPORT_TO_DISTRIBUTION = {
-    "alpaca": "alpaca-py",
-}
+# import under their distribution name (fastapi, redis, numpy, polars, markdown, psycopg). Currently
+# empty: the dashboard closure reaches no package whose import name differs from its distribution name
+# (the lone prior exception, alpaca -> alpaca-py, was removed when universe_coverage was decoupled from
+# the trading SDK). Kept as the extension point for any future import/dist mismatch the closure adds.
+IMPORT_TO_DISTRIBUTION: dict[str, str] = {}
 
 # Packages the dashboard imports DIRECTLY but does not list in requirements.txt because they are
 # HARD, always-installed dependencies of a package that IS listed — so the image always carries
@@ -213,26 +216,44 @@ def test_dashboard_import_closure_is_satisfied_by_requirements() -> None:
     )
 
 
-def test_guard_would_catch_redis_and_alpaca() -> None:
-    """Regression evidence: the two real incidents are in the closure and are satisfied.
+def test_guard_is_non_vacuous_on_redis() -> None:
+    """Regression evidence: the guard actually reaches a real transitive dep and enforces it.
 
-    Removing redis/alpaca-py from requirements MUST make the main guard fail — this proves the
-    closure actually reaches them (and that the test is not vacuously green).
+    ``redis`` is pulled by ``quantlib.bus`` (scorecard -> quantlib.bus.schema -> registry) since the
+    bus-decouple (#211/#231); it MUST be in the closure and declared, and a requirements set lacking
+    it MUST fail the main guard — proving the test is not vacuously green.
     """
     closure = _build_closure()
     third_party = _third_party_top_level(closure)
     assert "redis" in third_party, "closure should reach redis via quantlib.bus (#211/#231)"
-    assert (
-        "alpaca" in third_party
-    ), "closure should reach alpaca via quantlib.features.seed_universe (#227/#232)"
 
     declared = _requirement_distributions()
-    for incident_import, incident_dist in (("redis", "redis"), ("alpaca", "alpaca-py")):
-        distribution = IMPORT_TO_DISTRIBUTION.get(incident_import, incident_import)
-        assert _normalize(distribution) in declared, (
-            f"{incident_import} -> {incident_dist} must be declared; the reactive fixes "
-            "#231/#232 added them and this test locks that in"
-        )
-        # Prove the guard is non-vacuous: a requirements set lacking this entry is rejected.
-        without = declared - {_normalize(incident_dist)}
-        assert _normalize(distribution) not in without
+    assert _normalize("redis") in declared, (
+        "redis must be declared in requirements.txt; the reactive fix #231 added it and this "
+        "test locks that in"
+    )
+    # Prove the guard is non-vacuous: a requirements set lacking this entry is rejected.
+    without = declared - {_normalize("redis")}
+    assert _normalize("redis") not in without
+
+
+def test_universe_coverage_panel_does_not_pull_alpaca() -> None:
+    """The #227 universe-coverage panel must NOT drag the Alpaca trading SDK into the dashboard.
+
+    The panel originally imported ``KEEP_EXCHANGES`` from ``quantlib.features.seed_universe``, whose
+    module-level ``alpaca.trading`` import crash-looped the dashboard image (#232, reactive add). The
+    decouple moved the constant to the pure ``quantlib.universe`` module, so a monitoring UI no longer
+    bundles the trading SDK. This locks the decouple in: ``alpaca`` must stay OUT of the closure and
+    ``alpaca-py`` must stay OUT of requirements.txt.
+    """
+    closure = _build_closure()
+    third_party = _third_party_top_level(closure)
+    assert "alpaca" not in third_party, (
+        "alpaca must NOT be in the dashboard import closure — universe_coverage gets KEEP_EXCHANGES "
+        "from the pure quantlib.universe module, not the alpaca-importing seed_universe"
+    )
+    declared = _requirement_distributions()
+    assert _normalize("alpaca-py") not in declared, (
+        "alpaca-py must NOT be in dashboard requirements.txt — the dashboard no longer needs the "
+        "trading SDK after the universe_coverage decouple"
+    )
