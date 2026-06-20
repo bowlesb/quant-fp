@@ -978,6 +978,732 @@ fn confirm_pivot(
     }
 }
 
+/// A bounded record of one COMPLETED directional-change leg (pivot-to-pivot "chunk") at one scale, kept in a
+/// ring for the per-scale aggregates, the percentile read, and the persistence sum. All fields are sealed at
+/// the moment the leg's terminal pivot confirms — point-in-time, never revised.
+#[derive(Clone, Copy)]
+struct DcLeg {
+    signed_ret: f64, // (pivot_price - leg_start_price) / leg_start_price
+    abs_ret: f64,
+    slope: f64,    // signed_ret per minute over the leg's span
+    dur_min: f64,  // leg span in minutes
+    n_trades: f64, // sum of minute n_trades over the leg's bars
+    mean_spread: f64,
+    dir: i64, // +1 up-leg, -1 down-leg
+}
+
+/// Per-SCALE directional-change fold state. One independent DC state machine per threshold in the ladder,
+/// all advanced in lockstep over the SAME single pass of the close series (they share only the incremental
+/// volatility that scales their thresholds). ``mode`` is the current (provisional) leg direction; the running
+/// ``ext`` is the provisional extreme that a future >= delta reversal would confirm as the next pivot.
+struct ScaleState {
+    mode: i64, // 0 undirected, +1 up-leg, -1 down-leg
+    leg_start_price: f64,
+    leg_start_min: i64,
+    ext: f64,
+    ext_min: i64,
+    // undirected bootstrap: track a running high and low; the first delta-reversal from EITHER seeds direction.
+    hi: f64,
+    hi_min: i64,
+    lo: f64,
+    lo_min: i64,
+    // prefix accumulators (since the symbol block start) of minute n_trades and minute mean_spread, plus a bar
+    // count, so any leg's totals = (prefix at its end) - (prefix at its start). Snapshots are taken at leg
+    // start and at the running extreme so a confirmed leg (which ends at the PAST extreme) gets its true totals.
+    pre_ntrades: f64,
+    pre_spread: f64,
+    pre_bars: f64,
+    snap_start_ntrades: f64,
+    snap_start_spread: f64,
+    snap_start_bars: f64,
+    snap_ext_ntrades: f64,
+    snap_ext_spread: f64,
+    snap_ext_bars: f64,
+    // undirected-bootstrap prefix snapshots taken AT the running hi / lo (so the first confirmed leg, which
+    // ends at the past hi or lo, gets its true trades/spread totals — the directed-mode ``snap_ext`` analogue).
+    snap_hi_ntrades: f64,
+    snap_hi_spread: f64,
+    snap_hi_bars: f64,
+    snap_lo_ntrades: f64,
+    snap_lo_spread: f64,
+    snap_lo_bars: f64,
+    // last COMPLETED leg geometry for the Fibonacci grid.
+    prev_leg_start: f64,
+    prev_leg_end: f64,
+    prev_leg_dir: i64,
+    have_prev_leg: bool,
+    legs: std::collections::VecDeque<DcLeg>,
+    n_legs_total: f64, // count of all confirmed legs this block (not just the ring)
+    last_pivot_min: i64,
+    have_pivot: bool,
+    last_close: f64, // the most recent bar's close (the provisional price for the feature reads)
+}
+
+impl ScaleState {
+    fn new() -> Self {
+        ScaleState {
+            mode: 0,
+            leg_start_price: f64::NAN,
+            leg_start_min: 0,
+            ext: f64::NAN,
+            ext_min: 0,
+            hi: f64::NAN,
+            hi_min: 0,
+            lo: f64::NAN,
+            lo_min: 0,
+            pre_ntrades: 0.0,
+            pre_spread: 0.0,
+            pre_bars: 0.0,
+            snap_start_ntrades: 0.0,
+            snap_start_spread: 0.0,
+            snap_start_bars: 0.0,
+            snap_ext_ntrades: 0.0,
+            snap_ext_spread: 0.0,
+            snap_ext_bars: 0.0,
+            snap_hi_ntrades: 0.0,
+            snap_hi_spread: 0.0,
+            snap_hi_bars: 0.0,
+            snap_lo_ntrades: 0.0,
+            snap_lo_spread: 0.0,
+            snap_lo_bars: 0.0,
+            prev_leg_start: f64::NAN,
+            prev_leg_end: f64::NAN,
+            prev_leg_dir: 0,
+            have_prev_leg: false,
+            legs: std::collections::VecDeque::new(),
+            n_legs_total: 0.0,
+            last_pivot_min: 0,
+            have_pivot: false,
+            last_close: f64::NAN,
+        }
+    }
+}
+
+/// Fibonacci ratios used for the retracement read against the last completed leg (measured from the leg's END
+/// back toward its START): 0.382 / 0.5 / 0.618 / 0.786.
+const FIB_RETR: [f64; 4] = [0.382, 0.5, 0.618, 0.786];
+/// Degenerate-basis guard mirroring the existing swing group: when the prior leg's range is a near-zero
+/// fraction the retracement ratio explodes; beyond this absolute magnitude the read is UNDEFINED (NaN -> null).
+const FIB_DC_MAX_ABS: f64 = 10.0;
+
+/// Snapshot the running prefix accumulators as the leg-START anchor (called whenever a new leg begins).
+fn snap_leg_start(st: &mut ScaleState) {
+    st.snap_start_ntrades = st.pre_ntrades;
+    st.snap_start_spread = st.pre_spread;
+    st.snap_start_bars = st.pre_bars;
+}
+
+/// Snapshot the running prefix accumulators as the current-EXTREME anchor (called whenever the extreme moves).
+/// The leg that confirms at this extreme reads its totals from these snapshots — so a leg ending at a PAST
+/// extreme still gets exactly the trades/spread that occurred up to that extreme, not up to the confirming bar.
+fn snap_leg_ext(st: &mut ScaleState) {
+    st.snap_ext_ntrades = st.pre_ntrades;
+    st.snap_ext_spread = st.pre_spread;
+    st.snap_ext_bars = st.pre_bars;
+}
+
+/// Seal a freshly confirmed leg (leg_start .. pivot at the extreme) into the ring + last-leg geometry.
+#[allow(clippy::too_many_arguments)]
+fn dc_confirm(
+    st: &mut ScaleState,
+    pivot_price: f64,
+    pivot_min: i64,
+    new_dir: i64,
+    ring_k: usize,
+) {
+    let signed_ret = if st.leg_start_price > 0.0 {
+        (pivot_price - st.leg_start_price) / st.leg_start_price
+    } else {
+        0.0
+    };
+    let dur_min = ((pivot_min - st.leg_start_min) / 60) as f64;
+    let slope = if dur_min > 0.0 { signed_ret / dur_min } else { 0.0 };
+    // leg totals = (snapshot at the extreme/pivot) - (snapshot at the leg start), clamped non-negative.
+    let n_trades = (st.snap_ext_ntrades - st.snap_start_ntrades).max(0.0);
+    let span_bars = (st.snap_ext_bars - st.snap_start_bars).max(0.0);
+    let mean_spread = if span_bars > 0.0 {
+        (st.snap_ext_spread - st.snap_start_spread) / span_bars
+    } else {
+        0.0
+    };
+    let leg_dir = -new_dir; // the leg that just ENDED ran opposite to the new leg's direction
+    st.legs.push_back(DcLeg {
+        signed_ret,
+        abs_ret: signed_ret.abs(),
+        slope,
+        dur_min,
+        n_trades,
+        mean_spread,
+        dir: leg_dir,
+    });
+    while st.legs.len() > ring_k {
+        st.legs.pop_front();
+    }
+    st.n_legs_total += 1.0;
+    st.prev_leg_start = st.leg_start_price;
+    st.prev_leg_end = pivot_price;
+    st.prev_leg_dir = leg_dir;
+    st.have_prev_leg = true;
+    st.last_pivot_min = pivot_min;
+    st.have_pivot = true;
+}
+
+/// Advance ONE scale's DC state machine by one bar at price ``c`` / minute ``m`` with the scale's current
+/// threshold ``delta``. Returns whether a pivot confirmed THIS bar (for the cross-scale coincidence read).
+fn dc_step(st: &mut ScaleState, c: f64, m: i64, delta: f64, ring_k: usize) -> bool {
+    let mut confirmed = false;
+    st.last_close = c;
+    if st.leg_start_price.is_nan() {
+        st.leg_start_price = c;
+        st.leg_start_min = m;
+        st.ext = c;
+        st.ext_min = m;
+        st.hi = c;
+        st.hi_min = m;
+        st.lo = c;
+        st.lo_min = m;
+        snap_leg_start(st);
+        snap_leg_ext(st);
+        st.snap_hi_ntrades = st.pre_ntrades;
+        st.snap_hi_spread = st.pre_spread;
+        st.snap_hi_bars = st.pre_bars;
+        st.snap_lo_ntrades = st.pre_ntrades;
+        st.snap_lo_spread = st.pre_spread;
+        st.snap_lo_bars = st.pre_bars;
+        return false;
+    }
+    if st.mode == 0 {
+        if c > st.hi {
+            st.hi = c;
+            st.hi_min = m;
+            st.snap_hi_ntrades = st.pre_ntrades;
+            st.snap_hi_spread = st.pre_spread;
+            st.snap_hi_bars = st.pre_bars;
+        }
+        if c < st.lo {
+            st.lo = c;
+            st.lo_min = m;
+            st.snap_lo_ntrades = st.pre_ntrades;
+            st.snap_lo_spread = st.pre_spread;
+            st.snap_lo_bars = st.pre_bars;
+        }
+        let down_rev = if st.hi > 0.0 { (st.hi - c) / st.hi } else { 0.0 };
+        let up_rev = if st.lo > 0.0 { (c - st.lo) / st.lo } else { 0.0 };
+        if down_rev >= delta && down_rev >= up_rev {
+            // was rising: confirm a HIGH pivot at hi, start a down-leg from hi. The just-ended bootstrap leg
+            // ran leg_start..hi, so its totals come from the hi-anchored snapshot.
+            st.snap_ext_ntrades = st.snap_hi_ntrades;
+            st.snap_ext_spread = st.snap_hi_spread;
+            st.snap_ext_bars = st.snap_hi_bars;
+            dc_confirm(st, st.hi, st.hi_min, -1, ring_k);
+            st.mode = -1;
+            st.leg_start_price = st.hi;
+            st.leg_start_min = st.hi_min;
+            // the new down-leg starts at hi; its start-snapshot is the hi-anchored snapshot.
+            st.snap_start_ntrades = st.snap_hi_ntrades;
+            st.snap_start_spread = st.snap_hi_spread;
+            st.snap_start_bars = st.snap_hi_bars;
+            st.ext = c;
+            st.ext_min = m;
+            snap_leg_ext(st);
+            confirmed = true;
+        } else if up_rev >= delta {
+            st.snap_ext_ntrades = st.snap_lo_ntrades;
+            st.snap_ext_spread = st.snap_lo_spread;
+            st.snap_ext_bars = st.snap_lo_bars;
+            dc_confirm(st, st.lo, st.lo_min, 1, ring_k);
+            st.mode = 1;
+            st.leg_start_price = st.lo;
+            st.leg_start_min = st.lo_min;
+            st.snap_start_ntrades = st.snap_lo_ntrades;
+            st.snap_start_spread = st.snap_lo_spread;
+            st.snap_start_bars = st.snap_lo_bars;
+            st.ext = c;
+            st.ext_min = m;
+            snap_leg_ext(st);
+            confirmed = true;
+        }
+    } else if st.mode == 1 {
+        if c >= st.ext {
+            st.ext = c;
+            st.ext_min = m;
+            snap_leg_ext(st);
+        } else if st.ext > 0.0 && (st.ext - c) / st.ext >= delta {
+            dc_confirm(st, st.ext, st.ext_min, -1, ring_k);
+            st.mode = -1;
+            st.leg_start_price = st.ext;
+            st.leg_start_min = st.ext_min;
+            // the new leg starts at the prior extreme; its start-snapshot is the prior ext-snapshot.
+            st.snap_start_ntrades = st.snap_ext_ntrades;
+            st.snap_start_spread = st.snap_ext_spread;
+            st.snap_start_bars = st.snap_ext_bars;
+            st.ext = c;
+            st.ext_min = m;
+            snap_leg_ext(st);
+            confirmed = true;
+        }
+    } else {
+        // mode == -1 (down-leg): mirror.
+        if c <= st.ext {
+            st.ext = c;
+            st.ext_min = m;
+            snap_leg_ext(st);
+        } else if st.ext > 0.0 && (c - st.ext) / st.ext >= delta {
+            dc_confirm(st, st.ext, st.ext_min, 1, ring_k);
+            st.mode = 1;
+            st.leg_start_price = st.ext;
+            st.leg_start_min = st.ext_min;
+            st.snap_start_ntrades = st.snap_ext_ntrades;
+            st.snap_start_spread = st.snap_ext_spread;
+            st.snap_start_bars = st.snap_ext_bars;
+            st.ext = c;
+            st.ext_min = m;
+            snap_leg_ext(st);
+            confirmed = true;
+        }
+    }
+    confirmed
+}
+
+/// Number of per-scale features emitted (the per-scale chunk + Fibonacci block). Kept in lockstep with the
+/// Python ``_PER_SCALE_COLS`` ordering; the pure-Python oracle pins this column-for-column.
+const N_PER_SCALE: usize = 16;
+/// Cross-scale (5) + threshold-response (4) + shared sigma observability (1) = 10 scale-agnostic features.
+const N_GLOBAL: usize = 10;
+
+/// Median of a non-empty slice's values via a cheap copy-sort (the ring is tiny, <= ring_k).
+fn slice_median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let mut v: Vec<f64> = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    }
+}
+
+/// Fraction of ring legs whose abs-height is strictly below ``x`` (the percentile rank of the just-completed
+/// leg vs the name's recent leg-history at this scale). NaN when the ring is empty.
+fn pctile_below(values: &[f64], x: f64) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let below = values.iter().filter(|&&y| y < x).count() as f64;
+    below / values.len() as f64
+}
+
+/// Point-in-time MULTI-SCALE directional-change (DC) intrinsic-time decomposition fold.
+///
+/// Inputs are PARALLEL arrays already sorted by (symbol, minute):
+///   symbol         — integer code per symbol
+///   minute         — minute bucket (epoch seconds)
+///   close          — minute close
+///   n_trades       — minute trade count (from minute_agg; per-leg trade totals)
+///   mean_spread    — minute mean spread in bps (from minute_agg; per-leg quote activity)
+///   scales         — the volatility-multiple ladder, e.g. [0.5, 1.0, 2.0, 4.0]
+///   vol_win        — trailing minutes for the realized per-minute log-return sigma
+///   theta_floor    — minimum threshold (fraction) so a flat name doesn't pivot on every tick
+///   theta_cap      — maximum threshold (fraction) so a garbage print can't set an absurd threshold
+///   ring_k         — confirmed legs kept per scale (>= the 3 detailed + percentile history)
+///   day_secs       — seconds per session day (intraday-only resets — DC state persists; legs reset per day)
+///
+/// Emits one row per input bar, each a flat vector of N_PER_SCALE*n_scales per-scale features followed by
+/// N_GLOBAL scale-agnostic features. The fold reads only bars <= the emitted bar, so a pivot is confirmed only
+/// once the delta-reversal has ACTUALLY occurred — the current leg is always provisional (no look-ahead).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn swing_dc_fold(
+    symbol: PyReadonlyArray1<i64>,
+    minute: PyReadonlyArray1<i64>,
+    close: PyReadonlyArray1<f64>,
+    n_trades: PyReadonlyArray1<f64>,
+    mean_spread: PyReadonlyArray1<f64>,
+    scales: Vec<f64>,
+    vol_win: usize,
+    theta_floor: f64,
+    theta_cap: f64,
+    ring_k: usize,
+    day_secs: i64,
+) -> PyResult<Vec<Vec<f64>>> {
+    let symbol = symbol.as_slice()?;
+    let minute = minute.as_slice()?;
+    let close = close.as_slice()?;
+    let n_trades = n_trades.as_slice()?;
+    let mean_spread = mean_spread.as_slice()?;
+    let n_rows = symbol.len();
+    let n_scales = scales.len();
+    let total_cols = N_PER_SCALE * n_scales + N_GLOBAL;
+    let mut out: Vec<Vec<f64>> = (0..total_cols).map(|_| vec![f64::NAN; n_rows]).collect();
+
+    let mut i: usize = 0;
+    while i < n_rows {
+        let s = symbol[i];
+        let mut j = i;
+        while j < n_rows && symbol[j] == s {
+            j += 1;
+        }
+        let mut states: Vec<ScaleState> = (0..n_scales).map(|_| ScaleState::new()).collect();
+        // shared incremental sigma over the trailing vol_win one-minute LOG returns.
+        let mut ret_ring: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
+        let mut prev_close = f64::NAN;
+        let mut cur_day: i64 = i64::MIN;
+
+        let mut r = i;
+        while r < j {
+            let c = close[r];
+            let m = minute[r];
+            let nt = n_trades[r];
+            let sp = mean_spread[r];
+            let day = m.div_euclid(day_secs);
+            if day != cur_day {
+                cur_day = day;
+                // intraday-only: reset per-scale DC state + sigma history at the session boundary so a leg
+                // never straddles the overnight gap (mirrors n_pivots_today's daily reset in swing).
+                states = (0..n_scales).map(|_| ScaleState::new()).collect();
+                ret_ring.clear();
+                prev_close = f64::NAN;
+            }
+
+            // sigma update (point-in-time: the return into THIS bar, then the trailing-window std).
+            if !prev_close.is_nan() && prev_close > 0.0 && c > 0.0 {
+                ret_ring.push_back((c / prev_close).ln());
+                while ret_ring.len() > vol_win {
+                    ret_ring.pop_front();
+                }
+            }
+            prev_close = c;
+            let sigma = if ret_ring.len() >= 2 {
+                let n = ret_ring.len() as f64;
+                let mean = ret_ring.iter().sum::<f64>() / n;
+                let var = ret_ring.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                var.sqrt()
+            } else {
+                f64::NAN
+            };
+
+            // advance every scale by this bar, tracking which confirmed a pivot this minute.
+            let mut pivot_now: Vec<bool> = vec![false; n_scales];
+            for (si, st) in states.iter_mut().enumerate() {
+                st.pre_ntrades += nt;
+                st.pre_spread += sp;
+                st.pre_bars += 1.0;
+                let delta = if sigma.is_nan() {
+                    theta_floor // before sigma exists, use the floor so structure can still seed
+                } else {
+                    (scales[si] * sigma).clamp(theta_floor, theta_cap)
+                };
+                pivot_now[si] = dc_step(st, c, m, delta, ring_k);
+            }
+
+            // ---- emit the point-in-time 74-vector for THIS bar ----
+            emit_row(
+                &mut out, r, &states, &scales, sigma, m, &pivot_now, theta_floor, theta_cap,
+            );
+            r += 1;
+        }
+        i = j;
+    }
+    Ok(out)
+}
+
+/// The Fibonacci reads against the last completed leg (P0 = prev_leg_start, P1 = prev_leg_end), evaluated at
+/// the provisional ``cur_price``. Returns, in order:
+///   fib_retr_now    — current pullback as a fraction of the prior leg's range, measured from P1 back to P0
+///                     (0 at the leg END, 1 a full retrace to the leg START). NaN until a leg completes or on
+///                     a degenerate near-zero-range basis (|read| > FIB_DC_MAX_ABS -> NaN).
+///   fib_in_golden   — 1.0 if cur sits in the 61.8..78.6% retracement band of the prior leg, else 0.0.
+///   fib_holding_618 — 1.0 if retraced to ~[0.5, 0.786] AND the provisional leg has resumed in the PRIOR leg's
+///                     direction (a held golden-ratio pullback that resumed), else 0.0.
+///   fib_broke_786   — 1.0 if cur retraced PAST 78.6% (setup invalidated / likely full reversal), else 0.0.
+///   fib_ext_progress— travel toward the 127.2/161.8 extension once cur passes P1 in the prior-leg direction
+///                     (0 at P1, ~1 at 161.8%); NaN until a leg completes; 0 before any extension.
+///   fib_dist_nearest— signed distance (in leg-range fractions) from fib_retr_now to the nearest FIB_RETR
+///                     level (small magnitude = sitting on a level). NaN with fib_retr_now.
+///   fib_setup_long  — 1.0 when the prior leg was UP (P1>P0) AND cur is in the golden zone AND the provisional
+///                     leg has turned back up (cur_dir==+1): "right at the beginning of a likely-UP chunk".
+fn fib_reads(
+    st: &ScaleState,
+    cur_price: f64,
+    last_dir: f64,
+    cur_dir: f64,
+) -> (f64, f64, f64, f64, f64, f64, f64) {
+    let nan = f64::NAN;
+    if !st.have_prev_leg {
+        return (nan, 0.0, 0.0, 0.0, nan, nan, 0.0);
+    }
+    let p0 = st.prev_leg_start;
+    let p1 = st.prev_leg_end;
+    let range = p1 - p0;
+    if range.abs() <= 0.0 {
+        return (nan, 0.0, 0.0, 0.0, nan, nan, 0.0);
+    }
+    // retracement fraction: 0 at P1 (the pivot/leg end), 1 back at P0 (the leg start).
+    let retr = (p1 - cur_price) / range;
+    if !retr.is_finite() || retr.abs() > FIB_DC_MAX_ABS {
+        return (nan, 0.0, 0.0, 0.0, nan, nan, 0.0);
+    }
+    let in_golden = if (0.618..=0.786).contains(&retr) { 1.0 } else { 0.0 };
+    // The last completed leg is the most recent counter-trend move (a "pullback"); the CONTINUATION resumes in
+    // the OPPOSITE direction (a completed DOWN pullback continues UP, and vice versa). A long continuation =
+    // the completed leg was DOWN and the provisional leg has resumed UP.
+    let down_leg = last_dir < 0.0;
+    let up_leg = last_dir > 0.0;
+    let resumed = (down_leg && cur_dir > 0.0) || (up_leg && cur_dir < 0.0);
+    let holding_618 = if (0.5..=0.786).contains(&retr) && resumed { 1.0 } else { 0.0 };
+    let broke_786 = if retr > 0.786 { 1.0 } else { 0.0 };
+    // extension progress: cur extended the completed leg PAST its own end P1 in the leg's direction. retr < 0
+    // means cur passed P1; map retr in (0 .. -0.618) to (0 .. 1): 127.2% ext -> retr -0.272, 161.8% -> -0.618.
+    let ext_progress = if retr < 0.0 {
+        (-retr / 0.618).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // nearest standard retracement level + signed distance.
+    let mut nearest = FIB_RETR[0];
+    let mut best = (retr - FIB_RETR[0]).abs();
+    for &lvl in FIB_RETR.iter().skip(1) {
+        let d = (retr - lvl).abs();
+        if d < best {
+            best = d;
+            nearest = lvl;
+        }
+    }
+    let dist_nearest = retr - nearest;
+    // "right at the beginning of a likely-UP chunk": a DOWN pullback retraced into the golden zone and the
+    // provisional leg has turned back UP.
+    let setup_long = if down_leg && in_golden > 0.0 && cur_dir > 0.0 { 1.0 } else { 0.0 };
+    (retr, in_golden, holding_618, broke_786, ext_progress, dist_nearest, setup_long)
+}
+
+/// The threshold-RESPONSE signature across the scale ladder (parameter-free roughness fingerprint):
+///   nlegs_slope    — OLS slope of log(1+n_legs) on log(delta) across scales (how fast leg-count falls as the
+///                    threshold coarsens; the empirical DC scaling-law exponent — steeper = choppier path).
+///   chunk_slope    — OLS slope of log(median |leg height|) on log(delta) across scales.
+///   os_ratio_mean  — mean across scales of the provisional overshoot/delta ratio (the overshoot scaling-law
+///                    observable; ~1 normal, >1 trending, <1 mean-reverting recently).
+///   roughness      — n_legs at the finest scale / n_legs at the coarsest (high = rough/choppy).
+/// NaN where there is insufficient cross-scale structure (no sigma yet, or no legs anywhere).
+fn response_signature(
+    states: &[ScaleState],
+    scales: &[f64],
+    sigma: f64,
+    theta_floor: f64,
+    theta_cap: f64,
+) -> (f64, f64, f64, f64) {
+    let n = states.len();
+    if n < 2 || sigma.is_nan() {
+        return (f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+    }
+    let mut log_delta: Vec<f64> = Vec::with_capacity(n);
+    let mut log_nlegs: Vec<f64> = Vec::with_capacity(n);
+    let mut log_chunk: Vec<f64> = Vec::with_capacity(n);
+    let mut os_ratios: Vec<f64> = Vec::new();
+    let mut any_legs = false;
+    for (si, st) in states.iter().enumerate() {
+        let delta = (scales[si] * sigma).clamp(theta_floor, theta_cap);
+        log_delta.push(delta.ln());
+        log_nlegs.push((1.0 + st.n_legs_total).ln());
+        let med = slice_median(&st.legs.iter().map(|l| l.abs_ret).collect::<Vec<f64>>());
+        // floor the median at a tiny positive so the log is finite when the ring is empty/zero.
+        let med_f = if med.is_finite() && med > 0.0 { med } else { 1e-9 };
+        log_chunk.push(med_f.ln());
+        if st.n_legs_total > 0.0 {
+            any_legs = true;
+        }
+        if st.mode != 0 && delta > 0.0 {
+            let cur_price = st.last_close;
+            let cur_height = if st.leg_start_price > 0.0 {
+                ((cur_price - st.leg_start_price) / st.leg_start_price).abs()
+            } else {
+                0.0
+            };
+            os_ratios.push(cur_height / delta);
+        }
+    }
+    if !any_legs {
+        return (f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+    }
+    let nlegs_slope = ols_slope(&log_delta, &log_nlegs);
+    let chunk_slope = ols_slope(&log_delta, &log_chunk);
+    let os_ratio_mean = if os_ratios.is_empty() {
+        f64::NAN
+    } else {
+        os_ratios.iter().sum::<f64>() / os_ratios.len() as f64
+    };
+    let finest = states.first().map(|s| s.n_legs_total).unwrap_or(0.0);
+    let coarsest = states.last().map(|s| s.n_legs_total).unwrap_or(0.0);
+    let roughness = if coarsest > 0.0 {
+        finest / coarsest
+    } else if finest > 0.0 {
+        // coarsest found no legs but the finest did — maximal roughness; cap to keep it finite.
+        finest
+    } else {
+        f64::NAN
+    };
+    (nlegs_slope, chunk_slope, os_ratio_mean, roughness)
+}
+
+/// Ordinary-least-squares slope of y on x (both length n >= 2). NaN if x has zero variance.
+fn ols_slope(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    if n < 2.0 {
+        return f64::NAN;
+    }
+    let mx = x.iter().sum::<f64>() / n;
+    let my = y.iter().sum::<f64>() / n;
+    let mut sxx = 0.0;
+    let mut sxy = 0.0;
+    for k in 0..x.len() {
+        sxx += (x[k] - mx) * (x[k] - mx);
+        sxy += (x[k] - mx) * (y[k] - my);
+    }
+    if sxx <= 0.0 {
+        f64::NAN
+    } else {
+        sxy / sxx
+    }
+}
+
+/// Write one bar's flat feature vector from the (already-updated) per-scale states. Kept in a helper so the
+/// column ordering lives in ONE place; the Python oracle mirrors this exact ordering.
+#[allow(clippy::too_many_arguments)]
+fn emit_row(
+    out: &mut [Vec<f64>],
+    r: usize,
+    states: &[ScaleState],
+    scales: &[f64],
+    sigma: f64,
+    m: i64,
+    pivot_now: &[bool],
+    theta_floor: f64,
+    theta_cap: f64,
+) {
+    let n_scales = states.len();
+    // per-scale block
+    let mut dir_signs: Vec<f64> = vec![0.0; n_scales];
+    let mut nlegs_each: Vec<f64> = vec![0.0; n_scales];
+    let mut setup_long_each: Vec<f64> = vec![0.0; n_scales];
+    for (si, st) in states.iter().enumerate() {
+        let base = si * N_PER_SCALE;
+        let delta = if sigma.is_nan() {
+            theta_floor
+        } else {
+            (scales[si] * sigma).clamp(theta_floor, theta_cap)
+        };
+        // provisional current leg
+        let cur_dir = st.mode as f64;
+        dir_signs[si] = cur_dir;
+        let cur_price = st.last_close;
+        let cur_height = if st.leg_start_price > 0.0 {
+            (cur_price - st.leg_start_price) / st.leg_start_price
+        } else {
+            0.0
+        };
+        let minutes_since_dc = if st.have_pivot {
+            ((m - st.last_pivot_min) / 60) as f64
+        } else {
+            f64::NAN
+        };
+        // last completed leg descriptors (from the ring's back)
+        let (last_h, last_slope, last_dur, last_nt, last_sp, last_dir) = match st.legs.back() {
+            Some(leg) => (leg.signed_ret, leg.slope, leg.dur_min, leg.n_trades, leg.mean_spread, leg.dir as f64),
+            None => (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, 0.0),
+        };
+        // percentile of the last completed leg's |height| vs the ring (excluding itself)
+        let last_pctile = match st.legs.back() {
+            Some(leg) => {
+                let others: Vec<f64> = st
+                    .legs
+                    .iter()
+                    .take(st.legs.len().saturating_sub(1))
+                    .map(|l| l.abs_ret)
+                    .collect();
+                pctile_below(&others, leg.abs_ret)
+            }
+            None => f64::NAN,
+        };
+        // overshoot-to-dc ratio: current provisional overshoot magnitude / the scale's delta.
+        let os_to_dc = if st.mode != 0 && delta > 0.0 {
+            cur_height.abs() / delta
+        } else {
+            f64::NAN
+        };
+        // persistence: net signed leg progression over the ring plus the provisional leg.
+        let persistence: f64 = st.legs.iter().map(|l| l.signed_ret).sum::<f64>() + cur_height;
+        nlegs_each[si] = st.n_legs_total;
+
+        // Fibonacci grid on the last completed leg (start P0 .. end P1), reading where cur_price sits.
+        let (fib_retr, fib_golden, fib_hold618, fib_broke786, fib_ext, fib_dist, fib_setup_long) =
+            fib_reads(st, cur_price, last_dir, cur_dir);
+        setup_long_each[si] = fib_setup_long;
+
+        // write the 16 per-scale features in the fixed order (mirrored by the oracle).
+        out[base][r] = cur_dir;
+        out[base + 1][r] = minutes_since_dc;
+        out[base + 2][r] = last_h;
+        out[base + 3][r] = last_slope;
+        out[base + 4][r] = last_dur;
+        out[base + 5][r] = last_nt;
+        out[base + 6][r] = last_sp;
+        out[base + 7][r] = last_pctile;
+        out[base + 8][r] = os_to_dc;
+        out[base + 9][r] = persistence;
+        out[base + 10][r] = fib_retr;
+        out[base + 11][r] = fib_golden;
+        out[base + 12][r] = fib_hold618;
+        out[base + 13][r] = fib_broke786;
+        out[base + 14][r] = fib_ext;
+        out[base + 15][r] = fib_dist;
+    }
+
+    // ---- global block ----
+    let g = N_PER_SCALE * n_scales;
+    // (b) cross-scale consistency
+    let nonzero: Vec<f64> = dir_signs.iter().cloned().filter(|d| *d != 0.0).collect();
+    let agree_frac = if nonzero.is_empty() {
+        f64::NAN
+    } else {
+        let pos = nonzero.iter().filter(|d| **d > 0.0).count() as f64;
+        let neg = nonzero.iter().filter(|d| **d < 0.0).count() as f64;
+        pos.max(neg) / n_scales as f64
+    };
+    let pos = dir_signs.iter().filter(|d| **d > 0.0).count() as f64;
+    let neg = dir_signs.iter().filter(|d| **d < 0.0).count() as f64;
+    let dominant = if pos > neg {
+        1.0
+    } else if neg > pos {
+        -1.0
+    } else {
+        0.0
+    };
+    let setup_count: f64 = setup_long_each.iter().sum();
+    let pivot_coincidence: f64 = pivot_now.iter().filter(|p| **p).count() as f64;
+    // finest-only: structure (a directed leg) at the finest scale (index 0) but not at the >= 2x scales.
+    let finest_dir = dir_signs.first().cloned().unwrap_or(0.0);
+    let coarse_directed = dir_signs.iter().skip(1).any(|d| *d != 0.0);
+    let finest_only = if finest_dir != 0.0 && !coarse_directed { 1.0 } else { 0.0 };
+    out[g][r] = agree_frac;
+    out[g + 1][r] = dominant;
+    out[g + 2][r] = setup_count;
+    out[g + 3][r] = pivot_coincidence;
+    out[g + 4][r] = finest_only;
+
+    // (c) threshold-response signature: slope of log(n_legs) and log(mean chunk) vs log(delta) across scales,
+    // the mean overshoot/dc ratio, and a roughness ratio (finest n_legs / coarsest n_legs).
+    let (nlegs_slope, chunk_slope, os_ratio_mean, roughness) =
+        response_signature(states, scales, sigma, theta_floor, theta_cap);
+    out[g + 5][r] = nlegs_slope;
+    out[g + 6][r] = chunk_slope;
+    out[g + 7][r] = os_ratio_mean;
+    out[g + 8][r] = roughness;
+    // (d) sigma observability in bps
+    out[g + 9][r] = if sigma.is_nan() { f64::NAN } else { sigma * 10_000.0 };
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
@@ -988,5 +1714,6 @@ fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(time_lag_gather, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_canonical, m)?)?;
     m.add_function(wrap_pyfunction!(swing_fold, m)?)?;
+    m.add_function(wrap_pyfunction!(swing_dc_fold, m)?)?;
     Ok(())
 }
