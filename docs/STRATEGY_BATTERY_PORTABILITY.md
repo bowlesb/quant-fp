@@ -4,15 +4,57 @@ Status: VERIFICATION + DESIGN. Author: platform engineer, cycle 2026-06-19.
 Precondition for building the battery (Ben, verbatim intent): *"verify that we can take the
 strategies and easily port them to PRODUCTION without duplicating large parts of the code."*
 
+---
+
+## THE INVARIANT (the central design driver — everything else follows from this)
+
+**A strategy's decision logic is written ONCE, and is both EXECUTION-AGNOSTIC and SPEED-AGNOSTIC.**
+It produces *identical* decisions whether applied:
+- **(a) as a fast batch/vectorized sweep over the historical panel** — the laser-quick battery
+  backtest (Ben's hard <30–60s budget), OR
+- **(b) per-event over the live feature-vector bus** — production.
+
+**The one thing that must NEVER happen: two implementations of the same decision logic** (a
+fast-for-backtest one + a separate live one). That is backtest≠live drift at the strategy level — the
+exact failure the feature platform's shared seed/fold/emit eliminates for features. This is
+**parity-by-construction lifted to strategies**, and it is the make-or-break of the battery being
+worth building: a battery PASS is only a promotable artifact if the live container runs *that same
+decision*, not a re-coded cousin of it.
+
+### The Rust-vs-Python rule this FORCES (apply everywhere)
+
+The question for every decision component is **"will BOTH the fast batch backtest AND the live
+container execute this EXACT code?"** — not "what's fastest?".
+
+| Decision logic | How it stays single-implementation | Rust? |
+|---|---|---|
+| **COLUMNAR** (thresholds, cross-sectional ranks, score / linear combos — *most* strategies) | ONE pure Polars/NumPy expression that **vectorizes over the whole panel** (batch, fast) AND **applies to a single bus vector** (live). Same expression, two application modes. | **No** — Python/Polars, parity by construction. |
+| **SEQUENTIAL-and-hot** (triple-barrier first-touch, streak runs) | ONE **shared Rust kernel in `quant_tick`** that BOTH the backtest AND the live container call — parity-pinned by a Python reference oracle (same pattern as the feature Rust tests). | **Yes — ONE shared kernel**, never a harness-only fast kernel + a live Python re-impl. |
+| **NEVER** | a backtest-only fast path + a live-only slow path implementing the same decision | — if you're tempted to write the decision twice, **that is the smell to flag**, not silently fork. |
+
+So the Rust decision is reframed around **shared-code portability, not speed**: Rust appears only
+where the logic is inherently sequential AND both sides call the *same* kernel. Everything columnar
+stays one Polars/NumPy expression applied two ways.
+
+### What this means for `decide()`
+
+`decide()` is designed **columnar-first**: a pure function of feature *columns* + state, expressible
+as a Polars/NumPy expression, so the identical code runs (a) batch over the panel and (b) on a single
+bus row. §3 shows this explicitly for the worked archetype — the same expression producing the
+backtest signals AND the live per-minute signal — and §2.6 states the contract + flags the one risk
+(if speed ever seems to need a fork, that is THE key risk to surface, not paper over).
+
+---
+
 This is the strategy-layer analogue of the platform's **parity-by-construction** principle (the same
-reason live==backfill holds for features: one shared seed/fold/emit). A strategy's **decision logic**
-(signal → bet, given a feature vector / panel + state) must be written **ONCE** and executed by BOTH:
+reason live==backfill holds for features: one shared seed/fold/emit). The decision logic is written
+**ONCE** and executed by BOTH:
 
-1. the **BATTERY**, applied over a historical panel (the backtest), AND
-2. a **LIVE STRATEGY CONTAINER**, applied to the feature-vector bus per cycle (the real bet).
+1. the **BATTERY**, applied (batch) over a historical panel (the backtest), AND
+2. a **LIVE STRATEGY CONTAINER**, applied (per-event) to the feature-vector bus (the real bet).
 
-The only legitimate difference between the two is the **execution harness** (panel iteration vs bus
-subscription + broker order placement), never the decision logic.
+The only legitimate difference is the **execution harness + the application mode** (vectorized panel
+sweep vs per-event bus), never the decision logic.
 
 ---
 
@@ -239,25 +281,55 @@ class CrossSectionalLS(DecisionCore):
         return out
 ```
 
-**Battery (backtest) calls it** — over each historical panel timestamp:
+THREE call sites share this ONE `decide` (the invariant made concrete):
+
+**(1) Battery — FAST BATCH sweep over the panel** (the laser-quick backtest):
 ```python
-for minute in panel.timestamps():
-    targets = core.decide(PanelCrossSection(panel, minute))   # SAME decide()
-# → booked through long_short_per_name_cost (realistic per-name half-spread P&L) + the nulls/strata.
+# The columnar core (score = rank a named feature, or a frozen model.rank) vectorizes over the
+# WHOLE panel at once — one Polars/NumPy expression, NO per-timestamp Python loop:
+score   = panel.feature_matrix[:, col]                 # the SAME named-feature read, all rows
+book    = batch_topk_per_timestamp(score, panel.minute_epoch, frac)   # group-by-ts rank, vectorized
+# booked through BacktestExecutor.run_vectorized (per-name half-spread P&L + nulls/strata). <30-60s.
 ```
 
-**Live container calls it** — the thin harness, ~the same size as `overnight_beta/strategy.py`:
+**(2) Battery — PER-EVENT reference** (faithful to live; pins the batch path):
 ```python
-def cycle(self):
-    self.consume()                                            # bus poll → latest_by_symbol
-    targets = self._core.decide(BusCrossSection(self._latest))   # SAME decide(), zero re-code
-    self.reconcile_to_targets(targets)                        # diff vs held → Alpaca MOC/MOO orders
+for cs, ts in PanelFeed(panel).events():               # one timestamp slice at a time
+    intents = strategy.decide(cs, executor.book())     # the SAME decide()
+    executor.execute(intents, cs, clock)               # BacktestExecutor: pretend fill over the panel
 ```
 
-The ENTIRE difference is `PanelCrossSection` vs `BusCrossSection` (each ~15 lines) and the booking
-harness (P&L roll-up vs broker orders). **The `decide` body — the actual strategy — is one shared
-function.** A battery PASS carries its `ArchetypeSpec` + the `signal_feature`/`model` ref; the live
-container is instantiated from exactly that, so graduation is configuration, not coding.
+**(3) Live container — PER-EVENT over the bus** (production), a thin harness:
+```python
+for cs, ts in BusFeed(consumer).events():              # latest bus vectors as a CrossSection
+    intents = strategy.decide(cs, executor.book())     # the SAME decide(), zero re-code
+    executor.execute(intents, cs, clock)               # PaperExecutor: real Alpaca order
+```
+
+(2) and (3) are **literally the same `Runner` loop** with `{PanelFeed, BacktestExecutor}` vs
+`{BusFeed, PaperExecutor}` swapped — `strategy.decide` is byte-identical. (1) is the same decision
+*expression* applied batch instead of per-event.
+
+**How parity between the batch form (1) and the per-event form (2)/(3) is GUARANTEED** — this is the
+crux of the invariant, not an afterthought:
+- **Columnar archetypes (this one):** the score is a pure function of feature columns
+  (`score = signal_sign * cs.feature(name)`, or `model.rank(cs)`). Ranking top/bottom-k per timestamp
+  is the same operation whether done once-per-timestamp (per-event) or grouped-by-timestamp over the
+  whole panel (batch) — `numpy.argsort` within a group == the batch group-by rank. The **test
+  `test_executor_swap_parity_backtest_vs_paper`** pins that the per-event `decide` over a
+  `PanelCrossSection` and over a `BusCrossSection` built from identical data emit identical
+  `OrderIntent`s; a batch-vs-per-event equivalence test pins (1)==(2) on the same panel. There is ONE
+  scoring expression — `CrossSectionalLS.score` — and both application modes call it.
+- **Sequential archetypes (Phase 1):** the score is a shared `quant_tick` Rust kernel
+  (`triple_barrier_first_touch`); the batch backtest and the live container both call that SAME kernel,
+  pinned by a Python reference oracle in `tests/test_fp_rust.py` (the existing feature-Rust pattern).
+  There is NO harness-only fast kernel + live re-impl.
+
+The ENTIRE difference across all three is the feed (`PanelCrossSection` vs `BusCrossSection`, ~15
+lines each), the application mode (vectorized panel sweep vs per-event), and the executor (pretend P&L
+roll-up vs broker orders). **The decision expression is one shared thing.** A battery PASS carries its
+`ArchetypeSpec` + the `signal_feature`/frozen-`model` ref; the live container is instantiated from
+exactly that — graduation is configuration, not coding.
 
 ---
 
@@ -321,10 +393,24 @@ shared `emit`, backtest-only fold orchestration. The graduating artifact is the 
    change) so battery + containers share one import. (Proposed as a follow-up PR to avoid touching the
    live containers in the battery PR — boundary: no live-container behavior change without its own PR.)
 
-**Acceptance for the seam:** a test materializes one cross-section, builds BOTH a `PanelCrossSection`
-and a `BusCrossSection` from the identical feature values, runs the SAME `decide`, and asserts the
-target books are identical. That is the parity-by-construction proof for the strategy layer — the
-strategy analogue of the feature stream==backfill parity test.
+**Layering (enforces the invariant):** `quantlib/strategy_core/` is **self-contained** — the pure
+decide-cores + adapters + `Executor`/`DataFeed`/`Clock`/`Runner` + the cost model (`cost.py` lives
+HERE, with the executor it serves). `quantlib/battery/` **depends on** `strategy_core`, never the
+reverse, and the live containers will import the same `strategy_core` — so there is exactly one home
+for the decision + execution logic both sides share. (The cost model was moved out of `battery/` into
+`strategy_core/` for this reason; a `strategy_core → battery` import is the architectural smell that
+would let the two diverge.)
+
+**Acceptance for the seam (the invariant, pinned by tests):**
+- `test_decide_parity_panel_vs_bus` — the SAME `decide` over a `PanelCrossSection` and a
+  `BusCrossSection` built from identical data yields identical target books (execution-agnostic).
+- `test_batch_vs_per_event_select_identical_legs` — the SAME scoring expression selects identical legs
+  whether applied as the fast BATCH sweep (the battery's `run_vectorized`) or PER-EVENT (the live
+  `Runner`) (speed-agnostic). **This is the proof there is no backtest-only fast path that can drift.**
+- `test_executor_swap_parity_backtest_vs_paper` — the SAME `decide` emits identical `OrderIntent`s
+  whether routed to `BacktestExecutor` (pretend) or a `PaperExecutor` (real broker).
+
+Together these are the strategy-layer analogue of the feature stream==backfill parity test.
 
 ---
 
