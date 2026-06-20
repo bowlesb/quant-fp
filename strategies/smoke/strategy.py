@@ -46,6 +46,7 @@ from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from quantlib.strategy_core.production_execution import ProductionOrderIntent, make_client_order_id
 from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.model import MockMLModel, Model
+from strategies.lib.stale_entry import StaleEntryTracker
 from strategies.smoke.bet_store import BetStore
 from strategies.smoke.contract import (
     MODEL_FOLD_FEATURES,
@@ -211,6 +212,9 @@ class SmokeStrategy:
         self._last_symbol: str | None = None
         self._last_vector: FeatureView | None = None
         self._last_bet_ts: dt.datetime | None = None
+        # bounded detector for entries whose order never landed (genuinely not-found): stops the
+        # every-tick broker re-query spin without ever expiring a live/in-flight order.
+        self._stale_entries = StaleEntryTracker()
 
     def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
         """Mirror a captured fill into the durable StrategyState ledger (the migration SoT). A no-op when
@@ -275,6 +279,36 @@ class SmokeStrategy:
         except APIError as exc:
             logger.warning("reconcile: order %s not found at broker (%s)", client_order_id, exc)
             return None
+
+    def _fetch_entry_with_status(self, client_order_id: str) -> tuple[Order | None, bool]:
+        """Look up an ENTRY order, distinguishing GENUINELY not-found (40410000) from a transient error.
+        Returns ``(order, genuinely_not_found)``. Only a genuine not-found feeds the stale-entry tracker;
+        a transient error returns ``(None, False)`` and resets the streak so a live order is never expired.
+        """
+        try:
+            return cast(Order, self._trading.get_order_by_client_id(client_order_id)), False
+        except APIError as exc:
+            if is_order_not_found(exc):
+                return None, True
+            logger.warning("entry lookup transient error for %s (%s)", client_order_id, exc)
+            return None, False
+
+    def _abandon_if_entry_dead(self, entry_order_id: str, symbol: str, now: dt.datetime) -> bool:
+        """If a still-unfilled entry's order is GENUINELY not-found for a bounded streak (N consecutive
+        not-founds over >= M seconds), terminate the bet (it never landed) and stop re-querying. Returns
+        True iff the bet was abandoned this cycle. A transient miss / a found order resets the streak via
+        the caller, so a live in-flight order is never wrongly expired."""
+        if self._stale_entries.record_not_found(entry_order_id, now):
+            logger.warning(
+                "ABANDON: entry %s (%s) genuinely not-found x%d — never landed; marking bet terminal",
+                entry_order_id,
+                symbol,
+                self._stale_entries.streak_count(entry_order_id),
+            )
+            self._store.mark_abandoned(entry_order_id)
+            self._stale_entries.forget(entry_order_id)
+            return True
+        return False
 
     def _lookup_exit_order(self, exit_coid: str) -> tuple[Order | None, bool]:
         """Look up a close order by coid, distinguishing "not yet visible" from "does not exist".
@@ -383,7 +417,14 @@ class SmokeStrategy:
         for bet in self._store.list_open():
             entry_order_id = str(bet["entry_order_id"])
             if bet["entry_price"] is None:
-                order = self._fetch_order_by_coid(entry_order_id)
+                order, not_found = self._fetch_entry_with_status(entry_order_id)
+                if not_found:
+                    # the entry order genuinely doesn't exist at the broker; after a bounded streak,
+                    # terminate the bet (it never landed) and stop re-querying it every tick.
+                    if self._abandon_if_entry_dead(entry_order_id, str(bet["symbol"]), now):
+                        continue
+                    continue  # still within the streak window — re-check next cycle, no other action
+                self._stale_entries.reset(entry_order_id)  # found / transient -> clear the not-found streak
                 if order is not None and order.filled_avg_price:
                     filled_qty = order_filled_qty(order)
                     if filled_qty is not None:

@@ -6,6 +6,7 @@ Structurally identical to ``strategies/smoke/bet_store.BetStore`` (same notional
 than sharing one mutable class) is the isolation boundary the strategy-container contract asks for: each
 strategy owns its schema and can be dropped/migrated independently.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -36,8 +37,17 @@ CREATE TABLE IF NOT EXISTS {schema}.bets (
 """
 
 _OPEN_COLUMNS = (
-    "id", "symbol", "side", "entry_notional", "qty", "entry_order_id", "entry_ts",
-    "entry_price", "hold_until", "exit_order_id", "status",
+    "id",
+    "symbol",
+    "side",
+    "entry_notional",
+    "qty",
+    "entry_order_id",
+    "entry_ts",
+    "entry_price",
+    "hold_until",
+    "exit_order_id",
+    "status",
 )
 
 
@@ -108,6 +118,17 @@ class BetStore:
                    SET exit_ts = %s, exit_price = %s, realized_pnl = %s, status = 'closed'
                  WHERE entry_order_id = %s""",
             (exit_ts, exit_price, realized_pnl, entry_order_id),
+        )
+
+    def mark_abandoned(self, entry_order_id: str) -> None:
+        """Terminate a bet whose entry order never landed at the broker (genuinely not-found): advance it
+        to 'closed' with zero realized PnL (no position was ever taken), so the manage loop stops
+        re-querying a dead order forever. Backward-readable (existing status column/values)."""
+        self._store.execute(
+            f"""UPDATE {self._schema}.bets
+                   SET status = 'closed', realized_pnl = 0
+                 WHERE entry_order_id = %s AND status IN ('open', 'filled', 'closing')""",
+            (entry_order_id,),
         )
 
     def list_open(self) -> list[dict[str, object]]:

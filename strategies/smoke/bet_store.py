@@ -30,6 +30,7 @@ Schema (one table, ``bets``, status-partitioned by the ``status`` column):
     realized_pnl   numeric    (exit_price - entry_price) * qty  (long)
     status         text       'open' | 'filled' | 'closing' | 'closed'
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -59,8 +60,17 @@ CREATE TABLE IF NOT EXISTS {schema}.bets (
 """
 
 _OPEN_COLUMNS = (
-    "id", "symbol", "side", "entry_notional", "qty", "entry_order_id", "entry_ts",
-    "entry_price", "hold_until", "exit_order_id", "status",
+    "id",
+    "symbol",
+    "side",
+    "entry_notional",
+    "qty",
+    "entry_order_id",
+    "entry_ts",
+    "entry_price",
+    "hold_until",
+    "exit_order_id",
+    "status",
 )
 _OPEN_STATUSES = ("open", "filled", "closing")
 
@@ -156,6 +166,18 @@ class BetStore:
                    SET exit_ts = %s, exit_price = %s, realized_pnl = %s, status = 'closed'
                  WHERE entry_order_id = %s""",
             (exit_ts, exit_price, realized_pnl, entry_order_id),
+        )
+
+    def mark_abandoned(self, entry_order_id: str) -> None:
+        """Terminate a bet whose entry order never landed at the broker (genuinely not-found): advance it
+        to 'closed' with zero realized PnL (no position was ever taken), so the manage loop stops
+        re-querying the broker for a dead order forever. Uses the existing status column/values, so it is
+        backward-readable (an OLD-path container reads it as any other closed bet)."""
+        self._store.execute(
+            f"""UPDATE {self._schema}.bets
+                   SET status = 'closed', realized_pnl = 0
+                 WHERE entry_order_id = %s AND status IN ('open', 'filled', 'closing')""",
+            (entry_order_id,),
         )
 
     def list_open(self) -> list[dict[str, object]]:

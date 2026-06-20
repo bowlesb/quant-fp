@@ -47,6 +47,7 @@ from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from quantlib.strategy_core.production_execution import ProductionOrderIntent, make_client_order_id
 from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.reversion_model import VwapReversionModel
+from strategies.lib.stale_entry import StaleEntryTracker, is_order_not_found
 from strategies.reversion.bet_store import BetStore
 from strategies.reversion.contract import STRATEGY_NAME, contract_for
 
@@ -200,6 +201,9 @@ class ReversionStrategy:
         # coids whose "CLOSE pending fill" we've already logged this state-generation, so a stale pending
         # exit on a closed market doesn't hot-log every manage tick (per-state-change, not per-tick).
         self._pending_close_logged: set[str] = set()
+        # bounded detector for entries whose order never landed (genuinely not-found): stops the
+        # every-tick broker re-query spin without ever expiring a live/in-flight order.
+        self._stale_entries = StaleEntryTracker()
 
     def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
         """Mirror a captured fill into the durable StrategyState ledger (the migration SoT). A no-op when
@@ -263,6 +267,32 @@ class ReversionStrategy:
         except APIError as exc:
             logger.warning("order %s not found at broker (%s)", client_order_id, exc)
             return None
+
+    def _fetch_entry_with_status(self, client_order_id: str) -> tuple[Order | None, bool]:
+        """Look up an ENTRY order, distinguishing GENUINELY not-found (40410000) from a transient error.
+        Returns ``(order, genuinely_not_found)`` — only a genuine not-found feeds the stale-entry tracker."""
+        try:
+            return cast(Order, self._trading.get_order_by_client_id(client_order_id)), False
+        except APIError as exc:
+            if is_order_not_found(exc):
+                return None, True
+            logger.warning("entry lookup transient error for %s (%s)", client_order_id, exc)
+            return None, False
+
+    def _abandon_if_entry_dead(self, entry_order_id: str, symbol: str, now: dt.datetime) -> bool:
+        """Terminate a bet whose unfilled entry is GENUINELY not-found for a bounded streak (N consecutive
+        over >= M seconds) and stop re-querying it. Returns True iff abandoned this cycle."""
+        if self._stale_entries.record_not_found(entry_order_id, now):
+            logger.warning(
+                "ABANDON: entry %s (%s) genuinely not-found x%d — never landed; marking bet terminal",
+                entry_order_id,
+                symbol,
+                self._stale_entries.streak_count(entry_order_id),
+            )
+            self._store.mark_abandoned(entry_order_id)
+            self._stale_entries.forget(entry_order_id)
+            return True
+        return False
 
     def consume(self) -> None:
         """Poll the bus and keep the LATEST vector per symbol (the score set for this cycle)."""
@@ -333,7 +363,13 @@ class ReversionStrategy:
         for bet in self._store.list_open():
             entry_order_id = str(bet["entry_order_id"])
             if bet["entry_price"] is None:
-                order = self._fetch_order_by_coid(entry_order_id)
+                order, not_found = self._fetch_entry_with_status(entry_order_id)
+                if not_found:
+                    # the entry order genuinely doesn't exist; after a bounded streak, terminate the bet
+                    # (it never landed) and stop re-querying it every tick.
+                    self._abandon_if_entry_dead(entry_order_id, str(bet["symbol"]), now)
+                    continue
+                self._stale_entries.reset(entry_order_id)  # found / transient -> clear the streak
                 if order is not None and order.filled_avg_price:
                     filled_qty = order_filled_qty(order)
                     if filled_qty is not None:

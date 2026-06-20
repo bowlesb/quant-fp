@@ -31,6 +31,7 @@ from quantlib.strategy_core.production_execution import (
 )
 from quantlib.strategy_core.production_state import DictLedgerBackend, PgStateStore
 from strategies.lib.overnight_beta_model import OvernightBetaModel
+from strategies.lib.stale_entry import StaleEntryTracker
 from strategies.overnight_beta.contract import STRATEGY_NAME
 from strategies.overnight_beta.strategy import (
     OvernightBetaConfig,
@@ -77,6 +78,16 @@ class _FakeBroker:
             raise APIError('{"code":40410000,"message":"order not found"}')
         return self.by_coid[coid]
 
+    def get_clock(self) -> _ClosedClock:
+        return _ClosedClock()
+
+
+class _ClosedClock:
+    """A closed-market clock: the manage loop captures/abandons but never flattens (no OPG window)."""
+
+    is_open = False
+    next_close = None
+
 
 class _FakePanel:
     def last_close(self, symbol: str) -> float:
@@ -87,14 +98,33 @@ class _FakePanel:
 
 
 class _RecordingStore:
-    """Captures record_enter (the bespoke positions table is exercised unchanged)."""
+    """Captures record_enter + supports list_entered/mark_abandoned (the bespoke positions surface, no DB)."""
 
     def __init__(self) -> None:
         self.entered: list[dict[str, object]] = []
+        self.rows: dict[str, dict[str, object]] = {}
 
     def record_enter(self, today, symbol, leg, beta, target, coid, ts, ref) -> int:  # type: ignore[no-untyped-def]
         self.entered.append({"symbol": symbol, "leg": leg, "coid": coid, "target": target})
+        self.rows[coid] = {
+            "enter_order_id": coid,
+            "symbol": symbol,
+            "leg": leg,
+            "enter_ref_price": ref,
+            "enter_fill_price": None,
+            "enter_qty": None,
+            "exit_order_id": None,
+            "status": "entered",
+        }
         return len(self.entered)
+
+    def list_entered(self) -> list[dict[str, object]]:
+        return [row for row in self.rows.values() if row["status"] == "entered"]
+
+    def mark_abandoned(self, enter_order_id: str) -> None:
+        row = self.rows.get(enter_order_id)
+        if row is not None and row["status"] == "entered":
+            row["status"], row["realized_pnl"] = "flattened", 0
 
 
 def _config() -> OvernightBetaConfig:
@@ -214,6 +244,7 @@ def _strategy(
     strat._panel = _FakePanel()  # type: ignore[attr-defined,assignment]
     strat._model = OvernightBetaModel()  # type: ignore[attr-defined]
     strat._last_rebalance = None  # type: ignore[attr-defined]
+    strat._stale_entries = StaleEntryTracker(min_checks=2, min_seconds=0.0)  # type: ignore[attr-defined]
     return strat
 
 
@@ -239,3 +270,25 @@ def test_submit_close_auction_places_g2_order_and_books_fill() -> None:
     strat._book_fill("HI", "buy", coid, broker.by_coid[coid].filled_qty, 50.0)
     assert strat._state is not None
     assert strat._state.positions["HI"].qty == broker.by_coid[coid].filled_qty
+
+
+def test_stale_not_found_entry_leg_is_abandoned_and_stops_spinning() -> None:
+    """The reconcile-spin fix on overnight_beta: a close-auction entry leg whose order is genuinely
+    not-found at the broker is re-checked a bounded few times then abandoned (flattened), so the manage
+    loop stops re-querying a dead order."""
+    broker = _FakeBroker(price=50.0)
+    store = _RecordingStore()
+    state_store = PgStateStore(DictLedgerBackend())
+    strat = _strategy(broker, store, state_store)
+
+    # an entered leg whose enter order is NOT at the broker (it never landed) -> genuine not-found.
+    dead_coid = "overnight_beta-20260616T200000-HI-buy"
+    store.record_enter(NOW.date(), "HI", "long", 1.8, 50.0, dead_coid, NOW, 50.0)
+    assert len(store.list_entered()) == 1
+
+    strat.manage_and_flatten()  # 1st not-found (streak=1) -> still entered
+    assert len(store.list_entered()) == 1
+    strat.manage_and_flatten()  # 2nd consecutive -> terminal -> abandoned (flattened)
+    assert len(store.list_entered()) == 0
+    assert store.rows[dead_coid]["status"] == "flattened"
+    assert store.rows[dead_coid]["realized_pnl"] == 0  # no position ever taken
