@@ -30,7 +30,7 @@ import time
 import httpx
 import polars as pl
 
-from quantlib.data.raw_fetchers import QUOTES_SCHEMA, TRADES_SCHEMA
+from quantlib.data.raw_fetchers import QUOTES_SCHEMA, TRADES_SCHEMA, _join_conditions
 
 logger = logging.getLogger("fast_fetchers")
 
@@ -72,13 +72,6 @@ def _day_bounds(day: dt.date) -> tuple[str, str]:
         start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         end.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
-
-
-def _join_conditions(conditions: list[str] | None) -> str | None:
-    """Alpaca tick `conditions` is a list of single-char codes; store as a comma-joined string."""
-    if not conditions:
-        return None
-    return ",".join(str(condition) for condition in conditions)
 
 
 def _get_page(
