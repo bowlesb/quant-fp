@@ -57,7 +57,10 @@ consumer resolves names against **the frame's** schema, not its own stale one.
 
 ## 2. The design (Ben's, speed-preserving)
 
-Five moving parts. Wire format and producer compute path are unchanged.
+**End goal (Ben):** CONTINUOUS DEPLOYMENT of new features — merge a feature PR, deploy `fc`, with NO
+coordinated rebuilds and NO risk to active strategies. Two halves: §2.1–2.5 are the **accessor** that makes
+a running strategy robust to a changed fingerprint; §2.6 is the **safety gate** that proves an `fc`-only
+deploy is compatible BEFORE it ships. Six moving parts; wire format and producer compute path are unchanged.
 
 ### 2.1 Wire format UNCHANGED
 
@@ -165,6 +168,71 @@ replaced by a *stronger, name-level* protection (resolve each needed name agains
 schema). A bug that today is caught by "fingerprint differs" is caught tomorrow by "this name isn't in the
 frame" — with a far better error message, and without the false-positive rejections of benign additions.
 
+### 2.6 ⭐ Declared-feature contract + pre-deploy compatibility gate (the safety net)
+
+§2.1–2.5 make a *running* strategy robust to additions. This section makes an `fc`-only **deploy provably
+safe BEFORE it ships** — the half that turns "coordinated rebuild" into "continuous deployment". The end
+goal (Ben): merge feature PRs and deploy `fc` continuously, with NO coordinated rebuilds and NO risk to
+active strategies, gated by one automated check.
+
+**The declared-feature contract.** Each strategy DECLARES the exact feature names it consumes — its
+contract with the bus. It already does this implicitly; we make it explicit and machine-readable:
+
+```python
+# strategies/<name>/contract.py  (or a STRATEGY_FEATURES constant the container exports)
+STRATEGY_FEATURES: tuple[str, ...] = ("ret_1m", "volume_zscore_5m")   # smoke, e.g.
+```
+
+The contract is the SAME list the strategy passes to `to_model_vector(expected_names)` (single source of
+truth — the declared set IS what the model reads, so they cannot drift). For a strategy that reads a single
+feature via `view.value`, the contract is that one name.
+
+**The reusable check.** A pure function — no Redis, no live state:
+
+```python
+class IncompatibleSchema(Exception):
+    """A live strategy declares features the candidate schema lacks (with the exact missing names)."""
+
+def assert_compatible(candidate_schema: BusSchema, declared: Sequence[str], *, strategy: str) -> None:
+    missing = [name for name in declared if not candidate_schema.has(name)]
+    if missing:
+        raise IncompatibleSchema(
+            f"strategy '{strategy}' needs features absent from candidate "
+            f"fingerprint {candidate_schema.fingerprint:#018x}: {missing}"
+        )
+```
+
+i.e. the strategy's declared set must be a **subset** of the candidate schema's names. Subset — not equal —
+is exactly why additions are safe and a rename/removal of a *consumed* feature is the only thing that fails.
+
+**The pre-deploy gate.** Before relaunching `fc` on a new feature set, run — in CI or the deploy script —
+`assert_compatible(candidate_schema, contract, strategy=name)` for EVERY live strategy's declared contract
+against the NEW candidate fingerprint's schema:
+
+- **GREEN** (all subsets resolve) → `fc` deploys freely. Additions are non-breaking by construction;
+  strategies are untouched and keep trading across the fingerprint change.
+- **RED** → block the deploy and name the EXACT missing/renamed feature each affected strategy needs. A
+  genuine incompatibility (a feature a live strategy depends on was removed/renamed) is surfaced
+  *precisely, before deploy* — never a silent break, never a runtime decode crash mid-session.
+
+**What this replaces.** The manual "rebuild fc + 3 strategies, atomically" coordination collapses to:
+
+```
+rebuild fc  →  run compat gate (assert_compatible per strategy)  →  GREEN: relaunch fc  /  RED: block + name the feature
+```
+
+Strategies do not move unless THEY choose to adopt a new feature (at which point they update their own
+`STRATEGY_FEATURES` + `to_model_vector` list and rebuild on their own schedule). The entire error surface of
+a feature deploy is reduced to **one precise, checkable condition**: is every live strategy's declared set ⊆
+the new schema?
+
+**Where the gate gets the contracts.** Two options (decide at build): (a) a small registry the deploy
+script imports each strategy's `STRATEGY_FEATURES` from; or (b) each running strategy publishes its declared
+contract to Redis (`strategy:features:<name>`) on startup, and the gate reads the live set — which also
+covers "what is ACTUALLY running right now" without a static list to keep in sync. (b) is more robust (the
+gate checks reality, not a possibly-stale manifest); (a) is simpler and CI-runnable with no live cluster.
+Recommend (b) for the deploy gate with (a)'s static import as the CI smoke-check.
+
 ---
 
 ## 3. Speed analysis (no throughput regression at bus scale)
@@ -231,6 +299,14 @@ All pure / in-process (a fake `SchemaRegistry` backed by a dict — no live Redi
 6. **`FeatureRow` parity.** `FeatureView` satisfies the `FeatureRow` protocol; the re-homed
    `VwapReversionModel` / `MockMLModel` produce identical `Prediction`s reading a `FeatureView` vs the
    current `FeatureVector` on the same values (parity-by-construction at the decision layer).
+7. **Compat gate GREEN on additions.** `assert_compatible(candidate_schema, declared={A, B})` where the
+   candidate ADDS features but still contains {A, B} → passes (no raise). The deploy is cleared.
+8. **Compat gate RED names the exact feature.** A candidate schema that REMOVED/renamed `B` → declared {A,
+   B} raises `IncompatibleSchema` whose message names `B` and the candidate fingerprint. A multi-strategy
+   gate run reports every affected strategy + its missing names, and blocks.
+9. **Contract == model-input list.** A strategy's declared `STRATEGY_FEATURES` equals the `expected_names`
+   it passes to `to_model_vector` (single source of truth) — a test asserts they're the same object/list,
+   so the gate can never pass while the model would `MissingFeature` at runtime.
 
 ---
 
@@ -243,14 +319,15 @@ model input through `to_model_vector` (or stays on `view.value(name)` for the si
 ### 5.1 smoke (`strategies/smoke/`)
 - Today: `SAMPLE_FEATURES = ["ret_1m", "volume_zscore_5m"]`, `MODEL_FOLD_FEATURES = ["ret_1m",
   "volume_zscore_5m"]`; reads via `vector.value(name)`; `MockMLModel(MODEL_FOLD_FEATURES)`.
-- Migration: `EXPECTED_FEATURES = ["ret_1m", "volume_zscore_5m"]` declared once. The poll loop yields
-  `FeatureView`s (consumer resolves the frame's schema). `MockMLModel` consumes the view via `FeatureRow`
-  unchanged. Optionally `view.to_model_vector(EXPECTED_FEATURES)` if/when a real model replaces the mock.
+- Migration: `STRATEGY_FEATURES = ("ret_1m", "volume_zscore_5m")` declared once (the §2.6 contract). The
+  poll loop yields `FeatureView`s (consumer resolves the frame's schema). `MockMLModel` consumes the view
+  via `FeatureRow` unchanged. `view.to_model_vector(STRATEGY_FEATURES)` if/when a real model replaces the
+  mock — the same list, so contract == model input.
 - Effect: `fc` can add features freely — smoke keeps reading its 2 by name across the fingerprint change.
 
 ### 5.2 reversion (`strategies/reversion/`)
 - Today: `VwapReversionModel(window_m=30)` reads `vwap_deviation_30m` via `vector.value(model.feature_name)`.
-- Migration: `EXPECTED_FEATURES = [model.feature_name]`. Same `FeatureRow`-based `predict` on a
+- Migration: `STRATEGY_FEATURES = (model.feature_name,)`. Same `FeatureRow`-based `predict` on a
   `FeatureView`. The `np.isfinite` warmup guard stays.
 - Effect: a feature addition elsewhere never disturbs the single `vwap_deviation_30m` read.
 
@@ -269,16 +346,28 @@ model input through `to_model_vector` (or stays on `view.value(name)` for the si
 
 ---
 
-## 6. Deploy plan (the LAST coordinated strategy rebuild)
+## 6. Deploy plan — from coordinated rebuild to CONTINUOUS DEPLOYMENT
 
 1. Build behind this spec → Lead review → Ben review → re-audit (gated like the execution design).
 2. Producer change (publish `bus:schema:<fp>`) is **fingerprint-neutral** and additive — it can ride a
    normal `fc` rebuild; it does not change frame bytes or the registry.
-3. Cut the 3 strategies over to `FeatureView` + `expected_names` in ONE coordinated strategy rebuild —
-   `fc` untouched, fingerprint unchanged. This is the **last** coordinated rebuild.
-4. **After cutover:** a feature addition ships by rebuilding **`fc` alone**. Strategies keep reading their
-   declared names across the new fingerprint; `fc` publishes the new `bus:schema:<fp>`; consumers resolve
-   and cache it on the first new frame. No strategy rebuild, no coordinated window.
+3. Cut the 3 strategies over to `FeatureView` + the declared `STRATEGY_FEATURES` contract (§2.6) in ONE
+   coordinated strategy rebuild — `fc` untouched, fingerprint unchanged. This is the **last** coordinated
+   rebuild. Each strategy now publishes its contract (`strategy:features:<name>`) on startup.
+4. **After cutover — continuous feature deployment:**
+   ```
+   feature PR merges  →  rebuild fc candidate  →  COMPAT GATE: assert_compatible(candidate_schema, contract)
+                         for every live strategy  →  GREEN: relaunch fc  /  RED: block + name the feature
+   ```
+   On GREEN, `fc` ships alone: it publishes the new `bus:schema:<fp>`; consumers resolve + cache it on the
+   first new frame and keep reading their declared names. **No strategy rebuild, no coordinated window, no
+   fingerprint coordination.** A strategy moves only when IT chooses to adopt a new feature (updates its own
+   contract + `to_model_vector` list, rebuilds on its own schedule).
+
+**The vision this lands (Ben):** feature PRs merge and `fc` deploys CONTINUOUSLY, gated by the automated
+compat check. Active strategies are never at risk and never forced to rebuild. The entire risk surface of a
+feature deploy is reduced to one precise, automatable condition — *is every live strategy's declared feature
+set ⊆ the new schema?* — checked BEFORE the deploy, naming the exact incompatible feature if not.
 
 ---
 
@@ -301,6 +390,8 @@ model input through `to_model_vector` (or stays on `view.value(name)` for the si
 | `quantlib/bus/codec.py`                | `decode_view` (resolve-not-reject); keep `decode` for migration      |
 | `quantlib/bus/publisher.py`            | idempotent `bus:schema:<fp>` publish on init/first emit              |
 | `quantlib/bus/consumer.py`             | `BusConsumer` returns `FeatureView`s via the registry               |
-| `strategies/{smoke,reversion,overnight_beta}/` | declare `EXPECTED_FEATURES`; consume `FeatureView`          |
-| `tests/test_bus_feature_access.py` (new) | §4 proof tests                                                    |
+| `quantlib/bus/compat.py` (new)         | `assert_compatible` / `IncompatibleSchema` + multi-strategy gate (§2.6) |
+| `strategies/{smoke,reversion,overnight_beta}/` | declare `STRATEGY_FEATURES` contract (== `to_model_vector` list); publish `strategy:features:<name>` on startup; consume `FeatureView` |
+| `ops/` deploy script / CI              | run the compat gate against the candidate fingerprint before relaunching `fc` |
+| `tests/test_bus_feature_access.py` (new) | §4 proof tests (incl. compat-gate GREEN/RED, contract==model-input)         |
 | `tests/bench_bus_decode.py` (new)      | §3 throughput benchmark (gates the build)                           |
