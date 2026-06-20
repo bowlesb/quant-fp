@@ -60,7 +60,7 @@ why.
   automated-day-trading) per Ben's explicit request.
 - Decision: committed approach = cross-sectional short-horizon ML ranking on a
   ~1,000-symbol liquid universe; LightGBM; paper-first with statistical gates.
-  Rationale in `ARCHITECTURE.md`.
+  Rationale in `docs/archive/ARCHITECTURE.md` (archived 2026-06-20).
 - Started Phase 0 foundation.
 - Tore down legacy Edgar Docker stack (containers/networks removed, data volumes
   preserved) to free the single Alpaca data websocket. Old code/data left on disk.

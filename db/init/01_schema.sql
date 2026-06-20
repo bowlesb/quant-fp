@@ -1,5 +1,5 @@
 -- Quant trading system schema. Applied on first DB boot.
--- Design notes in ARCHITECTURE.md. Principle: append-only, fully reconstructable.
+-- Design notes in docs/archive/ARCHITECTURE.md. Principle: append-only, fully reconstructable.
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
