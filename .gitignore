@@ -22,3 +22,8 @@ experiments/shape_ensemble_results.jsonl
 rust/target/
 *.so
 .claude/worktrees/
+
+# Embedded git worktrees + per-experiment cache/scratch (flagged by the doc-hierarchy survey #293)
+.worktrees/
+experiments/*/cache/
+experiments/*/data/
