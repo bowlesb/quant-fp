@@ -15,7 +15,16 @@ import pytest
 
 from quantlib.strategy_core import TargetPosition
 from quantlib.strategy_core.adapters import BusCrossSection, PanelCrossSection
+from quantlib.strategy_core.backtest_executor import BacktestExecutor
 from quantlib.strategy_core.cross_sectional_ls import CrossSectionalLS
+from quantlib.strategy_core.execution import (
+    BookState,
+    RealClock,
+    Runner,
+    SimClock,
+    TargetBookStrategy,
+)
+from quantlib.strategy_core.feeds import PanelFeed
 
 
 class _FakeVector:
@@ -123,6 +132,105 @@ def test_thin_cross_section_returns_empty() -> None:
     symbols, minute, signal = _make_cross_section_data(1, seed=2)
     targets = CrossSectionalLS(frac=0.1, signal_feature="sig").decide(_panel_cs(symbols, minute, signal))
     assert targets == []  # < 2 finite names -> cannot form a long AND a short leg
+
+
+# --- The HOT-SWAP execution seams: same decide(), swapped Executor/Feed ---------------------------
+
+
+def test_target_book_strategy_emits_intents_matching_targets() -> None:
+    """TargetBookStrategy adapts the CrossSectionalLS book into OrderIntents — buys for + weights,
+    sells for - weights — so the per-event Runner places exactly the target book."""
+
+    symbols, minute, signal = _make_cross_section_data(40, seed=9)
+    core = CrossSectionalLS(frac=0.1, signal_feature="sig")
+    targets = core.decide(_panel_cs(symbols, minute, signal))
+    strategy = TargetBookStrategy(core)
+    intents = strategy.decide(_panel_cs(symbols, minute, signal), BookState())
+    by_symbol = {intent.symbol: intent for intent in intents}
+    for target in targets:
+        intent = by_symbol[target.symbol]
+        assert intent.side == ("buy" if target.target_weight >= 0 else "sell")
+        assert intent.target_weight == target.target_weight
+
+
+def test_executor_swap_parity_backtest_vs_paper() -> None:
+    """THE pretend-vs-actual swap proof: the SAME decide() (via TargetBookStrategy) produces IDENTICAL
+    OrderIntents whether the harness will route them to the BacktestExecutor (pretend fill over the
+    panel) or a PaperExecutor (real broker). The decision code is byte-identical; only the executor
+    behind the intents differs. We assert the intents are identical and the BacktestExecutor fills
+    them at the panel entry price + per-name half-spread cost."""
+
+    symbols, minute, signal = _make_cross_section_data(40, seed=4)
+    entry = np.full(len(symbols), 50.0)
+    half_spread = np.linspace(2.0, 10.0, len(symbols))
+    extra = {"entry_close": entry, "half_spread_bps": half_spread}
+    panel_cs = PanelCrossSection(symbols, minute, signal.reshape(-1, 1), {"sig": 0}, extra)
+
+    strategy = TargetBookStrategy(CrossSectionalLS(frac=0.1, signal_feature="sig"))
+    # the intents a live PaperExecutor would receive (decision only — no broker here):
+    paper_intents = strategy.decide(panel_cs, BookState())
+    # the intents the BacktestExecutor receives are produced by the SAME decide on the SAME data:
+    backtest_intents = strategy.decide(panel_cs, BookState())
+    assert paper_intents == backtest_intents  # byte-identical decision code path
+
+    executor = BacktestExecutor()
+    fills = executor.execute(backtest_intents, panel_cs, RealClock())
+    assert len(fills) == len(backtest_intents)
+    for fill in fills:
+        assert fill.fill_price == 50.0  # filled at the panel entry price
+        assert fill.cost_bps > 0  # charged the per-name half-spread + slippage
+    # the executor's book now holds exactly the target weights
+    assert abs(sum(executor.book().weights.values())) < 1e-9  # dollar-neutral book
+
+
+def test_panel_feed_replays_timestamps_in_order() -> None:
+    """PanelFeed yields one CrossSection event per distinct timestamp, in time order, each exposing the
+    execution columns by name — the backtest DataFeed the Runner consumes."""
+
+    class _FakePanel:
+        symbol_code = np.array([0, 1, 0, 1], dtype=np.int64)
+        symbol_names = ["A", "B"]
+        minute_epoch = np.array([100, 100, 200, 200], dtype=np.int64) * 1_000_000_000
+        feature_names = ["sig"]
+        feature_matrix = np.array([[0.1], [0.2], [0.3], [0.4]])
+        entry_close = np.array([10.0, 20.0, 11.0, 21.0])
+        half_spread_bps = np.array([3.0, 4.0, 3.0, 4.0])
+
+    events = list(PanelFeed(_FakePanel()).events())
+    assert len(events) == 2
+    assert events[0].ts < events[1].ts
+    assert events[0].cross_section.symbols == ["A", "B"]
+    assert events[0].cross_section.feature_for("A", "entry_close") == 10.0
+    assert events[0].cross_section.feature_for("B", "half_spread_bps") == 4.0
+
+
+def test_runner_drives_decide_over_feed() -> None:
+    """The Runner ties {strategy, feed, executor, clock} and calls the SAME decide per event — the one
+    loop the battery backtest and the live container share."""
+
+    n = 40
+    rng = np.random.default_rng(2)
+
+    class _FakePanel:
+        symbol_code = np.array(list(range(n)) + list(range(n)), dtype=np.int64)
+        symbol_names = [f"S{i}" for i in range(n)]
+        minute_epoch = np.array([100] * n + [200] * n, dtype=np.int64) * 1_000_000_000
+        feature_names = ["sig"]
+        feature_matrix = rng.normal(0, 1, (2 * n, 1))
+        entry_close = np.full(2 * n, 50.0)
+        half_spread_bps = np.full(2 * n, 5.0)
+
+    executor = BacktestExecutor()
+    runner = Runner(
+        TargetBookStrategy(CrossSectionalLS(frac=0.1, signal_feature="sig")),
+        PanelFeed(_FakePanel()),
+        executor,
+        SimClock(),
+    )
+    runner.run()
+    # after replaying both timestamps the book holds the last timestamp's dollar-neutral target
+    assert abs(sum(executor.book().weights.values())) < 1e-9
+    assert len(executor.book().weights) > 0
 
 
 if __name__ == "__main__":

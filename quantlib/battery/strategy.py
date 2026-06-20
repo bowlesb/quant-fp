@@ -26,7 +26,7 @@ from quantlib.backtest import (
     shuffle_within_groups,
     walk_forward_folds,
 )
-from quantlib.battery.cost import cost_curve, long_short_per_name_cost
+from quantlib.battery.cost import long_short_per_name_cost
 from quantlib.battery.panel import Panel
 from quantlib.battery.result import (
     BacktestResult,
@@ -38,6 +38,7 @@ from quantlib.battery.result import (
 from quantlib.battery.spec import ArchetypeSpec, Conditioner, Horizon
 from quantlib.research import DEFAULT_LGB
 from quantlib.strategy_core.adapters import PanelCrossSection
+from quantlib.strategy_core.backtest_executor import BacktestExecutor
 from quantlib.strategy_core.cross_sectional_ls import CrossSectionalLS as SharedCrossSectionalLS
 
 WINSOR_Q = 0.005  # per-day symmetric winsorization on the raw return (daily horizons)
@@ -201,17 +202,10 @@ class CrossSectionalLS:
         periods_per_year = 252.0 * (390.0 / spec.cadence_min)
         symbols = [panel.symbol_names[panel.symbol_code[i]] for i in rows]
         spreads = [float(panel.half_spread_bps[i]) for i in rows]
-        bt = long_short_per_name_cost(
-            preds,
-            labels,
-            groups,
-            symbols,
-            spreads,
-            frac=spec.frac,
-            cost_mult=1.0,
-            periods_per_year=periods_per_year,
-        )
-        curve = cost_curve(
+        # Book the P&L through the SHARED BacktestExecutor's VECTORIZED batch path (the same
+        # pretend-fill executor a live container swaps for a real broker) — applied columnar over the
+        # whole panel so the battery stays in budget. See docs/STRATEGY_BATTERY_PORTABILITY.md §2.6.
+        bt = BacktestExecutor.run_vectorized(
             preds,
             labels,
             groups,
@@ -220,6 +214,7 @@ class CrossSectionalLS:
             frac=spec.frac,
             periods_per_year=periods_per_year,
         )
+        curve = bt["cost_curve"]
         by_stratum = self._stratify(preds, labels, groups, rows, panel, lag, periods_per_year)
         by_regime = self._regime_split(preds, labels, groups, rows, panel, lag, periods_per_year)
         sanity = self._sanity(sub, panel)

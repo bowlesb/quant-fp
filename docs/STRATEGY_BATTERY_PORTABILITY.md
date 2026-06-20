@@ -123,6 +123,96 @@ makes it the single shared implementation. (Per-vector Shape-A cores are the deg
 
 ---
 
+## 2.5 The HOT-SWAP seams — `Executor` × `DataFeed` × `Clock` × `Runner`
+
+This is the precise shape (the event-driven-backtester == live-trader pattern). The strategy's
+`decide` is written ONCE; you **hot-swap the execution and the feed underneath it**. Four interfaces,
+and a `Runner` that ties them — the strategy code never changes across the swap.
+
+```python
+# quantlib/strategy_core/  (the SHARED home)
+
+@dataclass(frozen=True)
+class OrderIntent:
+    """What the strategy WANTS to transact this step — broker-agnostic. The Executor turns it into a
+    simulated fill (backtest) or a real Alpaca order (live). Same intent in; only the fill differs."""
+    symbol: str
+    side: str                 # "buy" | "sell"
+    target_weight: float      # the desired book weight (basket) ...
+    notional: float | None = None   # ... or an absolute notional (single-name); exactly one is set
+    reason: str = ""          # provenance for logging / the validation record
+
+class Strategy(Protocol):
+    spec: ArchetypeSpec
+    def decide(self, cs: CrossSection, state: BookState) -> list[OrderIntent]:
+        """PURE: given the as-of-t cross-section + the current book, return the orders to transact.
+        No bus, no broker, no wall-clock. Called once per step by the Runner — identical live + backtest.
+        MUST be columnar-friendly (see §2.6) so the BacktestExecutor can apply it across the panel fast."""
+
+class Executor(Protocol):
+    """THE pretend-trade vs actual-trade swap (Ben's explicit ask)."""
+    def execute(self, intents: list[OrderIntent], cs: CrossSection, clock: Clock) -> list[Fill]: ...
+    def book(self) -> BookState: ...
+# BacktestExecutor(cost_model): simulates the fill over the panel at the tradeable entry (>=09:35),
+#   charges the per-name half-spread + slippage, tracks position/P&L. (Reuses long_short_per_name_cost.)
+# PaperExecutor(alpaca) / LiveExecutor(alpaca): submits the REAL order (paper today, real later),
+#   captures the fill, reconciles the book. (This is exactly what reversion/overnight_beta do today.)
+
+class DataFeed(Protocol):
+    """Replays decision events. Same event shape out, different source."""
+    def events(self) -> Iterator[FeedEvent]: ...      # FeedEvent = (CrossSection, ts)
+# PanelFeed(panel):  yields each timestamp-slice of the historical panel as a CrossSection event.
+# BusFeed(consumer): yields a CrossSection built from the latest-by-symbol bus vectors each cycle.
+
+class Clock(Protocol):
+    def now(self) -> datetime: ...
+# SimClock(panel): time advances with the panel (the event ts).  RealClock(): wall-clock + market hours.
+
+class Runner:
+    """Ties {strategy, feed, executor, clock}. The ONE loop both paths share."""
+    def __init__(self, strategy, feed, executor, clock): ...
+    def run(self):
+        for cs, ts in self._feed.events():
+            intents = self._strategy.decide(cs, self._executor.book())   # SAME decide
+            self._executor.execute(intents, cs, self._clock)
+```
+
+So:
+```python
+battery_backtest = Runner(strategy, PanelFeed(panel),  BacktestExecutor(cost_model), SimClock(panel))
+live_container   = Runner(strategy, BusFeed(consumer), PaperExecutor(alpaca),        RealClock())
+```
+**SAME `Runner`, SAME `strategy.decide`, swapped components.** The live container becomes a thin
+harness: wire env → `{strategy, BusFeed, PaperExecutor, RealClock}` → `Runner.run()`. No duplicated
+decision logic. A battery PASS carries its `spec` (+ frozen model) so the live `Runner` is instantiated
+from exactly the validated configuration — graduation is configuration, not code.
+
+## 2.6 Performance — the BacktestExecutor must be VECTORIZED, not a per-event loop
+
+Ben's <30–60s battery budget forbids a slow per-timestamp Python loop calling `decide` 300×/day ×
+~250 days. The resolution: **`decide` is pure + columnar-friendly, so the `BacktestExecutor` applies
+it in BATCH over the whole panel**, while the live `PaperExecutor` calls the identical logic per event.
+
+Concretely, archetype 1's `decide` is `score → rank → top/bottom-k per timestamp`. All three are
+group-by-timestamp columnar ops over the resident panel arrays (numpy/polars) — the `BacktestExecutor`
+computes the entire book for ALL timestamps at once (the current battery already does this via
+`long_short_per_name_cost`'s per-timestamp bucketing), NOT a Python `for ts` loop. The live executor
+runs the SAME scalar `decide` on one cross-section per minute. The decision **logic** is identical;
+the **application** is batch-vs-streaming — which is exactly the feature platform's batch-backfill vs
+per-minute-stream split under one shared `emit`.
+
+**Contract for `decide`:** it must be expressible as a pure function of `(score_vector, group_ids)` →
+book, with no cross-step state that can't be carried as an explicit columnar `BookState` (e.g.
+turnover is a diff of consecutive per-timestamp books — vectorizable). **Inherently-sequential
+archetypes — triple-barrier first-touch, persistence/streak — CANNOT be applied in one columnar pass**
+(the early-exit along the path is sequential); those are the Phase-1 **Rust** kernel (`first_touch`),
+flagged here so the seam is built knowing batch-vectorization covers archetype 1 but not 2/3. The
+`Executor` interface accommodates both: `BacktestExecutor` may run a vectorized batch path for
+cross-sectional archetypes and the Rust per-path kernel for triple-barrier — the strategy `decide`
+contract is the same; only the executor's internal application differs.
+
+---
+
 ## 3. Worked example — ONE archetype, ONE core, BOTH paths
 
 Take the cross-sectional L/S top/bottom-k (Ben's EOD / multi-day / the overnight-beta shape). The
@@ -177,6 +267,22 @@ container is instantiated from exactly that, so graduation is configuration, not
 `overnight_beta`). They need only a one-time, mechanical lift to import the cores from the shared home
 (`strategies/lib/` → `quantlib/strategy_core/`) so the battery can import them too without depending
 on the `strategies/` deployment package. No logic changes; the cores are already pure + tested.
+
+**Re-expressing each existing container as `Runner(strategy, BusFeed, PaperExecutor, RealClock)` —
+the decision logic lifts UNCHANGED into `decide()`:**
+
+| Container | Today | Lifts to `decide()` UNCHANGED | Executor / Feed it keeps |
+|---|---|---|---|
+| `reversion` | `select_candidate(model, latest_by_symbol, threshold, held)` → one long | `decide(cs, state)`: run `VwapReversionModel.predict` per name (already pure), pick the best clearing the threshold not already held → `[OrderIntent(sym,"buy",notional=...)]` | `PaperExecutor` = its current submit/manage/finalize loop; `BusFeed` = its `consume()` |
+| `smoke` | gate + `MockMLModel.predict(latest)` → one buy | `decide`: the same predict+threshold on the 1-name cross-section → `[OrderIntent]` | same |
+| `overnight_beta` | `select_legs(returns_by_name, market)` → long/short legs | `decide` IS `select_legs` (already cross-sectional, already pure) → one `OrderIntent` per leg name | `PaperExecutor` = its CLS/OPG auction loop; `PanelFeed`/`BusFeed` = its `PanelLoader` |
+
+The lift is mechanical: the `evaluate_bet_gate` / cadence / cap logic stays in the **Executor** (it's
+execution-policy, not signal); the `predict`/`select_candidate`/`select_legs` signal logic becomes
+`decide`. **No rewrite — extract inline logic into `decide()`, wrap with the `Runner`.** Proposed as
+its own PR (boundary: no live-container behavior change without a PR), with a parity test per container
+(same `decide`, `PanelFeed`+`BacktestExecutor` vs `BusFeed`+`PaperExecutor`, identical intents on
+identical data).
 
 **The battery is what must change** (and it is new code, so this is cheap): build archetype 1 as a
 `DecisionCore.decide` over a `CrossSection`, NOT the current inline GBM/rank in

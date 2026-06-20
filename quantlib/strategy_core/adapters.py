@@ -27,22 +27,32 @@ class PanelCrossSection:
         minute: dt.datetime,
         feature_matrix_slice: np.ndarray,  # (n_names, n_features) for this minute
         feature_columns: dict[str, int],
+        extra_columns: dict[str, np.ndarray] | None = None,
     ) -> None:
         self.symbols = symbols
         self.minute = minute
         self._matrix = feature_matrix_slice
         self._cols = feature_columns
+        # execution columns (entry_close, half_spread_bps, ...) readable by name alongside features,
+        # so the BacktestExecutor reads fill price + cost through the SAME by-name interface as live.
+        self._extra = extra_columns or {}
         self._sym_index = {symbol: i for i, symbol in enumerate(symbols)}
 
     def feature(self, name: str) -> np.ndarray:
-        if name not in self._cols:
-            return np.full(len(self.symbols), np.nan)
-        return self._matrix[:, self._cols[name]]
+        if name in self._cols:
+            return self._matrix[:, self._cols[name]]
+        if name in self._extra:
+            return self._extra[name]
+        return np.full(len(self.symbols), np.nan)
 
     def feature_for(self, symbol: str, name: str) -> float:
-        if symbol not in self._sym_index or name not in self._cols:
+        if symbol not in self._sym_index:
             return float("nan")
-        return float(self._matrix[self._sym_index[symbol], self._cols[name]])
+        if name in self._cols:
+            return float(self._matrix[self._sym_index[symbol], self._cols[name]])
+        if name in self._extra:
+            return float(self._extra[name][self._sym_index[symbol]])
+        return float("nan")
 
 
 class BusCrossSection:
