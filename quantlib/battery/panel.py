@@ -250,6 +250,18 @@ def _compute_daily_features(daily: pl.DataFrame) -> pl.DataFrame:
         pl.col("rth_close").shift(-2).over(over).alias("exit_2d"),  # close 2 days ahead
         pl.col("rth_close").shift(-3).over(over).alias("exit_3d"),  # close 3 days ahead
     )
+    # FORWARD MAGNITUDE / VOLUME targets (Phase-1 non-direction archetypes), gap-safe per-symbol shifts:
+    #   fwd_absret_1d  = |next-day close/open - 1|  (the realized abnormal MOVE — #197's absret)
+    #   fwd_rv_5d      = the next-5-day close-close realized vol (the magnitude/range surface)
+    #   fwd_logvol_1d  = log(next-day dollar-volume)   (the participation/intensity surface — #187/#197)
+    # own_rv_20d (== rvol_20d) is the BASELINE for the partial-r own-vol control (the anti-fooling lever).
+    feat = feat.with_columns(
+        (pl.col("rth_close").shift(-1).over(over) / pl.col("rth_open").shift(-1).over(over) - 1.0)
+        .abs()
+        .alias("fwd_absret_1d"),
+        pl.col("ret_co_1d").rolling_std(window_size=5).shift(-5).over(over).alias("fwd_rv_5d"),
+        (pl.col("rth_dollar_vol").shift(-1).over(over) + 1.0).log().alias("fwd_logvol_1d"),
+    )
     return feat
 
 
@@ -308,6 +320,11 @@ def panel_from_daily_frame(feat: pl.DataFrame) -> Panel:
         "exit_overnight": feat["exit_overnight"].to_numpy().astype(float),
         "exit_2d": feat["exit_2d"].to_numpy().astype(float),
         "exit_3d": feat["exit_3d"].to_numpy().astype(float),
+        # Phase-1 magnitude/volume targets + the own-vol baseline for the partial-r control
+        "fwd_absret_1d": feat["fwd_absret_1d"].to_numpy().astype(float),
+        "fwd_rv_5d": feat["fwd_rv_5d"].to_numpy().astype(float),
+        "fwd_logvol_1d": feat["fwd_logvol_1d"].to_numpy().astype(float),
+        "own_rv_20d": feat["rvol_20d"].to_numpy().astype(float),
     }
     return Panel(
         symbol_code=symbol_code,
