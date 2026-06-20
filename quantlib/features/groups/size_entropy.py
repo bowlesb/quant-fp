@@ -92,16 +92,7 @@ class SizeEntropyGroup(FeatureGroup):
         trades = ctx.frame("trades").select(["symbol", "ts", "size"])
         if trades.height == 0:
             return pl.DataFrame(schema=_OUT_SCHEMA)
-        # Per print: order-of-magnitude size bin in [0, 5]. log10 of a non-positive size is null -> bin 0
-        # (smallest scale), matching the screen's fill_null(0.0).
-        per_trade = trades.with_columns(
-            pl.col("ts").dt.truncate("1m").alias("minute"),
-            pl.col("size").log10().floor().clip(0.0, 5.0).fill_null(0.0).alias("_bin"),
-        )
-        # Per (symbol, minute): the 6 per-minute bin counts (a pure function of the minute's own tape).
-        per_minute = per_trade.group_by(["symbol", "minute"]).agg(
-            *[(pl.col("_bin") == float(b)).sum().cast(pl.Float64).alias(f"_c{b}") for b in _BINS]
-        ).sort(["symbol", "minute"])
+        per_minute = _per_minute_bin_counts(trades).sort(["symbol", "minute"])
         # Trailing windowed SUM of each per-minute bin count (the bounded reductions the entropy is built
         # from). Then the entropy of the window's bin-count distribution in assemble below.
         feats: list[pl.Expr] = []
@@ -116,12 +107,63 @@ class SizeEntropyGroup(FeatureGroup):
         )
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Window-sliced live path: the SAME ``compute()`` on the trailing window it reads, filtered to T —
-        parity-true by construction (the dropped older minutes cannot affect a window ending at T)."""
-        return self.compute_latest_on_window(ctx, max(WINDOWS) + _WINDOW_SLACK)
+        """Latest-minute live path — VALUE-IDENTICAL to ``compute().filter(minute == max)`` but skips the
+        per-minute ``rolling_sum_by`` pass whose every row but T is discarded.
+
+        The window bin-count at the latest minute T is the SUM of the per-minute bin counts over the same
+        left-open trailing window ``rolling_sum_by`` reads — ``minute in (T - w, T]`` — so a single
+        ``filter -> group_by(symbol).sum()`` reproduces ``compute()``'s windowed counts at T exactly, then
+        ``_entropy_expr`` (the identical assemble) maps them to entropy. ``compute()``'s final
+        ``filter(minute == global max)`` emits only symbols that traded in minute T (a sparse "no trades"
+        minute yields no row); we match that by keying on ``per_minute``'s global max minute. Guarded by the
+        generic latest-parity test (tests/test_fp_latest.py) + the degenerate-window test in
+        tests/test_fp_b3_concentration.py."""
+        trades = ctx.frame("trades").select(["symbol", "ts", "size"])
+        if trades.height == 0:
+            return pl.DataFrame(schema=_OUT_SCHEMA)
+        per_minute = _per_minute_bin_counts(trades)
+        latest_minute = per_minute["minute"].max()
+        # compute()'s filter(minute == global max) keeps only symbols trading at T.
+        result = (
+            per_minute.filter(pl.col("minute") == latest_minute)
+            .select("symbol")
+            .unique()
+            .with_columns(pl.lit(latest_minute).alias("minute"))
+        )
+        for w in WINDOWS:
+            cutoff = latest_minute - pl.duration(minutes=w)
+            window_counts = (
+                per_minute.filter(
+                    (pl.col("minute") > cutoff) & (pl.col("minute") <= latest_minute)
+                )
+                .group_by("symbol")
+                .agg(*[pl.col(f"_c{b}").sum().alias(f"_c{b}") for b in _BINS])
+                .with_columns(
+                    _entropy_expr([pl.col(f"_c{b}") for b in _BINS]).alias(f"size_entropy_{w}m")
+                )
+                .select(["symbol", f"size_entropy_{w}m"])
+            )
+            result = result.join(window_counts, on="symbol", how="left")
+        return result.select(
+            ["symbol", "minute", *[f"size_entropy_{w}m" for w in WINDOWS]]
+        )
 
     def reduce_buffer_minutes(self) -> int:
         return max(WINDOWS) + _WINDOW_SLACK
+
+
+def _per_minute_bin_counts(trades: pl.DataFrame) -> pl.DataFrame:
+    """Per (symbol, minute): the 6 order-of-magnitude bin counts of the minute's prints — a pure function
+    of that minute's own tape (no look-ahead). Shared by both the backfill ``compute`` and the live
+    ``compute_latest`` so the bin assignment (``floor(log10(size))`` clipped to [0,5], non-positive ->
+    bin 0 to match the screen's fill_null) is defined once and identical on both paths."""
+    per_trade = trades.with_columns(
+        pl.col("ts").dt.truncate("1m").alias("minute"),
+        pl.col("size").log10().floor().clip(0.0, 5.0).fill_null(0.0).alias("_bin"),
+    )
+    return per_trade.group_by(["symbol", "minute"]).agg(
+        *[(pl.col("_bin") == float(b)).sum().cast(pl.Float64).alias(f"_c{b}") for b in _BINS]
+    )
 
 
 def _entropy_expr(window_counts: list[pl.Expr]) -> pl.Expr:
