@@ -5,6 +5,7 @@ place -> manage -> finalize flow against a FAKE broker + in-memory store (no rea
 All tests are network-free: vectors are built directly from ``default_schema()`` (no bus round-trip
 needed), so the model + selection logic is exercised deterministically.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -12,9 +13,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pytest
+from alpaca.common.exceptions import APIError
+from alpaca.trading.enums import OrderStatus
 
 from quantlib.bus.schema import default_schema
 from quantlib.bus.vector import FeatureVector
+from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from strategies.lib.reversion_model import VwapReversionModel
 from strategies.reversion.strategy import (
     ReversionConfig,
@@ -24,6 +28,8 @@ from strategies.reversion.strategy import (
     select_candidate,
 )
 
+# the Alpaca order-not-found error body PaperAlpacaExecutor catches when a coid was never placed.
+NOT_FOUND_BODY = '{"code":40410000,"message":"order not found for: %s"}'
 NOW = dt.datetime(2026, 6, 15, 14, 30, tzinfo=dt.timezone.utc)
 SCHEMA = default_schema()
 WINDOW_M = 30
@@ -162,8 +168,12 @@ class FakeOrder:
     client_order_id: str
     filled_avg_price: float | None
     filled_qty: float | None = None
-    status: str = "filled"
+    status: object = None  # an alpaca OrderStatus, set in submit_order (Alpaca-shaped)
     filled_at: dt.datetime | None = None
+    qty: float | None = None
+    side: object = None
+    submitted_at: dt.datetime | None = None
+    created_at: dt.datetime | None = None
 
 
 @dataclass
@@ -190,14 +200,23 @@ class FakeTradingClient:
         qty = request.qty  # type: ignore[attr-defined]
         filled_qty = float(notional) / self.fill_price if notional is not None else float(qty)
         order = FakeOrder(
-            id=f"broker-{len(self.submitted)}", client_order_id=coid,
-            filled_avg_price=self.fill_price, filled_qty=filled_qty, filled_at=NOW,
+            id=f"broker-{len(self.submitted)}",
+            client_order_id=coid,
+            filled_avg_price=self.fill_price,
+            filled_qty=filled_qty,
+            filled_at=NOW,
+            status=OrderStatus.FILLED,
+            qty=filled_qty,
+            submitted_at=NOW,
+            created_at=NOW,
         )
         self.submitted.append(order)
         self._by_coid[coid] = order
         return order
 
     def get_order_by_client_id(self, client_order_id: str) -> FakeOrder:
+        if client_order_id not in self._by_coid:
+            raise APIError(NOT_FOUND_BODY % client_order_id)
         return self._by_coid[client_order_id]
 
 
@@ -208,15 +227,29 @@ class InMemoryStore:
         self._bets: dict[str, dict[str, object]] = {}
 
     def record_open(
-        self, symbol: str, side: str, entry_notional: float, entry_order_id: str,
-        entry_ts: dt.datetime, hold_until: dt.datetime, signal: float,
+        self,
+        symbol: str,
+        side: str,
+        entry_notional: float,
+        entry_order_id: str,
+        entry_ts: dt.datetime,
+        hold_until: dt.datetime,
+        signal: float,
     ) -> int:
         if entry_order_id not in self._bets:
             self._bets[entry_order_id] = {
-                "id": len(self._bets) + 1, "symbol": symbol, "side": side,
-                "entry_notional": entry_notional, "qty": None, "entry_order_id": entry_order_id,
-                "entry_ts": entry_ts, "entry_price": None, "signal": signal, "hold_until": hold_until,
-                "exit_order_id": None, "status": "open",
+                "id": len(self._bets) + 1,
+                "symbol": symbol,
+                "side": side,
+                "entry_notional": entry_notional,
+                "qty": None,
+                "entry_order_id": entry_order_id,
+                "entry_ts": entry_ts,
+                "entry_price": None,
+                "signal": signal,
+                "hold_until": hold_until,
+                "exit_order_id": None,
+                "status": "open",
             }
         return int(self._bets[entry_order_id]["id"])  # type: ignore[arg-type]
 
@@ -233,7 +266,10 @@ class InMemoryStore:
     ) -> None:
         bet = self._bets[entry_order_id]
         bet["exit_ts"], bet["exit_price"], bet["realized_pnl"], bet["status"] = (
-            exit_ts, exit_price, realized_pnl, "closed"
+            exit_ts,
+            exit_price,
+            realized_pnl,
+            "closed",
         )
 
     def list_open(self) -> list[dict[str, object]]:
@@ -262,6 +298,10 @@ def _strategy(
     strategy._consumer = None  # type: ignore[attr-defined]
     strategy._trading = trading  # type: ignore[attr-defined]
     strategy._store = store  # type: ignore[attr-defined]
+    strategy._executor = PaperAlpacaExecutor(trading)  # type: ignore[attr-defined,arg-type]
+    strategy._state = None  # type: ignore[attr-defined]
+    strategy._state_store = None  # type: ignore[attr-defined]
+    strategy._pending_close_logged = set()  # type: ignore[attr-defined]
     strategy._model = VwapReversionModel(window_m=WINDOW_M, sensitivity=400.0)  # type: ignore[attr-defined]
     strategy._latest_by_symbol = {}  # type: ignore[attr-defined]
     strategy._last_bet_ts = None  # type: ignore[attr-defined]
@@ -278,7 +318,8 @@ def test_place_then_manage_finalizes_bet() -> None:
     strategy.maybe_place_bet()
     assert store.count_open() == 1
     entry = trading.submitted[0]
-    assert entry.client_order_id.startswith("rev_AAPL_")
+    # the G2 fully-qualifying coid {strategy}-{stamp}-{symbol}-{side} (the migration's coid scheme).
+    assert entry.client_order_id.startswith("reversion-") and entry.client_order_id.endswith("-AAPL-buy")
     expected_qty = 50.0 / 190.0  # NOTIONAL buy -> fractional shares
     assert entry.filled_qty == pytest.approx(expected_qty)
 
@@ -319,7 +360,8 @@ def test_does_not_stack_on_held_symbol() -> None:
     strategy = _strategy(config, trading, store)
     # AAPL is the most stretched but already held; MSFT mild -> below threshold -> no new bet.
     strategy._latest_by_symbol = {  # type: ignore[attr-defined]
-        "AAPL": _vector("AAPL", -0.006), "MSFT": _vector("MSFT", -0.0001),
+        "AAPL": _vector("AAPL", -0.006),
+        "MSFT": _vector("MSFT", -0.0001),
     }
     strategy.maybe_place_bet()
     assert trading.submitted == []

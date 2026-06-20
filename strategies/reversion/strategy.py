@@ -42,6 +42,10 @@ from alpaca.trading.requests import MarketOrderRequest
 
 from quantlib.bus.consumer import BusConsumer
 from quantlib.bus.view import FeatureView
+from quantlib.strategy_core.execution import Fill, OrderState
+from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
+from quantlib.strategy_core.production_execution import ProductionOrderIntent, make_client_order_id
+from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.reversion_model import VwapReversionModel
 from strategies.reversion.bet_store import BetStore
 from strategies.reversion.contract import STRATEGY_NAME, contract_for
@@ -178,14 +182,45 @@ class ReversionStrategy:
         trading: TradingClient,
         store: BetStore,
         model: VwapReversionModel,
+        state_store: PgStateStore | None = None,
     ) -> None:
         self._config = config
         self._consumer = consumer
         self._trading = trading
         self._store = store
+        # the production execution+state layer, additive ALONGSIDE the retained bespoke bet-store (the
+        # same pattern proven on smoke #220): broker calls go through PaperAlpacaExecutor (G2 coid) and
+        # every captured fill is mirrored into the durable StrategyState ledger (the SoT migration).
+        self._executor = PaperAlpacaExecutor(trading)
+        self._state_store = state_store
+        self._state = state_store.load(STRATEGY_NAME) if state_store is not None else None
         self._model = model
         self._latest_by_symbol: dict[str, FeatureView] = {}
         self._last_bet_ts: dt.datetime | None = None
+        # coids whose "CLOSE pending fill" we've already logged this state-generation, so a stale pending
+        # exit on a closed market doesn't hot-log every manage tick (per-state-change, not per-tick).
+        self._pending_close_logged: set[str] = set()
+
+    def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
+        """Mirror a captured fill into the durable StrategyState ledger (the migration SoT). A no-op when
+        no state store is wired, so the change is additive and the loop's decisions are unchanged."""
+        if self._state is None or self._state_store is None:
+            return
+        if any(existing.client_order_id == coid for existing in self._state.fills):
+            return  # idempotent: a coid already booked is never double-counted (restart-safe)
+        fill = Fill(
+            symbol=symbol,
+            side=side,
+            weight=0.0,
+            fill_price=price,
+            cost_bps=0.0,
+            client_order_id=coid,
+            filled_qty=qty,
+            avg_price=price,
+            status=OrderState.FILLED,
+        )
+        self._state.apply_fill(fill)
+        self._state_store.append_fill(STRATEGY_NAME, fill)
 
     def market_open(self) -> bool:
         clock = cast(Clock, self._trading.get_clock())
@@ -213,8 +248,10 @@ class ReversionStrategy:
             if order is not None and bet["entry_price"] is None:
                 filled_qty = order_filled_qty(order)
                 if order.filled_avg_price and filled_qty is not None:
-                    self._store.mark_filled(entry_order_id, float(order.filled_avg_price), filled_qty)
-                    bet["entry_price"] = float(order.filled_avg_price)
+                    filled_price = float(order.filled_avg_price)
+                    self._store.mark_filled(entry_order_id, filled_price, filled_qty)
+                    self._book_fill(str(bet["symbol"]), "buy", entry_order_id, filled_qty, filled_price)
+                    bet["entry_price"] = filled_price
                     bet["qty"] = filled_qty
             hold_until = bet["hold_until"]
             if isinstance(hold_until, dt.datetime) and now >= hold_until:
@@ -271,21 +308,13 @@ class ReversionStrategy:
             return
         symbol = candidate.symbol
         notional = self._config.notional_usd
-        coid = f"{COID_PREFIX}{symbol}_{now.strftime('%Y%m%dT%H%M%S')}"
+        coid = make_client_order_id(STRATEGY_NAME, now, symbol, "buy")
         hold_until = now + dt.timedelta(seconds=self._config.hold_sec)
         self._store.record_open(symbol, "buy", notional, coid, now, hold_until, candidate.probability)
-        order = cast(
-            Order,
-            self._trading.submit_order(
-                MarketOrderRequest(
-                    symbol=symbol,
-                    notional=notional,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                    client_order_id=coid,
-                )
-            ),
+        intent = ProductionOrderIntent(
+            strategy_id=STRATEGY_NAME, symbol=symbol, side="buy", decision_ts=now, notional=notional
         )
+        record = self._executor.submit(intent)
         self._last_bet_ts = now
         logger.info(
             "BET placed: BUY $%.2f notional %s p=%.3f dev=%+.5f coid=%s broker_id=%s hold=%ds",
@@ -294,7 +323,7 @@ class ReversionStrategy:
             candidate.probability,
             candidate.deviation,
             coid,
-            str(order.id),
+            record.broker_order_id,
             self._config.hold_sec,
         )
 
@@ -310,6 +339,7 @@ class ReversionStrategy:
                     if filled_qty is not None:
                         filled_price = float(order.filled_avg_price)
                         self._store.mark_filled(entry_order_id, filled_price, filled_qty)
+                        self._book_fill(str(bet["symbol"]), "buy", entry_order_id, filled_qty, filled_price)
                         bet["entry_price"] = filled_price
                         bet["qty"] = filled_qty
             hold_until = bet["hold_until"]
@@ -333,6 +363,7 @@ class ReversionStrategy:
             return None
         entry_price_value = float(entry_order.filled_avg_price)
         self._store.mark_filled(entry_order_id, entry_price_value, filled_qty)
+        self._book_fill(str(bet["symbol"]), "buy", entry_order_id, filled_qty, entry_price_value)
         bet["entry_price"] = entry_price_value
         bet["qty"] = filled_qty
         return entry_price_value, filled_qty
@@ -371,12 +402,18 @@ class ReversionStrategy:
             exit_coid = str(existing_exit)
         exit_order = self._fetch_order_by_coid(exit_coid)
         if exit_order is None or not exit_order.filled_avg_price:
-            logger.info("CLOSE pending fill for %s (coid=%s)", symbol, exit_coid)
+            # log a pending exit ONCE per coid (not every ~1.4s manage tick) so a stale pending close on a
+            # closed market doesn't hot-log forever — purely a log-legibility fix, no behavior change.
+            if exit_coid not in self._pending_close_logged:
+                logger.info("CLOSE pending fill for %s (coid=%s)", symbol, exit_coid)
+                self._pending_close_logged.add(exit_coid)
             return
         exit_price = float(exit_order.filled_avg_price)
         realized = (exit_price - entry_price_value) * qty
         exit_ts = exit_order.filled_at or dt.datetime.now(dt.timezone.utc)
         self._store.record_close(entry_order_id, exit_ts, exit_price, realized)
+        self._book_fill(symbol, "sell", exit_coid, qty, exit_price)
+        self._pending_close_logged.discard(exit_coid)  # resolved -> forget its pending-log marker
         logger.info(
             "BET closed: %s entry=%.4f exit=%.4f qty=%g pnl=%+.4f",
             symbol,
