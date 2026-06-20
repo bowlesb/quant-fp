@@ -1,2 +1,4 @@
 *.parquet
 *.csv
+_intraday_reduce/
+_daily_reduce/
