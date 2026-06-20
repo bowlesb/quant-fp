@@ -35,34 +35,22 @@ from dataclasses import dataclass
 
 import polars as pl
 from alpaca.data.historical import StockHistoricalDataClient
-from requests.adapters import HTTPAdapter
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest, GetCalendarRequest
+from requests.adapters import HTTPAdapter
 
-from quantlib.data.fast_backfill import (
-    DEFAULT_PROCESSES,
-    DEFAULT_THREADS_PER_PROCESS,
-    run_tier_fast,
-)
-from quantlib.data.raw_fetchers import (
-    fetch_bars_multi,
-    fetch_quotes_range,
-    fetch_trades_range,
-)
-from quantlib.data.raw_store import (
-    MANIFEST_SCHEMA,
-    done_keys,
-    free_bytes,
-    load_manifest,
-    manifest_dir,
-    manifest_path,
-    partition_dir,
-    reconcile_manifest_from_disk,
-    resumable_done_keys,
-    write_manifest_part,
-    write_partition,
-)
+from quantlib.data.fast_backfill import (DEFAULT_PROCESSES,
+                                         DEFAULT_THREADS_PER_PROCESS,
+                                         run_tier_fast)
+from quantlib.data.raw_fetchers import (fetch_bars_multi, fetch_quotes_range,
+                                        fetch_trades_range)
+from quantlib.data.raw_store import (MANIFEST_SCHEMA, done_keys, free_bytes,
+                                     load_manifest, manifest_dir,
+                                     manifest_path, partition_dir,
+                                     reconcile_manifest_from_disk,
+                                     resumable_done_keys, write_manifest_part,
+                                     write_partition)
 from quantlib.features.groups.market_context import INDICES as MARKET_INDICES
 from quantlib.universe import is_etf_like
 
@@ -491,19 +479,20 @@ def rank_by_dollar_volume(
     return sorted(symbols, key=lambda symbol: scores[symbol], reverse=True)
 
 
+def fetched_tiers(config: BackfillConfig) -> tuple[str, ...]:
+    """The tiers this run will actually fetch (so the reconcile can skip the rest).
+
+    bars are ALWAYS fetched (they are the dollar-volume ranking substrate); trades/quotes are fetched only
+    when their ``top_*`` budget is positive (``ranked[:0]`` is an empty fetch). A quotes-only widen/deepen
+    job (``--top-trades 0``) therefore skips the trades reconcile entirely. Preserves ``TIERS`` order."""
+    positive = {"trades": config.top_trades > 0, "quotes": config.top_quotes > 0}
+    return tuple(
+        tier for tier in TIERS if tier == "bars" or positive[tier]
+    )
+
+
 def run(config: BackfillConfig) -> None:
     os.makedirs(os.path.join(config.store, "raw"), exist_ok=True)
-
-    # Reconcile FIRST: an OOM/crash can lose a worker's unflushed manifest buffer even though its
-    # partitions were already written to disk, so a naive resume re-fetches >100k complete tick units
-    # (observed after two quotes-tier OOMs). Recording the orphaned on-disk partitions into the manifest
-    # makes the resume skip them. Idempotent + cheap relative to fetching, so it runs every time.
-    # ALL tiers, including bars: a broad bars deepfill whose buffer was lost orphaned ~2.77M bars
-    # partitions on disk that the manifest never recorded (observed 2026-06-19) — the manifest is the
-    # coverage source-of-truth (raw-coverage dashboard, resume done_keys), so an un-reconciled bars tape
-    # under-reports breadth by thousands of symbols and lets the resume re-pull data already on disk.
-    for tier in TIERS:
-        reconcile_manifest_from_disk(config.store, tier)
 
     trade_client = trading_client()
 
@@ -552,6 +541,21 @@ def run(config: BackfillConfig) -> None:
         logger.info(
             "FULL mode: %d universe symbols x %d trading days", len(universe), len(days)
         )
+
+    # Reconcile (AFTER the universe is known so it can be scoped): an OOM/crash can lose a worker's
+    # unflushed manifest buffer even though its partitions were already written to disk, so a naive resume
+    # re-fetches >100k complete units (observed after two quotes-tier OOMs). Recording the orphaned on-disk
+    # partitions makes the resume skip them. Scoped two ways so it stays cheap relative to fetching:
+    #   * TIERS — only the tiers this run fetches (``fetched_tiers``): a quotes-only deepen/widen job does
+    #     NOT glob the bars (>20M partitions) + trades manifests it never touches.
+    #   * SYMBOLS — when the run targets an explicit symbol set (WINDOW+symbols / SAMPLE), the resume can
+    #     only re-fetch THOSE symbols, so reconcile only their partition subtrees (``symbol=<S>/date=*``)
+    #     instead of the whole tier. Together these collapse a multi-minute full-tree scan to seconds for a
+    #     targeted backfill. Full-universe FULL/DAILY runs pass symbols=None => unchanged full-tier scan
+    #     (still catches a broad bars deepfill's orphaned buffer, the 2026-06-19 ~2.77M-partition case).
+    reconcile_scope = config.symbols if config.symbols is not None else None
+    for tier in fetched_tiers(config):
+        reconcile_manifest_from_disk(config.store, tier, symbols=reconcile_scope)
 
     logger.info(
         "disk free=%.1fGB, budget=%.2fTB",

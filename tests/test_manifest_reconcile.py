@@ -13,13 +13,9 @@ import datetime as dt
 import polars as pl
 import pytest
 
-from quantlib.data.raw_store import (
-    done_keys,
-    load_manifest,
-    reconcile_manifest_from_disk,
-    write_manifest_part,
-    write_partition,
-)
+from quantlib.data.raw_store import (done_keys, load_manifest,
+                                     reconcile_manifest_from_disk,
+                                     write_manifest_part, write_partition)
 
 DAY = dt.date(2026, 6, 12)
 
@@ -85,3 +81,45 @@ def test_reconcile_reads_real_rows_from_disk(tmp_path: pytest.TempPathFactory) -
     row = manifest.filter(pl.col("symbol") == "SPY").row(0, named=True)
     assert row["rows"] == 3
     assert row["bytes"] > 0
+
+
+def test_reconcile_symbol_scope_records_only_in_scope(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    # A symbol-scoped run (WINDOW+symbols / SAMPLE) can only re-fetch its own symbols, so reconcile must
+    # record THEIR orphans and IGNORE every other symbol's — that scoping is the whole startup-cost win.
+    store = str(tmp_path)
+    write_partition(store, "quotes", "XLK", DAY, _frame())  # in scope
+    write_partition(store, "quotes", "XLE", DAY, _frame())  # in scope
+    write_partition(store, "quotes", "AAPL", DAY, _frame())  # OUT of scope
+    reconciled = reconcile_manifest_from_disk(store, "quotes", symbols=["XLK", "XLE"])
+    assert reconciled == 2
+    done = done_keys(load_manifest(store, "quotes"))
+    assert ("XLK", DAY.isoformat()) in done
+    assert ("XLE", DAY.isoformat()) in done
+    assert ("AAPL", DAY.isoformat()) not in done  # never globbed — out of scope
+
+
+def test_reconcile_symbol_scope_missing_symbol_is_noop(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    # A fresh target with no partitions on disk matches nothing — a cheap no-op, no error.
+    store = str(tmp_path)
+    write_partition(store, "quotes", "AAPL", DAY, _frame())  # out of scope
+    assert reconcile_manifest_from_disk(store, "quotes", symbols=["NEWSYM"]) == 0
+    # The out-of-scope orphan stays unrecorded (the scope did not touch it).
+    assert ("AAPL", DAY.isoformat()) not in done_keys(load_manifest(store, "quotes"))
+
+
+def test_reconcile_symbols_none_scans_full_tier(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    # Regression: the full-universe path (symbols=None) must keep scanning the WHOLE tier (the broad-bars
+    # 2026-06-19 orphan-recovery case depends on it), unchanged from the original behavior.
+    store = str(tmp_path)
+    for symbol in ("AAPL", "NVDA", "MSFT"):
+        write_partition(store, "bars", symbol, DAY, _frame())
+    assert reconcile_manifest_from_disk(store, "bars", symbols=None) == 3
+    done = done_keys(load_manifest(store, "bars"))
+    for symbol in ("AAPL", "NVDA", "MSFT"):
+        assert (symbol, DAY.isoformat()) in done

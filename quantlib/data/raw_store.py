@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import glob
+import itertools
 import logging
 import os
 
@@ -209,7 +210,9 @@ def _parse_partition_path(path: str) -> tuple[str, str] | None:
     return symbol, date_iso
 
 
-def reconcile_manifest_from_disk(store: str, tier: str) -> int:
+def reconcile_manifest_from_disk(
+    store: str, tier: str, symbols: list[str] | None = None
+) -> int:
     """Record any on-disk partition that is MISSING from the manifest, returning the count reconciled.
 
     The manifest buffer flushes only every MANIFEST_FLUSH_EVERY units, so an OOM/crash that kills a worker
@@ -218,13 +221,31 @@ def reconcile_manifest_from_disk(store: str, tier: str) -> int:
     re-fetched — wasteful (idempotent, but it can re-pull >100k complete units). This scans the partition
     tree and appends one manifest part for the orphans (rows/bytes read from the parquet on disk), so a
     subsequent resume SKIPS them. Idempotent: a second run finds nothing to reconcile.
+
+    ``symbols`` SCOPES the scan: when a job fetches an explicit symbol set (WINDOW+symbols / SAMPLE mode),
+    the resume can only ever re-fetch THOSE symbols, so orphans of any other symbol are irrelevant to it.
+    Globbing ``symbol=<S>/date=*`` per in-scope symbol — instead of ``symbol=*`` over the whole tier —
+    collapses the scan from the full partition tree (the bars tier alone holds >20M partitions) to just the
+    handful of symbols being fetched, removing a multi-minute startup tax from every targeted backfill. When
+    ``symbols is None`` (the full-universe FULL/DAILY runs) the behavior is unchanged: scan ``symbol=*``.
     """
     manifest = load_manifest(store, tier)
     done = done_keys(manifest)
-    pattern = os.path.join(store, "raw", tier, "symbol=*", "date=*", "data.parquet")
+    tier_root = os.path.join(store, "raw", tier)
+    if symbols is None:
+        patterns = [os.path.join(tier_root, "symbol=*", "date=*", "data.parquet")]
+    else:
+        # One glob per in-scope symbol so the scan touches only those partition subtrees. A symbol with no
+        # partitions on disk simply matches nothing (no error), so a fresh-target set is a cheap no-op.
+        patterns = [
+            os.path.join(tier_root, f"symbol={symbol}", "date=*", "data.parquet")
+            for symbol in symbols
+        ]
     orphans: list[dict] = []
     now = dt.datetime.now(dt.timezone.utc)
-    for path in glob.iglob(pattern):
+    for path in itertools.chain.from_iterable(
+        glob.iglob(pattern) for pattern in patterns
+    ):
         key = _parse_partition_path(path)
         if key is None or key in done:
             continue
@@ -246,8 +267,9 @@ def reconcile_manifest_from_disk(store: str, tier: str) -> int:
         existing_parts = glob.glob(os.path.join(manifest_dir(store, tier), "*.parquet"))
         write_manifest_part(store, tier, orphans, len(existing_parts) + 1)
     logger.info(
-        "tier=%s reconciled %d orphaned on-disk partitions into the manifest",
+        "tier=%s reconciled %d orphaned on-disk partitions into the manifest (scope=%s)",
         tier,
         len(orphans),
+        "full" if symbols is None else f"{len(symbols)} symbols",
     )
     return len(orphans)
