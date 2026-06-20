@@ -49,13 +49,6 @@ class LiquidityRankGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "close", "volume")),
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
     )
-    # Per-session cache of the daily features keyed by (daily-snapshot token, universe-membership witness).
-    # Both the daily snapshot and the universe pin are fixed for the whole trading day, so the trailing-20d
-    # ADV and its cross-sectional rank are identical every minute — compute once, broadcast each minute (the
-    # recompute-every-minute over the full daily history + the per-day cross-sectional rank was the cost).
-    # The universe enters the key because the rank DENOMINATOR depends on it (unlike daily_beta/overnight_beta,
-    # which have no universe input) — a changed membership must invalidate, never serve a stale rank.
-    _daily_cache: tuple[tuple[object, ...], pl.DataFrame] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         return [
@@ -83,17 +76,14 @@ class LiquidityRankGroup(FeatureGroup):
         computed once, not per minute."""
         source = ctx.frame("daily")
         universe = ctx.frames["universe"] if "universe" in ctx.frames else None
+        # The rank DENOMINATOR depends on the universe membership, so the cache key pairs the daily-snapshot
+        # token with a universe witness — a changed membership re-keys and recomputes (never a stale rank).
         universe_witness: tuple[object, ...] = (
             (id(universe), universe.height) if universe is not None else (None, 0)
         )
         token = (*daily_snapshot_token(source), *universe_witness)
-        cached = self._daily_cache
-        if cached is not None and cached[0] == token:
-            return cached[1]
         members = universe.select("symbol").unique() if universe is not None else None
-        result = self._compute_daily_features(source, members)
-        self._daily_cache = (token, result)
-        return result
+        return self.session_cache.get(token, lambda: self._compute_daily_features(source, members))
 
     def _compute_daily_features(self, source: pl.DataFrame, members: pl.DataFrame | None) -> pl.DataFrame:
         """The actual per-(symbol, date) daily feature computation (the cached body)."""

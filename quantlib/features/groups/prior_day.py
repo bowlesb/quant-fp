@@ -18,6 +18,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
 )
 from quantlib.features.registry import register
 
@@ -34,7 +35,6 @@ class PriorDayGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "open", "high", "low", "close")),
         InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),
     )
-    _daily_cache: tuple[int, pl.DataFrame] | None = None  # cached prior-day levels (fixed all day)
 
     def declare(self) -> list[FeatureSpec]:
         specs = [
@@ -62,9 +62,11 @@ class PriorDayGroup(FeatureGroup):
         snapshot, so cache them on its identity (constant all day); the close-relative distances are
         applied per minute in compute()."""
         source = ctx.frame("daily")
-        cached = self._daily_cache
-        if cached is not None and cached[0] == id(source):
-            return cached[1]
+        return self.session_cache.get(
+            daily_snapshot_token(source), lambda: self._compute_daily_levels(source)
+        )
+
+    def _compute_daily_levels(self, source: pl.DataFrame) -> pl.DataFrame:
         daily = source.select(["symbol", "date", "open", "high", "low", "close"]).sort(["symbol", "date"])
         prev_high = pl.col("high").shift(1).over("symbol")
         prev_low = pl.col("low").shift(1).over("symbol")
@@ -85,9 +87,7 @@ class PriorDayGroup(FeatureGroup):
             ]
         )
         level_cols = ["_gap_open", "_prev_high", "_prev_low", "_prev_close", *[f"_{p}" for p in PIVOTS]]
-        result = daily.select(["symbol", "date", *level_cols])
-        self._daily_cache = (id(source), result)
-        return result
+        return daily.select(["symbol", "date", *level_cols])
 
     def exprs(self) -> list[pl.Expr]:
         """The close-relative feature expressions over the joined prior-day level columns (post daily

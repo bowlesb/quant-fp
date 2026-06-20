@@ -15,6 +15,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
 )
 from quantlib.features.registry import register
 
@@ -36,7 +37,6 @@ class MultiDayReturnGroup(FeatureGroup):
     # Per-session cache of the daily features keyed by the daily-snapshot object id. The snapshot is fixed
     # for the whole trading day, so its derived daily features are identical every minute — compute once,
     # broadcast each minute (this recompute-every-minute over the full daily history was the group's cost).
-    _daily_cache: tuple[int, pl.DataFrame, list[str]] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
@@ -80,9 +80,17 @@ class MultiDayReturnGroup(FeatureGroup):
         compute() and compute_latest() — the SAME code; only the minute broadcast differs. Cached on the
         daily-snapshot identity so the (identical-all-day) daily features are computed once, not per minute."""
         source = ctx.frame("daily")
-        cached = self._daily_cache
-        if cached is not None and cached[0] == id(source):
-            return cached[1], cached[2]
+        names = (
+            [f"daily_return_{w}d" for w in DAY_WINDOWS]
+            + [f"daily_vol_{w}d" for w in VOL_DAYS]
+            + [f"dist_from_{w}d_high" for w in HIGH_DAYS]
+        )
+        result = self.session_cache.get(
+            daily_snapshot_token(source), lambda: self._compute_daily(source, names)
+        )
+        return result, names
+
+    def _compute_daily(self, source: pl.DataFrame, names: list[str]) -> pl.DataFrame:
         daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
         daily = daily.with_columns((pl.col("_asof") / pl.col("_asof").shift(1).over("symbol") - 1.0).alias("_dret"))
@@ -93,14 +101,7 @@ class MultiDayReturnGroup(FeatureGroup):
             exprs.append(pl.col("_dret").rolling_std(window_size=w).over("symbol").cast(pl.Float64).alias(f"daily_vol_{w}d"))
         for w in HIGH_DAYS:
             exprs.append((pl.col("_asof") / pl.col("_asof").rolling_max(window_size=w).over("symbol") - 1.0).cast(pl.Float64).alias(f"dist_from_{w}d_high"))
-        names = (
-            [f"daily_return_{w}d" for w in DAY_WINDOWS]
-            + [f"daily_vol_{w}d" for w in VOL_DAYS]
-            + [f"dist_from_{w}d_high" for w in HIGH_DAYS]
-        )
-        result = daily.with_columns(exprs).select(["symbol", "date", *names])
-        self._daily_cache = (id(source), result, names)
-        return result, names
+        return daily.with_columns(exprs).select(["symbol", "date", *names])
 
     def _broadcast(self, minutes: pl.DataFrame, daily: pl.DataFrame, names: list[str]) -> pl.DataFrame:
         minutes = minutes.with_columns(pl.col("minute").dt.date().alias("date"))

@@ -16,6 +16,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
 )
 from quantlib.features.registry import register
 
@@ -34,7 +35,6 @@ class MultiDayVwapGroup(FeatureGroup):
     )
     # Daily features are identical every minute (the snapshot is fixed all day) — cache them on the
     # snapshot identity so they are computed once, not re-derived over the full daily history per minute.
-    _daily_cache: tuple[int, pl.DataFrame, list[str]] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
@@ -52,9 +52,13 @@ class MultiDayVwapGroup(FeatureGroup):
     def _daily(self, ctx: BatchContext) -> tuple[pl.DataFrame, list[str]]:
         """Per-(symbol, date) daily VWAP-distance features, cached on the daily-snapshot identity."""
         source = ctx.frame("daily")
-        cached = self._daily_cache
-        if cached is not None and cached[0] == id(source):
-            return cached[1], cached[2]
+        names = [spec.name for spec in self.declare()]
+        result = self.session_cache.get(
+            daily_snapshot_token(source), lambda: self._compute_daily(source, names)
+        )
+        return result, names
+
+    def _compute_daily(self, source: pl.DataFrame, names: list[str]) -> pl.DataFrame:
         daily = source.select(["symbol", "date", "close", "volume", "vwap"]).sort(["symbol", "date"])
         # shift by 1 so the rolling windows end at the PRIOR completed day (never today's incomplete bar)
         daily = daily.with_columns(
@@ -71,10 +75,7 @@ class MultiDayVwapGroup(FeatureGroup):
             vwap_n = sum_pv / sum_vol
             exprs.append((pl.col("_pc") / vwap_n - 1.0).cast(pl.Float64).alias(f"dist_from_vwap_{days}d"))
             exprs.append((pl.col("_pc") > vwap_n).cast(pl.Float64).alias(f"above_vwap_{days}d"))
-        names = [spec.name for spec in self.declare()]
-        result = daily.with_columns(exprs).select(["symbol", "date", *names])
-        self._daily_cache = (id(source), result, names)
-        return result, names
+        return daily.with_columns(exprs).select(["symbol", "date", *names])
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         daily, names = self._daily(ctx)
