@@ -59,14 +59,16 @@ BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
 # gappy sweep cleared all three, but the REAL-DATA A/B reconciliation showed market_beta breaches (the synthetic
 # had no SPY regressor so its corr-denom was never exercised) while distribution/volatility stayed clean.
 INCREMENTAL_UNSAFE = {
-    "volume",
-    "return_dynamics",
-    "volume_leads_price",
+    # return_dynamics + volume_leads_price were UNGATED by P2 (#283): the Neumaier compensated running sum
+    # closes their corr-denom straddle (engine-vs-batch CLEAN, 0/295 adversarial; guarded by
+    # test_gappy_denom_group_now_clean_after_p2_neumaier), so they now ride the incremental path.
+    "volume",  # batch-vs-canonical std FORMULA gap (drift-independent — Neumaier does NOT close it; verified it
+    # still breaches at intermediate volume variance v=5e6*(1+N(0,1e-5)), rel~15). Needs the centered-std batch fix.
     "price_volume",
     "market_beta",
-    # residual_analysis (Lever-2 migration): the OLS residual SSR is a difference of large near-equal centered
-    # power sums on a near-perfect intraday fit (the same cancellation as price_r2), so the incremental running
-    # sums round past the parity-breach ratio. Stays on the batch fresh-sum path until Lever-1's centering lands.
+    # residual_analysis: the OLS residual SSR is a difference of large near-equal centered power sums on a
+    # near-perfect intraday fit (the same cancellation as price_r2), so the incremental running sums round past
+    # the parity-breach ratio. Stays on the batch fresh-sum path until the centered-power-sum kernel lands.
     "residual_analysis",
 }
 # Genuinely safe sum-ratio / time-axis-OLS groups that ride the incremental fast path. trend_quality and
