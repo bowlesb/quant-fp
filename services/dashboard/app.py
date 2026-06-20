@@ -36,16 +36,14 @@ app = FastAPI(title="Quant Coverage Grid")
 
 @app.get("/api/store-grid/matrix")
 def store_grid_matrix() -> Response:
-    """The ALWAYS-WARM ticker×date coverage matrix — the grid's data feed. DATE rows (newest first, ~18 months
-    back) × TICKER columns (the captured universe, default-sorted most-covered first); each cell a coverage
-    byte (0..255 = proportion of the feature store present for that ticker that date) plus a binary trust bit
-    (1 = every present group fully-trusted).
+    """The ALWAYS-WARM date × feature-group coverage matrix — the grid's data feed. DATE rows (newest first,
+    ~18 months back) × GROUP columns (the ~63 registry feature-groups, trusted-first); each cell a coverage
+    byte (0..255 = fraction of that date's captured tickers that have this group) and the per-column trust bit.
 
     Served straight from the worker's precomputed MongoDB document, ALREADY gzip-compressed — the bytes are
-    passed through with ``Content-Encoding: gzip`` (a dense ~2.8M-cell matrix is multi-MB raw JSON, a few
-    hundred KB gzipped), so there is no build and no recompress on this request. On the genuine first-ever boot
-    (worker has not written yet) or unreachable Mongo, returns 503 with a small ``booting`` JSON the UI shows
-    as a brief one-time loading state — NOT a recurring "warming" placeholder.
+    passed through with ``Content-Encoding: gzip`` (no build, no recompress on the request path). On the genuine
+    first-ever boot (worker has not written yet) or unreachable Mongo, returns 503 with a small ``booting`` JSON
+    the UI shows as a brief one-time loading state — NOT a recurring "warming" placeholder.
     """
     blob = read_grid_gzip()
     if blob is None:
@@ -63,20 +61,19 @@ def store_grid_matrix() -> Response:
 @app.get("/api/store-grid/meta")
 def store_grid_meta_json() -> JSONResponse:
     """The small matrix meta header for the UI's "as of HH:MM:SS" staleness + dims — generated_at, anchor,
-    n_dates/n_tickers/n_groups, gzip size, build seconds. ``booting`` until the worker's first write lands.
-    """
+    n_dates/n_groups, gzip size, build seconds. ``booting`` until the worker's first write lands."""
     meta = read_grid_meta()
     if meta is None:
         return JSONResponse({"booting": True}, status_code=503)
     return JSONResponse(meta)
 
 
-@app.get("/api/store-grid/ticker/{symbol}")
-def store_grid_ticker_drill(symbol: str) -> JSONResponse:
-    """Drill for one TICKER column: its per-(date × group) presence + per-group binary trust — what a cell
-    click opens. Served from the worker's pre-warmed document for the most-covered tickers; an un-warmed ticker
-    falls back to a cheap one-ticker live build."""
-    return JSONResponse(read_grid_drill(symbol))
+@app.get("/api/store-grid/cell")
+def store_grid_cell_drill(group: str, date: str) -> JSONResponse:
+    """Drill for one (date × group) CELL: the per-TICKER breakdown — which tickers have that group's features
+    on that date (ranked, paginated), plus the date's captured-universe size + coverage %. Served from the
+    worker's pre-warmed cell doc; a cold/unreachable cache returns an empty-but-valid drill."""
+    return JSONResponse(read_grid_drill(group, date))
 
 
 @app.get("/healthz")

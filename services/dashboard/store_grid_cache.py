@@ -1,4 +1,4 @@
-"""Always-warm MongoDB cache + background WORKER for the ticker×date coverage matrix.
+"""Always-warm MongoDB cache + background WORKER for the date × feature-group coverage matrix.
 
 The matrix build (``store_grid.build_store_grid``) is a full-store pass (~3-4min: every in-window partition
 pays one bounded symbol read, dominated by the deep calendar groups) — far too slow for a request, but fine
@@ -6,16 +6,16 @@ on a permanent background loop that always serves the last-good document. This m
 side:
 
   * WORKER (``run_forever``) — the ``store-grid-worker`` container's entrypoint. Build the matrix once on boot,
-    write it to Mongo, then rebuild every ``STORE_GRID_INTERVAL_SECONDS`` (default 10 MIN) forever. Each loop
-    OVERWRITES the cache document, so the cache is last-good-forever: a stopped/slow worker keeps serving the
-    last good document (Mongo has no TTL on these docs — they persist until the next successful build replaces
-    them). The ONLY time a reader sees no data is the genuine first-ever boot before the first build lands.
+    write it + every populated cell's per-ticker drill to Mongo, then rebuild every ``STORE_GRID_INTERVAL_SECONDS``
+    (default 10 MIN) forever. Each loop OVERWRITES the cache documents, so the cache is last-good-forever: a
+    stopped/slow worker keeps serving the last good documents (no TTL — they persist until the next build
+    replaces them). The ONLY time a reader sees no data is the genuine first-ever boot before the first build.
 
   * READ side (``read_grid_gzip`` / ``read_drill`` / ``read_meta``) — the dashboard routes. A single indexed
-    Mongo lookup. The grid is stored gzip-compressed (a dense ~2.8M-cell matrix is multi-MB as raw JSON; gzip
-    takes it to a few hundred KB) as binary in the document, and the matrix route serves those exact bytes with
-    ``Content-Encoding: gzip`` — no decompress/recompress on the request path. ``read_meta`` returns the small
-    generated-at / dims header so the UI can show "as of HH:MM:SS" staleness.
+    Mongo lookup. The grid (392×63 ≈ 25k cells) is stored gzip-compressed as binary in one document, and the
+    matrix route serves those exact bytes with ``Content-Encoding: gzip`` — no decompress/recompress on the
+    request path. ``read_drill`` serves one (group, date) cell's per-ticker breakdown from its own pre-warmed
+    doc. ``read_meta`` returns the small generated-at / dims header for the "as of HH:MM:SS" staleness line.
 
 MongoDB is a dedicated ``mongo`` compose service (NOT the feature pipeline's store): the worker WRITES the
 precomputed grid there and the dashboard READS it, so a page refresh is one indexed document fetch and the
@@ -36,8 +36,8 @@ from pymongo.errors import PyMongoError
 from store_grid import (
     GRID_LOOKBACK_DAYS,
     STORE_ROOT,
+    build_cell_drill,
     build_store_grid,
-    build_ticker_drill,
     gather_window,
 )
 
@@ -48,22 +48,23 @@ GRID_MONGO_URL = os.environ.get("STORE_GRID_MONGO_URL", "mongodb://quant-mongo:2
 GRID_DB_NAME = os.environ.get("STORE_GRID_MONGO_DB", "dashboard")
 
 # Collections. A schema tag in the doc ``_id`` / collection names lets a future payload-shape change roll
-# cleanly past a stale document. The grid is one doc (_id="matrix"); meta one doc (_id="meta"); drills one doc
-# per symbol (_id=<SYMBOL>).
+# cleanly past a stale document. The grid is one doc (_id="matrix"); meta one doc (_id="meta"); each (date ×
+# group) cell drill is one doc keyed "group|date" (the per-ticker breakdown for that cell).
 GRID_COLLECTION = "store_grid_matrix"
-DRILL_COLLECTION = "store_grid_drill"
+DRILL_COLLECTION = "store_grid_drill_v2"
 META_COLLECTION = "store_grid_meta"
 GRID_DOC_ID = "matrix"
 META_DOC_ID = "meta"
+
+
+def _drill_id(group: str, date: str) -> str:
+    return f"{group}|{date}"
+
 
 # Worker loop cadence: the gap to WAIT AFTER each build before the next one. Ben's spec is a 10-MINUTE refresh.
 # The store/trust data changes slowly (capture per-session, trust per-sweep), so 10 min is plenty fresh; the
 # wait is AFTER the build so a long (~3-4min) build never piles up — the worker is always building or sleeping.
 INTERVAL_SECONDS = int(os.environ.get("STORE_GRID_INTERVAL_SECONDS", "600"))
-
-# Drills are lazy (per ticker, on a column click), but the worker pre-warms the most-covered N so the common
-# clicks are instant; an un-warmed ticker falls back to a live build on the route (one ticker is cheap).
-DRILL_PREWARM_TOP_N = int(os.environ.get("STORE_GRID_DRILL_PREWARM", "100"))
 
 # Short timeouts so the READ path never hangs a request when Mongo is unreachable — it fails fast and the route
 # reports a booting state. The worker uses the same client; a write failure raises and the loop logs + retries.
@@ -83,14 +84,13 @@ def _client(url: str = GRID_MONGO_URL) -> MongoClient:
 def write_grid(
     root: str = STORE_ROOT,
     lookback_days: int = GRID_LOOKBACK_DAYS,
-    drill_prewarm: int = DRILL_PREWARM_TOP_N,
     url: str = GRID_MONGO_URL,
 ) -> dict[str, object]:
-    """Build the matrix + pre-warm the top-N ticker drills and UPSERT each into Mongo (the grid + drills stored
-    gzip-compressed as binary). Gathers the store ONCE (``gather_window``) and reuses it for the matrix AND
-    every drill, so pre-warming N drills costs no extra store I/O. Returns a small summary for the worker to
-    log. Lets Mongo / build errors RAISE so a failed loop is loud in the worker log rather than silently
-    writing nothing."""
+    """Build the matrix + pre-warm EVERY populated (date × group) cell's per-ticker drill and UPSERT each into
+    Mongo (grid + drills stored gzip-compressed as binary). Gathers the store ONCE (``gather_window``) and
+    reuses it for the matrix AND every drill, so the drills cost no extra store I/O — they are pure in-memory
+    lookups over the gathered window. Returns a small summary for the worker to log. Lets Mongo / build errors
+    RAISE so a failed loop is loud in the worker log rather than silently writing nothing."""
     client = _client(url)
     database = client[GRID_DB_NAME]
     started = time.monotonic()
@@ -106,30 +106,38 @@ def write_grid(
         upsert=True,
     )
 
-    tickers = list(grid["tickers"])  # type: ignore[arg-type]
-    prewarmed = 0
+    # Pre-warm a drill doc for every POPULATED (group, date) cell — the populated cells are exactly where the
+    # matrix shows a non-zero coverage byte, so a click always hits a warm doc. Each is a tiny ticker list; a
+    # fresh DRILL_COLLECTION write per loop means stale cells naturally drop out as the window slides.
+    drills_written = 0
     drill_collection = database[DRILL_COLLECTION]
-    for symbol in tickers[: max(0, drill_prewarm)]:
-        drill = build_ticker_drill(str(symbol), root, lookback_days=lookback_days, window_data=window)
-        drill_collection.replace_one(
-            {"_id": str(symbol)},
-            {"_id": str(symbol), "gzip": gzip.compress(json.dumps(drill).encode("utf-8"), compresslevel=6)},
-            upsert=True,
-        )
-        prewarmed += 1
+    if window is not None:
+        for group, by_date in window.group_symbols.items():
+            for date_iso in by_date:
+                drill = build_cell_drill(
+                    group, date_iso, root, lookback_days=lookback_days, window_data=window
+                )
+                drill_collection.replace_one(
+                    {"_id": _drill_id(group, date_iso)},
+                    {
+                        "_id": _drill_id(group, date_iso),
+                        "gzip": gzip.compress(json.dumps(drill).encode("utf-8"), compresslevel=6),
+                    },
+                    upsert=True,
+                )
+                drills_written += 1
 
     summary = {
         "generated_at": grid["generated_at"],
         "anchor_date": grid["anchor_date"],
         "lookback_days": grid["lookback_days"],
         "n_dates": grid["summary"]["n_dates"],  # type: ignore[index]
-        "n_tickers": grid["summary"]["n_tickers"],  # type: ignore[index]
         "n_groups": grid["summary"]["n_groups"],  # type: ignore[index]
         "n_trusted_groups": grid["summary"]["n_trusted_groups"],  # type: ignore[index]
         "mean_coverage_pct": grid["summary"]["mean_coverage_pct"],  # type: ignore[index]
         "raw_bytes": len(raw),
         "gzip_bytes": len(blob),
-        "drills_prewarmed": prewarmed,
+        "drills_written": drills_written,
         "build_seconds": round(time.monotonic() - started, 1),
     }
     database[META_COLLECTION].replace_one({"_id": META_DOC_ID}, {"_id": META_DOC_ID, **summary}, upsert=True)
@@ -166,18 +174,30 @@ def read_meta(url: str = GRID_MONGO_URL) -> dict[str, object] | None:
     return doc
 
 
-def read_drill(symbol: str, root: str = STORE_ROOT, url: str = GRID_MONGO_URL) -> dict[str, object]:
-    """One ticker's per-(date×group) presence drill. Served from the pre-warmed document when available; an
-    un-warmed ticker (outside the top-N) falls back to a live build — a single ticker is cheap (~1s)."""
-    symbol = symbol.upper()
+def read_drill(
+    group: str, date: str, root: str = STORE_ROOT, url: str = GRID_MONGO_URL
+) -> dict[str, object]:
+    """One (date × group) CELL's per-ticker drill. Served from the pre-warmed document (every populated cell is
+    warmed each loop). On a cold/unreachable cache or an un-warmed (empty) cell, returns an empty-but-valid
+    drill rather than paying the ~3-4min full live gather on the request path."""
     try:
         client = _client(url)
-        doc = client[GRID_DB_NAME][DRILL_COLLECTION].find_one({"_id": symbol})
+        doc = client[GRID_DB_NAME][DRILL_COLLECTION].find_one({"_id": _drill_id(group, date)})
     except PyMongoError:
         doc = None
     if doc is not None:
         return json.loads(gzip.decompress(bytes(doc["gzip"])))  # type: ignore[no-any-return]
-    return build_ticker_drill(symbol, root)
+    return {
+        "generated_at": None,
+        "group": group,
+        "date": date,
+        "trusted": False,
+        "n_tickers": 0,
+        "universe": 0,
+        "coverage_pct": 0.0,
+        "limit": 0,
+        "tickers": [],
+    }
 
 
 def run_forever(
@@ -195,15 +215,14 @@ def run_forever(
         try:
             summary = write_grid(root=root, url=url)
             logger.info(
-                "store_grid: wrote matrix %sx%s (%s groups, %s trusted) anchor=%s "
-                "gzip=%.0fKB drills=%s in %.1fs",
+                "store_grid: wrote matrix %s dates × %s groups (%s trusted) anchor=%s "
+                "gzip=%.0fKB cell-drills=%s in %.1fs",
                 summary["n_dates"],
-                summary["n_tickers"],
                 summary["n_groups"],
                 summary["n_trusted_groups"],
                 summary["anchor_date"],
                 int(summary["gzip_bytes"]) / 1024,  # type: ignore[call-overload]
-                summary["drills_prewarmed"],
+                summary["drills_written"],
                 summary["build_seconds"],
             )
         except PyMongoError as exc:

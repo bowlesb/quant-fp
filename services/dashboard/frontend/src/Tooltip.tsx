@@ -7,21 +7,22 @@ interface Props {
   trustOverlay: boolean;
 }
 
-// Floating tooltip pinned near the cursor, naming the hovered cell's ticker / date / coverage% / trust. Only
+// Floating tooltip pinned near the cursor, naming the hovered cell's group / date / coverage% / trust. Only
 // shown over a covered cell (coverage byte > 0); empty cells get nothing.
 export function Tooltip({ hover, matrix, trustOverlay }: Props) {
   if (!hover) return null;
   const coverageByte = matrix.coverage[hover.rowIndex]?.[hover.colIndex] ?? 0;
   if (coverageByte <= 0) return null;
-  const trustedBit = matrix.trusted[hover.rowIndex]?.[hover.colIndex] ?? 0;
-  const ticker = matrix.tickers[hover.colIndex];
+  const trustedBit = matrix.group_trusted[hover.colIndex] ?? 0;
+  const group = matrix.groups[hover.colIndex];
   const date = matrix.dates[hover.rowIndex];
+  const universe = matrix.universe[hover.rowIndex] ?? 0;
   const coveragePct = Math.round((coverageByte / 255) * 100);
-  const groupsPresent = Math.round((coverageByte / 255) * matrix.n_groups);
+  const tickersCovered = Math.round((coverageByte / 255) * universe);
 
   // Keep the tooltip on-screen: flip to the left of the cursor near the right edge.
   const margin = 14;
-  const flipLeft = hover.clientX > window.innerWidth - 220;
+  const flipLeft = hover.clientX > window.innerWidth - 240;
   const style: React.CSSProperties = {
     top: hover.clientY + margin,
     left: flipLeft ? undefined : hover.clientX + margin,
@@ -30,7 +31,7 @@ export function Tooltip({ hover, matrix, trustOverlay }: Props) {
 
   return (
     <div className="tooltip" style={style}>
-      <div className="tooltip-ticker">{ticker}</div>
+      <div className="tooltip-ticker">{group}</div>
       <div className="tooltip-row">
         <span className="tooltip-label">date</span>
         <span>{date}</span>
@@ -38,15 +39,16 @@ export function Tooltip({ hover, matrix, trustOverlay }: Props) {
       <div className="tooltip-row">
         <span className="tooltip-label">coverage</span>
         <span>
-          {coveragePct}% &middot; {groupsPresent}/{matrix.n_groups} groups
+          {coveragePct}% &middot; {tickersCovered.toLocaleString()}/{universe.toLocaleString()} tickers
         </span>
       </div>
       <div className="tooltip-row">
         <span className="tooltip-label">trust</span>
         <span className={trustedBit ? "trust-yes" : "trust-no"}>
-          {trustedBit ? "all trusted" : "some untrusted"}
+          {trustedBit ? "trusted group" : "untrusted group"}
         </span>
       </div>
+      <div className="tooltip-hint">click for the per-ticker breakdown</div>
       {!trustOverlay && <div className="tooltip-hint">toggle trust overlay to colour by trust</div>}
     </div>
   );
