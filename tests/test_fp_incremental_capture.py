@@ -64,6 +64,10 @@ INCREMENTAL_UNSAFE = {
     "volume_leads_price",
     "price_volume",
     "market_beta",
+    # residual_analysis (Lever-2 migration): the OLS residual SSR is a difference of large near-equal centered
+    # power sums on a near-perfect intraday fit (the same cancellation as price_r2), so the incremental running
+    # sums round past the parity-breach ratio. Stays on the batch fresh-sum path until Lever-1's centering lands.
+    "residual_analysis",
 }
 # Genuinely safe sum-ratio / time-axis-OLS groups that ride the incremental fast path. trend_quality and
 # clean_momentum regress close on a CENTERED TIME axis (x always spreads with the minutes, never collapses on a
