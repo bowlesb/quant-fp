@@ -77,6 +77,23 @@ trusted); otherwise untrusted. No PENDING / DIVERGENT / UNGRADED states on this 
 Rows are **weekdays only** (weekend rows never capture, so dropping them keeps the matrix ~30% tighter; a
 weekday with no data still renders blank — honest, it *was* a trading day).
 
+## Drill-down visual nesting (PR 2 — React UI requirement)
+
+When the user clicks a cell/column and it **expands** to show detail (the per-ticker × per-group drill, or
+any future expansion), it must be **visually unmistakable that the expanded content belongs to the thing that
+was clicked** — the current grid is ambiguous about this and Ben flagged it directly. Every expand/drill, at
+every level, must make the parent→child relationship obvious by combining:
+
+- a **labeled header / tab** on the expanded panel naming its parent and giving the count
+  (e.g. `swing · 2026-06-18 — 412 tickers`, or `AAPL — 63 groups`);
+- **indentation / a contained card** so the child rows visibly sit *inside* the parent;
+- a **distinct background shade** for the expanded region (lighter or darker than the grid) so the boundary
+  is unmistakable;
+- **tighter / slightly smaller child rows** so they read as detail under the summary.
+
+Keep this treatment **consistent across all drill levels**. In React this is a styled expansion panel (header
+chip + indented, shaded, tighter body) — cheap to do well.
+
 ## Deployment
 
 The `store-glimpse-worker` service **replaces the host cron** `ops/collect_store_glimpse.py` (the
