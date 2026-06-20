@@ -440,3 +440,11 @@ path. (REQ-G7.)
   server-side-close (G7).
 
 **Status:** NO build. GATED on Ben's review of this revised design + a re-audit of these revisions.
+
+---
+
+## Navigation
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Strategy execution & state layer*. See also:
+[EXECUTION](EXECUTION.md) · the portability contract it extends
+[STRATEGY_BATTERY_PORTABILITY](STRATEGY_BATTERY_PORTABILITY.md) · the bus it runs on
+[BUS_FEATURE_ACCESS](BUS_FEATURE_ACCESS.md) + [STRATEGY_CONTAINERS](STRATEGY_CONTAINERS.md).

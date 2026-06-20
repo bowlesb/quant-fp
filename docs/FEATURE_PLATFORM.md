@@ -744,3 +744,11 @@ residual return, relative-volume rank.
 
 **M. Multi-day (natural predictors for the slow-horizon labels).** `daily_return_{1,3,5,10}d`,
 overnight gap, multi-day realized vol, distance from N-day high / low, multi-day volume trend.
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Feature Platform*. See also:
+[FEATURE_TAXONOMY](FEATURE_TAXONOMY.md) · [FEATURES](FEATURES.md) · [ADDING_A_FEATURE](ADDING_A_FEATURE.md) ·
+the compute substrate [UNIFIED_STATE_EXECUTION_SPEC](UNIFIED_STATE_EXECUTION_SPEC.md) · the trust it earns
+[TRUST_REDESIGN](TRUST_REDESIGN.md) · the data it runs on [BACKFILL](BACKFILL.md).

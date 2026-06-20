@@ -142,3 +142,11 @@ comes up, the `store-grid-worker` builds the first matrix into it (confirm its l
 the dashboard serves the grid at `/`. The previous Redis-backed `store-glimpse-worker` and the old host cron
 `ops/collect_store_glimpse.py` (the `1-58/3 * * * *` crontab line) are obsolete — remove that crontab line on
 deploy (`crontab -e`); see the cron registry in `docs/OPERATIONS.md`.
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Dashboard & coverage grid*. See also:
+[SCORECARD](SCORECARD.md) · [OBSERVABILITY](OBSERVABILITY.md) · [RAW_TAPE_COVERAGE](RAW_TAPE_COVERAGE.md) ·
+[UNIVERSE_COVERAGE](UNIVERSE_COVERAGE.md) · the data it visualizes [FEATURE_PLATFORM](FEATURE_PLATFORM.md) +
+[TRUST_REDESIGN](TRUST_REDESIGN.md).

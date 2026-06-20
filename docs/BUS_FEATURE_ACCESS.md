@@ -501,3 +501,10 @@ BEFORE the deploy, naming the exact incompatible feature (missing OR version-cha
 | `ops/` deploy script / CI              | run the compat gate (with the EXPECTED-live strategy set, fail-closed) against the candidate fingerprint before relaunching `fc` |
 | `tests/test_bus_feature_access.py` (new) | §4 proof tests 1–12 (incl. **B2** version-bump→RED, **B1** retry+ordering, **B3** fail-closed) |
 | `tests/bench_bus_decode.py` (new)      | §3 throughput benchmark (gates the build)                           |
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Feature-vector bus & decoupling*. See also:
+[STRATEGY_CONTAINERS](STRATEGY_CONTAINERS.md) · [MARKET_DATA_STREAMS](MARKET_DATA_STREAMS.md) · the producers
+[FEATURE_PLATFORM](FEATURE_PLATFORM.md) · the consumers' execution [STRATEGY_EXECUTION_ABSTRACTION](STRATEGY_EXECUTION_ABSTRACTION.md).

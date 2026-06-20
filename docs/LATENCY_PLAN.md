@@ -354,3 +354,11 @@ at the 10k steady-state (§2).
 **Sequencing recommendation:** when latency is re-prioritized, do `residual_analysis`→ReductionGroup FIRST
 (cheapest, biggest single win, and it co-locates with Lever #1's OLS-centering), then `momentum_run`'s two
 halves, each behind its own parity gate. Do NOT batch them into one big-bang change (§4.5).
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Latency & accountability*. See also:
+[`latency_budget.yaml`](latency_budget.yaml) · [PROFILE_SIM](PROFILE_SIM.md) ·
+[SIM_LATENCY_AUDIT](SIM_LATENCY_AUDIT.md) · [INCREMENTAL_READINESS](INCREMENTAL_READINESS.md) ·
+[SCALABILITY](SCALABILITY.md) · the compute it budgets [UNIFIED_STATE_EXECUTION_SPEC](UNIFIED_STATE_EXECUTION_SPEC.md).

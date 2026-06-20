@@ -1,6 +1,7 @@
 # STATE — read this first
 
 ## The plan — read first
+**Whole-system map: [`docs/SYSTEM_DESCRIPTION.md`](docs/SYSTEM_DESCRIPTION.md)** (every subcomponent + links).
 **The team's primary spine is the Feature Platform: `docs/FEATURE_PLATFORM.md`** (vision,
 requirements R1–R19, milestones **FP0–FP4**, anti-gaming rules). **Current milestone: FP0.**
 

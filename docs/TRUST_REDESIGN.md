@@ -127,3 +127,11 @@ after deploy.
 - **No drift/warning bookkeeping.** We don't track trends. A check either holds the threshold or it
   doesn't; failure → un-trust + investigate. Simpler, and the investigation is where judgment lives.
 - **Cross-sectional features** must be validated/checked over the full universe, never a sample.
+
+---
+
+## Related docs
+Part of the [System Description](SYSTEM_DESCRIPTION.md) → *Trust, parity & validation*. See also:
+[PARITY_LIFECYCLE](PARITY_LIFECYCLE.md) · [PARITY_COVERAGE](PARITY_COVERAGE.md) ·
+[PARITY_PLAYBOOK](PARITY_PLAYBOOK.md) · [VALIDATION_LEDGER](VALIDATION_LEDGER.md) · the features it grades
+[FEATURE_PLATFORM](FEATURE_PLATFORM.md) · the parity-true compute [UNIFIED_STATE_EXECUTION_SPEC](UNIFIED_STATE_EXECUTION_SPEC.md).
