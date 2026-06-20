@@ -31,6 +31,11 @@ class ReturnDynamicsGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.MOMENTUM
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
+    # The autocorrelation OLS regressor x is the LAGGED one-minute return. On a gappy window x≈0, so the corr
+    # denominator denom_x = b·Σx²−(Σx)² is a difference of float-noise that incremental's running sum rounds
+    # differently from the batch fresh sum, straddling the defined-guard — incremental emits where batch NULLs.
+    # Same conditioning class as `volume`; route LIVE to the batch fresh-sum recompute.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

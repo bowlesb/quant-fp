@@ -50,6 +50,12 @@ class VolumeLeadsPriceGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.CROSS_SECTIONAL
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),)
+    # Every feature is the corr of the windowed OLS of return (y) on LAGGED share volume (x). On a gappy window
+    # the lagged-volume regressor x≈0, so the corr denominator denom_x = b·Σx²−(Σx)² is a difference of
+    # float-noise; incremental's running sum rounds differently from the batch fresh sum, straddling the
+    # defined-guard — incremental emits where batch NULLs. Same conditioning class as `volume`; route LIVE to
+    # the batch fresh-sum recompute. (The module docstring already notes per-lag corr is not held parity-true.)
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs: list[FeatureSpec] = []

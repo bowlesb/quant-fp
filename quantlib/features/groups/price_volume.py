@@ -30,13 +30,14 @@ class PriceVolumeGroup(ReductionGroup):
     type = FeatureType.PRICE_VOLUME
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "high", "low", "close", "volume")),)
     # pv_correlation is a Pearson corr (cov / √(var_x·var_y)) of one-minute return against RAW share volume.
-    # Its only incremental-vs-batch breach was the near-perfect-fit corr (==±1.0 over a 3-minute window) at the
-    # b==2 corner, where cov/√(var_x·var_y) is noise/noise. The n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT)
-    # emits corr=sign(cov) exactly there — batch==incremental cell-for-cell on smooth/degenerate/n==2 walks
-    # (verified worst pv_correlation absdiff ~7e-15, machine eps). The OBV-slope OLS is well-conditioned (centered
-    # time axis) and this group has NO std-based feature (only sum/mean reductions), so no variance-cancellation
-    # blocker remains. The guard changes the degenerate-cell corr value -> the version bump above.
-    incremental_safe = True
+    # The n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT, #155) closes ONLY the b==2 perfect-fit corner — it does
+    # NOT cover the general gappy-window case: when a sparse symbol skips minutes the in-window volume regressor
+    # x≈0 over the window, so the corr denominator denom_x = b·Σx²−(Σx)² is a difference of float-noise that
+    # incremental's running Σx² rounds differently from the batch fresh sum, straddling the defined-guard at
+    # n>2 cells — incremental emits where batch NULLs. Same conditioning class as `volume`; route LIVE to the
+    # batch fresh-sum recompute. (OBV-slope regresses on a centered time axis and is well-conditioned; it rides
+    # the batch path here with no loss. The shared centered-denom kernel is the queued follow-up to widen this.)
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
