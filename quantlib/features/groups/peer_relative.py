@@ -80,7 +80,13 @@ class PeerRelativeReturnGroup(FeatureGroup):
             frame = lagged(frame, "close", window, f"_lag{window}")
         return frame.with_columns(
             [
-                (pl.col("close") / pl.col(f"_lag{w}") - 1.0).alias(f"_ret_{w}")
+                # is_finite() backstop: a zero/degenerate past close (_lag{w}=0) makes the ratio ±Inf —
+                # a mathematically-undefined div-by-zero -> NULL identically on both paths (no Inf-poisoned
+                # peer demean), never a silent value. Identical expression in stream and backfill.
+                pl.when((pl.col("close") / pl.col(f"_lag{w}") - 1.0).is_finite())
+                .then(pl.col("close") / pl.col(f"_lag{w}") - 1.0)
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .alias(f"_ret_{w}")
                 for w in PEER_WINDOWS
             ]
         ).select(["symbol", "minute", *[f"_ret_{w}" for w in PEER_WINDOWS]])

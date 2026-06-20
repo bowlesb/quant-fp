@@ -40,7 +40,11 @@ CORR_TOL = 1e-4
 
 
 def _ret() -> pl.Expr:
-    return pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+    # is_finite() backstop: a zero/degenerate prior close makes close/close.shift(1) ±Inf — a
+    # mathematically-undefined div-by-zero. Without the guard a single Inf return poisons the windowed OLS
+    # corr power sums. NULL it identically on both paths (the shared rolling sums drop the null minute).
+    ratio = pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0
+    return pl.when(ratio.is_finite()).then(ratio).otherwise(pl.lit(None, dtype=pl.Float64))
 
 
 @register

@@ -7,6 +7,7 @@ tests/test_fp_latest.py.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import polars as pl
@@ -82,3 +83,38 @@ def test_demean_sums_to_zero_within_cluster() -> None:
     out = run_group(REGISTRY.get_group("peer_relative"), _ctx())
     c0 = sum(_row(out, s, 5)["peer_relative_ret_5m"] for s in ("AAA", "BBB", "CCC"))
     assert c0 == pytest.approx(0.0, abs=1e-9)
+
+
+def _ctx_zero_close() -> BatchContext:
+    """A degenerate cluster-0 member (FFF) with a zero close 5 bars back: the 5m ratio close/_lag5
+    would otherwise be ±Inf and poison the cluster demean. Both members map to cluster 0."""
+    paths = {
+        "AAA": [100, 100, 100, 100, 100, 102.0],
+        "FFF": [0.0, 100, 100, 100, 100, 101.0],  # zero close at the _lag5 source -> ratio ±Inf without guard
+    }
+    rows = []
+    for sym, px in paths.items():
+        for i, price in enumerate(px):
+            rows.append(
+                {"symbol": sym, "minute": BASE + timedelta(minutes=i), "close": float(price)}
+            )
+    minute = pl.DataFrame(rows)
+    reference = pl.DataFrame({"symbol": ["AAA", "FFF"], "cluster_id": [0, 0]}).cast(
+        {"cluster_id": pl.Int32}
+    )
+    return BatchContext(frames={"minute_agg": minute, "reference": reference})
+
+
+def test_zero_past_close_is_null_not_inf() -> None:
+    """A zero past close (div-by-zero) yields NULL, never ±Inf, identically in compute and
+    compute_latest — and so does not Inf-poison the cluster-mean demean of its peers."""
+    group = REGISTRY.get_group("peer_relative")
+    ctx = _ctx_zero_close()
+    out = run_group(group, ctx)
+    fff = _row(out, "FFF", 5)["peer_relative_ret_5m"]
+    aaa = _row(out, "AAA", 5)["peer_relative_ret_5m"]
+    # FFF's own ratio is undefined (div-by-zero) -> NULL, not Inf.
+    assert fff is None
+    # AAA stays finite (its peer-mean demean is not poisoned by an Inf sibling).
+    assert aaa is not None
+    assert math.isfinite(aaa)
