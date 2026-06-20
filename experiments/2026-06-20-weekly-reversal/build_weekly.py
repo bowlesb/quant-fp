@@ -79,85 +79,90 @@ def build() -> None:
     days = list_days()
     print(f"trading days {len(days)} {days[0]}..{days[-1]}", flush=True)
 
-    # VECTORIZED daily reduce across ALL symbols, one day at a time -> a long (symbol, day) frame.
-    frames = []
+    di = {d: k for k, d in enumerate(days)}  # day -> trading-day index
+    # VECTORIZED daily reduce, STREAMED to disk one day at a time (memory-bounded regardless of span — the
+    # accumulate-all-frames-in-RAM version OOMs at multi-year scale). Each day -> one parquet, scanned lazily.
+    reduce_dir = f"{OUT_DIR}/_daily_reduce"
+    os.makedirs(reduce_dir, exist_ok=True)
+    for stale in glob.glob(f"{reduce_dir}/*.parquet"):
+        os.remove(stale)
     for i, day in enumerate(days):
         red = daily_reduce(day)
         if red.height:
-            frames.append(red.with_columns(pl.lit(day).alias("day")))
-        if (i + 1) % 100 == 0:
+            red.with_columns(pl.lit(di[day]).cast(pl.Int32).alias("didx")).write_parquet(
+                f"{reduce_dir}/d{di[day]:05d}.parquet"
+            )
+        if (i + 1) % 200 == 0:
             print(f"  reduced {i+1}/{len(days)} days", flush=True)
-    daily = pl.concat(frames, how="vertical").sort(["symbol", "day"])
-    di = {d: k for k, d in enumerate(days)}  # day -> trading-day index
-    daily = daily.with_columns(pl.col("day").replace_strict(di, return_dtype=pl.Int32).alias("didx"))
+    daily = pl.scan_parquet(f"{reduce_dir}/*.parquet").sort(["symbol", "didx"]).collect()
     print(f"daily frame: {daily.height} (symbol,day) rows, {daily['symbol'].n_unique()} symbols", flush=True)
 
-    # Resident per-symbol arrays for the weekly logic (indexed by trading-day index).
-    close_by: dict[str, dict[int, float]] = {}
-    dvol_by: dict[str, dict[int, float]] = {}
-    entry_by: dict[str, dict[int, float]] = {}
-    for sym, grp in daily.group_by("symbol"):
-        s = sym[0] if isinstance(sym, tuple) else sym
-        idx = grp["didx"].to_list()
-        close_by[s] = dict(zip(idx, grp["close"].to_list()))
-        dvol_by[s] = dict(zip(idx, grp["dvol"].to_list()))
-        entry_by[s] = dict(zip(idx, grp["entry"].to_list()))
+    # Per-symbol gap-safe trailing/forward features via window functions (a row exists per traded day; the
+    # didx alignment below requires a CONTIGUOUS calendar, so reindex each symbol onto the full day grid so a
+    # 5-back / 5-forward shift is exactly one trading week regardless of missing days).
+    grid = pl.DataFrame({"didx": list(range(len(days)))}, schema={"didx": pl.Int32})
+    syms = daily["symbol"].unique().to_list()
+    full = (
+        pl.DataFrame({"symbol": syms}, schema={"symbol": pl.Utf8})
+        .join(grid, how="cross")
+        .join(daily, on=["symbol", "didx"], how="left")
+        .sort(["symbol", "didx"])
+    )
+    full = full.with_columns(
+        pl.col("close").shift(REV_DAYS).over("symbol").alias("c_rev5"),
+        pl.col("dvol").rolling_mean(window_size=VOL_DAYS, min_periods=VOL_DAYS // 2).over("symbol").alias("adv20"),
+        (pl.col("close") / pl.col("close").shift(1).over("symbol")).log().alias("_lr"),
+    )
+    full = full.with_columns(
+        pl.col("_lr").rolling_std(window_size=VOL_DAYS, min_periods=5).over("symbol").alias("vol_20d"),
+        pl.col("entry").shift(-1).over("symbol").alias("entry_mon"),  # next-day tradeable Monday open
+        pl.col("entry").shift(-(1 + REV_DAYS)).over("symbol").alias("entry_exit"),  # exit Friday tradeable open
+        pl.col("close").shift(-(1 + REV_DAYS)).over("symbol").alias("c_fwd_end"),  # for disappeared flag
+    )
+    # Rebalance Fridays = every REV_DAYS-th index from VOL_DAYS up to the last full forward week.
+    rebal = set(range(VOL_DAYS, len(days) - REV_DAYS - 1, REV_DAYS))
+    obs = full.filter(
+        pl.col("didx").is_in(rebal)
+        & pl.col("close").is_not_null()
+        & pl.col("c_rev5").is_not_null()
+        & (pl.col("close") >= MIN_PRICE)
+        & (pl.col("c_rev5") >= MIN_PRICE)
+        & pl.col("adv20").is_not_null()
+    ).with_columns(
+        (pl.col("close") / pl.col("c_rev5") - 1.0).alias("rev_1w"),
+        (pl.col("adv20") + 1.0).log().alias("log_adv"),
+        # POINT-IN-TIME universe rank: dense rank by adv20 WITHIN each rebalance Friday, keep top-N.
+        pl.col("adv20").rank(method="ordinal", descending=True).over("didx").alias("_adv_rank"),
+    ).filter(pl.col("_adv_rank") <= N_SYMBOLS)
+    obs = obs.with_columns(
+        pl.when((pl.col("entry_mon") >= MIN_PRICE) & (pl.col("entry_exit") >= MIN_PRICE))
+        .then(pl.col("entry_exit") / pl.col("entry_mon") - 1.0)
+        .otherwise(None)
+        .alias("y_fwd_1w"),
+        pl.col("c_fwd_end").is_null().cast(pl.Int8).alias("disappeared"),
+        pl.col("didx").replace_strict({k: d for d, k in di.items()}, return_dtype=pl.Utf8).alias("friday"),
+    ).with_columns(pl.col("friday").str.slice(0, 4).cast(pl.Int32).alias("year"))
 
-    rows = []
-    rebal_idx = list(range(VOL_DAYS, len(days) - REV_DAYS - 1, REV_DAYS))
-    for n_done, friday_idx in enumerate(rebal_idx):
-        friday = days[friday_idx]
-        monday_idx, fwd_idx, revstart_idx = friday_idx + 1, friday_idx + 1 + REV_DAYS, friday_idx - REV_DAYS
-        monday, fwd_end = days[monday_idx], days[fwd_idx]
-        window = list(range(friday_idx - VOL_DAYS, friday_idx + 1))
-        # POINT-IN-TIME universe: trailing-20d mean dollar-vol AS-OF this Friday, top-N.
-        cand = []
-        for sym, dv in dvol_by.items():
-            if friday_idx not in close_by[sym] or revstart_idx not in close_by[sym]:
-                continue
-            dvs = [dv[w] for w in window if w in dv]
-            if len(dvs) >= VOL_DAYS // 2:
-                cand.append((sym, float(np.mean(dvs))))
-        cand.sort(key=lambda kv: kv[1], reverse=True)
-        universe = [s for s, _ in cand[:N_SYMBOLS]]
-        et = entry_ts(monday)
-        realized = realized_half_spread_bps(STORE, monday, universe, et)
-        rc_map = dict(zip(realized["symbol"].to_list(), realized["realized_half_spread_bps"].to_list())) if realized.height else {}
-        for sym in universe:
-            cb, db = close_by[sym], dvol_by[sym]
-            c_fri, c_revstart = cb[friday_idx], cb[revstart_idx]
-            if c_fri < MIN_PRICE or c_revstart < MIN_PRICE:
-                continue
-            rev_1w = c_fri / c_revstart - 1.0
-            prior = [cb[w] for w in window if w in cb]
-            if len(prior) < VOL_DAYS // 2:
-                continue
-            rets = np.diff(np.log(prior))
-            vol_20d = float(np.std(rets)) if len(rets) >= 5 else float("nan")
-            log_adv = float(np.log(np.mean([db[w] for w in window if w in db]) + 1.0))
-            entry = entry_by[sym].get(monday_idx)
-            exit_px = entry_by[sym].get(fwd_idx)
-            disappeared = 1 if fwd_idx not in cb else 0
-            y_fwd = None
-            if entry is not None and entry >= MIN_PRICE and exit_px is not None and exit_px >= MIN_PRICE:
-                y_fwd = exit_px / entry - 1.0
-            rows.append(
-                {
-                    "friday": friday,
-                    "year": int(friday[:4]),
-                    "symbol": sym,
-                    "rev_1w": rev_1w,
-                    "vol_20d": vol_20d,
-                    "log_adv": log_adv,
-                    "y_fwd_1w": y_fwd,
-                    "half_spread_bps": rc_map.get(sym),
-                    "disappeared": disappeared,
-                }
-            )
-        if (n_done + 1) % 20 == 0:
-            print(f"  {n_done+1}/{len(rebal_idx)} weeks built ({len(rows)} rows)", flush=True)
-
-    panel = pl.DataFrame(rows, infer_schema_length=None)
+    # Stage-1 realized half-spread at each rebalance Monday for the universe (fetched per rebalance week).
+    idx_to_day = {k: d for d, k in di.items()}
+    hs_rows = []
+    rebal_fridays = sorted(obs["didx"].unique().to_list())
+    for n_done, fri in enumerate(rebal_fridays):
+        monday = idx_to_day[fri + 1]
+        u = obs.filter(pl.col("didx") == fri)["symbol"].to_list()
+        rc = realized_half_spread_bps(STORE, monday, u, entry_ts(monday))
+        if rc.height:
+            hs_rows.append(rc.with_columns(pl.lit(fri).cast(pl.Int32).alias("didx")))
+        if (n_done + 1) % 50 == 0:
+            print(f"  realized-cost {n_done+1}/{len(rebal_fridays)} weeks", flush=True)
+    hs = pl.concat(hs_rows, how="vertical") if hs_rows else pl.DataFrame(
+        schema={"symbol": pl.Utf8, "realized_half_spread_bps": pl.Float64, "didx": pl.Int32}
+    )
+    panel = (
+        obs.join(hs, on=["symbol", "didx"], how="left")
+        .rename({"realized_half_spread_bps": "half_spread_bps"})
+        .select(["friday", "year", "symbol", "rev_1w", "vol_20d", "log_adv", "y_fwd_1w", "half_spread_bps", "disappeared"])
+    )
     out = f"{OUT_DIR}/weekly_panel.parquet"
     panel.write_parquet(out)
     n_rc = int(panel["half_spread_bps"].is_not_null().sum()) if panel.height else 0
