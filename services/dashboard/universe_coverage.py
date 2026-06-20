@@ -38,8 +38,7 @@ import datetime as dt
 import os
 import time
 
-from quantlib.features.seed_universe import KEEP_EXCHANGES
-from quantlib.universe import is_etf_like
+from quantlib.universe import KEEP_EXCHANGES, is_etf_like
 
 STORE_ROOT = os.environ.get("STORE_ROOT", "/store")
 
