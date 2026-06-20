@@ -114,6 +114,42 @@ def _draw_range_window(frame: pl.DataFrame, w: int) -> pl.DataFrame:
     )
 
 
+def _draw_range_latest_window(frame: pl.DataFrame, w: int, latest: object) -> pl.DataFrame:
+    """The total path excursion at the LATEST minute T ONLY — the live-path fast form of ``_draw_range_window``.
+
+    The excursion at T reads only the trailing ``(T-w, T]`` closes (the running cum-max/cum-min are anchored
+    at that window's earliest in-window bar), so there is no need to compute the rolling excursion at every
+    anchor minute and discard all but T: filter to ``(T-w, T]`` and reduce each symbol's window ONCE with the
+    IDENTICAL ``cum_max``/``cum_min`` running-extreme excursion (a per-symbol ``group_by`` agg, NOT a
+    per-anchor ``rolling``). Value-identical to ``_draw_range_window(frame, w).filter(==T)`` by construction —
+    same in-window closes, same window-anchored running extremes, same min/max reduction, same Guard 2 close>0
+    pre-filter and ``_finite`` backstop. Mirrors the blessed sector_beta latest-only pattern (#247)."""
+    col = f"draw_range_{w}m"
+    gathered = (
+        frame.filter(pl.col("close") > 0.0)
+        .filter((pl.col("minute") > latest - pl.duration(minutes=w)) & (pl.col("minute") <= latest))
+        .sort(["symbol", "minute"])
+        .group_by("symbol", maintain_order=True)
+        .agg(
+            (pl.col("close") / pl.col("close").cum_max() - 1.0).min().alias("__maxdd"),
+            (pl.col("close") / pl.col("close").cum_min() - 1.0).max().alias("__maxdu"),
+            pl.len().alias("__n"),
+        )
+        .with_columns(pl.lit(latest).alias("minute"))
+    )
+    warm = pl.col("__n") >= MIN_POINTS
+    drawup_leg = pl.when(warm).then(pl.col("__maxdu")).otherwise(None)
+    drawdown_leg = pl.when(warm).then(-pl.col("__maxdd")).otherwise(None)
+    total = pl.when(warm).then((-pl.col("__maxdd")) + pl.col("__maxdu")).otherwise(None)
+    return gathered.select(
+        "symbol",
+        "minute",
+        _finite(total).cast(pl.Float64).alias(col),
+        _finite(drawup_leg).cast(pl.Float64).alias(f"max_drawup_{w}m"),
+        _finite(drawdown_leg).cast(pl.Float64).alias(f"max_drawdown_{w}m"),
+    )
+
+
 def _finite(expr: pl.Expr) -> pl.Expr:
     """is_finite() backstop: any inf/-inf/nan slipping through becomes NULL identically on both paths."""
     return pl.when(expr.is_finite()).then(expr).otherwise(pl.lit(None, dtype=pl.Float64))
@@ -186,9 +222,19 @@ class DrawRangeGroup(FeatureGroup):
         return out.select(["symbol", "minute", *self.feature_names])
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Window-sliced live path: the SAME ``compute()`` on the trailing window it reads, filtered to T —
-        parity-true by construction (the dropped older minutes cannot affect a window ending at T)."""
-        return self.compute_latest_on_window(ctx, max(WINDOWS) + _WINDOW_SLACK)
+        """Latest-minute live path: reduce each symbol's trailing ``(T-w, T]`` window ONCE per window (a
+        per-symbol ``group_by`` agg, NOT a per-anchor ``rolling``), emitting only T's row. Value-identical to
+        ``compute(...).filter(==T)`` by construction — the excursion at T reads only the trailing-window closes
+        and the running extremes anchor at the window's earliest in-window bar regardless of how far the buffer
+        extends past T. Mirrors the blessed sector_beta latest-only pattern (#247)."""
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
+        if frame.height == 0:
+            return pl.DataFrame(schema=_OUT_SCHEMA)
+        latest = frame["minute"].max()
+        out = frame.filter(pl.col("minute") == latest).select(["symbol", "minute"]).sort("symbol")
+        for w in WINDOWS:
+            out = out.join(_draw_range_latest_window(frame, w, latest), on=["symbol", "minute"], how="left")
+        return out.select(["symbol", "minute", *self.feature_names])
 
     def reduce_buffer_minutes(self) -> int:
         return max(WINDOWS) + _WINDOW_SLACK
