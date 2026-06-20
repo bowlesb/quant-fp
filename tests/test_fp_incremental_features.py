@@ -1,6 +1,7 @@
 """The two LIVE paths agree: IncrementalEngine.step() == per-group compute_latest() (the batch), feature-
 for-feature, across a minute stream. Together with test_fp_latest (batch == backfill) this closes the chain
 backfill == batch == incremental — the same feature from one declaration, three execution paths."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -17,8 +18,16 @@ from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 
+# The deepest declared ReductionGroup window is 180m (momentum/price_returns/trend_quality/volume/...). The
+# incremental==batch parity test MUST stream past it, or the 90/120/180m windows are never fully populated and
+# a deep-window breach (degenerate-cell sign/null flips from running-sum vs fresh-sum rounding) slips through
+# silently. n_min=70 (the legacy default) only ever filled <=70m windows — exactly how the FP_INCREMENTAL
+# deep-window breaches went uncaught. Stream >= 200m so every window, incl 180m, is fully filled and graded.
+DEEPEST_WINDOW_M = 180
+MIN_DEEP_STREAM_M = 200
 
-def _stream(n_sym: int = 8, n_min: int = 70) -> pl.DataFrame:
+
+def _stream(n_sym: int = 8, n_min: int = MIN_DEEP_STREAM_M) -> pl.DataFrame:
     rng = np.random.default_rng(7)
     rows = []
     price = {s: 100.0 + s for s in range(n_sym)}
@@ -28,11 +37,66 @@ def _stream(n_sym: int = 8, n_min: int = 70) -> pl.DataFrame:
             price[s] *= 1.0 + (rng.standard_normal() * 0.002)
             c = price[s]
             rows.append(
-                {"symbol": f"S{s}", "minute": minute, "open": c * 0.999, "high": c * 1.002, "low": c * 0.998,
-                 "close": c, "volume": 1000.0 + rng.random() * 4000, "n_trades": float(rng.integers(1, 200)),
-                 "signed_volume": rng.standard_normal() * 1000, "mean_spread_bps": rng.random() * 5,
-                 "quote_imbalance": rng.standard_normal() * 0.3, "mean_bid_size": rng.random() * 100,
-                 "mean_ask_size": rng.random() * 100}
+                {
+                    "symbol": f"S{s}",
+                    "minute": minute,
+                    "open": c * 0.999,
+                    "high": c * 1.002,
+                    "low": c * 0.998,
+                    "close": c,
+                    "volume": 1000.0 + rng.random() * 4000,
+                    "n_trades": float(rng.integers(1, 200)),
+                    "signed_volume": rng.standard_normal() * 1000,
+                    "mean_spread_bps": rng.random() * 5,
+                    "quote_imbalance": rng.standard_normal() * 0.3,
+                    "mean_bid_size": rng.random() * 100,
+                    "mean_ask_size": rng.random() * 100,
+                }
+            )
+    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+
+
+def _degenerate_stream(n_sym: int = 12, n_min: int = MIN_DEEP_STREAM_M, seed: int = 7) -> pl.DataFrame:
+    """A deep stream engineered to hit the DEGENERATE-cell parity breach class: a third of the symbols are
+    PERFECTLY LINEAR ramps (close-on-time R^2 -> 1, so the OLS SSR is a tiny difference of large near-equal
+    sums) and a third are CONSTANT-FLAT (zero windowed variance, so the moment/variance defined-guards
+    straddle their epsilon at float-noise level); the rest random-walk. At deep windows the incremental
+    running-sum rounds differently from the batch fresh-sum, flipping a defined-guard NULL on/off — the exact
+    null/non-null parity breach the production self-check (and LatencyDrive's real-06-18 equity A/B) flagged.
+    A smooth random walk never produces these degenerate cells, which is why such breaches hid behind the old
+    70m test."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    base_price = {s: 100.0 + s for s in range(n_sym)}
+    walk = dict(base_price)
+    linear_slope = {s: 1e-4 * (s + 1) for s in range(n_sym) if s % 3 == 0}
+    flat = {s for s in range(n_sym) if s % 3 == 1}
+    for mi in range(n_min):
+        minute = BASE + dt.timedelta(minutes=mi)
+        for s in range(n_sym):
+            if s in linear_slope:
+                close = base_price[s] * (1.0 + linear_slope[s] * mi)
+            elif s in flat:
+                close = base_price[s]
+            else:
+                walk[s] *= 1.0 + rng.standard_normal() * 0.002
+                close = walk[s]
+            rows.append(
+                {
+                    "symbol": f"S{s}",
+                    "minute": minute,
+                    "open": close * 0.999,
+                    "high": close * 1.002,
+                    "low": close * 0.998,
+                    "close": close,
+                    "volume": 1000.0 + rng.random() * 4000,
+                    "n_trades": float(rng.integers(1, 200)),
+                    "signed_volume": rng.standard_normal() * 1000,
+                    "mean_spread_bps": rng.random() * 5,
+                    "quote_imbalance": rng.standard_normal() * 0.3,
+                    "mean_bid_size": rng.random() * 100,
+                    "mean_ask_size": rng.random() * 100,
+                }
             )
     return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
 
@@ -54,10 +118,12 @@ def _assert_close(batch: pl.DataFrame, inc: pl.DataFrame, label: str) -> None:
 def test_incremental_step_matches_batch() -> None:
     stream = _stream()
     minutes = sorted(stream["minute"].unique())
+    assert len(minutes) > DEEPEST_WINDOW_M, "stream must exceed the deepest 180m window to exercise it"
     groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
     engine = IncrementalEngine(groups)
 
-    checkpoints = {10, 30, len(minutes) - 1}  # warmup-ish, mid, full-buffer
+    # warmup-ish, mid, a DEEP post-180m minute (the 90/120/180m windows are only filled here), and full-buffer.
+    checkpoints = {10, 30, DEEPEST_WINDOW_M + 10, len(minutes) - 1}
     for ti, minute in enumerate(minutes):
         buffer = stream.filter(pl.col("minute") <= minute)
         inc = engine.step(buffer)
@@ -65,6 +131,112 @@ def test_incremental_step_matches_batch() -> None:
             ctx = BatchContext(frames={"minute_agg": buffer})
             for group in groups:
                 _assert_close(group.compute_latest(ctx), inc[group.name], f"min{ti}:{group.name}")
+
+
+# Groups whose incremental==batch parity BREACHES on degenerate cells at DEEP windows (60/120/180m) under the
+# production self-check semantics (a null in one path that is non-null in the other = a HARD breach). Verified
+# in this test by the degenerate stream below; reproduces LatencyDrive's real-06-18 equity A/B mechanism. This
+# is NOT a pass-list to keep green forever — it is the explicit, tracked KNOWN-BREACHING set the n_min>=200
+# widening now CATCHES (the 70m test never filled these windows, so the breach hid). STEP-3 (Lever-1: the
+# centered-denom / defined-guard fixes, Lead-sequenced) flips each green one at a time; when a group is fixed,
+# DELETE it from this set and the test's anti-vacuity check forces it to stay clean thereafter.
+#
+# NOTE on scope: a SYNTHETIC stream reproduces the degenerate-cell breach CLASS deterministically for the
+# variance/moment defined-guard groups (here: ``distribution``) but does NOT reproduce the full real-data
+# gap structure, so the broader 9-group set LatencyDrive measured on real 06-18 bars (trend_quality /
+# range_expansion / momentum / trade_freq_z / clean_momentum / liquidity / distribution / volatility /
+# momentum_consistency) is only fully confirmable on a real-data A/B. This test guarantees the deep windows
+# are EXERCISED + the breach class is CAUGHT (non-vacuous); the real-data A/B remains the authority on the
+# exact per-group arming list.
+DEEP_WINDOW_KNOWN_BREACHERS: frozenset[str] = frozenset({"distribution"})
+
+_PARITY_ATOL = 1e-6
+_PARITY_RTOL = 1e-6
+_PARITY_BREACH_RATIO = 10.0
+
+
+def _group_parity_breaches(batch_frame: pl.DataFrame, inc_frame: pl.DataFrame | None) -> bool:
+    """Production ``_incremental_parity`` scoped to one group's frame: True iff the worst divergence exceeds
+    the breach ratio (a null/non-null flip is an infinite, hard breach)."""
+    if inc_frame is None:
+        return True
+    cols = [c for c in batch_frame.columns if c not in ("symbol", "minute") and c in inc_frame.columns]
+    joined = batch_frame.select(["symbol", *cols]).join(
+        inc_frame.select(["symbol", *cols]), on="symbol", how="inner", suffix="__inc"
+    )
+    if joined.is_empty():
+        return False
+    for col in cols:
+        a, b = pl.col(col), pl.col(f"{col}__inc")
+        if joined.filter(a.is_null() != b.is_null()).height:
+            return True
+        ratio = joined.select(
+            ((a - b).abs() / (_PARITY_ATOL + _PARITY_RTOL * a.abs())).fill_null(0.0).max()
+        ).item()
+        if ratio is not None and float(ratio) > _PARITY_BREACH_RATIO:
+            return True
+    return False
+
+
+def test_incremental_matches_batch_deep_window_degenerate_cells() -> None:
+    """⭐ The deep-window parity gate (the coverage gap that hid the FP_INCREMENTAL breaches). Streams past the
+    180m deepest window with DEGENERATE cells (perfectly-linear + constant-flat symbols) and replicates the
+    PRODUCTION process_bars split: a SEPARATE incremental engine over the ``incremental_safe=True`` groups and
+    over the ``=False`` groups (no mixed-engine confound), graded with the production self-check semantics over
+    the post-180m-warmup minutes.
+
+    Two guarantees, both required for the test to be non-vacuous:
+      1. Every group NOT in ``DEEP_WINDOW_KNOWN_BREACHERS`` stays parity-clean at deep windows (the real
+         regression guard — a future change that breaks a clean group's deep-window parity FAILS here).
+      2. Every group IN ``DEEP_WINDOW_KNOWN_BREACHERS`` actually DOES breach (proves the widened windows EXERCISE
+         the breach class — if a documented breacher stops breaching it has been FIXED and must be removed from
+         the set, which this assertion forces).
+    """
+    stream = _degenerate_stream()
+    minutes = sorted(stream["minute"].unique())
+    assert len(minutes) > DEEPEST_WINDOW_M, "degenerate stream must exceed the 180m window"
+    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
+    safe = [g for g in groups if g.incremental_safe]
+    unsafe = [g for g in groups if not g.incremental_safe]
+    eng_safe, eng_unsafe = IncrementalEngine(safe), IncrementalEngine(unsafe)
+
+    ever_breached: set[str] = set()
+    graded = 0
+    for ti, minute in enumerate(minutes):
+        buffer = stream.filter(pl.col("minute") <= minute)
+        inc_safe = eng_safe.step(buffer, slice_derive=True)
+        inc_unsafe = eng_unsafe.step(buffer, slice_derive=True)
+        if ti <= DEEPEST_WINDOW_M:  # only grade once every window incl 180m is fully filled
+            continue
+        graded += 1
+        ctx = BatchContext(frames={"minute_agg": buffer})
+        for group in safe:
+            batch = group.compute_latest(ctx)
+            if _group_parity_breaches(batch, inc_safe[group.name]):
+                ever_breached.add(group.name)
+        for group in unsafe:
+            batch = group.compute_latest(ctx)
+            if _group_parity_breaches(batch, inc_unsafe[group.name]):
+                ever_breached.add(group.name)
+
+    assert (
+        graded > 0
+    ), "no post-180m-warmup minutes were graded — the stream did not exceed the deepest window"
+
+    safe_names = {g.name for g in safe}
+    # GUARANTEE 1: no SAFE group outside the documented set may breach at deep windows.
+    unexpected = (ever_breached & safe_names) - DEEP_WINDOW_KNOWN_BREACHERS
+    assert not unexpected, (
+        f"SAFE groups breached incremental==batch at deep windows but are NOT documented breachers: "
+        f"{sorted(unexpected)} — either a regression, or arm-blocking breachers to add to "
+        f"DEEP_WINDOW_KNOWN_BREACHERS (and gate incremental_safe=False) before arming FP_INCREMENTAL."
+    )
+    # GUARANTEE 2: each documented breacher must STILL breach (else it is fixed -> remove it -> non-vacuous).
+    no_longer_breaching = DEEP_WINDOW_KNOWN_BREACHERS - ever_breached
+    assert not no_longer_breaching, (
+        f"{sorted(no_longer_breaching)} no longer breach at deep windows — if a Lever-1 fix landed, REMOVE them "
+        f"from DEEP_WINDOW_KNOWN_BREACHERS so the test holds them clean going forward."
+    )
 
 
 def test_slice_derive_matches_whole_buffer() -> None:
@@ -88,7 +260,9 @@ def test_slice_derive_matches_whole_buffer() -> None:
         for safe_i, col in enumerate(engine.safe_value_cols):
             ref = whole_safe[:, safe_i]
             got = sliced[:, engine.col_index[col]]
-            assert np.allclose(ref, got, rtol=1e-9, atol=1e-9), f"{minute} {col}: slice != whole-buffer derive"
+            assert np.allclose(
+                ref, got, rtol=1e-9, atol=1e-9
+            ), f"{minute} {col}: slice != whole-buffer derive"
 
 
 def _sparse_stream(n_dense: int = 6, n_min: int = 64, gap: int = 10) -> pl.DataFrame:
@@ -105,10 +279,21 @@ def _sparse_stream(n_dense: int = 6, n_min: int = 64, gap: int = 10) -> pl.DataF
         minute = BASE + dt.timedelta(minutes=mi)
         price *= 1.0 + rng.standard_normal() * 0.003
         row = dict(template)
-        row.update({"symbol": "SP", "minute": minute, "open": price * 0.999, "high": price * 1.002,
-                    "low": price * 0.998, "close": price, "volume": 2000.0})
+        row.update(
+            {
+                "symbol": "SP",
+                "minute": minute,
+                "open": price * 0.999,
+                "high": price * 1.002,
+                "low": price * 0.998,
+                "close": price,
+                "volume": 2000.0,
+            }
+        )
         rows.append(row)
-    sparse = pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))).select(base.columns)
+    sparse = (
+        pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))).select(base.columns)
+    )
     return pl.concat([base, sparse]).sort(["symbol", "minute"])
 
 
@@ -124,7 +309,9 @@ def test_slice_derive_sparse_symbol_matches_whole_buffer() -> None:
     groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)]
     eng_slice = IncrementalEngine(groups)
     eng_whole = IncrementalEngine(groups)
-    assert eng_slice.max_lag >= 1  # the sparse gap (10) must exceed max_lag (and the legacy DERIVE_SLICE) to bite
+    assert (
+        eng_slice.max_lag >= 1
+    )  # the sparse gap (10) must exceed max_lag (and the legacy DERIVE_SLICE) to bite
 
     sp_minutes = set(stream.filter(pl.col("symbol") == "SP")["minute"].to_list())
     checked_sparse = 0
@@ -146,7 +333,11 @@ def test_time_origin_rolls_to_keep_ols_x_bounded() -> None:
     be pinned at ``_TIME_ORIGIN_LAG`` and the in-window x must stay small, NOT grow with session age."""
     stream = _stream(n_sym=6, n_min=120)
     minutes = sorted(stream["minute"].unique())
-    groups = [g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup) and g.name == "trend_quality"]
+    groups = [
+        g
+        for g in runnable({"minute_agg": stream})
+        if isinstance(g, ReductionGroup) and g.name == "trend_quality"
+    ]
     engine = IncrementalEngine(groups)
     assert engine.time_ols_cols, "trend_quality declares a time regressor; its OLS cols must be tracked"
 
@@ -156,7 +347,9 @@ def test_time_origin_rolls_to_keep_ols_x_bounded() -> None:
     latest_epoch = int(minutes[-1].timestamp())
     assert engine.ref_epoch is not None
     latest_x = (latest_epoch - engine.ref_epoch) / 60.0
-    assert latest_x == _TIME_ORIGIN_LAG, f"latest minute's x should be pinned at {_TIME_ORIGIN_LAG}, got {latest_x}"
+    assert (
+        latest_x == _TIME_ORIGIN_LAG
+    ), f"latest minute's x should be pinned at {_TIME_ORIGIN_LAG}, got {latest_x}"
 
     # The largest in-window x magnitude must stay bounded by the session's longest window, NOT the session age
     # (120 min). Read the running x/b sums for the longest window and bound the per-bar mean x.
@@ -166,7 +359,9 @@ def test_time_origin_rolls_to_keep_ols_x_bounded() -> None:
     x_col = sums[:, engine.col_index[f"__rd_{ns}_x"]]
     b_col = sums[:, engine.col_index[f"__rd_{ns}_b"]]
     mean_x = x_col[b_col > 0] / b_col[b_col > 0]
-    assert np.all(np.abs(mean_x) <= longest + 1), f"in-window x grew past the longest window ({longest}): {mean_x}"
+    assert np.all(
+        np.abs(mean_x) <= longest + 1
+    ), f"in-window x grew past the longest window ({longest}): {mean_x}"
 
 
 def test_sqrt_features_clip_negative_residue_to_zero_not_nan() -> None:
@@ -180,8 +375,11 @@ def test_sqrt_features_clip_negative_residue_to_zero_not_nan() -> None:
     directly into each group's assemble expressions — the exact code path the clip protects.)"""
     for group_name, agg_cols, feature_cols in (
         ("volatility", {"__mean_hl2_15": -1e-22}, ["parkinson_vol_15m"]),
-        ("distribution", {"__sum_up2_15": -1e-22, "__sum_dn2_15": -1e-22, "__sum_p_15": 5.0},
-         ["upside_vol_15m", "downside_vol_15m"]),
+        (
+            "distribution",
+            {"__sum_up2_15": -1e-22, "__sum_dn2_15": -1e-22, "__sum_p_15": 5.0},
+            ["upside_vol_15m", "downside_vol_15m"],
+        ),
     ):
         group = REGISTRY.get_group(group_name)
         wide = pl.DataFrame({"symbol": ["X"], **{col: [val] for col, val in agg_cols.items()}})
