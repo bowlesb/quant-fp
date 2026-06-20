@@ -133,6 +133,14 @@ FEATURE_GRID_HTML = """<!doctype html>
   .oft .bar .lbl { font-size:9px; color:var(--muted); margin-top:3px; white-space:nowrap; }
   .oft .bar .n { font-size:9px; color:var(--text); font-variant-numeric:tabular-nums; }
   .oft .bar.wknd .col { opacity:0.4; }
+  /* coverage-DROP detector: per-group badge + window-level banner */
+  .dropbadge { display:inline-block; font-size:9px; font-weight:700; padding:1px 5px; border-radius:8px;
+    white-space:nowrap; vertical-align:middle; }
+  .dropbadge.drop { background:#3a1417; color:#ff6b6b; border:1px solid #5a1f24; }
+  .dropbadge.thinning { background:#3a2a10; color:#e0a83b; border:1px solid #5a4118; }
+  .dropalert { margin:0 0 8px; padding:6px 9px; border-radius:6px; font-size:11px; line-height:1.7;
+    background:#1a1410; border:1px solid #5a4118; color:var(--text); }
+  .dropalert.ok { background:#0f1115; border-color:var(--border); color:var(--muted); }
   .verdict { font-weight:600; }
   .verdict.up { color:var(--green); } .verdict.flat { color:var(--amber); } .verdict.down { color:var(--red); }
   /* trust frontier: one stacked bar (trusted | eligible | blocked) + a per-group breakdown table */
@@ -464,12 +472,39 @@ async function toggleTimeline(force){
   for(const g of t.groups){
     const depth = g.backfill_earliest ?
       (g.backfill_earliest+" → "+g.backfill_latest+" ("+g.backfill_span_days+"d)") : "no backfill";
-    body += "<tr><th title='v"+g.version+" · "+g.n_features+"f'>"+g.group+
+    const dr = g.stream_drop || {};
+    let badge = "";
+    if(dr.status==="drop" || dr.status==="thinning"){
+      const pct = Math.round(100*(dr.ratio||0));
+      const tip = "live stream "+dr.recent+" symbols on "+dr.recent_date+" = "+pct+
+        "% of the in-window peak "+dr.baseline+" — "+
+        (dr.status==="drop"?"DROP (severe thinning)":"thinning");
+      badge = " <span class='dropbadge "+dr.status+"' title=\\""+tip+"\\">"+
+        (dr.status==="drop"?"⚠ DROP":"▼ thin")+" "+pct+"%</span>";
+    }
+    body += "<tr><th title='v"+g.version+" · "+g.n_features+"f'>"+g.group+badge+
       "<br><span class='depth'>bf "+depth+" · live horizon "+g.stream_horizon_days+"d</span></th>";
     for(const c of g.days){ body += tlCellHtml(c, g.stream_peak||0, g.backfill_peak||0); }
     body += "</tr>";
   }
   body += "</tbody>";
+
+  const alerts = t.drop_alerts || [];
+  let alertBanner = "";
+  if(alerts.length){
+    const items = alerts.map(a=>{
+      const pct = Math.round(100*(a.ratio||0));
+      return "<span class='dropbadge "+a.status+"' title='recent "+a.recent+
+        " on "+a.recent_date+" vs peak "+a.baseline+"'>"+
+        (a.status==="drop"?"⚠ ":"▼ ")+a.group+" "+pct+"%</span>";
+    }).join(" ");
+    alertBanner = "<div class='dropalert'><b>coverage DROP detector:</b> "+alerts.length+
+      " group(s) with live capture thinned vs their own in-window peak — "+items+"</div>";
+  } else {
+    alertBanner = "<div class='dropalert ok'>coverage DROP detector: no live-stream thinning "+
+      "detected this window.</div>";
+  }
+
   host.innerHTML =
     "<div class='symcov'>"+
     "<span class='closebtn' onclick='toggleTimeline(false)'>✕ close</span>"+
@@ -477,8 +512,10 @@ async function toggleTimeline(force){
       "STREAM, lower = BACKFILL. Cell BRIGHTNESS ∝ that day's distinct-symbol count vs the group's own "+
       "busiest in-window day, so each row reads as a coverage-VOLUME heat sparkline (dim = thin capture, "+
       "bright = full, dark = absent) — thinning/thickening is legible, not just present/absent (hover for "+
-      "counts). Group label shows backfill history DEPTH (earliest→latest span) and live HORIZON (recent "+
+      "counts). A ⚠ DROP / ▼ thin badge flags a group whose RECENT live capture fell vs its own in-window "+
+      "peak. Group label shows backfill history DEPTH (earliest→latest span) and live HORIZON (recent "+
       "weekdays the stream captured unbroken). Anchor "+(t.anchor_date||"—")+", last "+t.days+" days.</div>"+
+    alertBanner+
     "<div class='gridscroll'><table class='tl'>"+head+body+"</table></div></div>";
 }
 document.getElementById("tlbtn").onclick=()=>toggleTimeline(false);

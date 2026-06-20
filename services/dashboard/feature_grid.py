@@ -958,6 +958,70 @@ def _stream_horizon_days(stream_dates: list[str], anchor: dt.date) -> int:
     return horizon
 
 
+# A group whose RECENT live stream capture fell to <= this fraction of its own in-window baseline peak is
+# flagged as THINNING; <= the severe fraction is flagged a hard DROP. Per-group (own scale), so a thin
+# order-flow group and a full-universe bar group are each judged relative to themselves. The motivating case:
+# asset_flags stream peak 10381 (06-15) -> ~2820 (06-16..18) = recent/baseline ~0.27 -> a hard DROP.
+DROP_THINNING_RATIO = 0.6
+DROP_SEVERE_RATIO = 0.4
+# Below this many baseline-peak symbols a group's stream is too small for a ratio to be meaningful (a thin
+# canary order-flow group dipping 24 -> 12 is noise, not a capture regression worth a loud alert).
+DROP_MIN_BASELINE_SYMBOLS = 100
+
+
+def detect_stream_drop(
+    stream_per_date: dict[str, int], timeline_dates: list[str], stream_peak: int
+) -> dict[str, object]:
+    """Flag a group whose RECENT live-stream symbol capture has THINNED versus its own in-window baseline.
+
+    #221 made per-day capture VOLUME visible (cell opacity proportional to count / group peak), but a thinning
+    group still has to be EYEBALLED off the dim cells. This turns that into an explicit verdict: the most-recent
+    day that captured ANY stream symbols (``recent``) is compared to the group's in-window busiest day
+    (``baseline`` = ``stream_peak``). When ``recent / baseline`` falls at/under the thinning (or severe) ratio
+    -- and the baseline is large enough to matter -- the group is flagged so a thinning stream group is
+    SURFACED, not buried in opacity. Per-group/own-scale (never cross-group), source = stream only (backfill is
+    settled). Returns ``status`` (ok / thinning / drop / no_stream), the ``recent`` count + its ``recent_date``,
+    the ``baseline`` peak, and the ``ratio``. Pure read of counts already gathered -- NO extra store I/O.
+    """
+    recent_date: str | None = None
+    recent_n = 0
+    # timeline_dates is most-recent-first; take the freshest day that actually captured stream symbols.
+    for date_iso in timeline_dates:
+        count = stream_per_date.get(date_iso, 0)
+        if count > 0:
+            recent_date = date_iso
+            recent_n = count
+            break
+
+    baseline = stream_peak
+    if recent_date is None or baseline <= 0:
+        return {
+            "status": "no_stream",
+            "recent": 0,
+            "recent_date": None,
+            "baseline": baseline,
+            "ratio": None,
+        }
+
+    ratio = recent_n / baseline
+    if baseline < DROP_MIN_BASELINE_SYMBOLS:
+        status = "ok"
+    elif ratio <= DROP_SEVERE_RATIO:
+        status = "drop"
+    elif ratio <= DROP_THINNING_RATIO:
+        status = "thinning"
+    else:
+        status = "ok"
+
+    return {
+        "status": status,
+        "recent": recent_n,
+        "recent_date": recent_date,
+        "baseline": baseline,
+        "ratio": round(ratio, 3),
+    }
+
+
 def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT_DAYS) -> dict[str, object]:
     """A (group x recent-day x source) PRESENCE grid + per-group DEPTH stats — the time/depth legibility view.
 
@@ -971,6 +1035,9 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
       * Per-group DEPTH: ``backfill_earliest`` + ``backfill_span_days`` (how far back history reaches) and
         ``stream_horizon_days`` (how many recent weekdays the live stream captured unbroken) — history depth
         and live horizon side by side.
+      * Per-group ``stream_drop`` verdict + a window-level ``drop_alerts`` summary (``detect_stream_drop``):
+        a group whose RECENT live capture thinned versus its own in-window peak is flagged loud (drop /
+        thinning), so a thinning stream group is SURFACED, not eyeballed off the dim #221 heat cells.
 
     Read-side only: reuses ``gather_group_store_info`` (the SAME one-pass per-date symbol read the grid pays
     for), so this is no extra store I/O beyond the grid's, and shares nothing's source of truth.
@@ -1003,6 +1070,7 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
     timeline_dates = [(anchor - dt.timedelta(days=offset)).isoformat() for offset in range(span)]
 
     group_rows: list[dict[str, object]] = []
+    drop_verdicts: list[tuple[str, dict[str, object]]] = []
     for group in groups:
         info = infos.get(group)
         if info is None:
@@ -1034,6 +1102,10 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
             (backfill_per_date.get(date_iso, 0) for date_iso in timeline_dates), default=0
         )
 
+        # Coverage-DROP detector: is this group's RECENT live capture thinned vs its own in-window peak?
+        stream_drop = detect_stream_drop(stream_per_date, timeline_dates, stream_peak)
+        drop_verdicts.append((group, stream_drop))
+
         backfill_earliest = backfill_dates[0] if backfill_dates else None
         backfill_latest = backfill_dates[-1] if backfill_dates else None
         backfill_span = (
@@ -1055,9 +1127,26 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
                 "stream_horizon_days": _stream_horizon_days(stream_dates, anchor),
                 "stream_peak": stream_peak,
                 "backfill_peak": backfill_peak,
+                "stream_drop": stream_drop,
                 "days": day_cells,
             }
         )
+
+    # Roll the per-group verdicts up into a window-level summary: the explicit list of groups whose live
+    # stream thinned, severe-first, so a thinning group is the FIRST thing the page can shout — not eyeballed.
+    drop_alerts = [
+        {
+            "group": group,
+            "status": drop["status"],
+            "recent": drop["recent"],
+            "recent_date": drop["recent_date"],
+            "baseline": drop["baseline"],
+            "ratio": drop["ratio"],
+        }
+        for group, drop in drop_verdicts
+        if drop["status"] in ("drop", "thinning")
+    ]
+    drop_alerts.sort(key=lambda alert: (alert["status"] != "drop", alert["ratio"]))
 
     return {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1068,6 +1157,7 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
         # Most-recent first so the freshest day is the leftmost column next to the group label.
         "dates": timeline_dates,
         "groups": sorted(group_rows, key=lambda gr: str(gr["group"])),
+        "drop_alerts": drop_alerts,
     }
 
 

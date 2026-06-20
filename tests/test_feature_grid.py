@@ -367,6 +367,57 @@ def test_build_coverage_timeline_peaks_track_in_window_max(tmp_path: Path, fake_
     assert gx["backfill_peak"] == 2
 
 
+def test_detect_stream_drop_severe_and_thinning() -> None:
+    """detect_stream_drop classifies a group's RECENT live capture vs its own in-window peak.
+    The motivating case: asset_flags peaked ~10381, then recent days run ~2820 (ratio ~0.27) -> hard DROP."""
+    dates = ["2026-06-18", "2026-06-17", "2026-06-16", "2026-06-15"]  # most-recent first
+    # Severe: recent 2820 vs peak 10381 -> ratio 0.27 <= DROP_SEVERE_RATIO -> "drop".
+    severe = {"2026-06-15": 10381, "2026-06-16": 2820, "2026-06-17": 2820, "2026-06-18": 2820}
+    verdict = fg.detect_stream_drop(severe, dates, stream_peak=10381)
+    assert verdict["status"] == "drop"
+    assert verdict["recent"] == 2820 and verdict["recent_date"] == "2026-06-18"
+    assert verdict["baseline"] == 10381
+    assert verdict["ratio"] == round(2820 / 10381, 3)
+
+    # Thinning (not severe): recent 550 vs peak 1000 -> ratio 0.55, between SEVERE(0.4) and THINNING(0.6).
+    mild = {"2026-06-15": 1000, "2026-06-18": 550}
+    assert fg.detect_stream_drop(mild, dates, stream_peak=1000)["status"] == "thinning"
+
+
+def test_detect_stream_drop_ok_and_small_baseline() -> None:
+    dates = ["2026-06-18", "2026-06-17", "2026-06-16"]
+    # Healthy: recent ~ peak -> ok.
+    full = {"2026-06-16": 1000, "2026-06-18": 990}
+    assert fg.detect_stream_drop(full, dates, stream_peak=1000)["status"] == "ok"
+    # Small baseline (a thin canary order-flow group 24 -> 8): below DROP_MIN_BASELINE_SYMBOLS -> never alarmed.
+    canary = {"2026-06-16": 24, "2026-06-18": 8}
+    assert fg.detect_stream_drop(canary, dates, stream_peak=24)["status"] == "ok"
+    # No stream at all -> no_stream verdict, never an alert.
+    assert fg.detect_stream_drop({}, dates, stream_peak=0)["status"] == "no_stream"
+
+
+def test_build_coverage_timeline_drop_alerts(tmp_path: Path, fake_catalog: None) -> None:
+    """A group whose live stream thinned from a large peak surfaces in the window-level drop_alerts list."""
+    root = tmp_path / "store"
+    # groupX: 200-symbol live peak on 06-16, thinned to 40 on the anchor (ratio 0.2 -> hard DROP).
+    _write_partition(root, "groupX", "stream", "2026-06-16", [f"S{i}" for i in range(200)])
+    _write_partition(root, "groupX", "stream", "2026-06-18", [f"S{i}" for i in range(40)])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA"])
+    # groupY: steady 150-symbol live capture -> no alert.
+    _write_partition(root, "groupY", "stream", "2026-06-17", [f"T{i}" for i in range(150)])
+    _write_partition(root, "groupY", "stream", "2026-06-18", [f"T{i}" for i in range(148)])
+
+    view = fg.build_coverage_timeline(str(root), days=10)
+    by_group = {g["group"]: g for g in view["groups"]}
+    assert by_group["groupX"]["stream_drop"]["status"] == "drop"
+    assert by_group["groupY"]["stream_drop"]["status"] == "ok"
+
+    alerts = view["drop_alerts"]
+    assert [a["group"] for a in alerts] == ["groupX"]  # only the thinned group, groupY absent
+    assert alerts[0]["status"] == "drop"
+    assert alerts[0]["recent"] == 40 and alerts[0]["baseline"] == 200
+
+
 def test_build_coverage_timeline_caps_days(tmp_path: Path, fake_catalog: None) -> None:
     root = tmp_path / "store"
     _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA"])
