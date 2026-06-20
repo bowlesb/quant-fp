@@ -131,7 +131,9 @@ def write_grid(
         "generated_at": grid["generated_at"],
         "anchor_date": grid["anchor_date"],
         "lookback_days": grid["lookback_days"],
+        "universe_size": grid["summary"]["universe_size"],  # type: ignore[index]
         "n_dates": grid["summary"]["n_dates"],  # type: ignore[index]
+        "n_columns": grid["summary"]["n_columns"],  # type: ignore[index]
         "n_groups": grid["summary"]["n_groups"],  # type: ignore[index]
         "n_trusted_groups": grid["summary"]["n_trusted_groups"],  # type: ignore[index]
         "mean_coverage_pct": grid["summary"]["mean_coverage_pct"],  # type: ignore[index]

@@ -1,45 +1,55 @@
-# Store grid — date × feature-group coverage matrix (always-warm)
+# Store grid — date × column coverage matrix (always-warm, v3)
 
 The **immediate glimpse into the feature store**: one fast, always-warm grid whose **rows are DATES** (most
-recent at top, ~18 months back) and **columns are the ~63 FEATURE GROUPS** (the registry groups). Each **cell**
-encodes, as darkness, the **fraction of that date's captured tickers that have this feature-group** — an
-all-ticker aggregate per group per date. This fits one screen and is legible (392 × 63 ≈ 25k cells); the
-earlier per-ticker axis (11k columns against a shallow store) read as a near-empty black void and was rejected.
-A binary trust overlay colours whole group columns (a group is trusted-or-not).
+recent at top, ~18 months back) and **columns are the RAW tape layers (bars / trades / quotes) followed by the
+~63 FEATURE GROUPS**. Each **cell** darkens with the **fraction of the full universe that has this column's data
+on that date**. The grid is a **light theme**: WHITE = zero coverage = the page background, so an absent cell
+and a zero-coverage cell look identical. Coverage darkens each cell toward its column's colour — a **trusted**
+feature group → dark BLUE, an **untrusted** group → dark RED, a **raw** layer → dark SLATE — so trust is always
+shown in the colour (there is no toggle).
 
-**This grid IS the dashboard.** It is served at the ROOT `/`; every other dashboard page (status, jobs,
-scorecard, progress, raw/sector/universe coverage, liquidity bands, the old DB-health home) has been removed
-as UI. The matrix is built by a **permanent background worker** that refreshes it into **MongoDB every 10
-minutes**, and the dashboard serves the last-good document — so a refresh is one indexed Mongo fetch and the
-heavy build is never on the request path. The only loading state a reader ever sees is the genuine first-ever
-boot (the API returns `503 {booting}`); there is no recurring "warming".
+**This grid IS the dashboard.** Served at the ROOT `/`; every other dashboard page has been removed as UI. The
+matrix is built by a **permanent background worker** that refreshes it into **MongoDB every 10 minutes**; the
+dashboard serves the last-good document (one indexed Mongo fetch, the heavy build never on the request path).
+The only loading state a reader ever sees is the genuine first-ever boot (`503 {booting}`); no recurring
+"warming".
 
 ## What a cell means
 
 ```
-coverage[group][date] = (# in-universe tickers that have this GROUP on this date)
-                        / (# tickers captured at all that date)
+coverage[column][date] = (# tickers that have this column's data on this date) / UNIVERSE_SIZE
 ```
 
-The denominator is the **captured universe that date** (the union of tickers across all groups on that date),
-so a universe-wide bar group reads ~full and a thin order-flow group reads faint — an honest per-group breadth.
-A far-back date where only the calendar groups backfill shows a couple of full columns and the rest blank.
-Coverage is quantized to a byte (0..255). Store depth is genuinely uneven — only the calendar groups go back
-~18 months, most groups are shallow (recent weeks/months) — so the faint/blank far-back rows are **honest
-sparsity, not a bug**.
+The denominator is a **single fixed number** — the latest session's in-universe ``universe_membership`` count
+(~7.3k), applied identically to every raw layer, every feature group, and every individual feature (one fixed
+reference, surfaced in the legend so it is clear what 100% means). A universe-wide bars layer / bar group reads
+~full; a thin order-flow group reads faint; a far-back date where only the calendar groups backfill shows a
+couple of full columns and the rest white. Coverage is quantized to a byte (0 = none, 255 = the whole universe).
+Far-back dates read fainter against today's larger denominator — honest and intended (we genuinely held a
+smaller fraction of today's universe back then).
 
 **Binary trust** (trusted vs untrusted — nothing else). Trust is a per-FEATURE property
 (`feature_trust.trust_state = 'TRUSTED'`, the binary system of record); a GROUP is trusted iff **all** its
-features are. Since the columns ARE groups, trust colours whole columns — the 6 trusted vs 57 untrusted are
-immediately visible. Columns are ordered **trusted-first** so the trusted groups cluster on the left.
+features are. Trust is shown **in the colour** (trusted → blue, untrusted → red); raw layers are slate. Feature
+groups are ordered **trusted-first**. **Raw layers** (`bars` / `trades` / `quotes`) are added as their own
+columns at the FAR LEFT — the data substrate — with coverage = tickers-with-that-layer-that-date / the same
+fixed universe (read from the raw manifests via `raw_coverage`); they are not trust-graded, hence slate.
+
+**Horizontal group → feature expand.** Clicking an (expandable) feature-group column expands it INLINE into its
+individual feature sub-columns, each its own column at the group's coverage (features in a group share the
+(group, date) partition, so a feature's coverage equals its group's — the expand needs no extra store I/O). The
+value of the expand is the feature INVENTORY per group (legible feature names); collapsible. (Per-feature
+NULL/validity rates — which *would* differ within a group — are a heavier follow-up reading actual values; not
+in scope.)
 
 ## Architecture
 
-* **Builder** — `services/dashboard/store_grid.py`. `gather_window()` does the single store-reading pass
-  (one bounded evenly-sampled symbol-set read per in-window partition, reusing `feature_grid._read_symbols`);
-  `build_store_grid()` rolls that up into the date × group aggregate matrix, `build_cell_drill()` derives one
-  (group, date) cell's per-ticker list — both purely in-memory from the same gather. Read-side only; no store
-  schema/format/fingerprint change.
+* **Builder** — `services/dashboard/store_grid.py`. `universe_size()` reads the fixed denominator (the latest
+  session's in-universe `universe_membership` count). `gather_window()` does the single store-reading pass
+  (one bounded evenly-sampled symbol-set read per in-window partition + the raw-manifest read + the group
+  feature inventory); `build_store_grid()` rolls that up into the date × column matrix against the fixed
+  universe, `build_cell_drill()` derives one (group, date) cell's per-ticker list — all in-memory from the same
+  gather. Read-side only; no store schema/format/fingerprint change.
 * **Worker** — `services/dashboard/store_grid_cache.py`, run as the **`store-grid-worker`** compose service
   (`restart: unless-stopped`, built from the dashboard image, mounts `fp_store_real:/store:ro`, reaches the
   `mongo` service on `quant_default`). A permanent loop: build on boot, write the gzip-compressed matrix doc +
@@ -69,54 +79,48 @@ immediately visible. Columns are ordered **trusted-first** so the trusted groups
   "store_root": "/store",
   "anchor_date": "2026-06-18",
   "lookback_days": 548,
+  "universe_size": 7318,                           // the FIXED full-universe denominator (every cell)
   "n_groups": 63,
   "n_trusted_groups": 6,
   "dates":   ["2026-06-18", "2026-06-17", ...],   // rows, newest first, WEEKDAYS only
-  "groups":  ["calendar", ...],                    // columns, trusted-first then alphabetical
-  "group_trusted": [1, 0, ...],                    // per-column binary trust bit (aligned to groups)
-  "coverage": [[byte, ...], ...],                  // rows ⟂ dates, cols ⟂ groups; 0..255
-  "universe": [n, ...],                            // per-date captured-universe size (the denominator)
-  "group_coverage_pct": [...],                     // per-group mean coverage over present dates
-  "legend": { "coverage_scale": "...", "trust_overlay": "...", "depth_note": "..." },
-  "summary": { "n_dates": ..., "n_groups": ..., "n_trusted_groups": ..., "mean_coverage_pct": ... }
+  "columns": [                                     // raw layers first, then feature groups trusted-first
+    { "key": "bars",     "label": "minute bars", "kind": "raw",   "trusted": false, "features": [] },
+    { "key": "calendar", "label": "calendar",    "kind": "group", "trusted": true,  "features": ["minute_of_day_et", ...] },
+    ...
+  ],
+  "coverage": [[byte, ...], ...],                  // rows ⟂ dates, cols ⟂ columns; 0..255 (vs universe_size)
+  "column_coverage_pct": [...],                    // per-column mean coverage over its present dates
+  "summary": { "n_dates": ..., "n_columns": ..., "n_groups": ..., "n_trusted_groups": ..., "n_raw": ...,
+               "mean_coverage_pct": ..., "universe_size": 7318 }
 }
 ```
 
-Rows are **weekdays only** (weekend rows never capture, so dropping them keeps the matrix ~30% tighter; a
-weekday with no data still renders blank — honest, it *was* a trading day).
-
-## Drill-down visual nesting (Ben's explicit ask)
-
-When the user clicks a cell and it **expands** to show detail (the per-ticker breakdown for that group+date),
-it must be **visually unmistakable that the expanded content belongs to the thing that was clicked**. The drill
-makes the parent→child relationship obvious by combining:
-
-- a **labeled header chip** on the panel naming its parent (group + date + trust) and the count;
-- **indentation / a contained card** so the ticker list visibly sits *inside* the panel;
-- a **distinct background shade** for the nested region so the boundary is unmistakable;
-- **tighter / smaller child chips** (the monospace ticker grid) so they read as detail under the summary.
-
-Implemented in `DrillPanel.tsx`: the header chip names the parent group + a trust pill + the date; a summary
-line gives "N of M captured tickers · X% coverage"; the per-ticker list sits inside a further-indented,
-distinctly-shaded nested card whose own header chip names *its* parent (the group) — the same treatment one
-level down.
+Rows are **weekdays only** (weekend rows never capture; a weekday with no data still renders white — honest, it
+*was* a trading day).
 
 ## React SPA (the whole dashboard)
 
 The grid UI is a Vite + React + TypeScript SPA in `services/dashboard/frontend/`, built to static assets by
 the Dockerfile's `webbuild` (node) stage and served by the dashboard FastAPI app at the **ROOT `/`** (a
-`StaticFiles` mount, `html=True`). The grid IS the dashboard — there is no other page. Components:
+`StaticFiles` mount, `html=True`). The grid IS the dashboard — there is no other page. **Light theme**: WHITE
+background = zero coverage. Components:
 
+- **`theme.ts`** — `cellColor(byte, kind, trusted)` mixes WHITE → the column's dark colour (blue trusted / red
+  untrusted / slate raw) by coverage. There is no trust toggle — trust is always in the colour.
 - **`CanvasHeatmap.tsx`** — a **canvas** renderer (never DOM-per-cell): dates down the rows (newest at top),
-  the ~63 feature-GROUP columns across the top (angled name headers, trusted-first), cell darkness = coverage,
-  consuming `/api/store-grid/matrix` (gzip pass-through). The group columns all fit one screen; the date axis
-  scrolls vertically (row-windowed). Hover → tooltip; click a populated cell → the per-ticker drill; a search
-  highlights a group column.
-- **`App.tsx`** — fetches the matrix + polls `/api/store-grid/meta` for the **"as of HH:MM:SS"** staleness,
-  re-pulling the matrix only when a newer build exists. The binary-trust overlay is a single toggle (trusted
-  green / untrusted grey — no other states). The **only** loading state is the genuine first-ever boot (the
-  API's `503 {booting}`); there is no recurring "warming".
-- **`Tooltip.tsx`** / **`DrillPanel.tsx`** — the hover readout and the nested drill described above.
+  the raw layers + feature-group columns across the top (angled name headers; raw slate, trusted blue,
+  untrusted red), consuming `/api/store-grid/matrix` (gzip pass-through). All columns fit one screen; the date
+  axis scrolls vertically (row-windowed). Hover → tooltip. **Clicking an expandable group column expands it
+  inline into its feature sub-columns** (the primary interaction); a search highlights a group column. The
+  display-column list is derived from the matrix + the expanded-group set, so the expand is pure client state.
+- **`App.tsx`** — fetches the matrix + polls `/api/store-grid/meta` for the **"as of HH:MM"** staleness,
+  re-pulling the matrix only when a newer build exists. The legend names the four cell kinds (none / trusted /
+  untrusted / raw) and surfaces the fixed universe size. The **only** loading state is the genuine first-ever
+  boot (`503 {booting}`); there is no recurring "warming".
+- **`Tooltip.tsx`** — the hover readout (column, kind, date, coverage %, trust).
+
+The earlier `/api/store-grid/cell` per-ticker drill endpoint is retained (a group cell's ticker breakdown), but
+the v3 primary interaction is the horizontal feature expand.
 
 ### Stripped-down dashboard surface
 
