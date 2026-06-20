@@ -215,6 +215,10 @@ class SmokeStrategy:
         # bounded detector for entries whose order never landed (genuinely not-found): stops the
         # every-tick broker re-query spin without ever expiring a live/in-flight order.
         self._stale_entries = StaleEntryTracker()
+        # coids whose "CLOSE pending fill" we've already logged this state-generation, so a stale pending
+        # exit on a closed market doesn't hot-log every manage tick (per-state-change, not per-tick) — the
+        # same log-dedup as reversion's path. Pure legibility; zero behavior change.
+        self._pending_close_logged: set[str] = set()
 
     def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
         """Mirror a captured fill into the durable StrategyState ledger (the migration SoT). A no-op when
@@ -529,13 +533,18 @@ class SmokeStrategy:
         if missing:
             exit_order, exit_coid = self._resubmit_lost_exit(bet, symbol, qty)
         if exit_order is None or not exit_order.filled_avg_price:
-            logger.info("CLOSE pending fill for %s (coid=%s)", symbol, exit_coid)
+            # log a pending exit ONCE per coid (not every ~1.4s manage tick) so a stale pending close on a
+            # closed market doesn't hot-log forever — purely a log-legibility fix, no behavior change.
+            if exit_coid not in self._pending_close_logged:
+                logger.info("CLOSE pending fill for %s (coid=%s)", symbol, exit_coid)
+                self._pending_close_logged.add(exit_coid)
             return
         exit_price = float(exit_order.filled_avg_price)
         realized = (exit_price - entry_price_value) * qty
         exit_ts = exit_order.filled_at or dt.datetime.now(dt.timezone.utc)
         self._store.record_close(entry_order_id, exit_ts, exit_price, realized)
         self._book_fill(symbol, "sell", exit_coid, qty, exit_price)
+        self._pending_close_logged.discard(exit_coid)  # resolved -> forget its pending-log marker
         logger.info(
             "BET closed: %s entry=%.4f exit=%.4f qty=%g pnl=%+.4f",
             symbol,

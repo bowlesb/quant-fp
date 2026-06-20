@@ -9,6 +9,7 @@ cleanly when it is unreachable.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -347,6 +348,7 @@ def _strategy(config: SmokeConfig, trading: FakeTradingClient, store: InMemorySt
     strategy._last_vector = None  # type: ignore[attr-defined]
     strategy._last_bet_ts = None  # type: ignore[attr-defined]
     strategy._stale_entries = StaleEntryTracker()  # type: ignore[attr-defined]
+    strategy._pending_close_logged = set()  # type: ignore[attr-defined]
     return strategy
 
 
@@ -377,6 +379,35 @@ def test_place_then_manage_finalizes_bet() -> None:
     assert len(trading.submitted) == 2  # BUY + SELL
     sell = trading.submitted[1]
     assert sell.filled_qty == pytest.approx(expected_qty)  # sells exactly the filled qty
+
+
+def test_pending_close_logs_once_per_coid(caplog: pytest.LogCaptureFixture) -> None:
+    """The log-legibility fix: a stale pending EXIT logs 'CLOSE pending fill' ONCE per coid (per
+    state-generation, cleared on resolution), not on every ~1.4s manage tick — so a closed-market stale
+    exit doesn't hot-log forever. Pure legibility, zero behavior change."""
+    config = _config(hold_sec=0)
+    trading = FakeTradingClient(fill_price=190.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+
+    # a FILLED entry whose EXIT order is already submitted but still PENDING (no fill price yet).
+    qty = 50.0 / 190.0
+    entry_coid = "smoke-20260618T150000-AAPL-buy"
+    exit_coid = exit_coid_for(entry_coid)
+    store.record_open("AAPL", "buy", 50.0, entry_coid, NOW, NOW)
+    store.mark_filled(entry_coid, 190.0, qty)
+    store.mark_closing(entry_coid, exit_coid)
+    trading._by_coid[exit_coid] = FakeOrder(
+        id="broker-exit", client_order_id=exit_coid, filled_avg_price=None, filled_qty=0.0
+    )
+    bet = store.list_open()[0]
+
+    with caplog.at_level(logging.INFO, logger="smoke-strategy"):
+        for _ in range(20):  # 20 manage ticks on the same stale pending exit
+            strategy._close_bet(bet)
+    pending_lines = [r for r in caplog.records if "CLOSE pending fill" in r.getMessage()]
+    assert len(pending_lines) == 1  # ONE line across 20 ticks, not 20
+    assert store.count_open() == 1  # still open (the exit hasn't filled) — behavior unchanged
 
 
 class _CountingFakeTradingClient(FakeTradingClient):
