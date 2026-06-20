@@ -4,6 +4,10 @@ Status: VERIFICATION + DESIGN. Author: platform engineer, cycle 2026-06-19.
 Precondition for building the battery (Ben, verbatim intent): *"verify that we can take the
 strategies and easily port them to PRODUCTION without duplicating large parts of the code."*
 
+**Related docs:** this establishes the write-once `decide()` contract; `STRATEGY_EXECUTION_ABSTRACTION.md`
+builds on it to design the production-real STATE + Executor + Feed (the gated next step), and
+`STRATEGY_CONTAINERS.md` is the live per-strategy container contract on the feature-vector bus.
+
 ---
 
 ## THE INVARIANT (the central design driver — everything else follows from this)

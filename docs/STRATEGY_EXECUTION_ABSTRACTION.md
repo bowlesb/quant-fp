@@ -4,6 +4,10 @@ Status: **PLAN for adversarial audit** (NO implementation — the build is gated
 Author: platform engineer, cycle 2026-06-19. Reviewers: independent adversarial auditors (fanned out
 by the Lead) + Ben.
 
+**Related docs:** builds directly on the write-once `decide()` contract in
+`STRATEGY_BATTERY_PORTABILITY.md` (the precondition this plan extends); the eventual live runtime is
+the per-strategy `STRATEGY_CONTAINERS.md` container on the feature-vector bus.
+
 This is a **plan + requirements + test strategy**, written to be attacked: every requirement is
 falsifiable and maps to a test that would catch its violation. It is deliberately at the CONTRACT
 level (interfaces + behavioral guarantees), not implementation. The purpose is to let auditors find
