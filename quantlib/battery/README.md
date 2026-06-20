@@ -85,4 +85,24 @@ buying-power/PDT limits. So:
 - The `by_stratum` liquidity breakdown + the `cost_curve` exist precisely so a PASS that lives only
   in the illiquid tail (the trap-#1 signature) is visible as NON-deployable despite the headline.
 
+### The two concrete calibration gaps (BatteryAudit pass-2) — a PASS can OVERSTATE live edge
+
+These are deliberate Phase-0 modeling choices, NOT bugs, but they mean the backtest book is more
+diversified + more fillable than the live book, so the headline Sharpe is unachievable as-is:
+
+1. **Full-fill assumption.** `long_short_per_name_cost` books a 100% fill on every selected name,
+   charging only spread + borrow. The LIVE `build_basket` (services/executor) shorts ONLY
+   `easy_to_borrow` names, EXCLUDES price < $5 and ETF-like symbols, and REFUSES baskets below
+   `MIN_SCORE_SEP`. So the battery's short leg can include names the live container would never short
+   — the backtest's short-side edge is an upper bound the borrow/price/ETF gate will trim.
+2. **Breadth mismatch.** `frac=0.1` over `liquid_1500` books ~150 names/side; the live executor books
+   `K_LONG=K_SHORT≈3` (~$100–200/name, ~$2–5k gross). The battery's per-period Sharpe comes from
+   ~150-name diversification that the live 3–6-name book cannot reproduce — diversification Sharpe does
+   NOT survive the breadth cut.
+
+**Net:** a PASS demonstrates a signal EXISTS in a diversified, frictionless-fill basket;
+live-achievability at 3–6 borrow-constrained names is a SEPARATE question, answered by the execution
+layer + a borrow/price/breadth gate, not by the battery. (This is the AUC-insufficiency lesson, one
+level up: predictive-in-the-backtest ≠ harvestable-live.)
+
 Read the leaderboard as "what to promote to a live paper trial", never as a realized return.
