@@ -84,3 +84,23 @@ STRL #218, TWLO #221, WOLF #223, VSH #226, ENPH #228, GFS #240, NUVL #245, TE #2
   low tradeable-universe value, consistent with deprioritizing them.
 - This complements `docs/BACKFILL_SCOPE.md` (which covers BARS depth vs the live universe — already good) by
   measuring the QUOTE/TRADE tape vs the tradeable ADV universe, the current deepening front.
+
+## Status — B4 WIDTH landed; the NEXT tranche is the tight-spread LP head
+
+- **B4 width DONE (2026-06-20).** The 31 remaining zero-quote B4 targets (`OBAI/WKSP/AZTR/WPRT/LNAI/ALOT/…`,
+  computed by `quantlib.data.b4_quote_widen`) were fetched over the full quote span — all 31 landed (379
+  date-partitions each, 11,749 partitions / 10,541 real symbol-days / 0.217 GB; verified against the quotes
+  manifest). B4 quote coverage is now ~100%. The quote tape spans 2024-12-12 → 2026-06-18 across 4,323
+  symbols.
+- **NEXT = the tight-spread LP tranche (the liquid head, not the tail).** With the B4 width closed, the
+  remaining #208 quote-acquisition value is DEPTH on the names a liquidity-provision / spread-capture strategy
+  could actually trade: the mega/large-cap liquid head whose median quoted spread sits in the **1-5bps** band.
+  `universe_membership.median_spread_bps` is NULL (never seeded), so the tranche is measured DETERMINISTICALLY
+  from the deep-quote panel itself by `quantlib.data.next_quote_tranche` — rank the bars universe by ADV, take
+  the liquid head, measure median `(ask-bid)/mid` (bps) + an LP-headroom proxy (median top-of-book size) over
+  a recent quote sample, keep the 1-5bps band, rank deepest-headroom first. Names below 1bps (e.g. NVDA at
+  ~0.98bps) are excluded — penny-spread, no provision edge; wider names (AMD ~6.6bps, ORCL ~5.9bps) are out of
+  band. A representative top-200 cut yields ~73 in-band names (AAPL/MSFT/AMZN/GOOGL/META/INTC/NFLX/PLTR/…).
+  These already HAVE quote coverage, so the driver `ops/quote_tranche_lp.sh` is an idempotent REFRESH that
+  only brings each name's tape current — guard-named `quant-backfill-quotes-lptranche`, one-at-a-time,
+  memory-bounded. Run `ops/quote_tranche_lp.sh --dry-run` to preview the ranked tranche before launching.
