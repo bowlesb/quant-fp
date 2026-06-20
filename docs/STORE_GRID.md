@@ -6,10 +6,12 @@ names over the window). Each **cell** encodes, as darkness, the **proportion of 
 that ticker on that date** — the HEIC tiny-boxes view. A binary trust overlay marks cells whose every
 covering feature-group is fully trusted.
 
-This replaces the old server-rendered group×date `/store-glimpse` page (a 38–50s on-request store scan behind
-a host cron + 1h Redis TTL that surfaced a "warming…" placeholder on any cold/expired hit). The matrix is now
-built by a **permanent background worker** and served from a last-good Redis blob — the only loading state a
-reader ever sees is the genuine first-ever boot.
+**This grid IS the dashboard.** It is served at the ROOT `/`; every other dashboard page (status, jobs,
+scorecard, progress, raw/sector/universe coverage, liquidity bands, the old DB-health home) has been removed
+as UI. The matrix is built by a **permanent background worker** that refreshes it into **MongoDB every 10
+minutes**, and the dashboard serves the last-good document — so a refresh is one indexed Mongo fetch and the
+heavy build is never on the request path. The only loading state a reader ever sees is the genuine first-ever
+boot (the API returns `503 {booting}`); there is no recurring "warming".
 
 ## What a cell means
 
@@ -35,16 +37,18 @@ trusted); otherwise untrusted. No PENDING / DIVERGENT / UNGRADED states on this 
   `build_store_grid()` assembles the packed matrix from it, `build_ticker_drill()` derives one ticker's
   per-(date×group) presence — both purely in-memory from the same gather, so pre-warming N drills costs no
   extra store I/O. Read-side only; no store schema/format/fingerprint change.
-* **Worker** — `services/dashboard/store_grid_cache.py`, run as the **`store-glimpse-worker`** compose
-  service (`restart: unless-stopped`, built from the dashboard image, mounts `fp_store_real:/store:ro`, on
-  `quant_default` to reach `quant-redis`). A permanent loop: build on boot, write a gzip-compressed matrix
-  blob + the top-N ticker drills + a meta header to Redis, refresh a 24h TTL, sleep ~180s, repeat. A full
-  rebuild measures ~3–4 min (dominated by the deep calendar groups' many partitions); the data changes slowly
-  (capture per-session, trust per-sweep), so this cadence is plenty fresh and the last-good blob always
-  serves between builds.
-* **Reader** — `services/dashboard/app.py` routes below. A sub-ms Redis GET; the matrix route passes the
-  stored gzip bytes straight through with `Content-Encoding: gzip` (the dense ~2.8M-cell matrix is ~38 MB raw
-  JSON, ~130 KB gzipped — no build, no recompress on the request path).
+* **Worker** — `services/dashboard/store_grid_cache.py`, run as the **`store-grid-worker`** compose service
+  (`restart: unless-stopped`, built from the dashboard image, mounts `fp_store_real:/store:ro`, reaches the
+  `mongo` service on `quant_default`). A permanent loop: build on boot, write the gzip-compressed matrix doc +
+  the top-N ticker drill docs + a meta doc to **MongoDB**, then sleep **10 minutes** and repeat. Each loop
+  OVERWRITES the docs (no TTL — they persist until the next build replaces them), so the last-good document
+  always serves between builds. A full 18-month rebuild measures ~3–4 min (dominated by the deep calendar
+  groups' many partitions); 10-minute cadence is plenty fresh (capture is per-session, trust per-sweep).
+* **Cache** — a dedicated **`mongo`** compose service (`mongo:7`, a small `mongo_data` volume, LAN-internal,
+  no published port). NOT the feature pipeline's store — it holds only the precomputed dashboard grid.
+* **Reader** — `services/dashboard/app.py` routes below. One indexed Mongo `find_one`; the matrix route passes
+  the stored gzip bytes straight through with `Content-Encoding: gzip` (the dense ~2.8M-cell matrix is ~38 MB
+  raw JSON, ~130 KB gzipped — no build, no recompress on the request path).
 
 ## URLs
 
@@ -96,11 +100,11 @@ is a chip naming the parent ticker + group/trust counts; each group row is a tig
 trust pill; expanding a group reveals a further-indented, distinctly-shaded nested card whose own header chip
 names *its* parent (the group) — the same treatment one level down.
 
-## React SPA (PR 2)
+## React SPA (the whole dashboard)
 
 The grid UI is a Vite + React + TypeScript SPA in `services/dashboard/frontend/`, built to static assets by
-the Dockerfile's `webbuild` (node) stage and served by the dashboard FastAPI app at **`/store-grid`** (a
-`StaticFiles` mount, `html=True`). Components:
+the Dockerfile's `webbuild` (node) stage and served by the dashboard FastAPI app at the **ROOT `/`** (a
+`StaticFiles` mount, `html=True`). The grid IS the dashboard — there is no other page. Components:
 
 - **`CanvasHeatmap.tsx`** — a **canvas** renderer (never DOM-per-cell): dates down the rows (newest at top),
   tickers across the columns, cell darkness = coverage, consuming `/api/store-grid/matrix` (gzip pass-through).
@@ -112,15 +116,23 @@ the Dockerfile's `webbuild` (node) stage and served by the dashboard FastAPI app
   API's `503 {booting}`); there is no recurring "warming".
 - **`Tooltip.tsx`** / **`DrillPanel.tsx`** — the hover readout and the nested drill described above.
 
-This SPA **replaces both** old server-rendered pages: `/feature-grid` and `/store-glimpse` (and their page
-modules `feature_grid_page.py` / `store_glimpse_page.py`) are deleted. The underlying `feature_grid.py`
-store-introspection logic (reused by the worker, `store_glimpse.py`, and `scorecard.py`) and the
-`/api/feature-grid/*` + `/api/store-glimpse/*` JSON routes are kept.
+### Stripped-down dashboard surface
+
+This PR strips the dashboard to ONLY the grid. **Deleted** (UI-only page modules + their routes): `status_page`,
+`scorecard_page`, `raw_coverage_page`, `sector_coverage_page`, `sector_coverage`, `universe_coverage_page`,
+`universe_coverage`, `liquidity_bands_page`, `liquidity_bands`, `store_glimpse`, `store_glimpse_cache`, and the
+old `/`, `/status`, `/jobs`, `/scorecard`, `/progress`, `/raw-coverage`, `/sector-coverage`,
+`/universe-coverage`, `/liquidity-bands` HTML routes + the page-only `/api/*` routes for them. **Kept** (still
+written by the host Lead loop + crons — ops continuity, not UI): `status_store.py`, `scorecard.py` +
+`scorecard_store.py`, `raw_coverage.py` (a `scorecard` dependency), `feature_grid.py` (the store introspection
+the worker + scorecard reuse), and `jobs_page.load_status`. The **remaining API** is the grid routes
+(`/api/store-grid/*`), `/healthz`, and three ops-introspection READ routes (`/api/status/rows`,
+`/api/scorecard[/history]`, `/api/jobs`) backed by the live JSON stores.
 
 ## Deployment
 
-The `store-glimpse-worker` service **replaces the host cron** `ops/collect_store_glimpse.py` (the
-`1-58/3 * * * *` crontab line). On deploy: rebuild + bring up the dashboard and the worker
-(`docker compose up -d --build dashboard store-glimpse-worker`), confirm the worker log shows a first matrix
-write, open `/store-grid` to confirm the React grid serves, then remove that crontab line (`crontab -e`) — see
-the cron registry in `docs/OPERATIONS.md`.
+A single clean cutover: `docker compose up -d --build mongo store-grid-worker dashboard`. The `mongo` service
+comes up, the `store-grid-worker` builds the first matrix into it (confirm its log shows a matrix write), and
+the dashboard serves the grid at `/`. The previous Redis-backed `store-glimpse-worker` and the old host cron
+`ops/collect_store_glimpse.py` (the `1-58/3 * * * *` crontab line) are obsolete — remove that crontab line on
+deploy (`crontab -e`); see the cron registry in `docs/OPERATIONS.md`.

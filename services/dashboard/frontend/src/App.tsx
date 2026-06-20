@@ -133,9 +133,6 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="topbar-left">
-          <a className="home-link" href="/">
-            ← dashboard
-          </a>
           <h1>Feature-store coverage grid</h1>
           {matrix && (
             <span className="dims">
