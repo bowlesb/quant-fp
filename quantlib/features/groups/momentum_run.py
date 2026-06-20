@@ -272,24 +272,21 @@ class MomentumRunGroup(FeatureGroup):
         frame = ctx.frame("minute_agg")
         if frame.height == 0:
             return self.compute(ctx)
+        # ONE prepared slice serves BOTH halves. The streak slice (LOOKBACK_MINUTES + each symbol's single prior
+        # bar) is a SUPERSET of the skew slice (LOOKBACK_MINUTES): the extra prior bar sits strictly before
+        # T-LOOKBACK_MINUTES <= T-max(WINDOWS), so it lies OUTSIDE every (T-w, T] window the skew gathers — the
+        # skew value is unchanged by its presence. So prepare once (``__epoch`` + ``__ret`` derive — ~35% of the
+        # group, previously paid TWICE) and compute both halves off it, each on the minimal window it reads.
+        prepared = self._prepared(BatchContext(frames={"minute_agg": self._slice_with_prior_bar(frame, LOOKBACK_MINUTES)}))
+        latest = prepared["minute"].max()
         # residual_skew at T ONLY: gather each window's trailing (T-w, T] slice once (not a rolling over every
-        # lookback minute then discard all but T). Value-identical to the rolling form filtered to T — the
-        # window bars, the window-local origin, and the OLS+m3/m2**1.5 algebra are the SAME (shared
-        # _residual_skew_from_lists). The deepest window only reads the last max(WINDOWS) minutes, so the tight
-        # LOOKBACK_MINUTES slice is a safe (and sufficient) input bound for the gathers.
-        skew_slice = frame.filter(pl.col("minute") >= frame["minute"].max() - pl.duration(minutes=LOOKBACK_MINUTES))
-        skew_prepared = self._prepared(BatchContext(frames={"minute_agg": skew_slice}))
-        skew = self._compute_skew_latest(skew_prepared, skew_prepared["minute"].max())
-        # The streak half needs ONLY longest_streak — compute it directly (not via the full compute(), which
-        # would redundantly recompute the window-local residual_skew gather on this slice and throw it away).
-        # Same slice (+ each symbol's prior bar for the window-edge return), same _compute_streak math.
-        streak_slice = self._slice_with_prior_bar(frame, LOOKBACK_MINUTES)
-        streak_prepared = self._prepared(BatchContext(frames={"minute_agg": streak_slice}))
-        # longest_streak at T ONLY: gather each window's (T-w, T] run-length slice once (not a rolling over
-        # every lookback minute then discard all but T). The global __rl is still computed over the whole
-        # streak slice first (cumulative run state is history-dependent), so the value is identical to the
-        # rolling form filtered to T (shared _streak_from_rl_lists cap math).
-        streak = self._compute_streak_latest(streak_prepared, streak_prepared["minute"].max())
+        # lookback minute then discard all but T) + the window-local OLS/m3-m2^1.5 (shared with the backfill
+        # rolling form via _residual_skew_from_lists).
+        skew = self._compute_skew_latest(prepared, latest)
+        # longest_streak at T ONLY: global __rl over the whole prepared slice first (cumulative run state is
+        # history-dependent), then gather each window's (T-w, T] __rl slice once + the IDENTICAL cap (shared
+        # _streak_from_rl_lists). The prior bar gives the window-edge return its positional predecessor.
+        streak = self._compute_streak_latest(prepared, latest)
         return skew.join(streak, on=["symbol", "minute"], how="full", coalesce=True).select(
             ["symbol", "minute", *self.feature_names]
         )
