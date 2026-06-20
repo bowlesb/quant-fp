@@ -31,6 +31,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
 )
 from quantlib.features.registry import register
 
@@ -48,6 +49,13 @@ class LiquidityRankGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "close", "volume")),
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
     )
+    # Per-session cache of the daily features keyed by (daily-snapshot token, universe-membership witness).
+    # Both the daily snapshot and the universe pin are fixed for the whole trading day, so the trailing-20d
+    # ADV and its cross-sectional rank are identical every minute — compute once, broadcast each minute (the
+    # recompute-every-minute over the full daily history + the per-day cross-sectional rank was the cost).
+    # The universe enters the key because the rank DENOMINATOR depends on it (unlike daily_beta/overnight_beta,
+    # which have no universe input) — a changed membership must invalidate, never serve a stale rank.
+    _daily_cache: tuple[tuple[object, ...], pl.DataFrame] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         return [
@@ -70,11 +78,26 @@ class LiquidityRankGroup(FeatureGroup):
         ]
 
     def _daily_features(self, ctx: BatchContext) -> pl.DataFrame:
-        daily = (
-            ctx.frame("daily")
-            .select(["symbol", "date", "close", "volume"])
-            .sort(["symbol", "date"])
+        """Per (symbol, date) trailing-20d ADV + its cross-sectional liquidity rank. Cached on the
+        (daily-snapshot, universe-membership) identity so the (identical-all-day) daily features are
+        computed once, not per minute."""
+        source = ctx.frame("daily")
+        universe = ctx.frames["universe"] if "universe" in ctx.frames else None
+        universe_witness: tuple[object, ...] = (
+            (id(universe), universe.height) if universe is not None else (None, 0)
         )
+        token = (*daily_snapshot_token(source), *universe_witness)
+        cached = self._daily_cache
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        members = universe.select("symbol").unique() if universe is not None else None
+        result = self._compute_daily_features(source, members)
+        self._daily_cache = (token, result)
+        return result
+
+    def _compute_daily_features(self, source: pl.DataFrame, members: pl.DataFrame | None) -> pl.DataFrame:
+        """The actual per-(symbol, date) daily feature computation (the cached body)."""
+        daily = source.select(["symbol", "date", "close", "volume"]).sort(["symbol", "date"])
         daily = daily.with_columns((pl.col("close") * pl.col("volume")).alias("_dvol"))
         daily = daily.with_columns(
             pl.col("_dvol")
@@ -82,8 +105,7 @@ class LiquidityRankGroup(FeatureGroup):
             .over("symbol")
             .alias("_adv")
         )
-        if "universe" in ctx.frames:
-            members = ctx.frames["universe"].select("symbol").unique()
+        if members is not None:
             daily = daily.join(members, on="symbol", how="inner")
         rank = (pl.col("_adv").rank(method="average") / pl.col("_adv").count()).over(
             "date"
