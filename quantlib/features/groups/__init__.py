@@ -17,6 +17,7 @@ from quantlib.features.groups import (  # noqa: F401
     distribution,
     draw_range,
     dumper_state,
+    edgar_filing_frequency,
     efficiency,
     gap_fill_state,
     inter_arrival,

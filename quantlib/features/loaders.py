@@ -68,6 +68,21 @@ FROM asset_metadata a
 LEFT JOIN sector_map s ON s.symbol = a.symbol
 """
 
+# A SESSION snapshot of the EDGAR filings event store for one day, with a LOOKBACK so the trailing
+# count windows (deepest 90d) AND the 365d burst baseline are correct at the session start. available_at
+# is the point-in-time field (fixed at first sight); the per-minute available_at<=minute gate inside the
+# group makes it point-in-time, so loading the whole [day - lookback, day_end) window up front is correct.
+_FILINGS_SQL = """
+SELECT symbol, form_type, available_at
+FROM filings
+WHERE symbol IS NOT NULL
+  AND available_at >= %(start)s
+  AND available_at < %(day_end)s
+"""
+# The burst baseline reads the trailing 365 days — the deepest window the group touches, so the snapshot
+# must reach back at least this far (a few slack days for the calendar-day window edge).
+FILINGS_LOOKBACK_DAYS = 370
+
 
 def _query(sql: str, params: dict[str, str]) -> pl.DataFrame:
     with psycopg.connect(**DB_KWARGS) as conn, conn.cursor() as cur:
@@ -148,6 +163,34 @@ def load_universe(day: str) -> pl.DataFrame:
     if frame.height == 0:
         return pl.DataFrame(schema=UNIVERSE_SCHEMA)
     return frame.cast(UNIVERSE_SCHEMA)
+
+
+FILINGS_SCHEMA = {
+    "symbol": pl.String,
+    "form_type": pl.String,
+    "available_at": pl.Datetime("us", "UTC"),
+}
+
+
+def load_filings(day: str) -> pl.DataFrame:
+    """Session snapshot of the EDGAR filings event store for ``day``: every filing whose ``available_at``
+    falls in ``[day_start - FILINGS_LOOKBACK_DAYS, day_end)``. Loaded ONCE per session like ``daily`` /
+    ``reference``; the per-minute ``available_at <= minute`` gate inside the edgar group makes it
+    point-in-time. ``available_at`` is fixed at first sight, so feeding this identical frame to the live
+    and backfill sides is parity-true by construction (the same compute-time-join contract as the
+    reference snapshot, extended with the point-in-time gate). The lookback must cover the deepest window
+    the group reads (the 365-day burst baseline) so the trailing counts and minutes-since-last are correct
+    from the session's first minute, not just from the day's own filings."""
+    day_date = dt.date.fromisoformat(day)
+    day_end = day_date + dt.timedelta(days=1)
+    start = day_date - dt.timedelta(days=FILINGS_LOOKBACK_DAYS)
+    frame = _query(
+        _FILINGS_SQL,
+        {"start": start.isoformat(), "day_end": day_end.isoformat()},
+    )
+    if frame.height == 0:
+        return pl.DataFrame(schema=FILINGS_SCHEMA)
+    return frame.cast(FILINGS_SCHEMA)
 
 
 def load_tiers(day: str) -> pl.DataFrame:
