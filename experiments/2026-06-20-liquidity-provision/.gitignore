@@ -1,7 +1,5 @@
-*.parquet
-daily_cache/
-fill_ledger/
-.RUN_COMPLETE
-screen_console.txt
+fills/
 screen_results.csv
+screen_console.txt
+.RUN_COMPLETE
 __pycache__/
