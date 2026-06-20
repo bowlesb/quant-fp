@@ -34,6 +34,7 @@ from quantlib.features.base import (
 )
 from quantlib.features.registry import register
 from quantlib.features.session import OPEN_MINUTE, et_minute_of_day
+from quantlib.features.session_cumulative import session_cumulative_agg
 
 
 @register
@@ -128,21 +129,11 @@ class GapFillStateGroup(FeatureGroup):
         value-identical to ``_assemble(...).filter(minute == T)`` by construction — same RTH filter, same
         per-(symbol, sdate) first-open, same fill algebra — while touching only T's session, not the buffer."""
         names = [spec.name for spec in self.declare()]
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "open", "close"])
-        et_minute = et_minute_of_day(pl.col("minute"))
-        frame = frame.with_columns(
-            pl.col("minute").dt.convert_time_zone("America/New_York").dt.date().alias("sdate"),
-            et_minute.alias("_etm"),
-        )
-        latest_sdate = pl.lit(latest).dt.convert_time_zone("America/New_York").dt.date()
-        session = frame.filter((pl.col("_etm") >= OPEN_MINUTE) & (pl.col("sdate") == latest_sdate))
-        sess_open = (
-            session.sort(["symbol", "minute"])
-            .group_by("symbol", maintain_order=True)
-            .agg(pl.col("open").first().alias("_sess_open"), pl.col("sdate").first().alias("sdate"))
-        )
-        at_t = session.filter(pl.col("minute") == latest).select(["symbol", "minute", "close"])
-        joined = at_t.join(sess_open, on="symbol", how="left").join(
+        # The per-(symbol, current-session) aggregate is SHARED across the CumulativeState groups (runner/
+        # dumper/gap_fill) — derived once per shard-minute, not three times. ``_sess_open`` (session open) and
+        # ``close`` (T's close = the session's last bar) are this group's accumulators; the running max/min/sum
+        # the other two need are ignored here.
+        joined = session_cumulative_agg(ctx.frame("minute_agg"), latest).join(
             self._prev_close(ctx),
             left_on=["symbol", "sdate"],
             right_on=["symbol", "date"],

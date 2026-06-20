@@ -29,6 +29,7 @@ from quantlib.features.base import (
 )
 from quantlib.features.registry import register
 from quantlib.features.session import OPEN_MINUTE, et_minute_of_day
+from quantlib.features.session_cumulative import session_cumulative_agg
 
 BAND_LO = 2.0
 BAND_HI = 20.0
@@ -174,26 +175,10 @@ class RunnerStateGroup(FeatureGroup):
         construction: a running max/sum/first at the LAST bar of a window equals the window's max/sum/first;
         same RTH filter, same partition, same feature algebra."""
         names = [spec.name for spec in self.declare()]
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "open", "high", "close", "volume"])
-        et_minute = et_minute_of_day(pl.col("minute"))
-        frame = frame.with_columns(
-            pl.col("minute").dt.convert_time_zone("America/New_York").dt.date().alias("sdate"),
-            et_minute.alias("_etm"),
-        )
-        latest_sdate = pl.lit(latest).dt.convert_time_zone("America/New_York").dt.date()
-        session = frame.filter(
-            (pl.col("_etm") >= OPEN_MINUTE)
-            & (pl.col("sdate") == latest_sdate)
-            & (pl.col("minute") <= latest)
-        ).sort(["symbol", "minute"])
-        agg = session.group_by("symbol", maintain_order=True).agg(
-            pl.col("high").max().alias("_run_high"),
-            (pl.col("close") * pl.col("volume")).sum().alias("_run_dollar"),
-            pl.col("open").first().alias("_sess_open"),
-            pl.col("close").last().alias("close"),
-            pl.col("sdate").first().alias("sdate"),
-            pl.col("minute").last().alias("minute"),
-        )
+        # The per-(symbol, current-session) max/min/sum/first/last is SHARED across the CumulativeState groups
+        # (runner/dumper/gap_fill) — derived once per shard-minute, not three times. ``_run_high`` /
+        # ``_run_dollar`` / ``_sess_open`` / ``close`` are this group's accumulators (the others are ignored).
+        agg = session_cumulative_agg(ctx.frame("minute_agg"), latest)
         joined = agg.join(
             self._prev_close(ctx),
             left_on=["symbol", "sdate"],
