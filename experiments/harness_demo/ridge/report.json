@@ -1,0 +1,796 @@
+{
+  "config": {
+    "cadence": "daily",
+    "daily_cache": "experiments/data/battery_daily_cache.parquet",
+    "date_start": "2025-12-01",
+    "date_end": "2026-06-17",
+    "universe_top": 500,
+    "intraday_groups": null,
+    "intraday_horizons_min": [
+      30,
+      60
+    ],
+    "label_horizon_days": 1,
+    "label_horizon_min": 30,
+    "model": "ridge",
+    "n_folds": 5,
+    "min_train_rows": 500,
+    "min_test_rows": 50,
+    "seed": 13,
+    "long_short_frac": 0.1,
+    "capital": 1000000.0,
+    "cost_mult": 1.0,
+    "slippage_bps": 1.0,
+    "borrow_bps_annual": 50.0,
+    "percentile_cuts": [
+      0.01,
+      0.02,
+      0.05,
+      0.1,
+      0.2,
+      0.33,
+      0.5
+    ],
+    "run_shuffle_baseline": true,
+    "run_predict_zero_baseline": true
+  },
+  "n_rows": 56814,
+  "n_features": 13,
+  "n_symbols": 495,
+  "n_test_timestamps": 97,
+  "money": {
+    "capital": 1000000.0,
+    "total_pnl": 254343.72465277906,
+    "net_return": 0.25434372465277905,
+    "sharpe_net": 1.430244981000069,
+    "max_drawdown": 0.1176091169722048,
+    "mean_turnover": 2.3382921589688492,
+    "n_periods": 95,
+    "breakeven_cost_bps": 13.279814331688518,
+    "cost_used_bps": 3.3731495518270247,
+    "equity_curve": [
+      {
+        "period": 0,
+        "timestamp": "2026-01-29 19:59:00+00:00",
+        "net_return": -0.04156727650635452,
+        "equity": 958432.7234936454
+      },
+      {
+        "period": 1,
+        "timestamp": "2026-01-30 19:59:00+00:00",
+        "net_return": -0.017353781652160897,
+        "equity": 941078.9418414845
+      },
+      {
+        "period": 2,
+        "timestamp": "2026-02-02 19:59:00+00:00",
+        "net_return": 0.025076064081746556,
+        "equity": 966155.005923231
+      },
+      {
+        "period": 3,
+        "timestamp": "2026-02-03 19:59:00+00:00",
+        "net_return": -0.025718336030564174,
+        "equity": 940436.6698926669
+      },
+      {
+        "period": 4,
+        "timestamp": "2026-02-04 19:59:00+00:00",
+        "net_return": -0.04300476275133429,
+        "equity": 897431.9071413325
+      },
+      {
+        "period": 5,
+        "timestamp": "2026-02-05 19:59:00+00:00",
+        "net_return": 0.056647978651413626,
+        "equity": 954079.8857927461
+      },
+      {
+        "period": 6,
+        "timestamp": "2026-02-06 19:59:00+00:00",
+        "net_return": 0.01224681625829566,
+        "equity": 966326.7020510418
+      },
+      {
+        "period": 7,
+        "timestamp": "2026-02-09 19:59:00+00:00",
+        "net_return": 0.0027675042152614693,
+        "equity": 969094.2062663032
+      },
+      {
+        "period": 8,
+        "timestamp": "2026-02-10 19:59:00+00:00",
+        "net_return": 0.021687222542333913,
+        "equity": 990781.4288086371
+      },
+      {
+        "period": 9,
+        "timestamp": "2026-02-11 19:59:00+00:00",
+        "net_return": -0.017256795794359344,
+        "equity": 973524.6330142778
+      },
+      {
+        "period": 10,
+        "timestamp": "2026-02-12 19:59:00+00:00",
+        "net_return": 0.01329568527078487,
+        "equity": 986820.3182850627
+      },
+      {
+        "period": 11,
+        "timestamp": "2026-02-13 19:59:00+00:00",
+        "net_return": 0.0055916794843121195,
+        "equity": 992411.9977693747
+      },
+      {
+        "period": 12,
+        "timestamp": "2026-02-17 19:59:00+00:00",
+        "net_return": -0.010480183934222672,
+        "equity": 981931.8138351521
+      },
+      {
+        "period": 13,
+        "timestamp": "2026-02-18 19:59:00+00:00",
+        "net_return": 0.015212795841645503,
+        "equity": 997144.6096767975
+      },
+      {
+        "period": 14,
+        "timestamp": "2026-02-19 19:59:00+00:00",
+        "net_return": 0.0006319731233741391,
+        "equity": 997776.5828001717
+      },
+      {
+        "period": 15,
+        "timestamp": "2026-02-20 19:59:00+00:00",
+        "net_return": 0.008364348772482193,
+        "equity": 1006140.9315726539
+      },
+      {
+        "period": 16,
+        "timestamp": "2026-02-23 19:59:00+00:00",
+        "net_return": 0.026550865324024165,
+        "equity": 1032691.796896678
+      },
+      {
+        "period": 17,
+        "timestamp": "2026-02-24 19:59:00+00:00",
+        "net_return": 0.030648415613575588,
+        "equity": 1063340.2125102535
+      },
+      {
+        "period": 18,
+        "timestamp": "2026-02-25 19:59:00+00:00",
+        "net_return": -0.004289804705805833,
+        "equity": 1059050.4078044477
+      },
+      {
+        "period": 19,
+        "timestamp": "2026-02-26 19:59:00+00:00",
+        "net_return": 0.01329745633489381,
+        "equity": 1072347.8641393415
+      },
+      {
+        "period": 20,
+        "timestamp": "2026-02-27 19:59:00+00:00",
+        "net_return": 0.03752093707748497,
+        "equity": 1109868.8012168265
+      },
+      {
+        "period": 21,
+        "timestamp": "2026-03-02 19:59:00+00:00",
+        "net_return": 0.008689108864232294,
+        "equity": 1118557.9100810587
+      },
+      {
+        "period": 22,
+        "timestamp": "2026-03-03 19:59:00+00:00",
+        "net_return": -6.062276676458564e-05,
+        "equity": 1118497.2873142941
+      },
+      {
+        "period": 23,
+        "timestamp": "2026-03-04 19:59:00+00:00",
+        "net_return": -0.03643090473110386,
+        "equity": 1082066.3825831902
+      },
+      {
+        "period": 24,
+        "timestamp": "2026-03-05 19:59:00+00:00",
+        "net_return": 0.004268478698826935,
+        "equity": 1086334.861282017
+      },
+      {
+        "period": 25,
+        "timestamp": "2026-03-06 19:59:00+00:00",
+        "net_return": 0.03282994947871066,
+        "equity": 1119164.8107607279
+      },
+      {
+        "period": 26,
+        "timestamp": "2026-03-09 19:59:00+00:00",
+        "net_return": -0.0022682542616985365,
+        "equity": 1116896.5564990293
+      },
+      {
+        "period": 27,
+        "timestamp": "2026-03-10 19:59:00+00:00",
+        "net_return": -0.011368314997425667,
+        "equity": 1105528.2415016035
+      },
+      {
+        "period": 28,
+        "timestamp": "2026-03-11 19:59:00+00:00",
+        "net_return": 0.006236758447884537,
+        "equity": 1111764.999949488
+      },
+      {
+        "period": 29,
+        "timestamp": "2026-03-12 19:59:00+00:00",
+        "net_return": -0.0018099082561645666,
+        "equity": 1109955.0916933236
+      },
+      {
+        "period": 30,
+        "timestamp": "2026-03-13 19:59:00+00:00",
+        "net_return": 0.0045082375190908415,
+        "equity": 1114463.3292124143
+      },
+      {
+        "period": 31,
+        "timestamp": "2026-03-16 19:59:00+00:00",
+        "net_return": 0.001109777471237223,
+        "equity": 1115573.1066836515
+      },
+      {
+        "period": 32,
+        "timestamp": "2026-03-17 19:59:00+00:00",
+        "net_return": 0.013698534481810179,
+        "equity": 1129271.6411654616
+      },
+      {
+        "period": 33,
+        "timestamp": "2026-03-18 19:59:00+00:00",
+        "net_return": 0.008740566497493808,
+        "equity": 1138012.2076629554
+      },
+      {
+        "period": 34,
+        "timestamp": "2026-03-19 19:59:00+00:00",
+        "net_return": -0.02583439817743291,
+        "equity": 1112177.8094855226
+      },
+      {
+        "period": 35,
+        "timestamp": "2026-03-20 19:59:00+00:00",
+        "net_return": -0.010573493831489564,
+        "equity": 1101604.315654033
+      },
+      {
+        "period": 36,
+        "timestamp": "2026-03-23 19:59:00+00:00",
+        "net_return": 0.04112657028066474,
+        "equity": 1142730.885934698
+      },
+      {
+        "period": 37,
+        "timestamp": "2026-03-24 19:59:00+00:00",
+        "net_return": -0.004493086331723612,
+        "equity": 1138237.7996029742
+      },
+      {
+        "period": 38,
+        "timestamp": "2026-03-25 19:59:00+00:00",
+        "net_return": -0.009343420463831261,
+        "equity": 1128894.379139143
+      },
+      {
+        "period": 39,
+        "timestamp": "2026-03-26 19:59:00+00:00",
+        "net_return": 0.010812070315610456,
+        "equity": 1139706.4494547534
+      },
+      {
+        "period": 40,
+        "timestamp": "2026-03-27 19:59:00+00:00",
+        "net_return": -0.0746045588618939,
+        "equity": 1065101.8905928596
+      },
+      {
+        "period": 41,
+        "timestamp": "2026-03-30 19:59:00+00:00",
+        "net_return": 0.028393921988063144,
+        "equity": 1093495.8125809226
+      },
+      {
+        "period": 42,
+        "timestamp": "2026-03-31 19:59:00+00:00",
+        "net_return": 0.015824172071311444,
+        "equity": 1109319.984652234
+      },
+      {
+        "period": 43,
+        "timestamp": "2026-04-01 19:59:00+00:00",
+        "net_return": -0.0017673561804791712,
+        "equity": 1107552.6284717547
+      },
+      {
+        "period": 44,
+        "timestamp": "2026-04-02 19:59:00+00:00",
+        "net_return": -0.0019293136811658043,
+        "equity": 1105623.3147905888
+      },
+      {
+        "period": 45,
+        "timestamp": "2026-04-06 19:59:00+00:00",
+        "net_return": -0.002316589431007017,
+        "equity": 1103306.7253595819
+      },
+      {
+        "period": 46,
+        "timestamp": "2026-04-07 19:59:00+00:00",
+        "net_return": 0.01293458517713103,
+        "equity": 1116241.3105367129
+      },
+      {
+        "period": 47,
+        "timestamp": "2026-04-08 19:59:00+00:00",
+        "net_return": -0.01445666925699595,
+        "equity": 1101784.641279717
+      },
+      {
+        "period": 48,
+        "timestamp": "2026-04-09 19:59:00+00:00",
+        "net_return": -0.016388526127974864,
+        "equity": 1085396.115151742
+      },
+      {
+        "period": 49,
+        "timestamp": "2026-04-10 19:59:00+00:00",
+        "net_return": 0.027930916483919696,
+        "equity": 1113327.0316356616
+      },
+      {
+        "period": 50,
+        "timestamp": "2026-04-13 19:59:00+00:00",
+        "net_return": 0.016062102668468244,
+        "equity": 1129389.1343041298
+      },
+      {
+        "period": 51,
+        "timestamp": "2026-04-14 19:59:00+00:00",
+        "net_return": -0.03893480443597737,
+        "equity": 1090454.3298681523
+      },
+      {
+        "period": 52,
+        "timestamp": "2026-04-15 19:59:00+00:00",
+        "net_return": 0.028702140562018502,
+        "equity": 1119156.470430171
+      },
+      {
+        "period": 53,
+        "timestamp": "2026-04-16 19:59:00+00:00",
+        "net_return": 0.022564486268753934,
+        "equity": 1141720.9566989248
+      },
+      {
+        "period": 54,
+        "timestamp": "2026-04-17 19:59:00+00:00",
+        "net_return": 0.012960545986006235,
+        "equity": 1154681.502684931
+      },
+      {
+        "period": 55,
+        "timestamp": "2026-04-20 19:59:00+00:00",
+        "net_return": 0.020648376388550126,
+        "equity": 1175329.879073481
+      },
+      {
+        "period": 56,
+        "timestamp": "2026-04-21 19:59:00+00:00",
+        "net_return": 0.03183576889860021,
+        "equity": 1207165.6479720813
+      },
+      {
+        "period": 57,
+        "timestamp": "2026-04-22 19:59:00+00:00",
+        "net_return": -0.04534391690048854,
+        "equity": 1161821.7310715928
+      },
+      {
+        "period": 58,
+        "timestamp": "2026-04-23 19:59:00+00:00",
+        "net_return": 0.003879533164485824,
+        "equity": 1165701.2642360786
+      },
+      {
+        "period": 59,
+        "timestamp": "2026-04-24 19:59:00+00:00",
+        "net_return": -0.007657696409775923,
+        "equity": 1158043.5678263027
+      },
+      {
+        "period": 60,
+        "timestamp": "2026-04-27 19:59:00+00:00",
+        "net_return": -0.0074520577862451365,
+        "equity": 1150591.5100400576
+      },
+      {
+        "period": 61,
+        "timestamp": "2026-04-28 19:59:00+00:00",
+        "net_return": -0.01217351396403984,
+        "equity": 1138417.9960760179
+      },
+      {
+        "period": 62,
+        "timestamp": "2026-04-29 19:59:00+00:00",
+        "net_return": 0.031299878123624655,
+        "equity": 1169717.8741996426
+      },
+      {
+        "period": 63,
+        "timestamp": "2026-04-30 19:59:00+00:00",
+        "net_return": 0.00736377063491516,
+        "equity": 1177081.6448345578
+      },
+      {
+        "period": 64,
+        "timestamp": "2026-05-01 19:59:00+00:00",
+        "net_return": 0.013485433616803318,
+        "equity": 1190567.078451361
+      },
+      {
+        "period": 65,
+        "timestamp": "2026-05-04 19:59:00+00:00",
+        "net_return": 0.018342042163806877,
+        "equity": 1208909.120615168
+      },
+      {
+        "period": 66,
+        "timestamp": "2026-05-05 19:59:00+00:00",
+        "net_return": 0.021715849731183814,
+        "equity": 1230624.9703463519
+      },
+      {
+        "period": 67,
+        "timestamp": "2026-05-06 19:59:00+00:00",
+        "net_return": -0.010079370789094225,
+        "equity": 1220545.5995572577
+      },
+      {
+        "period": 68,
+        "timestamp": "2026-05-07 19:59:00+00:00",
+        "net_return": 0.016360774530276137,
+        "equity": 1236906.374087534
+      },
+      {
+        "period": 69,
+        "timestamp": "2026-05-08 19:59:00+00:00",
+        "net_return": 0.0559677709008361,
+        "equity": 1292874.1449883701
+      },
+      {
+        "period": 70,
+        "timestamp": "2026-05-11 19:59:00+00:00",
+        "net_return": -0.02768218617331907,
+        "equity": 1265191.958815051
+      },
+      {
+        "period": 71,
+        "timestamp": "2026-05-12 19:59:00+00:00",
+        "net_return": 0.00779414515164911,
+        "equity": 1272986.1039667001
+      },
+      {
+        "period": 72,
+        "timestamp": "2026-05-13 19:59:00+00:00",
+        "net_return": 0.016268777969326725,
+        "equity": 1289254.881936027
+      },
+      {
+        "period": 73,
+        "timestamp": "2026-05-14 19:59:00+00:00",
+        "net_return": -0.027589455132274135,
+        "equity": 1261665.4268037528
+      },
+      {
+        "period": 74,
+        "timestamp": "2026-05-15 19:59:00+00:00",
+        "net_return": -0.0433675661493159,
+        "equity": 1218297.860654437
+      },
+      {
+        "period": 75,
+        "timestamp": "2026-05-18 19:59:00+00:00",
+        "net_return": -0.019187852954569713,
+        "equity": 1199110.0076998672
+      },
+      {
+        "period": 76,
+        "timestamp": "2026-05-19 19:59:00+00:00",
+        "net_return": 0.02552471710427882,
+        "equity": 1224634.724804146
+      },
+      {
+        "period": 77,
+        "timestamp": "2026-05-20 19:59:00+00:00",
+        "net_return": 0.030337863316087094,
+        "equity": 1254972.588120233
+      },
+      {
+        "period": 78,
+        "timestamp": "2026-05-21 19:59:00+00:00",
+        "net_return": 0.02857838593657312,
+        "equity": 1283550.9740568062
+      },
+      {
+        "period": 79,
+        "timestamp": "2026-05-22 19:59:00+00:00",
+        "net_return": 0.025849551322292434,
+        "equity": 1309400.5253790987
+      },
+      {
+        "period": 80,
+        "timestamp": "2026-05-26 19:59:00+00:00",
+        "net_return": 0.014551299174986619,
+        "equity": 1323951.8245540853
+      },
+      {
+        "period": 81,
+        "timestamp": "2026-05-27 19:59:00+00:00",
+        "net_return": 0.03199786183132294,
+        "equity": 1355949.6863854083
+      },
+      {
+        "period": 82,
+        "timestamp": "2026-05-28 19:59:00+00:00",
+        "net_return": 0.01719406569700285,
+        "equity": 1373143.7520824112
+      },
+      {
+        "period": 83,
+        "timestamp": "2026-05-29 19:59:00+00:00",
+        "net_return": 0.01368521726519261,
+        "equity": 1386828.9693476039
+      },
+      {
+        "period": 84,
+        "timestamp": "2026-06-01 19:59:00+00:00",
+        "net_return": 0.00831371608756481,
+        "equity": 1395142.6854351687
+      },
+      {
+        "period": 85,
+        "timestamp": "2026-06-02 19:59:00+00:00",
+        "net_return": -0.03389047962510334,
+        "equity": 1361252.2058100654
+      },
+      {
+        "period": 86,
+        "timestamp": "2026-06-03 19:59:00+00:00",
+        "net_return": -0.0005229700984331663,
+        "equity": 1360729.2357116323
+      },
+      {
+        "period": 87,
+        "timestamp": "2026-06-04 19:59:00+00:00",
+        "net_return": -0.0770060422741747,
+        "equity": 1283723.1934374576
+      },
+      {
+        "period": 88,
+        "timestamp": "2026-06-05 19:59:00+00:00",
+        "net_return": 0.03619223573570118,
+        "equity": 1319915.4291731587
+      },
+      {
+        "period": 89,
+        "timestamp": "2026-06-08 19:59:00+00:00",
+        "net_return": -0.06534587920431398,
+        "equity": 1254569.5499688447
+      },
+      {
+        "period": 90,
+        "timestamp": "2026-06-09 19:59:00+00:00",
+        "net_return": -0.02350836381793685,
+        "equity": 1231061.186150908
+      },
+      {
+        "period": 91,
+        "timestamp": "2026-06-10 19:59:00+00:00",
+        "net_return": 0.02343663790102741,
+        "equity": 1254497.8240519355
+      },
+      {
+        "period": 92,
+        "timestamp": "2026-06-11 19:59:00+00:00",
+        "net_return": 0.0018170178842563515,
+        "equity": 1256314.8419361918
+      },
+      {
+        "period": 93,
+        "timestamp": "2026-06-12 19:59:00+00:00",
+        "net_return": 0.03106850883365752,
+        "equity": 1287383.3507698493
+      },
+      {
+        "period": 94,
+        "timestamp": "2026-06-15 19:59:00+00:00",
+        "net_return": -0.03303962611707012,
+        "equity": 1254343.724652779
+      }
+    ]
+  },
+  "threshold_curve": {
+    "cuts": [
+      {
+        "frac": 0.01,
+        "n_trades": 760,
+        "directional_precision": 0.4986842105263158,
+        "mean_fwd_return": 0.0027773767617846573,
+        "dollar_per_trade": 581.8534523122971,
+        "total_dollar_pnl": 442208.62375734583,
+        "net_per_period": 0.004654827618498377,
+        "sharpe_net": 1.3418049152933382,
+        "breakeven_cost_bps": 19.259181924784087
+      },
+      {
+        "frac": 0.02,
+        "n_trades": 1710,
+        "directional_precision": 0.5146198830409356,
+        "mean_fwd_return": 0.002842383740877644,
+        "dollar_per_trade": 267.5868584339884,
+        "total_dollar_pnl": 457573.52792212024,
+        "net_per_period": 0.004816563451811792,
+        "sharpe_net": 1.9996299664311854,
+        "breakeven_cost_bps": 20.5952381224609
+      },
+      {
+        "frac": 0.05,
+        "n_trades": 4552,
+        "directional_precision": 0.5037346221441125,
+        "mean_fwd_return": 0.0019038381531667704,
+        "dollar_per_trade": 62.39370534545637,
+        "total_dollar_pnl": 284016.1467325174,
+        "net_per_period": 0.002989643649815973,
+        "sharpe_net": 1.5888830309471642,
+        "breakeven_cost_bps": 14.839463030620523
+      },
+      {
+        "frac": 0.1,
+        "n_trades": 9260,
+        "directional_precision": 0.5083153347732181,
+        "mean_fwd_return": 0.0015447213213083204,
+        "dollar_per_trade": 24.016825586936417,
+        "total_dollar_pnl": 222395.80493503122,
+        "net_per_period": 0.0023410084730003285,
+        "sharpe_net": 1.430244981000069,
+        "breakeven_cost_bps": 13.279814331688518
+      },
+      {
+        "frac": 0.2,
+        "n_trades": 18558,
+        "directional_precision": 0.5065739842655459,
+        "mean_fwd_return": 0.0008812293341994161,
+        "dollar_per_trade": 5.64510076964753,
+        "total_dollar_pnl": 104761.78008311887,
+        "net_per_period": 0.0011027555798223039,
+        "sharpe_net": 0.8152216668621735,
+        "breakeven_cost_bps": 8.985513182568065
+      },
+      {
+        "frac": 0.33,
+        "n_trades": 30682,
+        "directional_precision": 0.507496251874063,
+        "mean_fwd_return": 0.0006389019230922224,
+        "dollar_per_trade": 2.2585323881169472,
+        "total_dollar_pnl": 69296.29073220417,
+        "net_per_period": 0.0007294346392863597,
+        "sharpe_net": 0.6964820773560497,
+        "breakeven_cost_bps": 8.016252685815402
+      },
+      {
+        "frac": 0.5,
+        "n_trades": 46584,
+        "directional_precision": 0.5055813154731238,
+        "mean_fwd_return": 0.0004478555832125604,
+        "dollar_per_trade": 0.9914941247922394,
+        "total_dollar_pnl": 46187.76230932168,
+        "net_per_period": 0.00048618697167707034,
+        "sharpe_net": 0.6368063622925818,
+        "breakeven_cost_bps": 7.675940803434015
+      }
+    ],
+    "auc": 0.5071561287296271,
+    "rank_ic": 0.005381275146762665
+  },
+  "shuffle_curve": {
+    "cuts": [
+      {
+        "frac": 0.01,
+        "n_trades": 760,
+        "directional_precision": 0.4631578947368421,
+        "mean_fwd_return": -0.0009251814296685057,
+        "dollar_per_trade": -343.7860955509923,
+        "total_dollar_pnl": -261277.43261875413,
+        "net_per_period": -0.0027502887644079385,
+        "sharpe_net": -1.5808482840011775,
+        "breakeven_cost_bps": -6.4154916655845255
+      },
+      {
+        "frac": 0.02,
+        "n_trades": 1710,
+        "directional_precision": 0.49064327485380116,
+        "mean_fwd_return": 0.0009607099898412588,
+        "dollar_per_trade": 58.51199720772336,
+        "total_dollar_pnl": 100055.51522520695,
+        "net_per_period": 0.0010532159497390204,
+        "sharpe_net": 0.9978960737200919,
+        "breakeven_cost_bps": 6.961076621307432
+      },
+      {
+        "frac": 0.05,
+        "n_trades": 4552,
+        "directional_precision": 0.4914323374340949,
+        "mean_fwd_return": -1.1926294024599338e-05,
+        "dollar_per_trade": -17.518751870399285,
+        "total_dollar_pnl": -79745.35851405755,
+        "net_per_period": -0.0008394248264637637,
+        "sharpe_net": -1.1856872626267938,
+        "breakeven_cost_bps": -0.08408590257229892
+      },
+      {
+        "frac": 0.1,
+        "n_trades": 9260,
+        "directional_precision": 0.491792656587473,
+        "mean_fwd_return": -0.0004605292944973043,
+        "dollar_per_trade": -17.269399768927816,
+        "total_dollar_pnl": -159914.64186027157,
+        "net_per_period": -0.001683312019581806,
+        "sharpe_net": -3.4499798129202195,
+        "breakeven_cost_bps": -3.9306975247802494
+      },
+      {
+        "frac": 0.2,
+        "n_trades": 18558,
+        "directional_precision": 0.5001077702338614,
+        "mean_fwd_return": 3.7255344096303813e-06,
+        "dollar_per_trade": -3.332279233510188,
+        "total_dollar_pnl": -61840.43801548207,
+        "net_per_period": -0.0006509519791103376,
+        "sharpe_net": -1.872546628222673,
+        "breakeven_cost_bps": 0.04988117356532708
+      },
+      {
+        "frac": 0.33,
+        "n_trades": 30682,
+        "directional_precision": 0.5001955543967147,
+        "mean_fwd_return": 4.708871959558569e-05,
+        "dollar_per_trade": -1.3974908194243814,
+        "total_dollar_pnl": -42877.81332157887,
+        "net_per_period": -0.0004513454033850407,
+        "sharpe_net": -1.760370982252746,
+        "breakeven_cost_bps": 0.5996366513010463
+      },
+      {
+        "frac": 0.5,
+        "n_trades": 46584,
+        "directional_precision": 0.5002790657736562,
+        "mean_fwd_return": 7.464165342025292e-05,
+        "dollar_per_trade": -0.5266110338106442,
+        "total_dollar_pnl": -24531.64839903505,
+        "net_per_period": -0.00025822787788457946,
+        "sharpe_net": -1.334993339676737,
+        "breakeven_cost_bps": 1.2821243385862315
+      }
+    ],
+    "auc": 0.49955889456827074,
+    "rank_ic": 0.001066317570300576
+  },
+  "predict_zero_total_pnl": 0.0,
+  "panel_load_seconds": 0.086,
+  "fit_apply_seconds": 1.185,
+  "total_seconds": 1.271,
+  "notes": [],
+  "summary_md": "# Strategy Harness report\n\nmodel=**ridge**  cadence=daily  label_horizon=1d/30m  L/S frac=10%  capital=$1,000,000  universe_top=500  folds=5\npanel=56,814 rows x 13 features x 495 symbols  test_timestamps=97\npanel_load=0.086s  fit+apply=1.185s  **total=1.271s**\n\n## a. MONEY (the configured basket, net of per-name cost)\n\n- **total P&L**: $254,344 on $1,000,000 book\n- **net return**: 25.43% over the test span\n- **after-cost Sharpe**: 1.43 (annualized)\n- **max drawdown**: 11.76%\n- **mean turnover/period**: 2.338\n- **breakeven cost**: 13.28 bps one-way (charged 3.37 bps median)\n- **periods**: 95\n\n## b. PERCENTILE-THRESHOLD CURVE (the headline \u2014 conservative-application analysis)\n\nAs the cut shrinks (more selective), does directional precision and $/trade improve?\n\n| cut (top/bot) | n_trades | precision | mean_fwd_ret | $/trade | total $ P&L | net/period | Sharpe_net |\n|---|---|---|---|---|---|---|---|\n| 1% | 760 | 0.4987 | 27.77bps | $582 | $442,209 | 46.548bps | 1.34 |\n| 2% | 1,710 | 0.5146 | 28.42bps | $268 | $457,574 | 48.166bps | 2.00 |\n| 5% | 4,552 | 0.5037 | 19.04bps | $62 | $284,016 | 29.896bps | 1.59 |\n| 10% | 9,260 | 0.5083 | 15.45bps | $24 | $222,396 | 23.410bps | 1.43 |\n| 20% | 18,558 | 0.5066 | 8.81bps | $6 | $104,762 | 11.028bps | 0.82 |\n| 33% | 30,682 | 0.5075 | 6.39bps | $2 | $69,296 | 7.294bps | 0.70 |\n| 50% | 46,584 | 0.5056 | 4.48bps | $1 | $46,188 | 4.862bps | 0.64 |\n\ncontext model diagnostics: sign-AUC=0.5072  rank-IC=0.0054\n\n## c. BASELINES (the trust gate \u2014 the curve must beat these)\n\n- **predict-zero** (no signal): total P&L = $0\n- **shuffle** (within-timestamp label permutation \u2014 the leakage/overfit null):\n\n| cut | precision | mean_fwd_ret | total $ P&L | Sharpe_net |\n|---|---|---|---|---|\n| 1% | 0.4632 | -9.25bps | -$261,277 | -1.58 |\n| 2% | 0.4906 | 9.61bps | $100,056 | 1.00 |\n| 5% | 0.4914 | -0.12bps | -$79,745 | -1.19 |\n| 10% | 0.4918 | -4.61bps | -$159,915 | -3.45 |\n| 20% | 0.5001 | 0.04bps | -$61,840 | -1.87 |\n| 33% | 0.5002 | 0.47bps | -$42,878 | -1.76 |\n| 50% | 0.5003 | 0.75bps | -$24,532 | -1.33 |\n\nshuffle sign-AUC=0.4996 (~0.5 expected); shuffle rank-IC=0.0011 (~0 expected).\n\n> A PASS-grade result needs precision and $/trade to RISE as the cut shrinks AND the real curve to dominate the shuffle/predict-zero baselines at every cut. Read this as an idealized upper bound (frictionless basket, survivorship caveat), not a live realized P&L.\n"
+}
