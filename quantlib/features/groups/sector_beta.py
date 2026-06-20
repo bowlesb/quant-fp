@@ -152,27 +152,7 @@ class SectorBetaGroup(FeatureGroup):
     def _assemble(self, ctx: BatchContext, minute_keys: pl.DataFrame) -> pl.DataFrame:
         """Build the paired (own, sector) one-minute returns, run the rolling OLS, emit on ``minute_keys``.
         Shared by compute() and compute_latest()."""
-        sector_map = self._sector_map(ctx)
-        own = self._own_minute_return(ctx)
-        own_pinned = self._pin_universe(ctx, own)
-        sector = self._sector_minute_return(own_pinned, sector_map)
-
-        paired = own.join(sector_map, on="symbol", how="left").with_columns(
-            pl.col("_sector").fill_null(UNKNOWN_SECTOR)
-        )
-        paired = paired.join(sector, on=["minute", "_sector"], how="left").sort(["symbol", "minute"])
-        # Power-sum building blocks over the PAIRED minutes (both returns present), so n/sx/sy/... share a
-        # denominator — a minute missing either side is excluded from all sums identically.
-        both = pl.col("_oret").is_not_null() & pl.col("_sret").is_not_null()
-        paired = paired.with_columns(
-            pl.when(both).then(1.0).otherwise(0.0).alias("__one"),
-            pl.when(both).then(pl.col("_sret")).otherwise(0.0).alias("__x"),
-            pl.when(both).then(pl.col("_oret")).otherwise(0.0).alias("__y"),
-            pl.when(both).then(pl.col("_sret") * pl.col("_sret")).otherwise(0.0).alias("__xx"),
-            pl.when(both).then(pl.col("_oret") * pl.col("_oret")).otherwise(0.0).alias("__yy"),
-            pl.when(both).then(pl.col("_sret") * pl.col("_oret")).otherwise(0.0).alias("__xy"),
-        )
-
+        paired = self._paired(ctx)
         exprs: list[pl.Expr] = []
         is_unknown = pl.col("_sector") == UNKNOWN_SECTOR
         for window in WINDOWS:
@@ -190,6 +170,79 @@ class SectorBetaGroup(FeatureGroup):
         out = out.join(minute_keys, on=["symbol", "minute"], how="right")
         return out.select(["symbol", "minute", *names])
 
+    def _paired(self, ctx: BatchContext) -> pl.DataFrame:
+        """Per-(symbol, minute) paired (own, sector) one-minute returns + the 6 OLS power-sum building blocks
+        (``__one/__x/__y/__xx/__yy/__xy``), zeroed on any minute missing either side so all sums share one
+        denominator. Shared by ``_assemble`` (rolling) and ``_assemble_latest`` (window-slice at T)."""
+        sector_map = self._sector_map(ctx)
+        own = self._own_minute_return(ctx)
+        own_pinned = self._pin_universe(ctx, own)
+        sector = self._sector_minute_return(own_pinned, sector_map)
+
+        paired = own.join(sector_map, on="symbol", how="left").with_columns(
+            pl.col("_sector").fill_null(UNKNOWN_SECTOR)
+        )
+        paired = paired.join(sector, on=["minute", "_sector"], how="left").sort(["symbol", "minute"])
+        both = pl.col("_oret").is_not_null() & pl.col("_sret").is_not_null()
+        return paired.with_columns(
+            pl.when(both).then(1.0).otherwise(0.0).alias("__one"),
+            pl.when(both).then(pl.col("_sret")).otherwise(0.0).alias("__x"),
+            pl.when(both).then(pl.col("_oret")).otherwise(0.0).alias("__y"),
+            pl.when(both).then(pl.col("_sret") * pl.col("_sret")).otherwise(0.0).alias("__xx"),
+            pl.when(both).then(pl.col("_oret") * pl.col("_oret")).otherwise(0.0).alias("__yy"),
+            pl.when(both).then(pl.col("_sret") * pl.col("_oret")).otherwise(0.0).alias("__xy"),
+        )
+
+    def _assemble_latest(self, ctx: BatchContext, latest: object) -> pl.DataFrame:
+        """The OLS at the LATEST minute T ONLY — the live-path fast form. ``_assemble`` runs the rolling
+        power sums (5 windows x 6 ``rolling_sum_by`` over the WHOLE buffer) then keeps only T; each window's
+        OLS at T reads only the trailing ``(T-w, T]`` paired returns, so SUM each window's slice directly
+        (a minute-cutoff filter + per-symbol group, NOT a rolling) and run the IDENTICAL ``_ols_from_sums``
+        beta/corr. Value-identical to ``_assemble(...).filter(==T)`` by construction (same paired rows, same
+        time-based window, same power-sum algebra)."""
+        paired = self._paired(ctx)
+        base = (
+            paired.filter(pl.col("minute") == latest)
+            .select(["symbol", "minute", "_sector"])
+            .sort("symbol")
+        )
+        is_unknown = pl.col("_sector") == UNKNOWN_SECTOR
+        for window in WINDOWS:
+            tag = _tag(window)
+            sums = (
+                paired.filter(
+                    (pl.col("minute") > latest - pl.duration(minutes=window)) & (pl.col("minute") <= latest)
+                )
+                .group_by("symbol", maintain_order=True)
+                .agg(
+                    pl.col("__one").sum().alias("__n"),
+                    pl.col("__x").sum().alias("__sx"),
+                    pl.col("__y").sum().alias("__sy"),
+                    pl.col("__xx").sum().alias("__sxx"),
+                    pl.col("__yy").sum().alias("__syy"),
+                    pl.col("__xy").sum().alias("__sxy"),
+                )
+            )
+            beta_raw, corr_raw = self._ols_from_sums(
+                pl.col("__n"), pl.col("__sx"), pl.col("__sy"), pl.col("__sxx"), pl.col("__syy"), pl.col("__sxy")
+            )
+            piece = sums.select(
+                "symbol",
+                beta_raw.cast(pl.Float64).alias(f"sector_beta_{tag}"),
+                corr_raw.cast(pl.Float64).alias(f"sector_corr_{tag}"),
+            )
+            base = base.join(piece, on="symbol", how="left")
+        # NULL the unknown bucket exactly as _assemble does (sector tag carries no sector OLS).
+        nulls = []
+        for window in WINDOWS:
+            tag = _tag(window)
+            for stat in ("beta", "corr"):
+                col = f"sector_{stat}_{tag}"
+                nulls.append(pl.when(is_unknown).then(None).otherwise(pl.col(col)).alias(col))
+        base = base.with_columns(nulls)
+        names = [spec.name for spec in self.declare()]
+        return base.select(["symbol", "minute", *names])
+
     def _ols(self, window: int) -> tuple[pl.Expr, pl.Expr]:
         """Rolling windowed OLS of own return (y) on sector return (x) over the trailing ``window`` minutes,
         from time-based rolling power sums. Returns (beta, corr). Undefined cells (n < MIN_PAIRS, zero
@@ -199,9 +252,18 @@ class SectorBetaGroup(FeatureGroup):
         def roll(name: str) -> pl.Expr:
             return pl.col(name).rolling_sum_by("minute", window_size=size).over("symbol")
 
-        n = roll("__one")
-        sx, sy = roll("__x"), roll("__y")
-        sxx, syy, sxy = roll("__xx"), roll("__yy"), roll("__xy")
+        return self._ols_from_sums(
+            roll("__one"), roll("__x"), roll("__y"), roll("__xx"), roll("__yy"), roll("__xy")
+        )
+
+    @staticmethod
+    def _ols_from_sums(
+        n: pl.Expr, sx: pl.Expr, sy: pl.Expr, sxx: pl.Expr, syy: pl.Expr, sxy: pl.Expr
+    ) -> tuple[pl.Expr, pl.Expr]:
+        """OLS beta/corr of y-on-x from the six power sums — the SINGLE source of truth shared by the rolling
+        backfill path (``_ols`` over ``rolling_sum_by`` sums) and the live latest-only path
+        (``_assemble_latest`` over per-window slice sums). Undefined cells (n < MIN_PAIRS, zero x/y-variance,
+        |beta| > BETA_MAX) -> null."""
         cov = sxy - sx * sy / n
         var_x = sxx - sx * sx / n
         var_y = syy - sy * sy / n
@@ -221,6 +283,5 @@ class SectorBetaGroup(FeatureGroup):
         so running the identical rolling form over the whole buffer and emitting T's row is parity-true; the
         window slice is left to compute_latest_on_window callers. Here we emit T's rows from the same
         _assemble (parity-guarded == compute().last by tests/test_fp_latest)."""
-        minute_keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = minute_keys["minute"].max()
-        return self._assemble(ctx, minute_keys.filter(pl.col("minute") == latest))
+        latest = ctx.frame("minute_agg")["minute"].max()
+        return self._assemble_latest(ctx, latest)
