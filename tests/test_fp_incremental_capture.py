@@ -35,6 +35,7 @@ from quantlib.features.capture import (
 )
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 from quantlib.features.incremental import IncrementalEngine
+from quantlib.features.reduction_anchor import attach_volume_anchor
 from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
@@ -60,15 +61,13 @@ BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
 # had no SPY regressor so its corr-denom was never exercised) while distribution/volatility stayed clean.
 INCREMENTAL_UNSAFE = {
     # return_dynamics + volume_leads_price were UNGATED by P2 (#283): the Neumaier compensated running sum
-    # closes their corr-denom straddle (engine-vs-batch CLEAN, 0/295 adversarial; guarded by
-    # test_gappy_denom_group_now_clean_after_p2_neumaier), so they now ride the incremental path.
-    "volume",  # batch-vs-canonical std FORMULA gap (drift-independent — Neumaier does NOT close it; verified it
-    # still breaches at intermediate volume variance v=5e6*(1+N(0,1e-5)), rel~15). Needs the centered-std batch fix.
-    "price_volume",
-    "market_beta",
+    # closes their corr-denom straddle. ``volume`` was UNGATED by the centered-power-sum std (this PR): its std
+    # now centers on the per-symbol anchor (Σ(v−a)/Σ(v−a)²), closing the batch-vs-canonical FORMULA gap that
+    # Neumaier could not (engine-vs-batch CLEAN — test_volume_centered_std_is_clean_after_centering).
+    "price_volume",  # the SAME centered-std fix applies (a centered-std vertical slice for price_volume next).
+    "market_beta",  # corr-denom centering on the same anchor (the sibling fix; not this PR).
     # residual_analysis: the OLS residual SSR is a difference of large near-equal centered power sums on a
-    # near-perfect intraday fit (the same cancellation as price_r2), so the incremental running sums round past
-    # the parity-breach ratio. Stays on the batch fresh-sum path until the centered-power-sum kernel lands.
+    # near-perfect intraday fit — the corr-denom-class centering (sibling), not the std-class. Stays gated here.
     "residual_analysis",
 }
 # Genuinely safe sum-ratio / time-axis-OLS groups that ride the incremental fast path. trend_quality and
@@ -339,17 +338,25 @@ def test_flipped_ols_parity_on_late_appearance_reseed(seed: int, present_p: floa
     )
 
 
-def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
-    """``volume`` STAYS GATED — its z-score std diverges batch-vs-incremental on a near-constant huge-volume
-    window. STRENGTHENED (false-green fix): the prior stream used ``v = 5e6 + N(0,1)`` — a near-ZERO relative
-    variance at which the power-sum std collapses to the null-floor identically on BOTH paths, spuriously
-    passing a ``not breached`` assertion (a P2 Neumaier-fixed claim that was a TEST ARTIFACT, not real). At the
-    INTERMEDIATE-variance regime (``vol_noise=1e-5``, std ~1e-5 of the 5e6 level) the ``Σv²−(Σv)²/n``
-    cancellation lands the z-score ~3e-5 apart — rel ~15x the parity ratio — a genuine batch-vs-canonical std
-    FORMULA gap that Neumaier (a DRIFT fix on the running sums) does NOT close. So the gate is LOAD-BEARING and
-    ``incremental_safe = False`` is correct; un-gating volume needs the centered-power-sum std batch change
-    (store Σ(v−c)/Σ(v−c)² for a reproducible per-window c so the squared terms are small), a separate engine
-    change. Comparing the engine DIRECTLY against the batch (no gate) MUST breach at this regime."""
+def _with_volume_anchor(frame: pl.DataFrame) -> pl.DataFrame:
+    """Attach volume's per-symbol centering anchor to a test minute frame — the production capture/backfill
+    attaches it where minute_agg is built; here we derive a daily snapshot from the frame's own volume (a
+    near-constant per-symbol level in these streams) and join the 2-sig-fig anchor the same way both paths
+    read it."""
+    daily = (
+        frame.group_by("symbol", maintain_order=True)
+        .agg(pl.col("volume").last().alias("volume"))
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_volume_anchor(frame, daily)
+
+
+def test_volume_centered_std_is_clean_after_centering() -> None:
+    """⭐ GATE 3 (the un-gate proof): on the INTERMEDIATE-variance huge-volume window that USED to breach
+    (volume_zscore ~3e-5 apart, rel ~15x — the batch-vs-canonical std FORMULA gap), volume's CENTERED
+    power-sum std (Σ(v−a)/Σ(v−a)² on the per-symbol anchor) makes engine-vs-batch CLEAN. This INVERTS the
+    former gate-is-load-bearing assertion — the proof the gate can drop and ``incremental_safe = True`` holds.
+    The anchor is attached to the frame BOTH paths fold (the same source), so they center identically."""
     walk = _flat_volume_minutes(n_sym=8, n_min=25, present_p=0.7, seed=9, vol=0.01, vol_noise=1e-5)
     volume = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == "volume"]
     ring = MinuteRing(maxlen=120)
@@ -359,23 +366,20 @@ def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
         if not bars:
             continue
         ring.push(_bars_to_frame(bars))
-        frame = ring.materialize()
+        frame = _with_volume_anchor(ring.materialize())
         ctx = BatchContext(frames={"minute_agg": frame})
         batch = compute_reduction_batch(volume, ctx)
         if engine is None:
             engine = IncrementalEngine(volume)
         inc = engine.step(frame, slice_derive=True)
-        # The breach surfaces as EITHER a null/non-null mismatch at the std floor (the helper asserts on it) OR
-        # a large z-score disagreement; both mean the gate is load-bearing.
         try:
             if _worst_tol_ratio(batch, inc) > _PARITY_BREACH_RATIO:
                 breached = True
         except AssertionError:
             breached = True
-    assert breached, (
-        "volume engine-vs-batch must STILL breach on the intermediate-variance huge-volume window (the "
-        "batch-vs-canonical std FORMULA gap) — its incremental_safe=False gate is load-bearing. If a "
-        "centered-power-sum std fix lands, flip the assertion + un-gate volume."
+    assert not breached, (
+        "volume engine-vs-batch must be CLEAN after the centered-power-sum std — the formula-gap breach is "
+        "closed, so incremental_safe=True is correct (gate 3, the un-gate proof)."
     )
 
 

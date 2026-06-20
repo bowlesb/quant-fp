@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import polars as pl
 
 from quantlib.features.base import BatchContext, FeatureGroup
+from quantlib.features.reduction_anchor import attach_volume_anchor
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
 
@@ -58,6 +59,10 @@ def build_frames(
         pl.col("_off").map_elements(lambda i: filing_forms[i % len(filing_forms)], return_dtype=pl.String).alias("form_type"),
         (BASE - pl.duration(days=pl.col("_off") * 45) + pl.duration(minutes=pl.col("_off"))).alias("available_at"),
     ).select("symbol", "form_type", "available_at")
+    # Attach the per-symbol volume centering anchor (from the daily snapshot) to minute_agg — the same
+    # attachment production capture / backfill apply where minute_agg is built, so the centered-std groups
+    # (volume) are runnable and center identically here.
+    intraday = attach_volume_anchor(intraday, daily)
     frames = {"minute_agg": intraday, "daily": daily, "reference": reference, "filings": filings}
     if include_trades:
         frames["trades"] = _build_trades(symbols, window_min)

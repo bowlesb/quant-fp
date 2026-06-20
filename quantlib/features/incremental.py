@@ -327,7 +327,15 @@ class IncrementalEngine:
         # times regardless of this flag.
         self.assert_ready_on_seed = assert_ready_on_seed
         self.groups = [g for g in groups if isinstance(g, ReductionGroup)]
-        self.derived, self.extra, self.value_cols, self.plan, self.reg_plan, self.windows = build_plan(self.groups)
+        (
+            self.derived,
+            self.extra,
+            self.value_cols,
+            self.plan,
+            self.reg_plan,
+            self.windows,
+            self.centered,
+        ) = build_plan(self.groups)
         self.col_index = {col: i for i, col in enumerate(self.value_cols)}
         # Flattened metadata for the Rust assemble kernel (FP_RUST_ASSEMBLE) — built ONCE here, reused each minute.
         self.asm_plan = build_assemble_plan(self.groups, self.windows, self.col_index, self.plan, self.reg_plan)
@@ -679,7 +687,9 @@ class IncrementalEngine:
         self._fold_latest(frame, latest, slice_derive=slice_derive)
         long = self._running_long()
         latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
-        return assemble_from_long(self.groups, long, latest_frame, latest, self.plan, self.reg_plan)
+        return assemble_from_long(
+            self.groups, long, latest_frame, latest, self.plan, self.reg_plan, self.centered
+        )
 
     def _fold_latest(self, frame: pl.DataFrame, latest: object, *, slice_derive: bool) -> None:
         """Roll the time origin, fold the new latest minute into the running sums, and expire what left every

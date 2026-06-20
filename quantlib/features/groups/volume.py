@@ -15,9 +15,11 @@ from quantlib.features.base import (
     InputSpec,
 )
 from quantlib.features.declarative import ReductionGroup, mean_, pt_, std_
+from quantlib.features.reduction_anchor import anchor_column
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
+_ANCHOR_VOLUME = anchor_column("volume")  # the per-symbol centering anchor column volume's centered std reads
 
 # A volume std below this fraction of the window mean is a degenerate constant-volume window where the
 # z-score is undefined (and a bare `std > 0` / exact `std == 0` guard diverges stream-vs-backfill on
@@ -38,20 +40,19 @@ class VolumeGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.VOLUME
     inputs = (
-        InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume")),
+        InputSpec(name="minute_agg", columns=("symbol", "minute", "close", "volume", _ANCHOR_VOLUME)),
     )
     windows = WINDOWS
-    # volume_zscore divides by std(ddof=1). REMAINS GATED (the only one of the 4 not flippable by the n==2 OLS
-    # guard): its blocker is a VARIANCE-family cancellation, not the OLS corner. Backfill (truth) computes std via
-    # polars ``rolling_std_by`` (Welford, stable); the live/incremental path computes it from power sums as
-    # ``sqrt((Σv² − (Σv)²/n)/(n−1))`` (catastrophic cancellation on RAW share volume ~1e6). On a near-constant
-    # huge-volume window the two land on OPPOSITE sides of the relative null-floor (``_VOL_STD_REL_EPS``) — a
-    # null/non-null parity break — AND at the n=2/3 z-score they disagree by ~7e-4 (verified, fresh-seed: the
-    # break is present even with ZERO incremental running-drift, so it is a batch-vs-canonical std FORMULA gap,
-    # not engine drift). The parity-true fix is the centered power-sum std (store Σ(v−c)/Σ(v−c)² for a
-    # reproducible per-symbol c) in the SHARED batch kernel so backfill and live compute std identically — that
-    # touches the batch path (Lead-owned, invasive). Flip to True only after that lands and parity-gates clean.
-    incremental_safe = False
+    # volume_zscore divides by std(ddof=1) — historically the batch-vs-canonical std FORMULA gap (the live/
+    # incremental power-sum ``sqrt((Σv²−(Σv)²/n)/(n−1))`` cancels on RAW share volume ~1e6). CLOSED by the
+    # centered power-sum std: ``centered_std`` routes volume's variance through Σ(v−a)/Σ(v−a)² on the per-symbol
+    # anchor (reduction_anchor.attach_volume_anchor, read identically by both paths) — shift-invariant so the
+    # value is unchanged, but the squared terms stay small so the cancellation is conditioned (machine
+    # precision, vs the ~3e-6 raw breach). incremental_safe: the engine and batch now agree cell-for-cell.
+    incremental_safe = True
+
+    def centered_std(self) -> dict[str, str]:
+        return {"volume": _ANCHOR_VOLUME}
 
     def declare(self) -> list[FeatureSpec]:
         specs = [

@@ -221,6 +221,18 @@ class ReductionGroup(FeatureGroup):
     # the absolute divergence is ~1e-8 (float floor), so this is a parity-self-check guard, not a value bug.
     incremental_safe: bool = True
 
+    def centered_std(self) -> dict[str, str]:
+        """{reduced_column_name: anchor_column} — the reduced columns whose std/variance is computed from a
+        per-symbol-CENTERED power sum ``Σ(v−a)²−(Σ(v−a))²/n`` (a the anchor) instead of the raw
+        ``Σv²−(Σv)²/n``, to keep the variance term conditioned on LARGE-magnitude values (raw share volume).
+        Value-identical (variance is shift-invariant) but float-stable — closes the batch-vs-canonical std
+        FORMULA gap that gated volume/price_volume (docs/CENTERED_STD_DESIGN.md, PROVEN machine-precision).
+        The anchor column must be present on the input frame (attach_volume_anchor, read identically by both
+        paths). Default empty — a column not listed keeps the raw power-sum std byte-for-byte. ADDITIVE: the
+        raw ``Σv``/``Σv²`` are still summed (mean/ratio need the raw sum), so a group that does NOT center any
+        column is byte-identical to before."""
+        return {}
+
     def prepare(self, frame: pl.DataFrame) -> pl.DataFrame:
         """Optional per-minute preprocessing of the (symbol, minute)-sorted input frame BEFORE the reduced /
         regression exprs are evaluated — for a CROSS-SYMBOL column the per-symbol exprs need (e.g. broadcasting
@@ -347,10 +359,14 @@ class ReductionGroup(FeatureGroup):
         )
 
 
-def _canonical(name: str, stats: tuple[str, ...], base: str) -> list[pl.Expr]:
+def _canonical(name: str, stats: tuple[str, ...], base: str, *, centered_base: bool = False) -> list[pl.Expr]:
     """Per-window canonical stat columns for one reduced column, derived from its batched windowed sums in
     the long frame: mean = sum/count, std(ddof=1) = sqrt((sumsq - sum^2/count)/(count-1)). ``base`` is the
-    sum-of-value column, ``base__p`` the sum-of-presence (non-null count), ``base__sq`` the sum-of-squares."""
+    sum-of-value column, ``base__p`` the sum-of-presence (non-null count), ``base__sq`` the sum-of-squares.
+
+    ``centered_base``: compute the std/variance from the PER-SYMBOL-CENTERED power sums ``{base}__c`` =
+    Σ(v−a) and ``{base}__csq`` = Σ(v−a)² (a = the anchor) — value-identical (variance is shift-invariant) but
+    float-stable on large-magnitude values. mean/sum still use the RAW ``base`` (so mean/ratio are unchanged)."""
     out = []
     if "sum" in stats:
         out.append(pl.col(base).alias(f"__c_sum_{name}"))
@@ -359,13 +375,16 @@ def _canonical(name: str, stats: tuple[str, ...], base: str) -> list[pl.Expr]:
         # guard count==0 (an all-null window) -> null, matching rolling_mean / rust_reductions (not NaN)
         out.append(pl.when(count > 0).then(pl.col(base) / count).otherwise(None).alias(f"__c_mean_{name}"))
     if "std" in stats:
-        count, total, sumsq = pl.col(f"{base}__p"), pl.col(base), pl.col(f"{base}__sq")
-        out.append(
-            pl.when(count > 1)
-            .then(((sumsq - total * total / count) / (count - 1)).sqrt())
-            .otherwise(None)
-            .alias(f"__c_std_{name}")
-        )
+        count = pl.col(f"{base}__p")
+        if centered_base:
+            # centered variance = (Σ(v−a)² − (Σ(v−a))²/n)/(n−1) — shift-invariant == the raw variance, but the
+            # squared terms stay small so the Σx²−(Σx)²/n cancellation is conditioned (closes the volume gap).
+            csum, csumsq = pl.col(f"{base}__c"), pl.col(f"{base}__csq")
+            var = (csumsq - csum * csum / count) / (count - 1)
+        else:
+            total, sumsq = pl.col(base), pl.col(f"{base}__sq")
+            var = (sumsq - total * total / count) / (count - 1)
+        out.append(pl.when(count > 1).then(var.sqrt()).otherwise(None).alias(f"__c_std_{name}"))
     return out
 
 
@@ -374,7 +393,15 @@ _PlanEntry = tuple[int, str, tuple[str, ...], tuple[int, ...], str]
 
 def build_plan(
     groups: list[ReductionGroup],
-) -> tuple[list[pl.Expr], list[pl.Expr], list[str], list[_PlanEntry], list[_PlanEntry], tuple[int, ...]]:
+) -> tuple[
+    list[pl.Expr],
+    list[pl.Expr],
+    list[str],
+    list[_PlanEntry],
+    list[_PlanEntry],
+    tuple[int, ...],
+    dict[str, str],
+]:
     """The union value-column plan for a set of declarative groups — SHARED by the batch and the incremental
     engine so both sum EXACTLY the same columns. Returns:
       derived  — exprs for the base reduced cols + the six OLS paired cols (namespaced per group),
@@ -397,6 +424,12 @@ def build_plan(
             derived += _ols_derived(ns, x_expr, y_expr)
             reg_plan.append((gi, name, stats, tuple(windows), ns))
             all_windows |= set(windows)
+    # base -> anchor column, for the reduced columns a group opts into centered std (additive; raw stays).
+    centered: dict[str, str] = {}
+    for gi, group in enumerate(groups):
+        for name, anchor in group.centered_std().items():
+            centered[f"__b{gi}_{name}"] = anchor
+
     extra: list[pl.Expr] = []
     value_cols: list[str] = []
     for _, _, stats, _, base in plan:
@@ -405,11 +438,21 @@ def build_plan(
             extra.append(pl.col(base).is_not_null().cast(pl.Float64).alias(f"{base}__p"))
             value_cols.append(f"{base}__p")
         if "std" in stats:
+            # RAW Σv² (kept byte-for-byte: mean/ratio and any non-centered std read it unchanged)
             extra.append((pl.col(base) * pl.col(base)).alias(f"{base}__sq"))
             value_cols.append(f"{base}__sq")
+            if base in centered:
+                # ADDITIVE centered power sums Σ(v−a) and Σ(v−a)² (a = the per-symbol anchor column). The
+                # centered variance = (Σ(v−a)² − (Σ(v−a))²/n)/(n−1) is shift-invariant == the raw variance, but
+                # the squared terms stay small so the cancellation is conditioned. The raw column null-mask is
+                # preserved (so presence/count is identical) by centering the SAME expr: null stays null.
+                vc = pl.col(base) - pl.col(centered[base])
+                extra.append(vc.alias(f"{base}__c"))
+                extra.append((vc * vc).alias(f"{base}__csq"))
+                value_cols += [f"{base}__c", f"{base}__csq"]
     for _, _, _, _, ns in reg_plan:
         value_cols += [f"__rd_{ns}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
-    return derived, extra, value_cols, plan, reg_plan, tuple(sorted(all_windows))
+    return derived, extra, value_cols, plan, reg_plan, tuple(sorted(all_windows)), centered
 
 
 def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> dict[str, pl.DataFrame]:
@@ -436,7 +479,7 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
         frame = group.prepare(frame)
     latest = frame["minute"].max()
 
-    derived, extra, value_cols, plan, reg_plan, windows = build_plan(groups)
+    derived, extra, value_cols, plan, reg_plan, windows, centered = build_plan(groups)
     with _phase.phase("batch.derive(value cols)"):
         frame = frame.with_columns(derived)
     with _phase.phase("batch.derive(sq+presence)"):
@@ -444,7 +487,9 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
     long = rust_windowed_sums(frame, value_cols, windows)
 
     with _phase.phase("batch.assemble(pivot+join)"):
-        return assemble_from_long(groups, long, resolve_points(groups, frame, latest), latest, plan, reg_plan)
+        return assemble_from_long(
+            groups, long, resolve_points(groups, frame, latest), latest, plan, reg_plan, centered
+        )
 
 
 def resolve_points(groups: list[ReductionGroup], frame: pl.DataFrame, latest: object) -> pl.DataFrame:
@@ -478,6 +523,7 @@ def assemble_from_long(
     latest: object,
     plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
     reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+    centered: dict[str, str] | None = None,
 ) -> dict[str, pl.DataFrame]:
     """Build each group's feature frame from a LONG (symbol, window, <value-col sums>) frame + the latest
     minute's rows carrying the precomputed ``__pt_<name>`` point columns (from ``resolve_points``, which
@@ -485,12 +531,13 @@ def assemble_from_long(
     (``long`` from the Rust kernel) and the incremental path (``long`` from the running-sum state) — so the
     canonical algebra and ``assemble()`` are the SAME code in both; only the source of the sums differs.
     ``latest`` is the minute stamped on output."""
+    centered = centered or {}
     results: dict[str, pl.DataFrame] = {}
     for gi, group in enumerate(groups):
         canon: list[pl.Expr] = []
         for pgi, name, stats, _, base in plan:
             if pgi == gi:
-                canon += _canonical(name, stats, base)
+                canon += _canonical(name, stats, base, centered_base=base in centered)
         for pgi, name, stats, _, ns in reg_plan:
             if pgi == gi:
                 sums = {key: pl.col(f"__rd_{ns}_{key}") for key in ("b", "x", "y", "xy", "xx", "yy")}
