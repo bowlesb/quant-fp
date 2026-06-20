@@ -296,6 +296,30 @@ def feature_grid_symbols_json(group: str, refresh: bool = False) -> JSONResponse
         raise HTTPException(status_code=404, detail=f"unknown group '{group}'") from exc
 
 
+@app.get("/api/feature-grid/{group}/symbol-depth")
+def feature_grid_symbol_depth_json(group: str, limit: int = 200, refresh: bool = False) -> JSONResponse:
+    """Per-SYMBOL coverage DEPTH for one group: for each ticker, HOW FAR BACK its data goes (earliest →
+    latest date + span + dates-present) PER SOURCE (stream vs backfill) — the time-DEPTH cut.
+
+    ``/symbols`` is per-symbol but only on the LATEST date (no depth); ``/timeline`` is depth but at the GROUP
+    level. This is the intersection — *which TICKER has this FEATURE, how far back, and from which source* — so
+    a ticker that backfills to 2025-05 but only streams the last 4 days reads exactly that. Each symbol is
+    classified ``both`` / ``backfill_only`` (settled history, under-represented LIVE) / ``stream_only`` (live,
+    not yet parity-checkable). ``limit`` caps the per-symbol rows (ranked shallowest-backfill first); summary
+    counts/spans are over ALL symbols. Two path segments, so the static path is not swallowed by ``/{group}``.
+
+    Shape (see docs/FEATURE_DASHBOARD.md):
+      {group, version, n_symbols, n_both, n_backfill_only, n_stream_only,
+       stream_earliest, stream_latest, stream_n_dates, backfill_earliest, backfill_latest, backfill_n_dates,
+       limit, n_shown, symbols: [{symbol, provenance, stream_earliest, stream_latest, stream_span_days,
+       stream_n_dates, backfill_earliest, backfill_latest, backfill_span_days, backfill_n_dates}]}
+    """
+    try:
+        return JSONResponse(CACHE.symbol_depth(group, STORE_ROOT, limit=limit, force=refresh))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown group '{group}'") from exc
+
+
 @app.get("/feature-grid", response_class=HTMLResponse)
 def feature_grid_page() -> str:
     """The visual coverage + trust grid (vanilla HTML/JS; fetches /api/feature-grid client-side)."""

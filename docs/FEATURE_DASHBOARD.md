@@ -18,6 +18,7 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `GET http://<host>:8088/api/feature-grid` | full grid JSON (groups × periods) |
 | `GET http://<host>:8088/api/feature-grid/{group}` | per-feature detail for one group |
 | `GET http://<host>:8088/api/feature-grid/{group}/symbols` | per-SYMBOL coverage: which tickers are live (stream) vs backfill-only (under-represented LIVE) |
+| `GET http://<host>:8088/api/feature-grid/{group}/symbol-depth` | per-SYMBOL coverage DEPTH: how far back each ticker's data goes (earliest→latest + span + #dates) per source (stream vs backfill) — which TICKER has this FEATURE, how far back (`?limit=N`) |
 | `GET http://<host>:8088/api/feature-grid/thin-live-symbols` | cross-group roll-up: which SYMBOLS are backfill-only (under-represented LIVE) across the most groups (`?limit=N`) |
 | `GET http://<host>:8088/api/feature-grid/timeline` | (group × recent-day × source) presence grid + per-group history-depth & live-horizon (`?days=N`) |
 | `GET http://<host>:8088/api/feature-grid/orderflow-trend` | per-recent-day LIVE-stream symbol breadth across the order-flow groups — is FP_TICK_SYMBOLS coverage widening or stalling (`?days=N`) |
@@ -159,6 +160,39 @@ OWN latest store date (stream and backfill backfill at different cadences).
   "both": ["AAPL", "..."],
   "backfill_only": ["AABB", "..."], // sorted; the under-represented tickers
   "stream_only": []
+}
+```
+
+Returns `404` for an unknown group.
+
+### `GET /api/feature-grid/{group}/symbol-depth`
+
+The time-**DEPTH** cut the other surfaces don't give. `{group}/symbols` is per-symbol but only on the LATEST
+date (no depth); `timeline` is depth but at the GROUP level. This is their intersection — *which TICKER has
+this FEATURE, how far back, and from which source* — so a ticker that backfills to 2025-05 but only streams
+the last 4 days reads exactly that. Each symbol is classified `both` / `backfill_only` (settled history, not
+captured live → under-represented LIVE) / `stream_only` (live but no settled backfill → not yet
+parity-checkable), and carries its OWN earliest/latest/span/#dates per source. Rows rank shallowest-backfill
+first (least settled history); `?limit=N` caps the rows (default 200); summary counts/spans are over ALL
+symbols. As DataIntegrity deepens the quote/trade tape, the per-source spans here are how that lands visibly.
+
+```jsonc
+{
+  "group": "trade_flow", "version": "1.0.0",
+  "n_symbols": 8070, "n_both": 4424, "n_backfill_only": 2903, "n_stream_only": 743,
+  "stream_earliest": "2026-06-15", "stream_latest": "2026-06-18", "stream_n_dates": 4,
+  "backfill_earliest": "2025-05-12", "backfill_latest": "2026-06-18", "backfill_n_dates": 69,
+  "limit": 200, "n_shown": 200,
+  "symbols": [
+    {
+      "symbol": "AAPL", "provenance": "both",
+      "backfill_earliest": "2025-05-12", "backfill_latest": "2026-06-18",
+      "backfill_span_days": 403, "backfill_n_dates": 69,
+      "stream_earliest": "2026-06-15", "stream_latest": "2026-06-18",
+      "stream_span_days": 4, "stream_n_dates": 4
+    }
+    // ... ranked shallowest-backfill first
+  ]
 }
 ```
 
