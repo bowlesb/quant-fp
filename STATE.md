@@ -215,11 +215,11 @@ Keep the harness gates for the REAL run later; this slice is to validate the pip
 
 ## Current status
 
-Fresh build started. Repo scaffolded. Design captured in `ARCHITECTURE.md`.
+Fresh build started. Repo scaffolded. Design captured in `docs/archive/ARCHITECTURE.md` (archived 2026-06-20; superseded by `docs/SYSTEM_DESCRIPTION.md`).
 
 ### Done
 - Repo structure + git init.
-- `ARCHITECTURE.md` (committed design, source of truth).
+- `docs/archive/ARCHITECTURE.md` (committed design, source of truth at the time; now archived).
 - TimescaleDB schema (`db/init/01_schema.sql`) — verified: 14 tables, 7 hypertables.
 - `docker-compose.yml` with TimescaleDB + dashboard + Prometheus + Grafana.
 - `.env` with Alpaca **paper** keys (gitignored); `.env.example` committed.

@@ -1,10 +1,14 @@
 # Quant Trading System — Architecture
 
+> **ARCHIVED 2026-06-20 (superseded — historical snapshot, do NOT treat as current).** Moved to
+> `docs/archive/` as the navigable doc hierarchy now lives at `docs/SYSTEM_DESCRIPTION.md` (#293), which
+> is the current whole-system map.
+>
 > **DEPRECATED — pre-pivot snapshot (2026-06-10).** This document predates the
 > 2026-06-12 pivot to the Feature Platform spine and no longer reflects the current
 > direction (it describes a "~40 v1 feature" Phase 0–7 ladder; the live system is the
 > 618-feature / 11k-symbol parity-true feature store). It is kept for historical
-> context only. For the current whole-system map see **`docs/SYSTEM_DESCRIPTION.md`**; for the
+> context only. For the current whole-system map see **`../SYSTEM_DESCRIPTION.md`**; for the
 > source of truth see `~/.quant-ops/SYSTEM_LOG.md` (live state), `docs/FEATURE_PLATFORM.md`, and
 > `docs/MISSION.md`.
 

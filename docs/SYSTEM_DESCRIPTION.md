@@ -10,8 +10,8 @@ link to its authoritative doc(s), which in turn link to their related docs — f
 For the platform vision and acceptance bar, start at [MISSION](MISSION.md) and
 [FEATURE_PLATFORM](FEATURE_PLATFORM.md).
 
-> The pre-pivot whole-system snapshot [`ARCHITECTURE.md`](../ARCHITECTURE.md) is **deprecated** (kept for
-> history). This document supersedes it as the system map.
+> The pre-pivot whole-system snapshot [`ARCHITECTURE.md`](archive/ARCHITECTURE.md) is **deprecated** and
+> **archived** (kept for history). This document supersedes it as the system map.
 
 ---
 
