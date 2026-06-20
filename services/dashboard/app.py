@@ -16,7 +16,7 @@ from typing import Any
 import markdown
 import psycopg
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -44,6 +44,13 @@ from universe_coverage import CACHE as UNIVERSE_CACHE
 from universe_coverage_page import UNIVERSE_COVERAGE_HTML
 
 app = FastAPI(title="Quant Dashboard")
+
+
+@app.get("/feature-grid")
+def feature_grid_redirect() -> RedirectResponse:
+    """Ben's canonical URL — the feature/store-coverage grid SPA lives at /store-grid; redirect so
+    http://<host>:8088/feature-grid lands on the live grid (the v2 root-/ rework supersedes this)."""
+    return RedirectResponse(url="/store-grid/")
 
 DOCS_DIR = Path("/docs")
 # 8-hour progress reports, one markdown file per period (market/evening/overnight).
