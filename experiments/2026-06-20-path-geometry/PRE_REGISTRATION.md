@@ -100,18 +100,28 @@ Substrate: trusted backfill store, top-N liquid per day, forward-30m cross-secti
 `$1` floor on both legs, tradeable entry >=09:35 ET. Two DISJOINT date windows (train-window discover,
 held-out-window replicate) — windows fixed in advance, no peeking.
 
+**ORDERING PRINCIPLE (the swing_dc lesson — Lead amendment).** The binding constraint we keep failing is
+INCREMENTAL-$-OVER-BASELINE, not IC. swing_dc passed trust + IC + replication and STILL $-nulled — and we
+only discovered it at G7, AFTER building the whole Rust kernel + production group. So we FRONT-LOAD the kill
+on the gate that actually binds: a cheap G0 $-screen runs FIRST, using zero-new-computation proxies, BEFORE
+any production group or kernel work. G1-G6 (the full trust rigor) still run in full before any deploy — but
+only if G0 says there is $ to chase. This saves the entire build when the vein is $-exhausted.
+
 | # | Gate | Pass bar | Why |
 |---|------|----------|-----|
-| G1 | **Own-vol control (CRITICAL)** | Partial rank-IC vs forward |move|/range, residualizing BOTH the feature AND the label on trailing realized sigma (and log-size), must retain **>= 60% of its raw IC magnitude** (collapse ratio <= 0.40 is a FAIL). | 10/13 prior "survivors" collapsed here — they were re-priced vol-persistence. This is THE gate. |
-| G2 | **Beyond swing_dc** | Incremental IC of the new feature in a model that ALREADY contains the swing_dc surface (esp. `resp_*`) must be non-trivial (the feature's gain-importance is non-marginal AND its partial-IC controlling for `resp_chunk_slope`/`resp_roughness` survives). | Must not be a re-statement of the already-staged roughness fingerprint. |
+| **G0** | **⭐ CHEAP EARLY $-SCREEN (runs FIRST, before any build)** | Construct the feature as the CHEAPEST possible eval-time proxy — **asymmetry via route B.1** (reuse swing_dc_fold's already-emitted per-leg height/slope/duration outputs → up/down asymmetry columnarly, ZERO new computation) + the **Hölder/roughness half as a handful of inline polars aggregations** (eval-time proxy, NOT a production group). Add the proxy to the FULL trusted-model baseline and run the EXACT Thread-1 harness $-curve test at {2,5,10}% cuts, vs the same baseline without it, dominating shuffle + predict-zero. **GO/NO-GO:** incremental $ over baseline at conservative cuts → proceed to G1-G6 + the production build. $-null (like swing_dc) → PUBLISH THE NULL, do NOT build the group/kernel, trigger the §6 pivot. | We keep failing at G7 after building. G0 is G7's question asked BEFORE the build, with throwaway proxies — fail fast on the binding constraint, save the kernel for an eval-afternoon. |
+| G1 | **Own-vol control (CRITICAL)** | Partial rank-IC vs forward |move|/range, residualizing BOTH the feature AND the label on trailing realized sigma (and log-size), must retain **>= 60% of its raw IC magnitude** (collapse ratio <= 0.40 is a FAIL). | 10/13 prior "survivors" collapsed here — they were re-priced vol-persistence. This is THE IC gate. |
+| G2 | **⭐ Incremental over the FULL trusted baseline (SHARPENED — Lead amendment)** | Incremental IC + non-marginal gain-importance of the new feature in a model that ALREADY contains the **full trusted baseline — explicitly the return-shape (price_returns, return_dynamics, efficiency) + volatility (volatility, ohlc_vol) groups AND swing_dc**. NOT "beyond swing_dc in isolation". The partial-IC must survive controlling for the baseline's own roughness/shape surface, not just for `resp_chunk_slope`. | The #255 + swing_dc evidence: the BASELINE'S OWN return-shape + vol groups already hold ~91% of the tail edge. swing_dc died on redundancy AGAINST THE BASELINE, not against itself. Beyond-swing_dc is necessary but NOT sufficient. |
 | G3 | **Shuffle baseline** | Real per-date IC distribution must dominate the within-timestamp label-shuffle null (the feature's mean |IC| > 99th pct of shuffled). | The leakage/overfit null. |
 | G4 | **BY-FDR** | Across ALL emitted features of the group, survive Benjamini-Yekutieli at q=0.10 (reuse `quantlib.battery.family.benjamini_yekutieli`, two-sided on the NW-t of per-date IC). | Multiple-testing honesty across the family. |
 | G5 | **Disjoint-window OOS replication** | A feature that passes G1-G4 on window-1 must replicate (same sign, IC within a stated band, partial-IC still surviving own-vol) on the held-out window-2. | swing_dc earned trust ONLY because it replicated 9/9 on a disjoint window. |
 | G6 | **No-look-ahead (bit-identical)** | Feature computed on the frame truncated at T == feature at T on the full-day frame, for confirmed history; current-leg provisional-only. Automated test. | A path-decomposition feature that repaints manufactures a fake edge (pitfall: standard zigzag). |
-| G7 | **$-curve move (the deploy gate, only if G1-G6 pass)** | Adding the group to the trusted-model inputs must IMPROVE the harness $-curve at conservative {2,5,10}% cuts vs the same baseline without it, dominating shuffle + predict-zero — the EXACT test applied to swing_dc in Thread 1. | Trust + IC are necessary; moving the money curve is what justifies a fingerprint change. |
+| G7 | **$-curve move (the deploy gate, only if G1-G6 pass)** | The PRODUCTION group added to the trusted-model inputs must IMPROVE the harness $-curve at conservative {2,5,10}% cuts vs the same baseline without it, dominating shuffle + predict-zero — the EXACT test applied to swing_dc in Thread 1 (and previewed at G0). | Trust + IC are necessary; moving the money curve is what justifies a fingerprint change. G0 previews this; G7 confirms it on the real production feature. |
 
-**Decision rule.** Advance to a production feature-group build ONLY if G1-G6 pass on BOTH windows; advance
-to a deploy proposal ONLY if G7 is green. Any single FAIL → publish the null with the failing gate named,
+**Decision rule.** Run **G0 FIRST** and report the $-screen result to the Lead BEFORE any group/kernel build.
+Advance to the production feature-group build ONLY if G0 shows incremental $; then G1-G6 must pass on BOTH
+windows; advance to a deploy proposal ONLY if G7 is green. Any single FAIL → publish the null with the
+failing gate named,
 and the vein-read stands (the *direction* was right even if this specific operator nulls). No p-hacking the
 ladder/window: the {2,4,8,16,32,64} tau ladder and W=120m are FIXED here; if they are swept, the sweep is a
 hyperparameter the FDR count must include.
@@ -122,5 +132,26 @@ hyperparameter the FDR count must include.
 
 - NOT a direction feature (magnitude/risk only; signed return is a secondary expected-null check).
 - NOT a new data source (Layer-A minute bars only).
-- NOT a re-derivation of own-vol (G1 enforces) or of `resp_chunk_slope` (G2 enforces).
-- NOT built yet — this PR is the pre-reg + gate-read ONLY. STOP here for the Lead's read before any code.
+- NOT a re-derivation of own-vol (G1 enforces) or of the baseline's shape/vol surface (G2 enforces).
+- NOT built yet — G0 runs on throwaway proxies FIRST; no production group/kernel until G0 is GO.
+
+---
+
+## 6. PRE-COMMITTED PIVOT — what a G0/G7 null routes to (Lead amendment)
+
+If G0 (or later G7) $-nulls, this is the **THIRD** path-structure-magnitude $-null on top of the current
+baseline (the others: swing_dc's `dc_resp_chunk_slope`-as-$ in Thread 1; and the #255 read that the
+baseline already holds ~91% of the path/vol tail edge). Three nulls on one vein is a verdict, not a miss:
+**read it as "the path-structure-magnitude vein is $-EXHAUSTED on top of the current trusted baseline"** —
+the baseline already prices price-geometry + volatility structure, so more clever geometry on the SAME
+minute bars is redundant-by-construction.
+
+**The pivot (named now so the null routes forward cleanly):** move to the genuinely ORTHOGONAL axis = the
+now-queryable **deep QUOTE / TAPE microstructure** — spread dynamics and the liquidity-provision surface on
+the quote tape (per the standing meta-conclusion: at our scale on bar-only data the remaining edge is
+quote-dependent, e.g. the #205 spread re-test + liquidity-provision surface). That is a DIFFERENT data
+substrate (the raw quote tape, not minute-bar geometry), so it is not redundant with the baseline's
+bar-derived shape/vol groups by construction — the one axis the path-geometry nulls leave open.
+
+A G0 GO, conversely, means the path-geometry vein has live incremental $ and we proceed to the full G1-G6
+rigor + production build. Either outcome is a clean, forward-routing result.
