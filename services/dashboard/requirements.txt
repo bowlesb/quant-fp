@@ -8,3 +8,6 @@ markdown==3.7
 psycopg[binary]==3.2.3
 polars
 numpy
+# quantlib.bus import chain (scorecard -> quantlib.bus.schema -> registry) imports redis at module
+# level since the bus-decouple (#211); the dashboard image must carry it even though it never connects.
+redis>=5,<6
