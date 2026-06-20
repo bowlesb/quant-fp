@@ -18,6 +18,7 @@ streak) cannot be one columnar pass and are the Phase-1 Rust kernel; `Executor` 
 This module deliberately imports NOTHING from the bus/broker — the live `PaperExecutor`/`BusFeed` are
 duck-typed on the broker/consumer handles so the pure core never drags redis/alpaca into the battery.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -60,9 +61,14 @@ class OrderIntent:
 
 
 class OrderState(str, Enum):
-    """The full Alpaca order lifecycle (REQ-X3) — partials and rejects are first-class, not time-outs."""
+    """The full Alpaca order lifecycle (REQ-X3) — partials and rejects are first-class, not time-outs.
+
+    NEW = created locally, not yet acknowledged; PENDING = submitted, awaiting broker ack; ACCEPTED =
+    the broker acknowledged it as a working order; then the terminal/partial states."""
 
     NEW = "new"
+    PENDING = "pending"
+    ACCEPTED = "accepted"
     PARTIALLY_FILLED = "partially_filled"
     FILLED = "filled"
     CANCELED = "canceled"
@@ -100,8 +106,7 @@ class BookState:
 
 
 class Clock(Protocol):
-    def now(self) -> dt.datetime:
-        ...
+    def now(self) -> dt.datetime: ...
 
 
 class SimClock:
@@ -132,8 +137,7 @@ class FeedEvent:
 class DataFeed(Protocol):
     """Replays decision events. Same event shape out (a CrossSection + ts), different source."""
 
-    def events(self) -> Iterator[FeedEvent]:
-        ...
+    def events(self) -> Iterator[FeedEvent]: ...
 
 
 class Strategy(Protocol):
@@ -141,19 +145,18 @@ class Strategy(Protocol):
     transact. No bus, no broker, no wall-clock. Called once per step by the Runner — identical live +
     backtest. MUST be columnar-friendly so the BacktestExecutor can batch it (see module docstring)."""
 
-    def decide(self, cross_section: CrossSection, state: BookState) -> list[OrderIntent]:
-        ...
+    def decide(self, cross_section: CrossSection, state: BookState) -> list[OrderIntent]: ...
 
 
 class Executor(Protocol):
     """THE pretend-trade vs actual-trade swap. `execute` turns intents into fills (simulated or real)
     and updates the book."""
 
-    def execute(self, intents: list[OrderIntent], cross_section: CrossSection, clock: Clock) -> list[Fill]:
-        ...
+    def execute(
+        self, intents: list[OrderIntent], cross_section: CrossSection, clock: Clock
+    ) -> list[Fill]: ...
 
-    def book(self) -> BookState:
-        ...
+    def book(self) -> BookState: ...
 
 
 class TargetBookCore(Protocol):
@@ -162,8 +165,7 @@ class TargetBookCore(Protocol):
     core drives the per-event Runner. The target book is also what the vectorized backtest path books —
     one representation, both paths."""
 
-    def decide(self, cross_section: CrossSection) -> list[TargetPosition]:
-        ...
+    def decide(self, cross_section: CrossSection) -> list[TargetPosition]: ...
 
 
 class TargetBookStrategy:
