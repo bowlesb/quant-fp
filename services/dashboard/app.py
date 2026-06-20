@@ -36,6 +36,8 @@ from sector_coverage import CACHE as SECTOR_CACHE
 from sector_coverage_page import SECTOR_COVERAGE_HTML
 from status_page import render_status_page
 from store_glimpse import CACHE as GLIMPSE_CACHE
+from store_glimpse_cache import read_drill as read_glimpse_drill
+from store_glimpse_cache import read_glimpse
 from store_glimpse_page import STORE_GLIMPSE_HTML
 from universe_coverage import CACHE as UNIVERSE_CACHE
 from universe_coverage_page import UNIVERSE_COVERAGE_HTML
@@ -415,7 +417,14 @@ def store_glimpse_json(days: int = 30, refresh: bool = False) -> JSONResponse:
     fraction (the cell DARKNESS = n_symbols-that-date / captured-universe) + trust hue (green=trusted /
     amber=pending / red=divergent / grey=ungraded). Plus a per-date Total column and an expandable
     per-feature breakdown. Reuses the #221/#223 grid's gathered counts + the feature_trust read — no new
-    heavy store I/O. ``days`` clips the row window (most-recent first); ``refresh=1`` bypasses the TTL cache.
+    heavy store I/O. ``days`` clips the row window (most-recent first).
+
+    SERVED FROM the persistent (Redis) cache that ``ops/collect_store_glimpse.py`` precomputes on a cron — a
+    sub-ms read, so the refresh is instant and always warm; the ~50s grid build runs only in that background
+    worker, never on this request. A COLD cache (worker not run yet) or unreachable Redis returns a small
+    ``warming`` payload (the page shows 'warming…') rather than hanging the request on the live build.
+    ``refresh=1`` is the manual escape hatch: it forces a live in-process build (the old path) for when the
+    worker is down and a fresh grid is needed now.
 
     Shape (see docs/STORE_GLIMPSE.md):
       {generated_at, store_root, anchor_date, days, universe_size,
@@ -424,7 +433,9 @@ def store_glimpse_json(days: int = 30, refresh: bool = False) -> JSONResponse:
        dates: ["2026-06-20", ...],
        cells: {date: {group: {coverage, n_symbols, hue}, ..., "__total__": {...}}}}
     """
-    return JSONResponse(GLIMPSE_CACHE.glimpse(STORE_ROOT, days=days, force=refresh))
+    if refresh:
+        return JSONResponse(GLIMPSE_CACHE.glimpse(STORE_ROOT, days=days, force=True))
+    return JSONResponse(read_glimpse(days=days))
 
 
 @app.get("/api/store-glimpse/{group}/tickers")
@@ -433,12 +444,18 @@ def store_glimpse_drill_json(
 ) -> JSONResponse:
     """The drill-down for one (date × group) cell: a TICKER × DATE presence grid for THAT group — one row per
     ticker, one box per date, shaded by provenance (both / stream / backfill / absent). Lazy (only on a cell
-    click) + paginated (``limit`` rows, ranked most-covered first; the universe is ~7.3k). 404 for an
-    unknown group. ``days`` sets the date window; ``refresh=1`` bypasses the TTL cache."""
-    try:
-        return JSONResponse(GLIMPSE_CACHE.drill(group, STORE_ROOT, days=days, limit=limit, force=refresh))
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown feature group: {group}")
+    click) + paginated (``limit`` rows, ranked most-covered first; the universe is ~7.3k). 404 for an unknown
+    group. ``days`` sets the date window.
+
+    SERVED FROM the same Redis cache the worker precomputes (a blob per group) — sub-ms, off the request path.
+    A cold cache / unreachable Redis returns a ``warming`` drill (empty but valid) rather than the ~1.5s live
+    build. ``refresh=1`` forces a live in-process build (the manual escape hatch when the worker is down)."""
+    if refresh:
+        try:
+            return JSONResponse(GLIMPSE_CACHE.drill(group, STORE_ROOT, days=days, limit=limit, force=True))
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown feature group: {group}")
+    return JSONResponse(read_glimpse_drill(group, days=days, limit=limit))
 
 
 @app.get("/store-glimpse", response_class=HTMLResponse)
