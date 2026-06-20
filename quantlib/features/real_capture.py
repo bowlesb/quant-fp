@@ -43,6 +43,7 @@ from quantlib.features.sharded_capture import (
     shard_of,
     worker_main,
 )
+from quantlib.features.stream_supervisor import run_stream_supervised
 
 
 # Tick AGGREGATION (the expensive part — per-symbol sign classification, spread/imbalance stats, the raw
@@ -245,7 +246,7 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     # last_arrival  = time.time() of the minute's LAST bar (pure-compute anchor; max over the minute).
     # symbol_arrivals = per-symbol time.time() of that symbol's bar (drill-down: which tickers are slow).
     pending: dict = {"minute": None, "bars": [], "trades": [], "quotes": [], "done": 0, "arrival": 0.0,
-                     "last_arrival": 0.0, "symbol_arrivals": {}}
+                     "last_arrival": 0.0, "symbol_arrivals": {}, "stopped": False}
     # The reader NO LONGER aggregates ticks — it forwards each shard its RAW trades/quotes and the WORKER
     # aggregates its own shard's ticks (threaded TickState per worker). This distributes the tick firehose
     # across the workers instead of the single reader buffering+aggregating all of it inline, so it scales
@@ -254,7 +255,10 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
     tick_syms = set(tick_symbols(symbols))
     trade_buf: dict = {}
     quote_buf: dict = {}
-    stream = build_stream()
+    # The supervisor rebuilds the stream on each (re)connect (a StockDataStream is single-use once run()
+    # returns), so the ACTIVE stream lives in this holder — the on_bar bounded-stop path stops THIS one.
+    # build_and_subscribe (below) populates it before each run(); None until the first connect.
+    active_stream: dict = {"stream": None}
 
     # OPT-IN raw market-data streams (md:) — a SEPARATE channel from the feature-vector bus. Both flags
     # are checked ONCE here (cheap booleans on the hot path, no per-message string parsing) and the
@@ -330,7 +334,9 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
                           file=sys.stderr, flush=True)
                 for queue in queues:
                     queue.put(None)  # shutdown sentinel: workers drain their queue then exit
-                await stream.stop_ws()
+                # Mark the stop as INTENTIONAL so the supervisor returns (no reconnect) on this bounded exit.
+                pending["stopped"] = True
+                await active_stream["stream"].stop_ws()
                 return
         now = time.time()
         if not pending["bars"]:
@@ -379,12 +385,32 @@ def run_sharded_capture(  # pragma: no cover (live multiprocess loop; logic is u
 
     # The reader exposes its own /metrics (ingestion counters) — workers own 9201..9208, reader owns 9200.
     metrics.start_metrics_server(int(os.environ.get("READER_METRICS_PORT", "9200")))
-    stream.subscribe_bars(on_bar, *symbols)
-    if tick_syms:
-        stream.subscribe_trades(on_trade, *tick_syms)
-        stream.subscribe_quotes(on_quote, *tick_syms)
-        print(f"[reader] tick streaming ON: trades+quotes for {len(tick_syms)} symbols", file=sys.stderr, flush=True)
-    stream.run()
+
+    def build_and_subscribe() -> StockDataStream:
+        """Build a FRESH subscribed stream for each (re)connect — a StockDataStream is single-use once run()
+        has returned, so the supervisor calls this once per attempt and we always build anew. The holder
+        points at the stream that is about to run() so the bounded-stop path (on_bar) stops the LIVE one."""
+        stream = build_stream()
+        stream.subscribe_bars(on_bar, *symbols)
+        if tick_syms:
+            stream.subscribe_trades(on_trade, *tick_syms)
+            stream.subscribe_quotes(on_quote, *tick_syms)
+            print(
+                f"[reader] tick streaming ON: trades+quotes for {len(tick_syms)} symbols",
+                file=sys.stderr,
+                flush=True,
+            )
+        active_stream["stream"] = stream
+        return stream
+
+    # SUPERVISED run: alpaca's run() returns cleanly on a reconnect that trips Alpaca's single-connection
+    # limit (the observed fc mid-session exit). The supervisor re-enters with backoff while the session is
+    # active, so that drop self-heals in seconds instead of waiting up to ~3 min for the monitor docker-start.
+    run_stream_supervised(
+        build_and_subscribe,
+        day=day if max_minutes is None else None,  # bounded/benchmark runs have no session clock
+        stopped_intentionally=lambda: bool(pending["stopped"]),
+    )
     if os.environ.get("FP_BENCH_LOG"):
         print("[reader] stream.run() returned; joining workers", file=sys.stderr, flush=True)
     for worker in workers:
