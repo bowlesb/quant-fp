@@ -35,6 +35,8 @@ from scorecard_page import SCORECARD_HTML
 from sector_coverage import CACHE as SECTOR_CACHE
 from sector_coverage_page import SECTOR_COVERAGE_HTML
 from status_page import render_status_page
+from universe_coverage import CACHE as UNIVERSE_CACHE
+from universe_coverage_page import UNIVERSE_COVERAGE_HTML
 
 app = FastAPI(title="Quant Dashboard")
 
@@ -378,6 +380,33 @@ def sector_coverage_page() -> str:
     return SECTOR_COVERAGE_HTML
 
 
+@app.get("/api/universe-coverage")
+def universe_coverage_json(days: int = 30, refresh: bool = False) -> JSONResponse:
+    """UNIVERSE coverage: the CAPTURED universe (``universe_membership`` in_universe count per session) vs the
+    AVAILABLE filtered set (tradable primary-venue common stocks surviving the seed's exchange + ETF/fund
+    screen over ``asset_metadata``) — the whole-universe captured-vs-available ratio over time. The complement
+    of the #223 per-group DROP detector: a silent universe re-cap (e.g. the 06-16 relaunch's 3000-of-7.3k
+    default cap) is an instantly-visible, permanent fixture, not a one-time catch.
+
+    Per day: captured count, the SAME-snapshot available denominator, the captured/available RATIO + status
+    band (full/thinned/capped), and uncaptured = available − captured (names left on the table). A day captured
+    ABOVE the current available set (a pre-ETF-screen seed) is flagged, ratio clamped to 100%. ``days`` clips
+    the per-day timeline to the most-recent N captured sessions. ``refresh=1`` bypasses the TTL cache.
+
+    Shape (see docs/UNIVERSE_COVERAGE.md):
+      {generated_at, available, status, ratio_thresholds: {ok, thin},
+       latest: {date, captured, ratio, ratio_pct, uncaptured, status, over_available},
+       timeline: [{date, captured, ratio, ratio_pct, uncaptured, status, over_available}]}
+    """
+    return JSONResponse(UNIVERSE_CACHE.coverage(days=days, force=refresh))
+
+
+@app.get("/universe-coverage", response_class=HTMLResponse)
+def universe_coverage_page() -> str:
+    """The visual universe-coverage surface (vanilla HTML/JS; fetches /api/universe-coverage client-side)."""
+    return UNIVERSE_COVERAGE_HTML
+
+
 @app.get("/api/scorecard")
 def scorecard_json(refresh: bool = False) -> JSONResponse:
     """SYSTEM PROGRESS scorecard: Ben's six platform axes (A trusted / B deployed / C trust-process health /
@@ -635,7 +664,8 @@ def dashboard() -> str:
 <a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a> &nbsp;
 <a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a> &nbsp;
 <a href="/liquidity-bands" style="color:#58a6ff;text-decoration:none;font-size:13px;">Liquidity bands &rarr;</a> &nbsp;
-<a href="/sector-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Sector coverage &rarr;</a></h1>
+<a href="/sector-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Sector coverage &rarr;</a> &nbsp;
+<a href="/universe-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Universe coverage &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
   <div class="grid" style="margin-bottom:24px;">
