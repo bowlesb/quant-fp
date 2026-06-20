@@ -120,10 +120,50 @@ class GapFillStateGroup(FeatureGroup):
             ["symbol", "minute", *names]
         )
 
+    def _assemble_latest(self, ctx: BatchContext, latest: object) -> pl.DataFrame:
+        """Latest-minute live form: resolve each symbol's session-open for T's OWN session as a SINGLE row
+        (``open.first()`` aggregated over that session's RTH bars, NOT broadcast over every minute), then
+        evaluate the gap-fill ONLY on the rows at T. The gap-fill at T reads nothing but T's session-open,
+        prev_close and T's close (session_open is fixed within the day, no cross-session state), so this is
+        value-identical to ``_assemble(...).filter(minute == T)`` by construction — same RTH filter, same
+        per-(symbol, sdate) first-open, same fill algebra — while touching only T's session, not the buffer."""
+        names = [spec.name for spec in self.declare()]
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "open", "close"])
+        et_minute = et_minute_of_day(pl.col("minute"))
+        frame = frame.with_columns(
+            pl.col("minute").dt.convert_time_zone("America/New_York").dt.date().alias("sdate"),
+            et_minute.alias("_etm"),
+        )
+        latest_sdate = pl.lit(latest).dt.convert_time_zone("America/New_York").dt.date()
+        session = frame.filter((pl.col("_etm") >= OPEN_MINUTE) & (pl.col("sdate") == latest_sdate))
+        sess_open = (
+            session.sort(["symbol", "minute"])
+            .group_by("symbol", maintain_order=True)
+            .agg(pl.col("open").first().alias("_sess_open"), pl.col("sdate").first().alias("sdate"))
+        )
+        at_t = session.filter(pl.col("minute") == latest).select(["symbol", "minute", "close"])
+        joined = at_t.join(sess_open, on="symbol", how="left").join(
+            self._prev_close(ctx),
+            left_on=["symbol", "sdate"],
+            right_on=["symbol", "date"],
+            how="left",
+        )
+        denom = pl.col("prev_close") - pl.col("_sess_open")
+        fill = (
+            pl.when(denom.abs() > 1e-9)
+            .then((pl.col("close") - pl.col("_sess_open")) / denom)
+            .otherwise(None)
+        )
+        feats = joined.with_columns(
+            fill.alias("gap_fill_fraction"),
+            pl.when(denom.abs() > 1e-9).then((fill < 0).cast(pl.Int8)).otherwise(None).alias("gap_extended"),
+        ).select(["symbol", "minute", *names])
+        keys = ctx.frame("minute_agg").select(["symbol", "minute"]).filter(pl.col("minute") == latest)
+        return keys.join(feats, on=["symbol", "minute"], how="left").select(["symbol", "minute", *names])
+
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         return self._assemble(ctx, ctx.frame("minute_agg").select(["symbol", "minute"]))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = keys["minute"].max()
-        return self._assemble(ctx, keys.filter(pl.col("minute") == latest))
+        latest = ctx.frame("minute_agg")["minute"].max()
+        return self._assemble_latest(ctx, latest)
