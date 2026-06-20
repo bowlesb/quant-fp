@@ -5,6 +5,7 @@ broker + in-memory store (no real orders placed).
 The gate + qty tests are network-free. The sampling + flow tests use the quant-redis bus and skip
 cleanly when it is unreachable.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -14,12 +15,13 @@ from dataclasses import dataclass, field
 
 import pytest
 import redis
-
 from alpaca.common.exceptions import APIError
+from alpaca.trading.enums import OrderStatus
 
 from quantlib.bus.consumer import BusConsumer
 from quantlib.bus.publisher import BusPublisher
 from quantlib.bus.schema import default_schema
+from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from strategies.lib.model import MockMLModel
 from strategies.smoke.strategy import (
     SmokeConfig,
@@ -71,9 +73,7 @@ def test_gate_allows_when_clear() -> None:
 
 
 def test_gate_blocks_when_kill_switch_off() -> None:
-    gate = evaluate_bet_gate(
-        _config(enabled=False), NOW, None, 0, 0.0, market_open=True, last_symbol="AAPL"
-    )
+    gate = evaluate_bet_gate(_config(enabled=False), NOW, None, 0, 0.0, market_open=True, last_symbol="AAPL")
     assert not gate.allowed
     assert gate.reason == "kill_switch_off"
 
@@ -103,7 +103,12 @@ def test_gate_blocks_at_max_total_notional() -> None:
     # open 180 + prospective 50 = 230 > 200 cap
     gate = evaluate_bet_gate(
         _config(max_total_notional_usd=200.0, notional_usd=50.0),
-        NOW, None, 1, 180.0, market_open=True, last_symbol="AAPL",
+        NOW,
+        None,
+        1,
+        180.0,
+        market_open=True,
+        last_symbol="AAPL",
     )
     assert not gate.allowed
     assert gate.reason == "max_total_notional"
@@ -114,13 +119,23 @@ def test_gate_bounds_actual_notional_not_share_price() -> None:
     # exposure (not 3 whole AMD shares ~ $1641). A 4th $50 bet -> 200 == cap, so it is allowed...
     gate_ok = evaluate_bet_gate(
         _config(max_total_notional_usd=200.0, notional_usd=50.0, max_concurrent=10),
-        NOW, None, 3, 150.0, market_open=True, last_symbol="AMD",
+        NOW,
+        None,
+        3,
+        150.0,
+        market_open=True,
+        last_symbol="AMD",
     )
     assert gate_ok.allowed
     # ...but a 5th would push 200 + 50 = 250 > 200 and is skipped.
     gate_blocked = evaluate_bet_gate(
         _config(max_total_notional_usd=200.0, notional_usd=50.0, max_concurrent=10),
-        NOW, None, 4, 200.0, market_open=True, last_symbol="AMD",
+        NOW,
+        None,
+        4,
+        200.0,
+        market_open=True,
+        last_symbol="AMD",
     )
     assert not gate_blocked.allowed
     assert gate_blocked.reason == "max_total_notional"
@@ -165,8 +180,12 @@ class FakeOrder:
     client_order_id: str
     filled_avg_price: float | None
     filled_qty: float | None = None
-    status: str = "filled"
+    status: object = None  # set to an alpaca OrderStatus in submit_order (Alpaca-shaped)
     filled_at: dt.datetime | None = None
+    qty: float | None = None
+    side: object = None
+    submitted_at: dt.datetime | None = None
+    created_at: dt.datetime | None = None
 
 
 @dataclass
@@ -212,6 +231,10 @@ class FakeTradingClient:
             filled_avg_price=self.fill_price,
             filled_qty=filled_qty,
             filled_at=NOW,
+            status=OrderStatus.FILLED,
+            qty=filled_qty,
+            submitted_at=NOW,
+            created_at=NOW,
         )
         self.submitted.append(order)
         self._by_coid[coid] = order
@@ -235,15 +258,27 @@ class InMemoryStore:
         self._bets: dict[str, dict[str, object]] = {}
 
     def record_open(
-        self, symbol: str, side: str, entry_notional: float, entry_order_id: str,
-        entry_ts: dt.datetime, hold_until: dt.datetime,
+        self,
+        symbol: str,
+        side: str,
+        entry_notional: float,
+        entry_order_id: str,
+        entry_ts: dt.datetime,
+        hold_until: dt.datetime,
     ) -> int:
         if entry_order_id not in self._bets:
             self._bets[entry_order_id] = {
-                "id": len(self._bets) + 1, "symbol": symbol, "side": side,
-                "entry_notional": entry_notional, "qty": None,
-                "entry_order_id": entry_order_id, "entry_ts": entry_ts, "entry_price": None,
-                "hold_until": hold_until, "exit_order_id": None, "status": "open",
+                "id": len(self._bets) + 1,
+                "symbol": symbol,
+                "side": side,
+                "entry_notional": entry_notional,
+                "qty": None,
+                "entry_order_id": entry_order_id,
+                "entry_ts": entry_ts,
+                "entry_price": None,
+                "hold_until": hold_until,
+                "exit_order_id": None,
+                "status": "open",
             }
         return int(self._bets[entry_order_id]["id"])  # type: ignore[arg-type]
 
@@ -290,15 +325,16 @@ class InMemoryStore:
         return total
 
 
-def _strategy(
-    config: SmokeConfig, trading: FakeTradingClient, store: InMemoryStore
-) -> SmokeStrategy:
+def _strategy(config: SmokeConfig, trading: FakeTradingClient, store: InMemoryStore) -> SmokeStrategy:
     consumer = BusConsumer(config.symbols, url=URL) if _redis_up() else None
     strategy = SmokeStrategy.__new__(SmokeStrategy)
     strategy._config = config  # type: ignore[attr-defined]
     strategy._consumer = consumer  # type: ignore[attr-defined]
     strategy._trading = trading  # type: ignore[attr-defined]
     strategy._store = store  # type: ignore[attr-defined]
+    strategy._executor = PaperAlpacaExecutor(trading)  # type: ignore[attr-defined,arg-type]
+    strategy._state = None  # type: ignore[attr-defined]
+    strategy._state_store = None  # type: ignore[attr-defined]
     strategy._model = MockMLModel()  # type: ignore[attr-defined]
     strategy._last_symbol = "AAPL"  # type: ignore[attr-defined]
     strategy._last_vector = None  # type: ignore[attr-defined]
@@ -316,7 +352,8 @@ def test_place_then_manage_finalizes_bet() -> None:
     assert store.count_open() == 1
     assert len(trading.submitted) == 1  # the BUY entry
     entry = trading.submitted[0]
-    assert entry.client_order_id.startswith("smoke_AAPL_")
+    # the G2 fully-qualifying coid {strategy}-{stamp}-{symbol}-{side} (the migration's coid scheme).
+    assert entry.client_order_id.startswith("smoke-") and entry.client_order_id.endswith("-AAPL-buy")
     # NOTIONAL buy: $50 / $190 share = ~0.263 fractional shares, not a whole share
     expected_qty = 50.0 / 190.0
     assert entry.filled_qty == pytest.approx(expected_qty)
