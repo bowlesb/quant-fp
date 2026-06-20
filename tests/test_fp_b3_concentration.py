@@ -203,6 +203,49 @@ def test_size_entropy_window_parity_mixed() -> None:
     _assert_window_parity("size_entropy", {"trades": _trades(rows)})
 
 
+def _trades_multi(rows: list[tuple[str, datetime, float, float]]) -> pl.DataFrame:
+    """rows = list of (symbol, ts, price, size) — the multi-symbol tape the live path sees."""
+    return pl.DataFrame(
+        {
+            "symbol": [r[0] for r in rows],
+            "ts": [r[1] for r in rows],
+            "price": [r[2] for r in rows],
+            "size": [r[3] for r in rows],
+        }
+    )
+
+
+def test_size_entropy_multi_symbol_sparse_last_minute_parity() -> None:
+    # The fast compute_latest's edge case: AAA trades through minute m2 (the global last minute) but BBB's
+    # last trade is at m1. compute().filter(minute == global max) emits ONLY AAA at m2 — BBB has no row at
+    # the latest minute. The fast live form must drop BBB identically (key on the global max minute, not
+    # each symbol's own last minute).
+    m0, m1, m2 = BASE, BASE + timedelta(minutes=1), BASE + timedelta(minutes=2)
+    rows = [
+        ("AAA", m0 + timedelta(seconds=1), 100.0, 5.0),
+        ("AAA", m1 + timedelta(seconds=1), 100.0, 5000.0),
+        ("AAA", m2 + timedelta(seconds=1), 100.0, 50.0),
+        ("BBB", m0 + timedelta(seconds=1), 100.0, 30.0),
+        ("BBB", m1 + timedelta(seconds=1), 100.0, 3000.0),
+    ]
+    ctx = BatchContext(frames={"trades": _trades_multi(rows)})
+    live = REGISTRY.get_group("size_entropy").compute_latest(ctx).sort("symbol")
+    assert live["symbol"].to_list() == ["AAA"]
+    assert live["minute"].to_list() == [m2]
+    _assert_window_parity("size_entropy", {"trades": _trades_multi(rows)})
+
+
+def test_size_entropy_deeper_than_window_parity() -> None:
+    # A buffer DEEPER than the 60m window: compute() does real multi-window rolling and its last-minute
+    # window must drop the out-of-window early minutes. Two symbols, distinct size mixes, 65 minutes.
+    rows: list[tuple[str, datetime, float, float]] = []
+    for minute_idx in range(65):
+        ts = BASE + timedelta(minutes=minute_idx, seconds=1)
+        rows.append(("AAA", ts, 100.0, 5.0 if minute_idx % 2 == 0 else 5000.0))
+        rows.append(("BBB", ts, 100.0, 50.0 if minute_idx % 3 == 0 else 50000.0))
+    _assert_window_parity("size_entropy", {"trades": _trades_multi(rows)})
+
+
 def test_size_entropy_empty_frame() -> None:
     empty = pl.DataFrame(
         schema={"symbol": pl.String, "ts": pl.Datetime("us", "UTC"), "price": pl.Float64, "size": pl.Float64}
