@@ -1,2 +1,3 @@
 *.parquet
 *.csv
+_daily_reduce/
