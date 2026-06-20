@@ -1,4 +1,13 @@
-# ⏵ CURRENT OPERATIONAL STATE — 2026-06-15 ~11:30 ET (read this block first)
+# ⏵ OPERATIONAL STATE SNAPSHOT — 2026-06-15 ~11:30 ET
+
+> **ARCHIVED (superseded — historical snapshot, do NOT treat as current).** This is a point-in-time
+> capture of the pre-team single-loop operating model (`integration/converged` bind-mount trunk, the
+> host-cron `ops/autonomous_loop.sh`/`ops/audit_loop.sh` single-`claude -p` cycle, 618 features / 11,336
+> symbols). The system has since migrated to a team-of-agents model coordinated via `~/.quant-ops/SYSTEM_LOG.md`
+> (live fingerprint + universe + cron registry there), and the feature set has grown past 618. For the
+> CURRENT source of truth see `~/.quant-ops/SYSTEM_LOG.md` (live state), `docs/OPERATIONS.md` (the cron
+> registry of record), `docs/OPERATING_MODEL.md` (roles/loops), and `docs/FEATURE_PLATFORM.md` (design).
+> Kept for historical reference (git history preserved via `git mv`).
 
 **Live now:** parity-true capture running on the real Alpaca SIP feed. Trunk = `integration/converged`
 (bind-mounted into the `feature-computer` container at `/app`; running process picks up code only on
