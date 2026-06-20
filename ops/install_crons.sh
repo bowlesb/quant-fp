@@ -68,6 +68,21 @@ CHANGED=0
 CURRENT="$(crontab -l 2>/dev/null || true)"
 NEXT="$CURRENT"
 
+# AUDIT (non-mutating): the hand-managed nightly_relaunch line must carry UNIVERSE_MAX_SYMBOLS, else each
+# pre-market relaunch silently re-seeds the universe at seed_universe's DEFAULT cap (3000) instead of the
+# full filtered set. This was a real oversight (06-16..06-20: membership re-capped 11336->3000 every night)
+# because the override was never on the cron line. We do NOT rewrite the DESTRUCTIVE relaunch line (see the
+# header) — instead we LOUDLY flag the gap so a relaunch can never silently re-cap unnoticed. The coordinator
+# applies the one-line live-crontab edit (the canonical line is in docs/OPERATIONS.md).
+audit_relaunch_universe_cap() {
+  printf '%s\n' "$CURRENT" | grep -F 'ops/nightly_relaunch.sh' | grep -vqF 'UNIVERSE_MAX_SYMBOLS' || return 0
+  echo "install_crons.sh: ⚠️  nightly_relaunch cron line is MISSING UNIVERSE_MAX_SYMBOLS — it will re-seed"
+  echo "                  the universe at the DEFAULT 3000 cap. Coordinator: edit the live crontab line to"
+  echo "                  prefix 'UNIVERSE_MAX_SYMBOLS=100000' (see docs/OPERATIONS.md registry). Not auto-fixed"
+  echo "                  here: this installer never rewrites the destructive relaunch line."
+}
+audit_relaunch_universe_cap
+
 for i in "${!MATCHES[@]}"; do
   match="${MATCHES[$i]}"
   if printf '%s\n' "$NEXT" | grep -qF "$match"; then
