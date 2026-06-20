@@ -37,6 +37,8 @@ from quantlib.battery.result import (
 )
 from quantlib.battery.spec import ArchetypeSpec, Conditioner, Horizon
 from quantlib.research import DEFAULT_LGB
+from quantlib.strategy_core.adapters import PanelCrossSection
+from quantlib.strategy_core.cross_sectional_ls import CrossSectionalLS as SharedCrossSectionalLS
 
 WINSOR_Q = 0.005  # per-day symmetric winsorization on the raw return (daily horizons)
 MIN_CROSS_SECTION = 20  # per-timestamp breadth floor for the cross-sectional median
@@ -269,14 +271,26 @@ class CrossSectionalLS:
                 )
                 pred = booster.predict(test_X)
             else:
-                # raw fast path: a single-feature signal = the feature value itself (no model)
-                pred = test_X[:, 0]
+                # raw fast path: the per-name score IS the SHARED decision core's score (the leading
+                # feature), so the battery ranks on exactly what a live container's decide() would —
+                # backtest==live by construction. See docs/STRATEGY_BATTERY_PORTABILITY.md.
+                pred = self._shared_core_score(test_X)
             for j, i in enumerate(te):
                 preds.append(float(pred[j]))
                 labels.append(float(sub.y[i]))
                 groups.append(sub.ts[i])
                 rows.append(int(sub.row_idx[i]))
         return preds, labels, groups, rows
+
+    def _shared_core_score(self, test_X: np.ndarray) -> np.ndarray:
+        """Score the test rows through the SHARED `CrossSectionalLS` decision core (the same object a
+        live container runs), so the battery's raw-path signal is production-identical by construction.
+        The leading feature column is the signal the core ranks on (named 'signal' in a one-feature
+        cross-section view); the core's score == what decide() ranks, == what the live cycle ranks."""
+        symbols = [str(i) for i in range(test_X.shape[0])]
+        cross_section = PanelCrossSection(symbols, _epoch_to_dt(0), test_X[:, :1], {"signal": 0})
+        core = SharedCrossSectionalLS(frac=self.spec.frac, signal_feature="signal")
+        return core.score(cross_section)
 
     def _stratify(
         self, preds, labels, groups, rows, panel: Panel, lag: int, ppy: float
