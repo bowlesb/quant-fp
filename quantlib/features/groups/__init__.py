@@ -15,6 +15,7 @@ from quantlib.features.groups import (  # noqa: F401
     daily_beta,
     distribution,
     dumper_state,
+    edgar_filing_frequency,
     efficiency,
     gap_fill_state,
     inter_arrival,

@@ -48,7 +48,17 @@ def build_frames(
         [pl.lit("Technology").alias("sector"), pl.lit(True).alias("shortable"),
          pl.lit(True).alias("easy_to_borrow"), pl.lit(True).alias("marginable"), pl.lit(False).alias("fractionable")]
     )
-    frames = {"minute_agg": intraday, "daily": daily, "reference": reference}
+    # Synthetic EDGAR filings snapshot: a handful per symbol spread across the trailing year (one inside
+    # the session window so the same-session look-ahead gate is exercised) so the edgar_filing_frequency
+    # group is runnable in the profiler + the generic latest-parity test.
+    filing_forms = ("8-K", "10-Q", "10-K", "4", "SC 13G")
+    filings = symbols.join(
+        pl.DataFrame({"_off": list(range(8))}), how="cross"
+    ).with_columns(
+        pl.col("_off").map_elements(lambda i: filing_forms[i % len(filing_forms)], return_dtype=pl.String).alias("form_type"),
+        (BASE - pl.duration(days=pl.col("_off") * 45) + pl.duration(minutes=pl.col("_off"))).alias("available_at"),
+    ).select("symbol", "form_type", "available_at")
+    frames = {"minute_agg": intraday, "daily": daily, "reference": reference, "filings": filings}
     if include_trades:
         frames["trades"] = _build_trades(symbols, window_min)
     return frames

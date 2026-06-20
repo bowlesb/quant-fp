@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-694 features across 56 group(s).
+704 features across 57 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -108,6 +108,16 @@
 | `dumper_in_band` | dumper_state | price | A | tolerance | Int8 | warmup | (0.0, 1.0) | 1 if prior close is in the small-cap band [$2,$20], else 0. |
 | `dumper_is_active` | dumper_state | price | A | tolerance | Int8 | warmup | (0.0, 1.0) | 1 if dumper_in_band AND dumper_early_drop >= 0.30 (the small-cap-crash regime flag), else 0. |
 | `dumper_log_dollar_vol` | dumper_state | price | A | tolerance | Float64 | warmup | (0.0, None) | log1p of cumulative dollar volume (sum of close*volume) since the session open — the crash-day liquidity / participation so far. |
+| `edgar_count_10k_90d` | edgar_filing_frequency | reference | A | tolerance | Float64 | none | (0.0, 10000.0) | Count of this symbol's 10K filings available in the trailing 90 calendar days as of the minute. |
+| `edgar_count_10q_90d` | edgar_filing_frequency | reference | A | tolerance | Float64 | none | (0.0, 10000.0) | Count of this symbol's 10Q filings available in the trailing 90 calendar days as of the minute. |
+| `edgar_count_8k_90d` | edgar_filing_frequency | reference | A | tolerance | Float64 | none | (0.0, 10000.0) | Count of this symbol's 8K filings available in the trailing 90 calendar days as of the minute. |
+| `edgar_count_form4_90d` | edgar_filing_frequency | reference | A | tolerance | Float64 | none | (0.0, 10000.0) | Count of this symbol's FORM4 filings available in the trailing 90 calendar days as of the minute. |
+| `edgar_filing_burst` | edgar_filing_frequency | reference | A | tolerance | Float64 | sparse | (0.0, None) | Filing-frequency spike: trailing-7-day filing count relative to the symbol's expected 7-day count from its trailing-365-day baseline rate (count_7d / (count_365d * 7/365)); NaN when the baseline is zero (no filings in the trailing year, undefined rate). |
+| `edgar_filing_count_30d` | edgar_filing_frequency | reference | A | tolerance | Float64 | none | (0.0, 10000.0) | Count of this symbol's SEC filings that became publicly available in the trailing 30 calendar days as of the minute (available_at in (minute - 30d, minute]). |
+| `edgar_filing_count_7d` | edgar_filing_frequency | reference | A | tolerance | Float64 | none | (0.0, 10000.0) | Count of this symbol's SEC filings that became publicly available in the trailing 7 calendar days as of the minute (available_at in (minute - 7d, minute]). |
+| `edgar_filing_count_90d` | edgar_filing_frequency | reference | A | tolerance | Float64 | none | (0.0, 10000.0) | Count of this symbol's SEC filings that became publicly available in the trailing 90 calendar days as of the minute (available_at in (minute - 90d, minute]). |
+| `edgar_minutes_since_last_8k` | edgar_filing_frequency | reference | A | tolerance | Float64 | sparse | (0.0, None) | Minutes since this symbol's most recent 8-K (material-event filing) became available; null when the symbol has no prior 8-K on record. |
+| `edgar_minutes_since_last_filing` | edgar_filing_frequency | reference | A | tolerance | Float64 | sparse | (0.0, None) | Minutes since this symbol's most recent filing became available (available_at <= minute); null when the symbol has no prior filing on record. |
 | `directional_efficiency_10m` | efficiency | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Signed Kaufman efficiency over 10 minutes: net price change / total absolute travel, in [-1, 1] (sign = net direction). |
 | `directional_efficiency_120m` | efficiency | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Signed Kaufman efficiency over 120 minutes: net price change / total absolute travel, in [-1, 1] (sign = net direction). |
 | `directional_efficiency_15m` | efficiency | momentum | A | tolerance | Float64 | warmup | (-1.01, 1.01) | Signed Kaufman efficiency over 15 minutes: net price change / total absolute travel, in [-1, 1] (sign = net direction). |

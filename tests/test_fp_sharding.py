@@ -68,7 +68,18 @@ def _snapshots() -> dict[str, pl.DataFrame]:
             for d in range(10)
         ]
     )
-    return {"reference": reference, "daily": daily}
+    # EDGAR filings snapshot: a few per symbol so edgar_filing_frequency (a per-symbol DB-join group) is
+    # runnable in BOTH the single-process and sharded paths — proving the new join source is shard-invariant.
+    filings = pl.DataFrame(
+        [
+            {"symbol": symbol, "form_type": ("8-K", "10-Q", "4")[d % 3],
+             "available_at": BASE - timedelta(days=d * 20 + off)}
+            for off, symbol in enumerate(SYMBOLS)
+            for d in range(4)
+        ],
+        schema={"symbol": pl.String, "form_type": pl.String, "available_at": pl.Datetime("us", "UTC")},
+    )
+    return {"reference": reference, "daily": daily, "filings": filings}
 
 
 def _single_process(n_minutes: int) -> dict[str, pl.DataFrame]:

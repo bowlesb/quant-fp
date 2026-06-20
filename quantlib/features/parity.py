@@ -20,7 +20,13 @@ from quantlib.features import store
 from quantlib.features.backfill_bars import backfill_daily
 from quantlib.features.backfill_ticks import load_trades_backfill
 from quantlib.features.compare import coverage, diff, vectors
-from quantlib.features.loaders import load_minute_agg, load_reference, load_tiers, load_trades_live
+from quantlib.features.loaders import (
+    load_filings,
+    load_minute_agg,
+    load_reference,
+    load_tiers,
+    load_trades_live,
+)
 from quantlib.features.registry import REGISTRY
 
 
@@ -53,8 +59,13 @@ def parity_test(day: str, source_live: str = "stream", source_backfill: str = "b
     daily = backfill_daily(day, symbols)
     tiers = load_tiers(day)
     universe = tiers.select("symbol")  # pin cross-sectional rank to the day's fixed membership (gap #3)
-    live = vectors({"minute_agg": live_minute, "reference": reference, "daily": daily, "universe": universe})
-    backfill = vectors({"minute_agg": backfill_minute, "reference": reference, "daily": daily, "universe": universe})
+    # The EDGAR filings snapshot is fed to BOTH sides (source-independent, available_at fixed at first
+    # sight), so edgar_filing_frequency is covered by the sweep and — being identical — must score 100%,
+    # the standing check that the point-in-time DB join is deterministic.
+    filings = load_filings(day)
+    shared = {"reference": reference, "daily": daily, "universe": universe, "filings": filings}
+    live = vectors({"minute_agg": live_minute, **shared})
+    backfill = vectors({"minute_agg": backfill_minute, **shared})
     return diff(live, backfill, tiers)
 
 
