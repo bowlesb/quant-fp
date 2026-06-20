@@ -129,6 +129,30 @@ def test_shuffle_canary_collapses_on_magnitude() -> None:
     assert abs(result.shuffle_ic) < 0.05
 
 
+# --- the signal==own-vol degenerate guard (Lane-D found) ------------------------------------------
+
+
+def test_signal_collinear_with_own_vol_is_flagged_not_net_new() -> None:
+    """Lane-D-found guard: when the SIGNAL is the own-vol baseline itself, residualizing it on own-vol
+    is a self-cancellation, so the collapse ratio is an artifact (can read spuriously high). The result
+    must be flagged collinear and verdict DESCRIPTIVE-ONLY — net-new must NOT be claimed."""
+    rng = np.random.default_rng(11)
+    n_syms, n_days = 80, 40
+    sig, tgt, vol = [], [], []
+    for _ in range(n_days):
+        v = np.exp(rng.normal(0, 0.5, n_syms))
+        for s in range(n_syms):
+            vol.append(v[s])
+            sig.append(np.log(v[s]))  # the SIGNAL == the own-vol baseline
+            tgt.append(v[s] * np.exp(rng.normal(0, 0.2)))  # target = own-vol (pure persistence)
+    result = evaluate_magnitude_volume(
+        _panel(np.array(sig), np.array(tgt), np.array(vol), n_syms, n_days), _SPEC, TargetKind.RV, seed=13
+    )
+    assert result.signal_collinear_with_own_vol
+    assert result.verdict == "DESCRIPTIVE-ONLY"
+    assert "collinear" in result.verdict_reason
+
+
 # --- the net-of-cost median gate ------------------------------------------------------------------
 
 

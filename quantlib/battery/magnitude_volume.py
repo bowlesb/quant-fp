@@ -77,6 +77,7 @@ class MagnitudeVolumeResult:
     win_rate: float | None
 
     directional: bool = False  # magnitude/volume is NEVER directional (trap #2)
+    signal_collinear_with_own_vol: bool = False  # the signal IS the own-vol baseline -> collapse unusable
     verdict: str = "DESCRIPTIVE-ONLY"
     verdict_reason: str = ""
     by_window: dict[str, float] = field(default_factory=dict)
@@ -90,21 +91,49 @@ GATE_NW_T = 2.0
 
 
 def _residualize_on_own_vol(values: np.ndarray, own_vol: np.ndarray) -> np.ndarray:
-    """Partial out the name's own baseline vol: regress `values` on log(own_vol) (cross-section-wide)
-    and return the residual. The #197 own_vol_collapse control, applied to a vector. NaN-safe."""
-    out = np.full_like(values, np.nan)
+    """Partial out the name's own baseline vol for a RANK-IC metric: regress the RANK of `values` on
+    the RANK of own_vol and return the residual rank. Rank-residualization (not log-OLS on the raw
+    level) removes ANY monotone own-vol relationship — so a signal collinear with own-vol on the raw
+    scale cannot partially escape the control (the Lane-D lesson: a log-level OLS leaves a nonlinear
+    own-vol component, letting raw own_rv masquerade as net-new). NaN-safe. Generalizes #197's
+    own_vol_collapse (which regressed log-ratio on log-rv) to the cross-sectional rank surface."""
+    out = np.full_like(values, np.nan, dtype=float)
     finite = np.isfinite(values) & np.isfinite(own_vol) & (own_vol > 0)
     if finite.sum() < 30:
         return out
-    y = values[finite]
-    x = np.log(own_vol[finite])
+    y = _rank(values[finite])
+    x = _rank(own_vol[finite])
     if np.std(x) < 1e-12:
-        out[finite] = y - np.median(y)
+        out[finite] = y - np.mean(y)
         return out
     design = np.column_stack([np.ones(x.size), x])
     beta, *_ = np.linalg.lstsq(design, y, rcond=None)
     out[finite] = y - design @ beta
     return out
+
+
+def _rank(values: np.ndarray) -> np.ndarray:
+    """Average-rank of a vector, normalized to [0, 1] (ties share the mean rank)."""
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty(values.size, dtype=float)
+    ranks[order] = np.arange(values.size, dtype=float)
+    # average tied ranks
+    _, inv, counts = np.unique(values, return_inverse=True, return_counts=True)
+    csum = np.concatenate([[0], np.cumsum(counts)])
+    avg = np.array([(csum[i] + csum[i + 1] - 1) / 2.0 for i in range(counts.size)])
+    return avg[inv] / max(values.size - 1, 1)
+
+
+def _abs_corr(a: np.ndarray, own_vol: np.ndarray) -> float:
+    """|Pearson corr| between the signal and log(own_vol) — to detect a signal that IS the own-vol
+    baseline (the degenerate self-residualization case the collapse ratio can't interpret)."""
+    finite = np.isfinite(a) & np.isfinite(own_vol) & (own_vol > 0)
+    if finite.sum() < 30:
+        return 0.0
+    x, y = a[finite], np.log(own_vol[finite])
+    if np.std(x) < 1e-12 or np.std(y) < 1e-12:
+        return 0.0
+    return float(abs(np.corrcoef(x, y)[0, 1]))
 
 
 def evaluate_magnitude_volume(
@@ -152,6 +181,11 @@ def evaluate_magnitude_volume(
     )
     resid_ic = mean_ic(resid_real)
     collapse = abs(resid_ic) / abs(raw_ic) if (raw_ic == raw_ic and abs(raw_ic) > 1e-9) else float("nan")
+    # GUARD (Lane-D found this): if the SIGNAL is itself (near-)collinear with the own-vol baseline,
+    # residualizing it on own-vol leaves only noise, and the residual IC is an ARTIFACT — the collapse
+    # ratio is then meaningless (it can read spuriously HIGH). Flag it so the verdict cannot claim
+    # net-new from a self-residualization. The control assumes the signal is NOT the own-vol baseline.
+    sig_collinear = _abs_corr(sig, vol) > 0.97
 
     net_bps_median, win_rate = (None, None)
     if target is TargetKind.ABSRET:
@@ -170,6 +204,7 @@ def evaluate_magnitude_volume(
         collapse=collapse,
         net_bps_median=net_bps_median,
         win_rate=win_rate,
+        signal_collinear_with_own_vol=sig_collinear,
     )
     result.verdict, result.verdict_reason = _decide(result)
     return result
@@ -215,6 +250,14 @@ def _decide(result: MagnitudeVolumeResult) -> tuple[str, str]:
     )
     if not predicts:
         return "DESCRIPTIVE-ONLY", "no cross-sectional predictability of the target (IC/t gate)"
+    if result.signal_collinear_with_own_vol:
+        # the signal IS the own-vol baseline -> residualizing it on own-vol is a self-cancellation,
+        # so the collapse ratio is an artifact (can read spuriously high). Cannot claim net-new.
+        return (
+            "DESCRIPTIVE-ONLY",
+            "signal is (near-)collinear with the own-vol baseline — the collapse control is "
+            "degenerate (self-residualization), net-new cannot be claimed (Lane-D-found guard)",
+        )
     net_new = result.collapse == result.collapse and result.collapse >= COLLAPSE_NETNEW
     if not net_new:
         return (
