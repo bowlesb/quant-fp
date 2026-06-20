@@ -40,6 +40,13 @@ ENTRY_ET_MIN = 9 * 60 + 35  # 09:35 ET tradeable Monday entry (never the Friday 
 MIN_PRICE = 1.0  # $1 floor
 CANDIDATE_ADV_FLOOR = 5_000_000.0  # $5M/day dollar-volume floor to count a liquid day
 CANDIDATE_MIN_LIQUID_DAYS = 60  # a symbol needs this many in-span liquid days to enter the candidate set
+# Bound how many pending days ONE process caches before exiting (0 = all). Chunking the cache across fresh
+# subprocess invocations (run_all.sh loops until complete) caps RSS — polars/Arrow allocations from the
+# per-day scans accumulate ~17MB/day in a long-lived process; a fresh process per chunk reclaims them at exit.
+MAX_DAYS_PER_RUN = int(os.environ.get("MAX_DAYS_PER_RUN", "0"))
+CACHE_ONLY = (
+    os.environ.get("CACHE_ONLY", "0") == "1"
+)  # only build the cache chunk, then exit (no weekly panel)
 
 
 def list_days() -> list[str]:
@@ -96,14 +103,20 @@ def build_daily_cache(days: list[str]) -> pl.DataFrame:
     os.makedirs(cache_dir, exist_ok=True)
     done = {p[:-8] for p in os.listdir(cache_dir) if p.endswith(".parquet")}
     pending = [d for d in days if d not in done]
+    if MAX_DAYS_PER_RUN > 0:
+        pending = pending[:MAX_DAYS_PER_RUN]
     if done:
-        print(f"resuming: {len(done)} day-partitions already cached, {len(pending)} pending", flush=True)
+        print(f"resuming: {len(done)} cached, {len(pending)} this chunk", flush=True)
     for i, day in enumerate(pending):
         dd = day_daily(day)
         if dd.height:
             dd.write_parquet(f"{cache_dir}/{day}.parquet")  # one small file/day; memory does NOT grow
         if (i + 1) % 60 == 0 or i == len(pending) - 1:
-            print(f"  cached {len(done) + i + 1}/{len(days)} days", flush=True)
+            print(f"  cached {len(done) + i + 1} (chunk {i + 1}/{len(pending)})", flush=True)
+    n_cached = len([p for p in os.listdir(cache_dir) if p.endswith(".parquet")])
+    print(f"CACHE_STATUS cached={n_cached} total={len(days)}", flush=True)
+    if CACHE_ONLY:
+        return pl.DataFrame()
     return pl.scan_parquet(f"{cache_dir}/*.parquet").filter(pl.col("date").is_in(set(days))).collect()
 
 
@@ -111,6 +124,8 @@ def build() -> None:
     days = list_days()
     print(f"trading days {len(days)} {days[0]}..{days[-1]}", flush=True)
     daily = build_daily_cache(days)
+    if CACHE_ONLY:
+        return  # cache chunk done; the orchestrator loops until the cache is complete, then assembles
     # Candidate set: a symbol needs CANDIDATE_MIN_LIQUID_DAYS in-span days over the ADV floor.
     liq = daily.filter(pl.col("dvol") >= CANDIDATE_ADV_FLOOR).group_by("symbol").len()
     candidates = set(liq.filter(pl.col("len") >= CANDIDATE_MIN_LIQUID_DAYS)["symbol"].to_list())
