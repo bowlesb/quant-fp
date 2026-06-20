@@ -53,12 +53,17 @@ class BacktestExecutor:
             price = cross_section.feature_for(intent.symbol, "entry_close")
             half_spread = cross_section.feature_for(intent.symbol, "half_spread_bps")
             if not np.isfinite(price) or price < 1.0:
+                # REFUSE the fill, exactly as a live broker would reject/no-fill an unfillable name:
+                # the book is NOT moved (the name never enters new_weights), and the REJECTED report
+                # carries a 0 realized weight + 0 (finite, no-execution) fill_price — never a NaN price
+                # nor a position the reconciled live book could not hold (audit F3, pass 2). The status
+                # is REJECTED so the state machine sees a terminal non-fill, not a phantom fill.
                 fills.append(
                     Fill(
                         symbol=intent.symbol,
                         side=intent.side,
-                        weight=intent.target_weight,
-                        fill_price=float("nan"),
+                        weight=0.0,
+                        fill_price=0.0,
                         cost_bps=0.0,
                         client_order_id=intent.client_order_id,
                         filled_qty=0.0,
