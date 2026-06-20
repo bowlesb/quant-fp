@@ -1,4 +1,4 @@
-"""Unit tests for the /jobs visibility surface (ops/collect_jobs_status.py + services/dashboard/jobs_page.py).
+"""Unit tests for jobs status (ops/collect_jobs_status.py writer + services/dashboard/jobs_page.load_status).
 
 No live crontab, docker, or real logs: the collector's log-classification and crontab/installed parsing are
 exercised against tmp log files and synthetic ``crontab -l`` line lists, and the page renderer is checked
@@ -154,68 +154,6 @@ def test_registry_matches_each_job_to_its_own_log() -> None:
     logs = [job.log for job in cjs.REGISTRY]
     assert len(logs) == len(set(logs))
     assert all(".quant-" in str(log) for log in logs)
-
-
-def test_page_renders_three_sections_and_badges() -> None:
-    import jobs_page
-
-    data = {
-        "scheduled": [
-            {
-                "name": "nightly_relaunch",
-                "schedule": "11 5 * * 1-5 (PT)",
-                "purpose": "pre-market recreate",
-                "last_run": "2026-06-18T05:16:00Z",
-                "status": "ok",
-                "log": "/home/ben/.quant-validation/nightly_relaunch.log",
-            }
-        ],
-        "running": [{"name": "dia-oflow-bf", "status": "Up 2 hours"}],
-        "recent_runs": [
-            {"ts": "2026-06-18T05:16:00Z", "job": "nightly_relaunch", "status": "ok"}
-        ],
-        "collected_at": "2026-06-18T12:00:00Z",
-    }
-    html_out = jobs_page.render_jobs_page(data)
-    assert "Scheduled crons" in html_out
-    assert "Currently running" in html_out
-    assert "Recent runs" in html_out
-    assert "nightly_relaunch" in html_out
-    assert "dia-oflow-bf" in html_out
-    assert "badge-ok" in html_out
-    assert "collected 2026-06-18T12:00:00Z" in html_out
-
-
-def test_page_missing_file_notice() -> None:
-    import jobs_page
-
-    html_out = jobs_page.render_jobs_page(None)
-    assert "No jobs status collected yet" in html_out
-
-
-def test_page_escapes_text() -> None:
-    import jobs_page
-
-    data = {
-        "scheduled": [
-            {
-                "name": "<script>alert(1)</script>",
-                "schedule": "* * * * *",
-                "purpose": "x",
-                "last_run": None,
-                "status": "unknown",
-                "log": "",
-            }
-        ],
-        "running": [],
-        "recent_runs": [],
-        "collected_at": None,
-    }
-    html_out = jobs_page.render_jobs_page(data)
-    assert "<script>alert(1)</script>" not in html_out
-    assert "&lt;script&gt;" in html_out
-    # A never-run job shows the empty marker, not the literal None.
-    assert "never" in html_out
 
 
 def test_load_status_handles_missing_and_corrupt(tmp_path, monkeypatch) -> None:

@@ -138,54 +138,74 @@ services:
     <<: *common
     environment:
       STORE_ROOT: /store
+      # The cache Mongo the store-grid-worker writes; the dashboard READS the precomputed grid from here.
+      STORE_GRID_MONGO_URL: "mongodb://quant-mongo:27017"
+      # The ops-introspection read routes' backing stores (still written by the host Lead loop + crons).
       STATUS_STORE_PATH: /quant-ops/status_dashboard.json
-      # Progress-scorecard snapshot time series (read-WRITE, same ~/.quant-ops mount as the status board).
       SCORECARD_STORE_PATH: /quant-ops/scorecard_snapshots.json
     ports:
       - "0.0.0.0:8088:8000"     # LAN-accessible: http://192.168.1.32:8088
     volumes:
-      - ./STATE.md:/docs/STATE.md:ro
-      - ./JOURNAL.md:/docs/JOURNAL.md:ro
-      - ./ARCHITECTURE.md:/docs/ARCHITECTURE.md:ro
-      # Documented end-to-end latency baseline — axis D of the /scorecard panel parses its re-measure table.
+      # Documented end-to-end latency baseline — the /api/scorecard axis D parses its re-measure table.
       - ./docs/SIM_LATENCY_AUDIT.md:/docs/SIM_LATENCY_AUDIT.md:ro
-      # 8-hour progress reports rendered by the /progress page. Dir mount (not a
-      # rebuild) so a new report .md is served immediately — content, not code.
-      - ./docs/progress:/docs/progress:ro
-      # Feature store (read-only): the /feature-grid coverage surface reads partition
-      # dates + per-date symbol counts from here. RO so the dashboard can never write.
+      # Feature store (read-only): feature_grid introspection (reused by the scorecard route) reads partition
+      # dates + per-date symbol counts. RO so the dashboard can never write. The GRID itself is served from
+      # Mongo (the worker's precompute), not built here.
       - fp_store_real:/store:ro
-      # Hourly status board store (read-WRITE): the same ~/.quant-ops file the Lead loop
-      # appends rows to on the host; the /status reaction POST writes Ben's notes back here.
+      # The ops JSON stores the kept read routes serve (status_dashboard.json / scorecard_snapshots.json /
+      # jobs_status.json) — written by the host Lead loop + crons into this same ~/.quant-ops mount.
       - ${HOME}/.quant-ops:/quant-ops
     depends_on:
       timescaledb:
         condition: service_healthy
+      mongo:
+        condition: service_healthy
 
-  store-glimpse-worker:
-    # The ALWAYS-WARM background worker for the ticker×date feature-store coverage matrix (the React
-    # /store-grid view). Reuses the dashboard IMAGE (same quantlib/polars + the read-only /store mount +
-    # the DB for the trust read) but runs a permanent rebuild LOOP instead of the web server, writing a
-    # compact gzipped matrix blob to quant-redis (rebuild, then a few-minute gap, forever). This REPLACES the host cron
-    # (ops/collect_store_glimpse.py) so a cold/expired cache can never surface the old "warming…" state —
-    # the reader always serves the last good blob. Read-only w.r.t. the store; no fingerprint/schema risk.
+  mongo:
+    # Dedicated cache store for the always-warm coverage grid (NOT the feature pipeline's store). The
+    # store-grid-worker WRITES the precomputed 18-month matrix (+ drills + meta) here; the dashboard READS it,
+    # so a page load is one indexed document fetch and the heavy build is never on the request path. A small
+    # named volume persists the cache across restarts. LAN-internal only (no published port).
+    image: mongo:7
+    container_name: quant-mongo
+    <<: *common
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  store-grid-worker:
+    # The ALWAYS-WARM background worker for the ticker×date feature-store coverage matrix (the dashboard grid).
+    # Reuses the dashboard IMAGE (same quantlib/polars + the read-only /store mount + the DB for the trust read)
+    # but runs a permanent rebuild LOOP instead of the web server: build on boot, write the compact gzipped
+    # matrix + drills + meta to MongoDB, then rebuild every 10 MINUTES forever. The dashboard always serves the
+    # last-good document, so a cold/expired cache can never surface a recurring "warming" state — the only
+    # loading state is the genuine first-ever boot. Read-only w.r.t. the feature store; no fingerprint/schema risk.
     build:
       context: .
       dockerfile: services/dashboard/Dockerfile
+    container_name: store-grid-worker
     <<: *common
     command: ["python3", "-m", "store_grid_cache"]
     environment:
       STORE_ROOT: /store
-      # The bus Redis (quant-redis on quant_default). The matrix blob + per-ticker drills live here.
-      STORE_GRID_REDIS_URL: "redis://quant-redis:6379/0"
+      # The dedicated cache Mongo (quant-mongo on quant_default). The matrix + per-ticker drills + meta live here.
+      STORE_GRID_MONGO_URL: "mongodb://quant-mongo:27017"
+      # 10-minute refresh cadence (Ben's spec): build, write to Mongo, wait 600s, repeat.
+      STORE_GRID_INTERVAL_SECONDS: "600"
     volumes:
       # Feature store, READ-ONLY: the worker reads partition dates + per-date symbol sets to build the
       # coverage matrix. RO so it can never write the store the feature pipeline owns.
       - fp_store_real:/store:ro
-      # Shared ~/.quant-ops mount (parity with the dashboard service; not currently written by the worker).
+      # Shared ~/.quant-ops mount (parity with the dashboard service; not written by the worker).
       - ${HOME}/.quant-ops:/quant-ops
     depends_on:
       timescaledb:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
 
   prometheus:
@@ -219,3 +239,6 @@ volumes:
     external: true
   prom_data:
   grafana_data:
+  # Persists the dashboard coverage-grid cache (the store-grid-worker's precomputed matrix + drills + meta)
+  # across restarts. Local (NOT external) — this cache is owned by this compose project, rebuilt every 10 min.
+  mongo_data:
