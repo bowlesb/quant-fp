@@ -137,10 +137,59 @@ class IntradaySeasonalityGroup(FeatureGroup):
             ["symbol", "minute", *names]
         )
 
+    def _assemble_latest(self, ctx: BatchContext, latest: object) -> pl.DataFrame:
+        """Latest-minute live form: the running since-open MEAN volume at T is ``volume.sum()/count`` over T's
+        OWN RTH session up to and including T (T is the latest minute, so the cumulative ``_cvol``/``_n`` at T
+        equal a SINGLE per-(symbol, session) ``sum``/``len``), and the tod-bucket / absret read T's own row.
+        Value-identical to ``_assemble(...).filter(minute == T)`` by construction — same RTH+session filter,
+        same per-(symbol, sdate) cumulative reduce at its last bar, same bucket/baseline algebra — while
+        touching only T's session, NOT a per-minute cum_sum over the whole buffer."""
+        names = [spec.name for spec in self.declare()]
+        baseline = _load_baseline()
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "open", "close", "volume"])
+        etm = et_minute_of_day(pl.col("minute"))
+        frame = frame.with_columns(
+            pl.col("minute").dt.convert_time_zone("America/New_York").dt.date().alias("sdate"),
+            etm.alias("_etm"),
+        )
+        latest_sdate = pl.lit(latest).dt.convert_time_zone("America/New_York").dt.date()
+        session = frame.filter(
+            (pl.col("_etm") >= OPEN_MINUTE)
+            & (pl.col("_etm") < CLOSE_MINUTE_EXCL)
+            & (pl.col("sdate") == latest_sdate)
+            & (pl.col("minute") <= latest)
+        ).sort(["symbol", "minute"])
+        agg = session.group_by("symbol", maintain_order=True).agg(
+            pl.col("volume").sum().alias("_cvol"),
+            pl.len().alias("_n"),
+            pl.col("volume").last().alias("volume"),
+            pl.col("open").last().alias("open"),
+            pl.col("close").last().alias("close"),
+            pl.col("_etm").last().alias("_etm"),
+            pl.col("minute").last().alias("minute"),
+        )
+        bucket = ((pl.col("_etm") - OPEN_MINUTE) // BUCKET) * BUCKET + OPEN_MINUTE
+        joined = agg.with_columns(bucket.cast(pl.Int32).alias("bucket")).join(
+            baseline, on="bucket", how="left"
+        )
+        run_mean_vol = pl.col("_cvol") / pl.col("_n")
+        absret = (pl.col("close") / pl.col("open") - 1.0).abs()
+        feats = joined.with_columns(
+            pl.when(pl.col("baseline_absret") > 0)
+            .then(absret / pl.col("baseline_absret"))
+            .otherwise(None)
+            .alias("absret_vs_tod"),
+            pl.when((run_mean_vol > 0) & (pl.col("vol_shape") > 0))
+            .then(pl.col("volume") / (run_mean_vol * pl.col("vol_shape")))
+            .otherwise(None)
+            .alias("volume_vs_tod"),
+        ).select(["symbol", "minute", *names])
+        keys = ctx.frame("minute_agg").select(["symbol", "minute"]).filter(pl.col("minute") == latest)
+        return keys.join(feats, on=["symbol", "minute"], how="left").select(["symbol", "minute", *names])
+
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         return self._assemble(ctx, ctx.frame("minute_agg").select(["symbol", "minute"]))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = keys["minute"].max()
-        return self._assemble(ctx, keys.filter(pl.col("minute") == latest))
+        latest = ctx.frame("minute_agg")["minute"].max()
+        return self._assemble_latest(ctx, latest)
