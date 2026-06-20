@@ -116,6 +116,36 @@ def test_backtest_executor_rejects_sub_dollar() -> None:
     assert fills["PENNY"].status == OrderState.REJECTED
 
 
+def test_backtest_executor_refuses_nonfinite_price_does_not_move_book() -> None:
+    """F3 (audit): a non-finite entry price must REFUSE the fill and NOT move the book — never book a
+    position at a price we don't have (a fictitious fill is the experiment-only hack that breaks live)."""
+    symbols = ["NANP", "OK"]
+    minute = dt.datetime(2026, 1, 5, 19, 59, tzinfo=dt.timezone.utc)
+    cs = PanelCrossSection(
+        symbols,
+        minute,
+        np.array([[1.0], [2.0]]),
+        {"sig": 0},
+        {"entry_close": np.array([np.nan, 50.0]), "half_spread_bps": np.array([3.0, 3.0])},
+    )
+    executor = BacktestExecutor()
+    fills = {
+        f.symbol: f
+        for f in executor.execute(
+            [
+                OrderIntent("NANP", "buy", 0.5, notional=100.0, client_order_id="c1"),
+                OrderIntent("OK", "buy", 0.5, notional=100.0, client_order_id="c2"),
+            ],
+            cs,
+            RealClock(),
+        )
+    }
+    assert fills["NANP"].status == OrderState.REJECTED
+    assert fills["NANP"].filled_qty == 0.0
+    assert "NANP" not in executor.book().weights  # the book was NOT moved for the refused name
+    assert executor.book().weights.get("OK") == 0.5  # the good name booked normally
+
+
 # --- Idempotency (REQ-X4) ------------------------------------------------------------------------
 
 

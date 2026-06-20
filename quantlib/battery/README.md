@@ -69,3 +69,20 @@ half_spread)` sorted by `(symbol, minute)` is the SAME layout `rust/src/lib.rs` 
 so the Phase-1 `triple_barrier_first_touch` kernel + the triple-barrier / streak archetypes slot
 into the existing `Strategy` protocol with zero conversion. The path-dependent fields on
 `BacktestResult` (`up_vs_down_asymmetry`, `per_trade_pnl`) are stubbed for that phase.
+
+## Interpreting a PASS — it's an OPTIMISTic UPPER BOUND, not a deployable P&L
+
+A battery `PASS` is the BEST case, not the live case. The backtest books a frictionless
+~top/bottom-k cross-sectional basket over the (liquid-cut) panel — e.g. ~150 names per leg, every
+short assumed borrowable, fills at the tradeable entry + the per-name half-spread. A LIVE container
+on a shared paper/real Alpaca account trades a far smaller, harder book: typically a handful of
+`easy_to_borrow` names per leg, real borrow availability/fees, partial fills, rejects, and
+buying-power/PDT limits. So:
+
+- A PASS says "this signal carried tradeable edge under idealized frictions" — it is the ceiling.
+- It does NOT say "this nets X bps live." The gap (borrow, capacity, partials, the small live name
+  count) is measured by the live `PaperExecutor`'s realized-slippage logging, not assumed away.
+- The `by_stratum` liquidity breakdown + the `cost_curve` exist precisely so a PASS that lives only
+  in the illiquid tail (the trap-#1 signature) is visible as NON-deployable despite the headline.
+
+Read the leaderboard as "what to promote to a live paper trial", never as a realized return.
