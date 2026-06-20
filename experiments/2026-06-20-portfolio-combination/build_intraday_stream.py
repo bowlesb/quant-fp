@@ -46,10 +46,10 @@ def list_days() -> list[str]:
     return [d for d in days if SPAN_START <= d <= SPAN_END]
 
 
-def daily_reduce(day: str) -> pl.DataFrame:
-    """Per-symbol RTH last-close, dollar-vol, tradeable entry, AND the day's swing_dc close score (L2) —
-    computed ONLY on the day's top-N-by-dollar-vol universe (swing_dc on ~7000 syms/day is the bottleneck;
-    we rank cheaply first, then fold only the universe)."""
+def daily_reduce(day: str, with_swingdc: bool) -> pl.DataFrame:
+    """Per-symbol RTH last-close, dollar-vol, tradeable entry. If with_swingdc (rebalance Fridays only), also
+    the day's swing_dc close score (L2), computed on the top-2N-by-dvol universe. S-INTRADAY rebalances
+    WEEKLY, so swing_dc (the bottleneck) runs only on the ~400 Fridays, not all 2011 days."""
     if not glob.glob(f"{STORE}/raw/bars/symbol=*/date={day}"):
         return pl.DataFrame()
     et = pl.col("ts").dt.convert_time_zone("America/New_York")
@@ -68,7 +68,8 @@ def daily_reduce(day: str) -> pl.DataFrame:
         (pl.col("close") * pl.col("volume")).sum().alias("dvol"),
         pl.col("close").filter(pl.col("_etm") >= ENTRY_ET_MIN).first().alias("entry"),
     )
-    # take a generous top universe (2x N_SYMBOLS so per-day ADV-rank below has headroom) for the swing_dc fold
+    if not with_swingdc:
+        return agg.with_columns(pl.lit(None, dtype=pl.Float64).alias("L2_chunk_slope"))
     universe = set(agg.sort("dvol", descending=True).head(2 * N_SYMBOLS)["symbol"].to_list())
     fold_in = (
         raw.filter(pl.col("symbol").is_in(universe))
@@ -91,12 +92,15 @@ def build() -> None:
     days = list_days()
     print(f"trading days {len(days)} {days[0]}..{days[-1]}", flush=True)
     di = {d: k for k, d in enumerate(days)}
+    # S-INTRADAY rebalances WEEKLY: swing_dc (the bottleneck) runs ONLY on rebalance Fridays (every 5th
+    # trading day from VOL_DAYS); all days still get the cheap close/dvol reduce (for ADV + L3 trailing).
+    rebal_set = set(range(VOL_DAYS, len(days) - 6, 5))
     reduce_dir = f"{OUT_DIR}/_intraday_reduce"
     os.makedirs(reduce_dir, exist_ok=True)
     for stale in glob.glob(f"{reduce_dir}/*.parquet"):
         os.remove(stale)
     for i, day in enumerate(days):
-        red = daily_reduce(day)
+        red = daily_reduce(day, with_swingdc=(i in rebal_set))
         if red.height:
             red.with_columns(pl.lit(di[day]).cast(pl.Int32).alias("didx")).write_parquet(
                 f"{reduce_dir}/d{di[day]:05d}.parquet"
@@ -118,8 +122,8 @@ def build() -> None:
     full = full.with_columns(
         (pl.col("close") / pl.col("close").shift(1).over("symbol")).log().alias("_lr"),
         pl.col("dvol").rolling_mean(VOL_DAYS, min_periods=VOL_DAYS // 2).over("symbol").alias("adv20"),
-        pl.col("entry").shift(-1).over("symbol").alias("entry_next"),  # next-day tradeable entry
-        pl.col("entry").shift(-2).over("symbol").alias("entry_exit"),  # exit the day after
+        pl.col("entry").shift(-1).over("symbol").alias("entry_next"),  # next-day (Mon) tradeable entry
+        pl.col("entry").shift(-6).over("symbol").alias("entry_exit"),  # exit ~1 week later (5-day hold)
     )
     full = full.with_columns(
         pl.col("_lr").rolling_std(VOL_DAYS, min_periods=5).over("symbol").alias("L3_vol20"),
@@ -129,7 +133,7 @@ def build() -> None:
         ],
         ((pl.col("close").rolling_max(VOL_DAYS).over("symbol") - pl.col("close").rolling_min(VOL_DAYS).over("symbol")) / pl.col("close")).alias("L3_range20"),
     )
-    # rebalance EVERY trading day (daily-rebalanced intraday-family stream)
+    # rebalance WEEKLY (only rebalance Fridays carry swing_dc / L2); weekly hold to align with S-WEEKLY.
     obs = full.filter(
         pl.col("close").is_not_null() & (pl.col("close") >= MIN_PRICE) & pl.col("adv20").is_not_null()
         & pl.col("L2_chunk_slope").is_not_null() & pl.col("L3_vol20").is_not_null()
