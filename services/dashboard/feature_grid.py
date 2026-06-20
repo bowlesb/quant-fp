@@ -1025,6 +1025,15 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
                 }
             )
 
+        # Per-group, in-window peak symbol counts per source. The page normalizes each cell's count
+        # against its own group's busiest day so the row reads as a coverage-VOLUME heat sparkline
+        # (thinning/thickening), not just on/off — every group's own scale, so a thin order-flow group
+        # and a full-universe bar group are each legible relative to themselves.
+        stream_peak = max((stream_per_date.get(date_iso, 0) for date_iso in timeline_dates), default=0)
+        backfill_peak = max(
+            (backfill_per_date.get(date_iso, 0) for date_iso in timeline_dates), default=0
+        )
+
         backfill_earliest = backfill_dates[0] if backfill_dates else None
         backfill_latest = backfill_dates[-1] if backfill_dates else None
         backfill_span = (
@@ -1044,6 +1053,8 @@ def build_coverage_timeline(root: str = STORE_ROOT, days: int = TIMELINE_DEFAULT
                 "stream_earliest": stream_dates[0] if stream_dates else None,
                 "stream_latest": stream_dates[-1] if stream_dates else None,
                 "stream_horizon_days": _stream_horizon_days(stream_dates, anchor),
+                "stream_peak": stream_peak,
+                "backfill_peak": backfill_peak,
                 "days": day_cells,
             }
         )

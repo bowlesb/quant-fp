@@ -328,6 +328,10 @@ def test_build_coverage_timeline_presence_and_depth(tmp_path: Path, fake_catalog
     assert gx["backfill_span_days"] == 9
     # Live horizon: Wed 06-17 + Thu 06-18 captured unbroken from the anchor = 2 weekdays.
     assert gx["stream_horizon_days"] == 2
+    # In-window peak symbol counts per source (drives the page's coverage-volume heat intensity):
+    # stream busiest day = 06-17 (AAA, BBB = 2); backfill busiest = 06-17/06-18 (3).
+    assert gx["stream_peak"] == 2
+    assert gx["backfill_peak"] == 3
 
     gx_days = {d["date"]: d for d in gx["days"]}
     # 06-18: stream(1) + backfill(3) both present.
@@ -342,6 +346,25 @@ def test_build_coverage_timeline_presence_and_depth(tmp_path: Path, fake_catalog
     assert gy["stream_horizon_days"] == 0  # never live
     gy_days = {d["date"]: d for d in gy["days"]}
     assert gy_days["2026-06-18"]["provenance"] == "backfill_only"
+    # No live stream ever -> stream peak is 0 (cells render dark, no false heat).
+    assert gy["stream_peak"] == 0
+    assert gy["backfill_peak"] == 1
+
+
+def test_build_coverage_timeline_peaks_track_in_window_max(tmp_path: Path, fake_catalog: None) -> None:
+    """Per-group peaks are the busiest in-window day per source — the heat-normalization denominator.
+    A thinning live stream (3 syms today vs a 9-sym peak earlier in the window) keeps the high peak so
+    the recent thin days render dimmer, making the coverage drop legible."""
+    root = tmp_path / "store"
+    _write_partition(root, "groupX", "stream", "2026-06-16", ["AAA", "BBB", "CCC"])  # 3
+    _write_partition(root, "groupX", "stream", "2026-06-17", ["A", "B", "C", "D", "E", "F", "G", "H", "I"])  # 9 peak
+    _write_partition(root, "groupX", "stream", "2026-06-18", ["AAA"])  # thinned to 1
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB"])
+
+    view = fg.build_coverage_timeline(str(root), days=10)
+    gx = {g["group"]: g for g in view["groups"]}["groupX"]
+    assert gx["stream_peak"] == 9  # the 06-17 busiest day, not today's thinned 1
+    assert gx["backfill_peak"] == 2
 
 
 def test_build_coverage_timeline_caps_days(tmp_path: Path, fake_catalog: None) -> None:
