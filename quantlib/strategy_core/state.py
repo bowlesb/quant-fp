@@ -11,6 +11,7 @@ ledger (so corruption is detectable). Backtest uses `MemoryStateStore`; live use
 `apply_fill` is the ONE transition function both backtest and live call, so positions/P&L evolve
 identically regardless of where the fill came from (simulated or real broker).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -91,18 +92,22 @@ class StrategyState:
 
 
 class StateStore(Protocol):
-    """Swappable persistence behind one shape: MemoryStateStore (backtest) / PgStateStore (live)."""
+    """Swappable persistence behind one shape: MemoryStateStore (backtest) / PgStateStore (live).
 
-    def load(self, strategy_id: str) -> StrategyState:
-        ...
+    `append_fill` is the append-only-ledger primitive (REQ-S2): a live store persists each fill durably
+    (the ledger is the source from which positions are recomputable), so a crash mid-cycle never loses a
+    fill. `save` snapshots the derived state. `load` rebuilds state from the durable store on restart."""
 
-    def save(self, state: StrategyState) -> None:
-        ...
+    def load(self, strategy_id: str) -> StrategyState: ...
+
+    def save(self, state: StrategyState) -> None: ...
+
+    def append_fill(self, strategy_id: str, fill: Fill) -> None: ...
 
 
 class MemoryStateStore:
     """In-process state (backtest). The live `PgStateStore` (durable, atomic, append-only ledger) is
-    the same interface — not built this phase."""
+    the same interface."""
 
     def __init__(self) -> None:
         self._states: dict[str, StrategyState] = {}
@@ -112,3 +117,8 @@ class MemoryStateStore:
 
     def save(self, state: StrategyState) -> None:
         self._states[state.strategy_id] = state
+
+    def append_fill(self, strategy_id: str, fill: Fill) -> None:
+        """In-memory: the ledger already lives on `state.fills` (apply_fill appends it). A no-op snapshot
+        keeps the protocol uniform so the live durable store is a drop-in."""
+        self._states.setdefault(strategy_id, StrategyState(strategy_id=strategy_id))

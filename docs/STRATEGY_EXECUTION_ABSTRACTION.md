@@ -1,6 +1,35 @@
 # Strategy Execution Abstraction — PLAN, REQUIREMENTS & TEST STRATEGY
 
-Status: **PLAN for adversarial audit** (NO implementation — the build is gated on audits passing).
+Status: **BUILT** (Lead greenlit the build after the design audit cleared L1–L6 + the G1–G7 answers).
+The production execution+state layer is implemented in `quantlib/strategy_core/production_execution.py`,
+`production_executor.py`, `production_state.py` (+ `OrderState` lifecycle + `StateStore.append_fill`
+extensions), with the 6 test gates in `tests/test_production_execution.py` (19 tests) — all green. NO live
+wiring/deploy: the conformance + worked-example run against the in-process `PaperBrokerStub`; the
+real-alpaca `PaperExecutor` integration test against the paper account is the gate before any live cutover
+(Lead-sequenced). Fingerprint-neutral (execution layer, not the feature path; `0xae849d400c909972/694`
+unchanged).
+
+**Build summary (what maps where):**
+- G2 coid + lifecycle → `make_client_order_id` + the extended `OrderState` (NEW/PENDING/ACCEPTED/…).
+- ONE `ProductionExecutor` (submit/poll/cancel/positions/get_order_by_coid) → `FaithfulBacktestExecutor`
+  (tradeable-price fills, per-name half-spread, per-bar volume-participation partials, sub-$1/zero-liquidity
+  rejects) + `PaperBrokerStub` (scriptable lifecycle, conformance counterpart).
+- G4 `pre_trade_check` (BP/PDT/shortable); G1 per-strategy `reconcile` (coid-namespace scoped, siblings
+  ignored); G6 `apply_corporate_action` in reconcile; G3 `recover_on_restart` (query-before-resubmit,
+  four branches); G5 actual-weight in `StrategyState.apply_fill` (verified).
+- REQ-S2 durable SoT → `PgStateStore` over a `LedgerBackend` (Pg in prod, `DictLedgerBackend` in tests);
+  `load` rebuilds exact state by replaying the append-only ledger (restart-recovers exact positions).
+
+**Gate results (all green):** (1) conformance sim==paper on full/partial/reject/cancel; (2) restart-safety
+×3 (mid-order, orphaned-stop, partial-across-restart) + rejected/absent branches; (3) reconcile broker-wins
++ G1 sibling-not-adopted + G6 split-not-drift + large-drift-alert; (4) idempotent submit + G3
+ambiguous-resubmit no-double-trade + G4 unfundable/non-shortable rejected; (5) faithful cost model
+predict-zero→cost-drag + the data-trap floor (the battery's full self-proof suite is the REQ-A1 gate in
+`tests/test_battery.py`); (6) worked example — decide()+StrategyState through both executors → identical
+positions, decide() core UNCHANGED, ledger-recompute == positions, durable restart recovers exact state.
+
+Original plan below (unchanged — the contracts it specified are what got built).
+
 Author: platform engineer, cycle 2026-06-19. Reviewers: independent adversarial auditors (fanned out
 by the Lead) + Ben.
 
