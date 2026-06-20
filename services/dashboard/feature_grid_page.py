@@ -90,6 +90,9 @@ FEATURE_GRID_HTML = """<!doctype html>
   .pill.PENDING  { background:#3a3210; color:var(--amber); }
   .pill.VALIDATED{ background:#10301c; color:#56d364; }
   .pill.DIVERGENT{ background:#3a1414; color:#ff7b72; }
+  .pill.both         { background:#10301c; color:#56d364; }
+  .pill.backfill_only{ background:#3a2a10; color:#e0a458; }
+  .pill.stream_only  { background:#10243a; color:#58a6ff; }
   .bar { display:inline-block; width:70px; height:8px; background:#0f1115; border:1px solid var(--border);
     border-radius:4px; vertical-align:middle; overflow:hidden; }
   .bar > span { display:block; height:100%; background:var(--amber); }
@@ -328,7 +331,10 @@ async function openDetail(group){
     (gaps.length?"<div class='muted' style='margin-top:4px'>"+gaps.join(" · ")+"</div>":"")+
     "<button class='symbtn' onclick=\\"loadSymbols('"+d.group+"')\\">▸ ticker representation "+
     "(which symbols are live vs backfill-only)</button>"+
+    "<button class='symbtn' onclick=\\"loadSymbolDepth('"+d.group+"')\\">▸ coverage depth "+
+    "(how far back per ticker, stream vs backfill)</button>"+
     "<div id='symcovhost'></div>"+
+    "<div id='symdepthhost'></div>"+
     "<table class='feat'><thead><tr><th>feature (hover=description)</th><th>trust</th>"+
     "<th>trajectory to trusted</th><th class='num'>clean match-rate</th><th>last validated</th><th>layer</th>"+
     "</tr></thead><tbody>"+rows+"</tbody></table></div>";
@@ -354,6 +360,40 @@ async function loadSymbols(group){
       "but NOT captured on the live stream today ("+s.n_backfill_only+"):</div>"+list(s.backfill_only)+
     (s.n_stream_only? "<div class='muted' style='margin-top:8px'>stream-only — live but absent from "+
       "today's backfill ("+s.n_stream_only+"):</div>"+list(s.stream_only) : "")+
+    "</div>";
+}
+
+async function loadSymbolDepth(group){
+  const host = document.getElementById("symdepthhost");
+  if(!host) return;
+  host.innerHTML = "<div class='symcov muted'>loading coverage depth…</div>";
+  const r = await fetch("/api/feature-grid/"+encodeURIComponent(group)+"/symbol-depth");
+  const d = await r.json();
+  const span = (e,l) => e ? (e+"→"+l) : "—";
+  let rows="";
+  for(const row of d.symbols){
+    const cls = row.provenance;  // both | backfill_only | stream_only
+    rows += "<tr><td>"+row.symbol+"</td>"+
+      "<td><span class='pill "+cls+"'>"+cls.replace("_"," ")+"</span></td>"+
+      "<td>"+span(row.backfill_earliest,row.backfill_latest)+"</td>"+
+      "<td class='num'>"+row.backfill_span_days+"</td>"+
+      "<td class='num'>"+row.backfill_n_dates+"</td>"+
+      "<td>"+span(row.stream_earliest,row.stream_latest)+"</td>"+
+      "<td class='num'>"+row.stream_n_dates+"</td></tr>";
+  }
+  host.innerHTML =
+    "<div class='symcov'>"+
+    "<div class='stat'><b>"+d.n_symbols+"</b> symbols</div>"+
+    "<div class='stat'><b>"+d.n_both+"</b> both</div>"+
+    "<div class='stat'><b>"+d.n_backfill_only+"</b> backfill-only</div>"+
+    "<div class='stat'><b>"+d.n_stream_only+"</b> stream-only</div>"+
+    "<div class='stat'><b>"+span(d.backfill_earliest,d.backfill_latest)+"</b> backfill span ("+d.backfill_n_dates+"d)</div>"+
+    "<div class='stat'><b>"+span(d.stream_earliest,d.stream_latest)+"</b> stream span ("+d.stream_n_dates+"d)</div>"+
+    "<div class='muted' style='margin-top:8px'>per-ticker depth — how far back each ticker's data goes, "+
+      "per source (shown "+d.n_shown+" of "+d.n_symbols+", shallowest backfill first):</div>"+
+    "<table class='feat' style='margin-top:6px'><thead><tr><th>ticker</th><th>provenance</th>"+
+    "<th>backfill span</th><th class='num'>days</th><th class='num'>#dates</th>"+
+    "<th>stream span</th><th class='num'>#dates</th></tr></thead><tbody>"+rows+"</tbody></table>"+
     "</div>";
 }
 

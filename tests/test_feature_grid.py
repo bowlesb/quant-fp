@@ -498,3 +498,74 @@ def test_build_trust_frontier_all_eligible_when_no_defects(
     assert frontier["n_blocked"] == 0
     assert frontier["n_eligible"] == 3
     assert frontier["projected_trusted_pct"] == 100.0
+
+
+def test_build_symbol_depth_per_symbol_history(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    # AAA backfills deep (3 dates) + streams recently (1 date) -> both, full backfill depth.
+    # BBB backfills only the latest date -> shallow backfill, backfill_only.
+    # CCC streams only (no backfill) -> stream_only, not parity-checkable.
+    _write_partition(root, "groupX", "backfill", "2025-05-12", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2025-05-13", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB"])
+    _write_partition(root, "groupX", "stream", "2026-06-18", ["AAA", "CCC"])
+
+    depth = fg.build_symbol_depth("groupX", str(root))
+    assert depth["group"] == "groupX"
+    assert depth["n_symbols"] == 3
+    assert depth["n_both"] == 1  # AAA
+    assert depth["n_backfill_only"] == 1  # BBB
+    assert depth["n_stream_only"] == 1  # CCC
+    assert depth["backfill_earliest"] == "2025-05-12"
+    assert depth["backfill_latest"] == "2026-06-18"
+    assert depth["backfill_n_dates"] == 3
+
+    by_symbol = {row["symbol"]: row for row in depth["symbols"]}
+    # AAA: full backfill depth (earliest captured date), recent stream.
+    assert by_symbol["AAA"]["provenance"] == "both"
+    assert by_symbol["AAA"]["backfill_earliest"] == "2025-05-12"
+    assert by_symbol["AAA"]["backfill_n_dates"] == 3
+    assert by_symbol["AAA"]["stream_earliest"] == "2026-06-18"
+    assert by_symbol["AAA"]["stream_n_dates"] == 1
+    # BBB: shallow backfill (only the latest date), no stream.
+    assert by_symbol["BBB"]["provenance"] == "backfill_only"
+    assert by_symbol["BBB"]["backfill_n_dates"] == 1
+    assert by_symbol["BBB"]["stream_n_dates"] == 0
+    assert by_symbol["BBB"]["stream_earliest"] is None
+    # CCC: stream only, no settled backfill.
+    assert by_symbol["CCC"]["provenance"] == "stream_only"
+    assert by_symbol["CCC"]["backfill_n_dates"] == 0
+
+
+def test_build_symbol_depth_span_days(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    _write_partition(root, "groupX", "backfill", "2026-06-15", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA"])
+    depth = fg.build_symbol_depth("groupX", str(root))
+    row = depth["symbols"][0]
+    # inclusive calendar span 06-15..06-18 = 4 days.
+    assert row["backfill_span_days"] == 4
+    assert row["stream_span_days"] == 0  # no stream history
+
+
+def test_build_symbol_depth_ranks_shallowest_backfill_first(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    # AAA on 2 backfill dates, BBB on 1 -> BBB (shallower) ranks first.
+    _write_partition(root, "groupX", "backfill", "2026-06-17", ["AAA"])
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB"])
+    depth = fg.build_symbol_depth("groupX", str(root))
+    assert [row["symbol"] for row in depth["symbols"]] == ["BBB", "AAA"]
+
+
+def test_build_symbol_depth_limit_caps_rows(tmp_path: Path, fake_catalog: None) -> None:
+    root = tmp_path / "store"
+    _write_partition(root, "groupX", "backfill", "2026-06-18", ["AAA", "BBB", "CCC", "DDD"])
+    depth = fg.build_symbol_depth("groupX", str(root), limit=2)
+    assert depth["n_symbols"] == 4  # summary counts ALL symbols
+    assert depth["n_shown"] == 2
+    assert len(depth["symbols"]) == 2  # only the rows are capped
+
+
+def test_build_symbol_depth_unknown_group(fake_catalog: None) -> None:
+    with pytest.raises(KeyError):
+        fg.build_symbol_depth("no_such_group", "/store")

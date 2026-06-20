@@ -683,6 +683,146 @@ def build_symbol_coverage(group: str, root: str = STORE_ROOT) -> dict[str, objec
     }
 
 
+# How many symbols to return per source in the symbol-depth surface. The per-symbol depth scan is the full
+# per-date set read (heavier than the latest-date-only /symbols pass), so the response caps the listed
+# symbols; the summary counts are over ALL symbols, only the per-symbol rows are capped.
+SYMBOL_DEPTH_DEFAULT_LIMIT = 200
+
+
+def _per_date_symbol_sets(root: str, group: str, version: str, source: str) -> dict[str, set[str]]:
+    """Per-date distinct-symbol SETS for one (group, source) over its WHOLE history — like
+    ``gather_group_store_info`` but RETAINING the sets (it keeps only counts). Same bounded per-partition
+    file sampling, so a 7k-file stream partition is still ~12 reads. {} when the source has no partitions."""
+    base = Path(root) / f"group={group}" / f"v={version}" / f"source={source}"
+    if not base.exists():
+        return {}
+    per_date: dict[str, set[str]] = {}
+    for date_dir in sorted(base.glob("date=*")):
+        date_iso = date_dir.name.removeprefix("date=")
+        per_date[date_iso] = _read_symbols(root, group, version, source, date_iso)
+    return per_date
+
+
+def _invert_to_symbol_depth(per_date: dict[str, set[str]]) -> dict[str, dict[str, object]]:
+    """Invert per-date symbol sets → per-symbol depth: each symbol's earliest date, latest date, and the
+    number of dates it is present on. A symbol present on the earliest captured date has FULL history depth;
+    one that first appears recently is shallow (a late-listed / late-subscribed ticker)."""
+    by_symbol: dict[str, dict[str, object]] = {}
+    for date_iso in sorted(per_date):
+        for symbol in per_date[date_iso]:
+            row = by_symbol.get(symbol)
+            if row is None:
+                by_symbol[symbol] = {"earliest": date_iso, "latest": date_iso, "n_dates": 1}
+            else:
+                row["latest"] = date_iso
+                row["n_dates"] = int(row["n_dates"]) + 1  # type: ignore[arg-type]
+    return by_symbol
+
+
+def build_symbol_depth(
+    group: str, root: str = STORE_ROOT, limit: int = SYMBOL_DEPTH_DEFAULT_LIMIT
+) -> dict[str, object]:
+    """Per-SYMBOL coverage DEPTH for one group: for each ticker, HOW FAR BACK its data goes (earliest →
+    latest date + span + dates-present) PER SOURCE (stream vs backfill).
+
+    This is the time-DEPTH cut the other surfaces don't give. The group grid (``/api/feature-grid``) is per
+    (group × period) counts; ``/symbols`` is per-symbol but only on the LATEST date (no depth); the
+    ``/timeline`` is depth but only at the GROUP level. This is their intersection — *which TICKER has this
+    FEATURE, how far back, and from which source* — the visible answer to "how deep/broad is our tape per
+    feature" as DataIntegrity deepens the quote/trade tape.
+
+    Each symbol is classified by where it has history: ``both`` (stream + backfill), ``backfill_only``
+    (settled history but not captured live — under-represented LIVE), ``stream_only`` (live but no settled
+    backfill yet — not parity-checkable). Per source a symbol carries its OWN earliest/latest/span/n_dates,
+    so a ticker that backfills to 2025-05 but only streams the last 4 days reads exactly that.
+
+    Read-side only: one bounded per-partition symbol read across the group's dates per source (same sampling
+    the grid uses). ``limit`` caps the per-symbol ROWS returned (ranked shallowest-backfill first — the names
+    whose history is thinnest); summary counts + spans are over ALL symbols.
+    """
+    if group not in _catalog_by_group():
+        raise KeyError(group)
+    version = _group_version(group)
+    if version is None:
+        raise KeyError(group)
+
+    stream_by_date = _per_date_symbol_sets(root, group, version, "stream")
+    backfill_by_date = _per_date_symbol_sets(root, group, version, "backfill")
+    stream_depth = _invert_to_symbol_depth(stream_by_date)
+    backfill_depth = _invert_to_symbol_depth(backfill_by_date)
+
+    stream_symbols = set(stream_depth)
+    backfill_symbols = set(backfill_depth)
+    union = stream_symbols | backfill_symbols
+    both = stream_symbols & backfill_symbols
+    backfill_only = backfill_symbols - stream_symbols
+    stream_only = stream_symbols - backfill_symbols
+
+    stream_dates = sorted(stream_by_date)
+    backfill_dates = sorted(backfill_by_date)
+
+    rows = [
+        _symbol_depth_row(symbol, stream_depth.get(symbol), backfill_depth.get(symbol)) for symbol in union
+    ]
+    # Rank shallowest-backfill first (fewest backfill dates = least settled history), then by symbol — the
+    # names whose tape is thinnest are what this surface exists to flag. Symbols with NO backfill sort first.
+    rows.sort(key=lambda row: (int(row["backfill_n_dates"]), str(row["symbol"])))  # type: ignore[arg-type]
+
+    return {
+        "group": group,
+        "version": version,
+        "n_symbols": len(union),
+        "n_both": len(both),
+        "n_backfill_only": len(backfill_only),
+        "n_stream_only": len(stream_only),
+        "stream_earliest": stream_dates[0] if stream_dates else None,
+        "stream_latest": stream_dates[-1] if stream_dates else None,
+        "stream_n_dates": len(stream_dates),
+        "backfill_earliest": backfill_dates[0] if backfill_dates else None,
+        "backfill_latest": backfill_dates[-1] if backfill_dates else None,
+        "backfill_n_dates": len(backfill_dates),
+        "limit": limit,
+        "n_shown": min(limit, len(rows)),
+        "symbols": rows[:limit],
+    }
+
+
+def _span_days(earliest: str | None, latest: str | None) -> int:
+    """Calendar-day span (inclusive) between two ISO dates, or 0 when either is missing."""
+    if earliest is None or latest is None:
+        return 0
+    return (dt.date.fromisoformat(latest) - dt.date.fromisoformat(earliest)).days + 1
+
+
+def _symbol_depth_row(
+    symbol: str, stream: dict[str, object] | None, backfill: dict[str, object] | None
+) -> dict[str, object]:
+    """One per-symbol depth row: provenance class + each source's earliest/latest/span/n_dates (nulls when a
+    source has no history for the symbol)."""
+    if stream is not None and backfill is not None:
+        provenance = "both"
+    elif backfill is not None:
+        provenance = "backfill_only"  # settled history, not captured live → under-represented LIVE
+    else:
+        provenance = "stream_only"  # live but no settled backfill → not yet parity-checkable
+    stream_earliest = stream["earliest"] if stream else None
+    stream_latest = stream["latest"] if stream else None
+    backfill_earliest = backfill["earliest"] if backfill else None
+    backfill_latest = backfill["latest"] if backfill else None
+    return {
+        "symbol": symbol,
+        "provenance": provenance,
+        "stream_earliest": stream_earliest,
+        "stream_latest": stream_latest,
+        "stream_span_days": _span_days(stream_earliest, stream_latest),  # type: ignore[arg-type]
+        "stream_n_dates": int(stream["n_dates"]) if stream else 0,  # type: ignore[arg-type]
+        "backfill_earliest": backfill_earliest,
+        "backfill_latest": backfill_latest,
+        "backfill_span_days": _span_days(backfill_earliest, backfill_latest),  # type: ignore[arg-type]
+        "backfill_n_dates": int(backfill["n_dates"]) if backfill else 0,  # type: ignore[arg-type]
+    }
+
+
 def _latest_partition_date(root: str, group: str, version: str, source: str) -> str | None:
     """The most recent ``date=`` partition (ISO string) for one (group, source), or None if the source has
     no partitions. A bare directory-name scan — no parquet bodies read."""
@@ -1167,6 +1307,7 @@ class GridCache:
         self._thin: dict[int, tuple[float, dict[str, object]]] = {}
         self._timeline: dict[int, tuple[float, dict[str, object]]] = {}
         self._oflow_trend: dict[int, tuple[float, dict[str, object]]] = {}
+        self._symbol_depth: dict[tuple[str, int], tuple[float, dict[str, object]]] = {}
 
     def grid(self, root: str, force: bool = False) -> dict[str, object]:
         now = time.monotonic()
@@ -1229,6 +1370,18 @@ class GridCache:
             return cached[1]
         view = build_orderflow_coverage_trend(root, days)
         self._oflow_trend[days] = (now, view)
+        return view
+
+    def symbol_depth(
+        self, group: str, root: str, limit: int = SYMBOL_DEPTH_DEFAULT_LIMIT, force: bool = False
+    ) -> dict[str, object]:
+        now = time.monotonic()
+        key = (group, limit)
+        cached = self._symbol_depth.get(key)
+        if not force and cached is not None and (now - cached[0]) <= self.ttl:
+            return cached[1]
+        view = build_symbol_depth(group, root, limit)
+        self._symbol_depth[key] = (now, view)
         return view
 
 
