@@ -48,6 +48,8 @@ from quantlib.features.groups import (  # noqa: F401
     round_levels,
     runner_state,
     sector,
+    sector_beta,
+    sector_return,
     signed_trade_ratio,
     size_entropy,
     swing,

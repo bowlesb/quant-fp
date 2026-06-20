@@ -136,8 +136,17 @@ def test_sharded_market_context_identical_via_index_replication() -> None:
 
 def test_cross_sectional_rank_via_reduce_identical() -> None:
     single, sharded = _single_process(10), _sharded(10)
-    assert REDUCE_GROUPS == ("cross_sectional_rank", "breadth")
+    assert REDUCE_GROUPS == ("cross_sectional_rank", "breadth", "sector_return", "sector_beta")
     _assert_same(single["cross_sectional_rank"], sharded["cross_sectional_rank"])
+
+
+def test_sector_aggregates_via_reduce_identical() -> None:
+    # sector_return / sector_beta are whole-universe GATHERs grouped by GICS sector: per-shard each would
+    # see only ~1/N of a sector and emit N different sector aggregates per minute. Routed through the reduce
+    # they must equal the single-process value computed over EVERY symbol in the sector.
+    single, sharded = _single_process(10), _sharded(10)
+    for group in ("sector_return", "sector_beta"):
+        _assert_same(single[group], sharded[group])
 
 
 def test_breadth_via_reduce_identical() -> None:

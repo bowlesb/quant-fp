@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-694 features across 56 group(s).
+708 features across 58 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -546,6 +546,20 @@
 | `sector_is_technology` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is technology, else 0.0 (one-hot, broadcast across the day). |
 | `sector_is_unknown` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol has no mapped sector (unlisted in the sector map or FMP could not classify it), else 0.0. |
 | `sector_is_utilities` | sector | reference | A | tolerance | Float64 | none | (-0.01, 1.01) | 1.0 when the symbol's GICS-aligned sector is utilities, else 0.0 (one-hot, broadcast across the day). |
+| `sector_beta_15m` | sector_beta | cross_sectional | A | tolerance | Float64 | sparse | (-15.0, 15.0) | Rolling beta to THIS ticker's GICS sector over 15m: slope of its one-minute return regressed on its sector's equal-weight one-minute return (NULL for unmapped-sector names). |
+| `sector_beta_30m` | sector_beta | cross_sectional | A | tolerance | Float64 | sparse | (-15.0, 15.0) | Rolling beta to THIS ticker's GICS sector over 30m: slope of its one-minute return regressed on its sector's equal-weight one-minute return (NULL for unmapped-sector names). |
+| `sector_beta_60m` | sector_beta | cross_sectional | A | tolerance | Float64 | sparse | (-15.0, 15.0) | Rolling beta to THIS ticker's GICS sector over 60m: slope of its one-minute return regressed on its sector's equal-weight one-minute return (NULL for unmapped-sector names). |
+| `sector_corr_15m` | sector_beta | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Rolling correlation of this ticker's one-minute return with its GICS sector's over 15m, in [-1, 1] (NULL for unmapped-sector names). |
+| `sector_corr_30m` | sector_beta | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Rolling correlation of this ticker's one-minute return with its GICS sector's over 30m, in [-1, 1] (NULL for unmapped-sector names). |
+| `sector_corr_60m` | sector_beta | cross_sectional | A | tolerance | Float64 | sparse | (-1.01, 1.01) | Rolling correlation of this ticker's one-minute return with its GICS sector's over 60m, in [-1, 1] (NULL for unmapped-sector names). |
+| `sector_excess_15m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 15m return minus its sector's equal-weight mean over the same window (within-sector excess; NULL for unmapped-sector names). |
+| `sector_excess_30m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 30m return minus its sector's equal-weight mean over the same window (within-sector excess; NULL for unmapped-sector names). |
+| `sector_excess_5m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 5m return minus its sector's equal-weight mean over the same window (within-sector excess; NULL for unmapped-sector names). |
+| `sector_excess_60m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-6.0, 6.0) | This ticker's trailing 60m return minus its sector's equal-weight mean over the same window (within-sector excess; NULL for unmapped-sector names). |
+| `sector_return_15m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Equal-weight mean trailing 15m return of THIS ticker's GICS sector, joined onto the ticker by its sector (NULL for unmapped-sector names). |
+| `sector_return_30m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Equal-weight mean trailing 30m return of THIS ticker's GICS sector, joined onto the ticker by its sector (NULL for unmapped-sector names). |
+| `sector_return_5m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Equal-weight mean trailing 5m return of THIS ticker's GICS sector, joined onto the ticker by its sector (NULL for unmapped-sector names). |
+| `sector_return_60m` | sector_return | cross_sectional | A | tolerance | Float64 | sparse | (-1.0, 5.0) | Equal-weight mean trailing 60m return of THIS ticker's GICS sector, joined onto the ticker by its sector (NULL for unmapped-sector names). |
 | `signed_trade_ratio_15m` | signed_trade_ratio | trade_flow | B | tolerance | Float64 | warmup | (-1.0, 1.0) | Net signed (buy-minus-sell, tick-rule) share volume as a fraction of total share volume over the trailing 15 minutes — scale-free trade-flow imbalance in [-1, 1]. |
 | `signed_trade_ratio_30m` | signed_trade_ratio | trade_flow | B | tolerance | Float64 | warmup | (-1.0, 1.0) | Net signed (buy-minus-sell, tick-rule) share volume as a fraction of total share volume over the trailing 30 minutes — scale-free trade-flow imbalance in [-1, 1]. |
 | `signed_trade_ratio_5m` | signed_trade_ratio | trade_flow | B | tolerance | Float64 | warmup | (-1.0, 1.0) | Net signed (buy-minus-sell, tick-rule) share volume as a fraction of total share volume over the trailing 5 minutes — scale-free trade-flow imbalance in [-1, 1]. |
