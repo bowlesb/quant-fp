@@ -15,7 +15,7 @@ from typing import Any
 
 import markdown
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -39,6 +39,8 @@ from store_glimpse import CACHE as GLIMPSE_CACHE
 from store_glimpse_cache import read_drill as read_glimpse_drill
 from store_glimpse_cache import read_glimpse
 from store_glimpse_page import STORE_GLIMPSE_HTML
+from store_grid_cache import read_drill as read_grid_drill
+from store_grid_cache import read_grid_gzip, read_meta as read_grid_meta
 from universe_coverage import CACHE as UNIVERSE_CACHE
 from universe_coverage_page import UNIVERSE_COVERAGE_HTML
 
@@ -462,6 +464,56 @@ def store_glimpse_drill_json(
 def store_glimpse_page() -> str:
     """The visual feature-store glimpse grid (vanilla HTML/JS; fetches /api/store-glimpse client-side)."""
     return STORE_GLIMPSE_HTML
+
+
+@app.get("/api/store-grid/matrix")
+def store_grid_matrix() -> Response:
+    """The ALWAYS-WARM ticker×date coverage matrix — the React grid's data feed. DATE rows (newest first,
+    ~18 months back) × TICKER columns (the captured universe, default-sorted most-covered first); each cell
+    a coverage byte (0..255 = proportion of the feature store present for that ticker that date) plus a binary
+    trust bit (1 = every present group fully-trusted).
+
+    Served straight from the ``store-glimpse-worker``'s precomputed Redis blob, ALREADY gzip-compressed — the
+    bytes are passed through with ``Content-Encoding: gzip`` (a dense ~2.8M-cell matrix is multi-MB raw JSON,
+    a few hundred KB gzipped), so there is no build and no recompress on this request. On the genuine
+    first-ever boot (worker has not written yet) or unreachable Redis, returns 503 with a small ``booting``
+    JSON the UI shows as a brief one-time loading state — NOT the old recurring "warming…" placeholder.
+
+    Shape (decompressed; see store_grid.build_store_grid):
+      {generated_at, anchor_date, lookback_days, n_groups, n_trusted_groups,
+       dates: [...], tickers: [...], coverage: [[byte,...],...], trusted: [[bit,...],...],
+       coverage_pct: [...], summary: {...}}
+    """
+    blob = read_grid_gzip()
+    if blob is None:
+        return JSONResponse(
+            {"booting": True, "detail": "coverage matrix not built yet (first boot)"},
+            status_code=503,
+        )
+    return Response(
+        content=blob,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/store-grid/meta")
+def store_grid_meta_json() -> JSONResponse:
+    """The small matrix meta header for the UI's "as of HH:MM:SS" staleness + dims — generated_at, anchor,
+    n_dates/n_tickers/n_groups, gzip size, build seconds. ``booting`` until the worker's first write lands.
+    """
+    meta = read_grid_meta()
+    if meta is None:
+        return JSONResponse({"booting": True}, status_code=503)
+    return JSONResponse(meta)
+
+
+@app.get("/api/store-grid/ticker/{symbol}")
+def store_grid_ticker_drill(symbol: str) -> JSONResponse:
+    """Drill for one TICKER column: its per-(date × group) presence + per-group binary trust — what a cell
+    click opens. Served from the worker's pre-warmed blob for the most-covered tickers; an un-warmed ticker
+    falls back to a cheap one-ticker live build."""
+    return JSONResponse(read_grid_drill(symbol))
 
 
 @app.get("/api/scorecard")

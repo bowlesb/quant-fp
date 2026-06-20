@@ -162,6 +162,32 @@ services:
       timescaledb:
         condition: service_healthy
 
+  store-glimpse-worker:
+    # The ALWAYS-WARM background worker for the ticker×date feature-store coverage matrix (the React
+    # /store-grid view). Reuses the dashboard IMAGE (same quantlib/polars + the read-only /store mount +
+    # the DB for the trust read) but runs a permanent rebuild LOOP instead of the web server, writing a
+    # compact gzipped matrix blob to quant-redis (rebuild, then a few-minute gap, forever). This REPLACES the host cron
+    # (ops/collect_store_glimpse.py) so a cold/expired cache can never surface the old "warming…" state —
+    # the reader always serves the last good blob. Read-only w.r.t. the store; no fingerprint/schema risk.
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+    <<: *common
+    command: ["python3", "-m", "store_grid_cache"]
+    environment:
+      STORE_ROOT: /store
+      # The bus Redis (quant-redis on quant_default). The matrix blob + per-ticker drills live here.
+      STORE_GRID_REDIS_URL: "redis://quant-redis:6379/0"
+    volumes:
+      # Feature store, READ-ONLY: the worker reads partition dates + per-date symbol sets to build the
+      # coverage matrix. RO so it can never write the store the feature pipeline owns.
+      - fp_store_real:/store:ro
+      # Shared ~/.quant-ops mount (parity with the dashboard service; not currently written by the worker).
+      - ${HOME}/.quant-ops:/quant-ops
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:latest
     <<: *common
