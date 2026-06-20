@@ -87,3 +87,20 @@ def test_no_look_ahead_appending_future_bar() -> None:
             assert a is b
         else:
             assert a == pytest.approx(b, abs=1e-9)
+
+
+def test_zero_close_return_does_not_poison_corr() -> None:
+    """A zero close makes close/close.shift(1) ±Inf; the is_finite() backstop NULLs that return so the
+    windowed OLS correlation stays finite-or-NULL (never ±Inf / NaN-poisoned) on both paths."""
+    rng = np.random.default_rng(3)
+    n = 80
+    closes = list(np.cumprod(1.0 + rng.normal(0, 0.003, n)) * 100.0)
+    closes[40] = 0.0  # a single bad zero-close print: return at 40 (0/x) and 41 (x/0=Inf) both undefined
+    volumes = list(rng.uniform(1000, 5000, n))
+    out = run_group(
+        REGISTRY.get_group("volume_leads_price"),
+        BatchContext(frames={"minute_agg": _frame(closes, volumes)}),
+    )
+    for feat in REGISTRY.get_group("volume_leads_price").feature_names:
+        for value in out[feat].to_list():
+            assert value is None or np.isfinite(value)
