@@ -8,6 +8,19 @@ is consumer-side only. The wire format, the producer, and the schema/registry ar
 fingerprint `0x...694` is untouched. (The producer publishes ONE extra Redis key per fingerprint — a
 side artifact, not a wire change.)
 
+**Audit resolution (BatteryAudit, 2026-06-19 — core decouple VERIFIED; 5 gaps closed):**
+- **B1 [HIGH] publish race →** §2.2: producer SETs+confirms `bus:schema:<fp>` BEFORE the first frame of that
+  fp (publish-then-emit); consumer treats `UnknownSchema` as retry-with-backoff, never a hard stop.
+- **B2 [HIGH / regression] version-bump silent corruption →** §2.6: contract pins `(name, version)`;
+  `assert_compatible` RED on a version change of a CONSUMED feature (safe default), + an optional
+  value-identical fast-path (noted follow-up). Restores the loud-failure the fp gate gave us, at feature
+  granularity.
+- **B3 [MED] contract drift / green-by-omission →** §2.6: contract derived from the model's construction
+  constant (identity test); gate FAILS-CLOSED if an expected-live strategy hasn't published its contract.
+- **B4 [MED] cache eviction →** §2.2: `bus:schema:<fp>` keys are no-TTL + eviction-exempt (explicit).
+- **B5 [LOW] present-but-NaN →** §2.4: `to_model_vector` guarantees PRESENCE, not finiteness; warmup gating
+  owns finiteness — documented so nobody assumes an all-finite vector.
+
 ---
 
 ## 1. The problem (why coordinated deploys are forced today)
@@ -81,16 +94,40 @@ Redis key:  bus:schema:<fingerprint_hex>   ->   JSON  {"fingerprint": "0x..694",
 ```
 
 - Written **idempotently** by the producer once per fingerprint (it is constant for the life of a feature
-  set), e.g. on `BusPublisher` init / first publish. `SET` (no TTL, or a long TTL refreshed on emit) —
-  one tiny key per fingerprint, a few thousand short lines, written once.
+  set). One tiny key per fingerprint, a few thousand short lines, written once.
 - This is a **side artifact**, not a wire change: it does not touch the frame bytes, the registry, or the
   fingerprint computation. It is the publish of an *existing* object (`BusSchema`) the producer already
   holds.
-- **Bootstrap / resilience:** if `bus:schema:<fp>` is missing for a fingerprint a consumer sees (producer
-  hasn't written it yet, or a non-bus producer), the consumer falls back to its OWN compiled schema **iff
-  the fingerprint matches** (today's behavior) — and otherwise raises `UnknownSchema(fp)` loudly. A
-  registry abstraction (`SchemaRegistry`) wraps the lookup so a future backend (a DB table, a file) can
-  replace Redis without touching consumers.
+
+**B1 — publish-then-emit ordering (must-fix).** The schema key MUST be visible before the first frame of a
+new fingerprint, or the transition frame (or a reconnect reading retained `MAXLEN≈4h` frames) can reach a
+consumer before `bus:schema:<fp>` exists → `UnknownSchema` → a strategy stops trading mid-session: exactly
+the failure this design prevents. Two-sided fix:
+
+- **Producer (strict ordering):** before the FIRST `XADD` of a given fingerprint, the `BusPublisher` SETs
+  `bus:schema:<fp>` and CONFIRMS the write (the `SET` ack returns, or a read-back) — *publish-then-emit*.
+  This is checked once per fingerprint (a `_published_fps` set guard), so it adds nothing to the steady-
+  state publish path. A fingerprint never emits a frame whose schema isn't already resolvable.
+- **Consumer (never hard-stop on a lag):** a decode that can't yet resolve `bus:schema:<fp>` raises
+  `UnknownSchema`, which the consumer treats as **retry-with-backoff** — re-poll the registry a few times
+  (short capped backoff), NOT a hard stop. The frame is held/re-tried (the stream entry isn't acked-past
+  until resolved), so a brief resolve lag (or a not-yet-replicated key) self-heals instead of killing the
+  container. Only a genuinely unresolvable fingerprint after the bounded retries surfaces as an operational
+  error (logged loudly), and even then the container keeps polling other frames rather than crashing.
+
+**B4 — eviction-resistance (must be explicit).** `bus:schema:<fp>` keys carry **no TTL** and MUST be exempt
+from Redis key eviction — either the bus runs on a Redis instance with `maxmemory-policy noeviction`, or the
+schema keys live on a non-evictable backend (a small dedicated namespace/instance, or the durable registry
+backend below). The frame streams are independently `MAXLEN`-trimmed (bounded memory) and do not depend on
+this; the schema keys are tiny and few (one per fingerprint ever seen), so exempting them is cheap. A
+`SchemaRegistry` abstraction wraps the lookup so a future durable backend (a DB table, a file) can replace
+Redis without touching consumers.
+
+- **Bootstrap / same-fingerprint fallback:** if `bus:schema:<fp>` is still unresolvable for a fingerprint a
+  consumer sees AND that fingerprint == the consumer's OWN compiled schema, the consumer falls back to its
+  compiled schema (today's behavior — the offsets are knowably correct). For any OTHER fingerprint, only
+  the B1 retry-with-backoff applies; there is no compiled fallback for a fingerprint the consumer wasn't
+  built against (it has no trustworthy offset map for it).
 
 ### 2.3 Name-addressed accessor against the FRAME's schema — `FeatureView`
 
@@ -142,6 +179,12 @@ def to_model_vector(self, expected_names: Sequence[str]) -> np.ndarray:
   for a genuinely-optional input uses `get(name, default=nan)` explicitly — opt-in, not the default.)
 - **Extra features in the frame → ignored** (the additive case: features were added; the consumer simply
   doesn't ask for them).
+- **B5 — present-but-NaN is NOT this layer's job (document it).** `to_model_vector` guarantees the requested
+  features are PRESENT and correctly placed; it does **not** guarantee they are FINITE. A feature that is
+  present but `NaN` that minute (warmup / sparse) passes `has(name)` and is fed as `NaN` to the model — this
+  is correct: finiteness is the responsibility of the strategy's warmup gate (don't bet until the needed
+  features are finite, `STRATEGY_CONTAINERS.md`), not of the name-resolution layer. Nobody should assume
+  `to_model_vector` returns an all-finite vector.
 
 This is where the decoupling pays off: feature ADDITIONS are non-breaking by construction, because the
 consumer only ever asks for its own `expected_names`.
@@ -175,45 +218,86 @@ safe BEFORE it ships** — the half that turns "coordinated rebuild" into "conti
 goal (Ben): merge feature PRs and deploy `fc` continuously, with NO coordinated rebuilds and NO risk to
 active strategies, gated by one automated check.
 
-**The declared-feature contract.** Each strategy DECLARES the exact feature names it consumes — its
-contract with the bus. It already does this implicitly; we make it explicit and machine-readable:
+**The declared-feature contract — pins (name, VERSION) (B2 must-fix).** Each strategy DECLARES the exact
+features it consumes, each pinned to the group VERSION it was certified against — its contract with the bus.
+Name alone is NOT sufficient (see B2 below); the contract is a list of `(name, version)`:
 
 ```python
-# strategies/<name>/contract.py  (or a STRATEGY_FEATURES constant the container exports)
-STRATEGY_FEATURES: tuple[str, ...] = ("ret_1m", "volume_zscore_5m")   # smoke, e.g.
+# strategies/<name>/contract.py
+STRATEGY_FEATURES: tuple[FeatureReq, ...] = (
+    FeatureReq("ret_1m", version="v3"),
+    FeatureReq("volume_zscore_5m", version="v3"),
+)   # smoke, e.g.  (FeatureReq = a tiny frozen (name, version) dataclass)
 ```
 
-The contract is the SAME list the strategy passes to `to_model_vector(expected_names)` (single source of
-truth — the declared set IS what the model reads, so they cannot drift). For a strategy that reads a single
-feature via `view.value`, the contract is that one name.
+The names in this contract are the SAME `expected_names` the strategy passes to `to_model_vector` — see
+B3 (single source of truth, derived from the model's construction constant, not a parallel list).
 
-**The reusable check.** A pure function — no Redis, no live state:
+> **B2 [HIGH / REGRESSION — the important one].** The fingerprint is a blake2b over `group:name:VERSION`,
+> so a **version bump changes the fingerprint but keeps the names**. Today that halts the strategy (fp
+> reject) — a loud, safe stop. A name-only resolve would SILENTLY feed the model the new-version,
+> *differently-computed* feature — silent model corruption replacing a loud halt. The fix: the contract
+> pins `version`, and `assert_compatible` checks the candidate field's version == the declared version, so
+> a version change of a CONSUMED feature is **RED** (the strategy then opts in deliberately, exactly like an
+> addition). This restores the loud-failure property the old fp gate gave us — at feature granularity.
+
+**The reusable check — name AND version (B2).** A pure function; no Redis, no live state:
 
 ```python
 class IncompatibleSchema(Exception):
-    """A live strategy declares features the candidate schema lacks (with the exact missing names)."""
+    """A live strategy needs a feature the candidate lacks, or at a different version (exact list)."""
 
-def assert_compatible(candidate_schema: BusSchema, declared: Sequence[str], *, strategy: str) -> None:
-    missing = [name for name in declared if not candidate_schema.has(name)]
-    if missing:
+def assert_compatible(
+    candidate: BusSchema, declared: Sequence[FeatureReq], *, strategy: str,
+    value_identical_bumps: Mapping[str, str] = {},   # name -> version the producer annotated value-identical
+) -> None:
+    missing, changed = [], []
+    for req in declared:
+        field = candidate.field(req.name)            # None if absent
+        if field is None:
+            missing.append(req.name)
+        elif field.version != req.version and value_identical_bumps.get(req.name) != field.version:
+            changed.append((req.name, req.version, field.version))   # version bump, NOT value-identical
+    if missing or changed:
         raise IncompatibleSchema(
-            f"strategy '{strategy}' needs features absent from candidate "
-            f"fingerprint {candidate_schema.fingerprint:#018x}: {missing}"
+            f"strategy '{strategy}' vs candidate {candidate.fingerprint:#018x}: "
+            f"missing={missing} version_changed={changed}"
         )
 ```
 
-i.e. the strategy's declared set must be a **subset** of the candidate schema's names. Subset — not equal —
-is exactly why additions are safe and a rename/removal of a *consumed* feature is the only thing that fails.
+i.e. every declared `(name, version)` must be present in the candidate AT THE SAME VERSION. Subset on names
+(not equal) is why additions are safe; the version check is why a re-computation of a consumed feature can
+never slip in silently.
+
+**Version bumps are usually value-identical restructures (#203-style) — the safe-default + opt-in fast-path
+nuance.** Most of our version bumps are value-identical (the feature's numbers don't change; only its
+internal computation/registration did). For those, forcing a strategy opt-in is friction, not safety. So the
+spec is:
+
+- **SAFE DEFAULT (in v1, required): RED on ANY consumed-feature version change.** A version bump of a
+  feature a live strategy declares blocks the deploy until the strategy opts in (bumps its `FeatureReq`
+  version and rebuilds) — identical ergonomics to adopting an addition. This is the must-have B2 fix.
+- **OPTIONAL value-identical fast-path (the friction-reducer): the producer ANNOTATES a bump as
+  value-identical** (a `bus:value_identical:<fp>` set, or a per-field flag the producer asserts when it
+  knows the numbers are unchanged — e.g. a #203-style restructure verified equal in CI). The gate then
+  auto-passes that specific bump (the `value_identical_bumps` arg above). **Recommendation: ship the safe
+  default in v1; the value-identical fast-path is a noted FOLLOW-UP** — it requires a producer-side
+  value-identity assertion we should design carefully (a wrong annotation re-introduces the silent-
+  corruption risk), so it should not gate the v1 build. The safe default alone fully closes B2.
 
 **The pre-deploy gate.** Before relaunching `fc` on a new feature set, run — in CI or the deploy script —
 `assert_compatible(candidate_schema, contract, strategy=name)` for EVERY live strategy's declared contract
 against the NEW candidate fingerprint's schema:
 
-- **GREEN** (all subsets resolve) → `fc` deploys freely. Additions are non-breaking by construction;
-  strategies are untouched and keep trading across the fingerprint change.
-- **RED** → block the deploy and name the EXACT missing/renamed feature each affected strategy needs. A
-  genuine incompatibility (a feature a live strategy depends on was removed/renamed) is surfaced
-  *precisely, before deploy* — never a silent break, never a runtime decode crash mid-session.
+- **GREEN** (every live strategy's `(name, version)` set resolves in the candidate) → `fc` deploys freely.
+  Additions are non-breaking by construction; strategies are untouched and keep trading across the change.
+- **RED** → block the deploy and name the EXACT feature(s) at fault per strategy: `missing` (removed/
+  renamed) and `version_changed` (a consumed feature was re-computed). Surfaced *precisely, before deploy* —
+  never a silent break, never a runtime decode crash, never a silent re-computation fed to a model.
+- **FAILS-CLOSED on a missing contract (B3).** The gate is parameterized with the set of strategies it
+  EXPECTS to be live. If any expected strategy hasn't published its contract (it's down, mid-restart, or
+  never registered), the gate is **RED**, not green-by-omission — a down strategy must never be cleared by
+  silence. (Operationally: bring the strategy up / confirm its contract before the deploy proceeds.)
 
 **What this replaces.** The manual "rebuild fc + 3 strategies, atomically" coordination collapses to:
 
@@ -221,17 +305,25 @@ against the NEW candidate fingerprint's schema:
 rebuild fc  →  run compat gate (assert_compatible per strategy)  →  GREEN: relaunch fc  /  RED: block + name the feature
 ```
 
-Strategies do not move unless THEY choose to adopt a new feature (at which point they update their own
-`STRATEGY_FEATURES` + `to_model_vector` list and rebuild on their own schedule). The entire error surface of
-a feature deploy is reduced to **one precise, checkable condition**: is every live strategy's declared set ⊆
-the new schema?
+Strategies do not move unless THEY choose to adopt a new (or re-versioned) feature — they bump their own
+`STRATEGY_FEATURES` and rebuild on their own schedule. The error surface of a feature deploy is reduced to
+**one precise, checkable condition**: does every live strategy's declared `(name, version)` set resolve in
+the new schema (with version-identical fields), and has every expected strategy published its contract?
 
-**Where the gate gets the contracts.** Two options (decide at build): (a) a small registry the deploy
-script imports each strategy's `STRATEGY_FEATURES` from; or (b) each running strategy publishes its declared
-contract to Redis (`strategy:features:<name>`) on startup, and the gate reads the live set — which also
-covers "what is ACTUALLY running right now" without a static list to keep in sync. (b) is more robust (the
-gate checks reality, not a possibly-stale manifest); (a) is simpler and CI-runnable with no live cluster.
-Recommend (b) for the deploy gate with (a)'s static import as the CI smoke-check.
+**Single source of truth — contract derived from the model's construction constant (B3).** The declared
+contract must NOT be a parallel hand-kept list that can drift from what the model actually reads. It is
+derived from the SAME constant the model is CONSTRUCTED with. E.g. `MockMLModel(feature_names=...)` already
+takes its features as a constructor arg today — the contract IS that constant (the strategy exposes
+`model.required_features()` / the constant the model was built from), and `to_model_vector` is called with
+that same list. A unit test asserts the published contract == the model's construction list (identity), so
+the gate can never pass while the model would read something different at runtime.
+
+**Where the gate gets the contracts.** Each running strategy publishes its declared `(name, version)`
+contract to Redis (`strategy:features:<name>`) on startup; the gate reads the LIVE set — so it checks what
+is ACTUALLY running, not a possibly-stale static manifest. The gate is given the EXPECTED-live strategy set
+and **fails closed** if any expected strategy's contract is absent (B3). A static import of each strategy's
+constant is the CI smoke-check (runnable with no live cluster), but the deploy gate uses the live published
+contracts.
 
 ---
 
@@ -293,9 +385,11 @@ All pure / in-process (a fake `SchemaRegistry` backed by a dict — no live Redi
    NaN.
 4. **Length/structural misalignment still loud.** A frame whose header `n_features` ≠ the resolved schema's
    `n_features` → raises (we never index past the payload).
-5. **Unknown schema is loud, with safe same-fingerprint fallback.** Unresolvable fingerprint (not in
-   registry, not the consumer's own) → `UnknownSchema(fp)`. A missing key whose fp == the consumer's own
-   compiled schema → falls back to the compiled schema (today's behavior, preserved).
+5. **Unknown schema retries, never hard-stops (B1).** A fingerprint not yet resolvable → the consumer
+   retries-with-backoff and SUCCEEDS once the fake registry is populated mid-test (the frame is not dropped,
+   the container does not stop). A fp == the consumer's own compiled schema with a missing key → falls back
+   to the compiled schema. Only an unresolvable fp after bounded retries surfaces a logged operational error
+   while the consumer keeps polling other frames.
 6. **`FeatureRow` parity.** `FeatureView` satisfies the `FeatureRow` protocol; the re-homed
    `VwapReversionModel` / `MockMLModel` produce identical `Prediction`s reading a `FeatureView` vs the
    current `FeatureVector` on the same values (parity-by-construction at the decision layer).
@@ -304,9 +398,19 @@ All pure / in-process (a fake `SchemaRegistry` backed by a dict — no live Redi
 8. **Compat gate RED names the exact feature.** A candidate schema that REMOVED/renamed `B` → declared {A,
    B} raises `IncompatibleSchema` whose message names `B` and the candidate fingerprint. A multi-strategy
    gate run reports every affected strategy + its missing names, and blocks.
-9. **Contract == model-input list.** A strategy's declared `STRATEGY_FEATURES` equals the `expected_names`
-   it passes to `to_model_vector` (single source of truth) — a test asserts they're the same object/list,
-   so the gate can never pass while the model would `MissingFeature` at runtime.
+9. **Contract == model-input list (B3).** A strategy's declared `STRATEGY_FEATURES` names equal the
+   `expected_names` it passes to `to_model_vector`, both derived from the model's construction constant — a
+   test asserts identity, so the gate can never pass while the model would read something different.
+10. **⭐ Version-bumped consumed feature → RED (B2, the regression test).** Candidate keeps name `B` but at a
+    DIFFERENT version than the contract pins. `assert_compatible` raises `IncompatibleSchema` with `B` in
+    `version_changed` (declared vs candidate version). And: a bump annotated value-identical in
+    `value_identical_bumps` → auto-passes (the fast-path). Proves a silent re-computation can't slip in.
+11. **Publish-then-emit ordering (B1).** With a registry where the schema for `fp_new` is written only AFTER
+    the first frame, the consumer's retry-with-backoff still resolves it (no stop); and a producer test
+    asserts `SET bus:schema:<fp>` is confirmed before the first `XADD` of that fp.
+12. **Gate fails closed on a missing contract (B3).** The gate, told strategies {smoke, reversion,
+    overnight_beta} are expected live, with only two having published a contract → RED (names the strategy
+    whose contract is absent), NOT green-by-omission.
 
 ---
 
@@ -357,17 +461,19 @@ model input through `to_model_vector` (or stays on `view.value(name)` for the si
 4. **After cutover — continuous feature deployment:**
    ```
    feature PR merges  →  rebuild fc candidate  →  COMPAT GATE: assert_compatible(candidate_schema, contract)
-                         for every live strategy  →  GREEN: relaunch fc  /  RED: block + name the feature
+                         for every EXPECTED-live strategy  →  GREEN: relaunch fc  /  RED: block + name the feature
    ```
-   On GREEN, `fc` ships alone: it publishes the new `bus:schema:<fp>`; consumers resolve + cache it on the
-   first new frame and keep reading their declared names. **No strategy rebuild, no coordinated window, no
-   fingerprint coordination.** A strategy moves only when IT chooses to adopt a new feature (updates its own
-   contract + `to_model_vector` list, rebuilds on its own schedule).
+   On GREEN, `fc` ships alone: on first emit of the new fingerprint it publishes `bus:schema:<fp>` and
+   confirms it BEFORE the first frame (B1 publish-then-emit); consumers resolve + cache it (retry-with-
+   backoff bridges any momentary lag) and keep reading their declared, version-pinned names. **No strategy
+   rebuild, no coordinated window, no fingerprint coordination.** A strategy moves only when IT chooses to
+   adopt a new (or re-versioned) feature — bumps its own contract + rebuilds on its own schedule.
 
 **The vision this lands (Ben):** feature PRs merge and `fc` deploys CONTINUOUSLY, gated by the automated
 compat check. Active strategies are never at risk and never forced to rebuild. The entire risk surface of a
-feature deploy is reduced to one precise, automatable condition — *is every live strategy's declared feature
-set ⊆ the new schema?* — checked BEFORE the deploy, naming the exact incompatible feature if not.
+feature deploy is reduced to one precise, automatable condition — *does every expected-live strategy's
+declared `(name, version)` set resolve in the new schema, and has each published its contract?* — checked
+BEFORE the deploy, naming the exact incompatible feature (missing OR version-changed) if not.
 
 ---
 
@@ -384,14 +490,14 @@ set ⊆ the new schema?* — checked BEFORE the deploy, naming the exact incompa
 
 | File                                   | Change                                                              |
 |----------------------------------------|---------------------------------------------------------------------|
-| `quantlib/bus/schema.py`               | `BusSchema.to_json()/from_json()`; `offsets()` map accessor          |
-| `quantlib/bus/registry.py` (new)       | `SchemaRegistry` (Redis + fake), per-fingerprint cache               |
-| `quantlib/bus/view.py` (new)           | `FeatureView`, `to_model_vector`, `MissingFeature`/`UnknownSchema`   |
+| `quantlib/bus/schema.py`               | `BusSchema.to_json()/from_json()`; `offsets()` map + `field(name)` (version) accessor |
+| `quantlib/bus/registry.py` (new)       | `SchemaRegistry` (Redis + fake), per-fingerprint cache; **B4** non-evicting/no-TTL keys |
+| `quantlib/bus/view.py` (new)           | `FeatureView`, `to_model_vector`, `MissingFeature`/`UnknownSchema` (**B5**: present≠finite) |
 | `quantlib/bus/codec.py`                | `decode_view` (resolve-not-reject); keep `decode` for migration      |
-| `quantlib/bus/publisher.py`            | idempotent `bus:schema:<fp>` publish on init/first emit              |
-| `quantlib/bus/consumer.py`             | `BusConsumer` returns `FeatureView`s via the registry               |
-| `quantlib/bus/compat.py` (new)         | `assert_compatible` / `IncompatibleSchema` + multi-strategy gate (§2.6) |
-| `strategies/{smoke,reversion,overnight_beta}/` | declare `STRATEGY_FEATURES` contract (== `to_model_vector` list); publish `strategy:features:<name>` on startup; consume `FeatureView` |
-| `ops/` deploy script / CI              | run the compat gate against the candidate fingerprint before relaunching `fc` |
-| `tests/test_bus_feature_access.py` (new) | §4 proof tests (incl. compat-gate GREEN/RED, contract==model-input)         |
+| `quantlib/bus/publisher.py`            | **B1** publish-then-emit: SET+confirm `bus:schema:<fp>` before first `XADD` of that fp |
+| `quantlib/bus/consumer.py`             | `BusConsumer` returns `FeatureView`s via the registry; **B1** `UnknownSchema` = retry-with-backoff, never hard-stop |
+| `quantlib/bus/compat.py` (new)         | `FeatureReq(name, version)`; `assert_compatible` (**B2** name AND version) / `IncompatibleSchema`; multi-strategy gate, **B3** fails-closed on a missing contract + optional value-identical fast-path |
+| `strategies/{smoke,reversion,overnight_beta}/` | declare `STRATEGY_FEATURES` `(name, version)` contract derived from the model's construction constant (**B3**); publish `strategy:features:<name>` on startup; consume `FeatureView` |
+| `ops/` deploy script / CI              | run the compat gate (with the EXPECTED-live strategy set, fail-closed) against the candidate fingerprint before relaunching `fc` |
+| `tests/test_bus_feature_access.py` (new) | §4 proof tests 1–12 (incl. **B2** version-bump→RED, **B1** retry+ordering, **B3** fail-closed) |
 | `tests/bench_bus_decode.py` (new)      | §3 throughput benchmark (gates the build)                           |
