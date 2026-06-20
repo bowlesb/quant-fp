@@ -43,9 +43,6 @@ class OvernightIntradaySplitGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "open", "close")),
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
     )
-    # Per-session cache of the daily features keyed by the daily-snapshot content token (the snapshot is
-    # fixed all day, so its overnight/intraday split is identical every minute). Mirrors multi_day / daily_beta.
-    _daily_cache: tuple[tuple[int, int, object, float], pl.DataFrame] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         return [
@@ -78,13 +75,9 @@ class OvernightIntradaySplitGroup(FeatureGroup):
         """Per (symbol, date) overnight/intraday split features from the daily bar. Cached on the daily-
         snapshot identity so the (identical-all-day) daily features are computed once, not per minute."""
         source = ctx.frame("daily")
-        token = daily_snapshot_token(source)
-        cached = self._daily_cache
-        if cached is not None and cached[0] == token:
-            return cached[1]
-        result = self._compute_daily_features(source)
-        self._daily_cache = (token, result)
-        return result
+        return self.session_cache.get(
+            daily_snapshot_token(source), lambda: self._compute_daily_features(source)
+        )
 
     def _compute_daily_features(self, source: pl.DataFrame) -> pl.DataFrame:
         daily = source.select(self.inputs[0].columns).sort(["symbol", "date"])

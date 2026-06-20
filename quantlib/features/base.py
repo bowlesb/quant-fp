@@ -8,6 +8,7 @@ features are the named, addressable outputs of a group (``declare()``).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -120,6 +121,18 @@ class FeatureGroup(ABC):
     type: FeatureType
     inputs: tuple[InputSpec, ...] = ()
 
+    @property
+    def session_cache(self) -> SessionCache:
+        """The group's per-instance, engine-owned per-session memo for its Class-A (intraday-invariant)
+        derived frame (see ``SessionCache``). Lazily created per instance — a Class-A group routes its
+        once-per-session computation through ``self.session_cache.get(witness, compute)`` instead of
+        hand-rolling a ``_daily_cache`` field + token check."""
+        cache = self.__dict__.get("_session_cache")
+        if cache is None:
+            cache = SessionCache()
+            self.__dict__["_session_cache"] = cache
+        return cache
+
     @abstractmethod
     def declare(self) -> list[FeatureSpec]:
         """The named feature outputs and their contracts."""
@@ -219,6 +232,37 @@ def daily_snapshot_token(source: pl.DataFrame) -> tuple[int, int, object, float]
     last_date = source["date"].max() if "date" in source.columns and source.height else None
     close_sum = float(source["close"].sum()) if "close" in source.columns and source.height else 0.0
     return (id(source), source.height, last_date, close_sum)
+
+
+class SessionCache:
+    """The ONE engine-owned per-session memo for a Class-A (intraday-invariant) group's derived frame.
+
+    The unified form of the per-group bespoke ``_daily_cache`` boilerplate (daily_beta #238 / overnight_beta
+    #262 / liquidity_rank #264 / prior_day / multi_day_* / overnight_intraday_split / return_dispersion): a
+    Class-A group's per-(symbol, date) features are a pure function of a per-session-CONSTANT snapshot
+    (``daily`` / ``reference`` / ``universe``), so they are computed ONCE per session and broadcast every
+    minute. Hold one ``SessionCache`` per group instance and call ``get(witness, compute)``: when ``witness``
+    (a content token — typically ``daily_snapshot_token(source)``, paired with any extra dependency witness
+    such as the universe membership) is unchanged the cached frame is returned; when it changes (a new
+    session / new snapshot / new universe) ``compute`` is re-run and re-cached. NO stale serve across a
+    changed witness — the same invariant every bespoke copy proved.
+
+    Value-identical to recompute-every-minute by construction: pure memoization keyed on the input's content;
+    only WHEN ``compute`` runs changes, never WHAT it returns."""
+
+    __slots__ = ("_witness", "_value")
+
+    def __init__(self) -> None:
+        self._witness: object = None
+        self._value: pl.DataFrame | None = None
+
+    def get(self, witness: object, compute: Callable[[], pl.DataFrame]) -> pl.DataFrame:
+        if self._value is not None and self._witness == witness:
+            return self._value
+        value = compute()
+        self._witness = witness
+        self._value = value
+        return value
 
 
 def lagged(frame: pl.DataFrame, value: str, minutes: int, alias: str) -> pl.DataFrame:
