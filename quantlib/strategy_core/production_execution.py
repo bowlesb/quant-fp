@@ -58,6 +58,22 @@ def strategy_id_of(client_order_id: str) -> str:
     return client_order_id.split("-", 1)[0]
 
 
+def parse_client_order_id(client_order_id: str) -> tuple[str, dt.datetime, str, str]:
+    """Inverse of `make_client_order_id`: recover (strategy_id, decision_ts, symbol, side) from a coid.
+
+    The coid is ``{strategy}-{YYYYMMDDTHHMMSS}-{symbol}-{side}``; strategy is the first segment, stamp the
+    second, side the last, and the symbol is whatever lies between (so a symbol with a ``-`` is tolerated,
+    though our universe uses ``.``). Lets a broker read-back reconstruct the EXACT original coid so reconcile
+    matches on it."""
+    parts = client_order_id.split("-")
+    if len(parts) < 4:
+        raise ValueError(f"not a well-formed production coid: {client_order_id!r}")
+    strategy_id, stamp, side = parts[0], parts[1], parts[-1]
+    symbol = "-".join(parts[2:-1])
+    decision_ts = dt.datetime.strptime(stamp, "%Y%m%dT%H%M%S").replace(tzinfo=dt.timezone.utc)
+    return strategy_id, decision_ts, symbol, side
+
+
 @dataclass(frozen=True)
 class ProductionOrderIntent:
     """What the strategy wants to transact — broker-agnostic, qty/notional oriented (not book-weight).
