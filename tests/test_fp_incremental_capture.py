@@ -100,12 +100,22 @@ def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: fl
     return out
 
 
-def _flat_volume_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float) -> list[list[dict]]:
+def _flat_volume_minutes(
+    n_sym: int, n_min: int, present_p: float, seed: int, vol: float, vol_noise: float = 1e-5
+) -> list[list[dict]]:
     """A stream with NEAR-CONSTANT huge share volume (the worst variance-cancellation regime for volume_zscore:
     Σv² and (Σv)²/n are large near-equal sums whose difference is float noise, so the power-sum std flips
-    across the relative null-floor differently from backfill's rolling_std_by). Price still drifts normally."""
+    across the relative null-floor differently from backfill's rolling_std_by). Price still drifts normally.
+
+    ``vol_noise`` is the RELATIVE volume jitter (std as a fraction of the ~5e6 level). The default 1e-5 is the
+    INTERMEDIATE-variance regime that genuinely breaches: it was a measured FALSE-GREEN trap that the prior
+    near-ZERO-variance ``v = 5e6 + N(0,1)`` form (vol_noise ~ 2e-7) hid — at that tiny variance the power-sum
+    std collapses to the null-floor identically on both paths (spuriously clean), while at 1e-5 the
+    ``Σv²−(Σv)²/n`` cancellation lands the z-score ~3e-5 apart (rel ~15x the parity ratio). The test asserts
+    the breach at this regime so the gate cannot false-pass on a too-quiet stream again."""
     rng = np.random.default_rng(seed)
     price = {s: 100.0 + s for s in range(n_sym)}
+    base_vol = {s: rng.uniform(5e5, 5e6) for s in range(n_sym)}
     out: list[list[dict]] = []
     for mi in range(n_min):
         minute_iso = (BASE + dt.timedelta(minutes=mi)).isoformat()
@@ -116,7 +126,9 @@ def _flat_volume_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vo
             if not present:
                 continue
             c = price[s]
-            v = max(5_000_000.0 + rng.standard_normal(), 1.0)  # huge, ~constant: std cancellation stress
+            # near-constant huge volume with a RELATIVE (not additive-±1) jitter — the regime that exposes the
+            # batch-vs-canonical std cancellation (additive ±1 noise on 5e6 is below the breach threshold).
+            v = max(base_vol[s] * (1.0 + rng.standard_normal() * vol_noise), 1.0)
             bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
                          "v": v, "t": minute_iso})
         out.append(bars)
@@ -328,12 +340,17 @@ def test_flipped_ols_parity_on_late_appearance_reseed(seed: int, present_p: floa
 
 
 def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
-    """``volume`` stays gated: its z-score std (power-sum sqrt(Σv²−(Σv)²/n) on the live/incremental path vs
-    backfill rolling_std_by) diverges on a near-constant-volume window — a real batch-vs-canonical FORMULA gap
-    (null/non-null at the std floor, or a large z-score disagreement at n=2/3). This asserts the gate is still
-    LOAD-BEARING for volume so its ``incremental_safe = False`` is not stale; flipping it needs the centered-std
-    batch change. Comparing the engine DIRECTLY against the batch (no gate) must breach."""
-    walk = _flat_volume_minutes(n_sym=8, n_min=25, present_p=0.7, seed=9, vol=0.01)
+    """``volume`` STAYS GATED — its z-score std diverges batch-vs-incremental on a near-constant huge-volume
+    window. STRENGTHENED (false-green fix): the prior stream used ``v = 5e6 + N(0,1)`` — a near-ZERO relative
+    variance at which the power-sum std collapses to the null-floor identically on BOTH paths, spuriously
+    passing a ``not breached`` assertion (a P2 Neumaier-fixed claim that was a TEST ARTIFACT, not real). At the
+    INTERMEDIATE-variance regime (``vol_noise=1e-5``, std ~1e-5 of the 5e6 level) the ``Σv²−(Σv)²/n``
+    cancellation lands the z-score ~3e-5 apart — rel ~15x the parity ratio — a genuine batch-vs-canonical std
+    FORMULA gap that Neumaier (a DRIFT fix on the running sums) does NOT close. So the gate is LOAD-BEARING and
+    ``incremental_safe = False`` is correct; un-gating volume needs the centered-power-sum std batch change
+    (store Σ(v−c)/Σ(v−c)² for a reproducible per-window c so the squared terms are small), a separate engine
+    change. Comparing the engine DIRECTLY against the batch (no gate) MUST breach at this regime."""
+    walk = _flat_volume_minutes(n_sym=8, n_min=25, present_p=0.7, seed=9, vol=0.01, vol_noise=1e-5)
     volume = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == "volume"]
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
@@ -355,13 +372,10 @@ def test_volume_still_gated_breaches_on_degenerate_variance() -> None:
                 breached = True
         except AssertionError:
             breached = True
-    # P2 (Neumaier stable summation): the variance power sum sqrt(Σv²−(Σv)²/n) on the incremental running sums
-    # now matches the batch fresh window sum (the running add/subtract carries its rounding loss in ``_comp``),
-    # so the near-constant-volume degenerate-variance null-flip is closed. volume keeps incremental_safe=False
-    # until the LEAD sequences the flip; this test now PROVES parity-green, inverting the former assertion.
-    assert not breached, (
-        "volume engine-vs-batch is now CLEAN on the degenerate near-constant-variance window after the P2 "
-        "Neumaier stable-summation fix (the former variance-family null-flip breach is closed)"
+    assert breached, (
+        "volume engine-vs-batch must STILL breach on the intermediate-variance huge-volume window (the "
+        "batch-vs-canonical std FORMULA gap) — its incremental_safe=False gate is load-bearing. If a "
+        "centered-power-sum std fix lands, flip the assertion + un-gate volume."
     )
 
 
