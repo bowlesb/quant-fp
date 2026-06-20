@@ -1,372 +1,409 @@
-# Strategy Execution Abstraction — production-real State + Executor + Feed
+# Strategy Execution Abstraction — PLAN, REQUIREMENTS & TEST STRATEGY
 
-Status: **DESIGN** (no implementation this cycle — for Lead/Ben review before any build).
-Author: platform engineer, cycle 2026-06-19.
+Status: **PLAN for adversarial audit** (NO implementation — the build is gated on audits passing).
+Author: platform engineer, cycle 2026-06-19. Reviewers: independent adversarial auditors (fanned out
+by the Lead) + Ben.
 
-Ben's anti-goal (the thing this design must NOT become): *"a beautiful experiment harness that
-works ONLY in an experiment setting and has a million hacks that reduce reliability/trustworthiness
-once we actually deploy."* The two parts he tried before and found very hard: **STATE** and
-**PRETEND-VS-REAL EXECUTION**. This doc designs for production from the first line, grounded in
-studying his prior attempt (`/home/ben/automated-day-tracking-claude/rust_trade_executor/`) so we
-build on the walls he already hit instead of rediscovering them.
+This is a **plan + requirements + test strategy**, written to be attacked: every requirement is
+falsifiable and maps to a test that would catch its violation. It is deliberately at the CONTRACT
+level (interfaces + behavioral guarantees), not implementation. The purpose is to let auditors find
+holes BEFORE any code is written.
 
-The unifying principle is the platform's: **parity-by-construction**. The strategy's decision logic,
-and now also its STATE model and its EXECUTION semantics, are defined ONCE and behave identically in
-backtest and live — the only swap is the *implementation* behind a trait/protocol (in-memory vs
-persisted state; simulated vs real fills; panel vs bus feed). A divergence between the two IS the
-hack-debt Ben fears, so the design's job is to make divergence structurally impossible, or — where it
-genuinely can't be eliminated — to **flag it as a named risk with options**, never paper over it.
-
----
-
-## 1. Prior art: what Ben built, and exactly where it broke
-
-His `rust_trade_executor` is a real, thoughtful attempt — the *shapes* are good and we keep them.
-What was incomplete is precisely the production-fidelity of STATE and PRETEND-VS-REAL. Concretely:
-
-### 1.1 The shapes he built (keep these)
-- **`TradeState` trait** (`src/state.rs:10`): `set/get/delete(key, Value)` with `MemoryState`
-  (in-memory `HashMap`, offline sim) and `RedisState` (Redis, live). *Policies call it without
-  knowing which backs them* — the right idea: one state interface, swappable storage.
-- **`BarDelivery` trait** (`src/bar_delivery.rs`): `next_bar()` with `MemoryBarDelivery` (offline,
-  instant) vs `PubSubBarDelivery` (live, Redis `bar:complete`). This is our `DataFeed`.
-- **`Policy` trait** (`src/policy/mod.rs`): `evaluate()` runs in BOTH sim and live. This is our
-  `decide()`. The aspiration — "policies work identically offline and real-time" — is exactly the
-  invariant. (The `quant-fp` live containers `reversion`/`smoke`/`overnight_beta` already follow the
-  same pure-decision + harness split — see `STRATEGY_BATTERY_PORTABILITY.md`.)
-
-### 1.2 Where it BROKE (the load-bearing lessons — design around each)
-
-| # | Wall he hit | Evidence | Root cause | What our design must do |
-|---|---|---|---|---|
-| **L1** | **Sim never placed orders** — `label_gen.rs`/`simulate.rs` run `evaluate()` but NEVER call `enter_trade()`; live `initiator.rs` does. So backtest fills at `bar.close` with no slippage/partial/reject; live gets real fills. | `label_gen.rs` uses `MemoryState`+`MemoryBarDelivery`, no order placement; live `initiator.rs:390` calls `enter_trade()` + waits for fill. | TWO execution paths. The exact backtest≠live drift. "Backtest 5% win, live 1% — surprise at go-live." | **One `Executor` trait**; `BacktestExecutor` SIMULATES the same fill semantics the real one produces. Sim and live both go through `execute(OrderIntent)`. |
-| **L2** | **Partial fills unhandled** — `wait_for_fill()` only accepts status `"filled"`; `"partially_filled"` times out and the trade fails to record though shares were bought. | `policy/mod.rs:~560` bails unless `=="filled"`; `EntryResult.fill_qty` exists but is never validated vs requested. | The fill model assumed atomic full fills. | Fill is a **first-class outcome** (`Fill{filled_qty, avg_price, status}`), partials modeled in BOTH the sim and the live executor; the state machine handles `partially_filled`. |
-| **L3** | **State source-of-truth split → drift/loss** — trade record in Postgres, live stop updates only in Redis. Redis crash ⇒ trailing-stop updates lost, fallback reconstructs the WRONG stop from params. | `executor.rs:144-164` reads Redis-first then falls back to policy params; Postgres never stores the updated stop. | Two stores, neither authoritative; dynamic state only in the volatile one. | **One typed `StrategyState`** persisted to ONE durable store (the trade DB), reconciled against the broker; no "dynamic state only in Redis" path. |
-| **L4** | **No broker reconciliation** — live executor loads `IN_PROGRESS` from Postgres but never calls `get_positions()` to check what Alpaca actually holds; a stop that filled while the process was down leaves an orphaned `IN_PROGRESS` row. | `reconcile_closed_position()` exists only on the SIM path (`simulation/live.rs:159`), unused by the live executor. | Reconciliation was built for sim, never wired to live. | **Reconcile against the broker is mandatory** at startup + periodically; the broker is the source of truth for positions. |
-| **L5** | **Entry not idempotent** — a retried entry request can double-trade; `initiator.rs` writes the trade once with no duplicate guard. | `initiator.rs:~409` single insert, no client-order-id dedupe at the state layer. | No idempotency key tying intent→order→state. | Every order carries a deterministic `client_order_id`; entry is idempotent (the broker rejects dup coids; the state upserts on coid). |
-| **L6** | **`fill_time = entry_time`** (no execution-latency record); some actions stubbed (`ExitLimit` → `// TODO: Place limit order`). | `initiator.rs:~430`; `executor.rs:458`. | Time + action coverage shortcuts. | Fills carry the broker's real `filled_at`; the action set the executor supports is closed + tested, no silent TODOs. |
-
-The meta-lesson: **the abstraction shapes were right; the failure was that the SIMULATED path and the
-LIVE path were two different implementations that never tested each other, and STATE was split across
-two stores with the dynamic part in the volatile one.** Our design fixes exactly those two things.
-
-He also had a hard-won discipline worth importing: a **strict UTC-everywhere timezone rule**
-(`docs/trading/PYTHON_WRAPPER.md`) — storage/processing UTC, ET only for market-hours logic, PT only
-for display. We adopt it and *enforce* it (the prior repo stated it but didn't assert it).
+Ben's anti-goal (the failure this plan must prevent): *"a beautiful experiment harness that works
+ONLY in an experiment setting and has a million hacks that reduce reliability/trustworthiness once we
+actually deploy."* The two parts he tried before and found very hard: **STATE** and **PRETEND-VS-REAL
+EXECUTION**. This plan is grounded in studying his prior attempt
+(`/home/ben/automated-day-tracking-claude/rust_trade_executor/`) so we design against the walls he
+already hit (§3).
 
 ---
 
-## 2. The execution invariant (extends the decide() invariant)
+## 1. Requirements (the production-real invariants — each is falsifiable)
 
-`STRATEGY_BATTERY_PORTABILITY.md` established: **the decision logic is written once and run
-identically batch (panel, fast) and per-event (live)**. This doc extends parity to the two hard
-layers:
+Numbered so audits + tests can cite them. Each REQ has an owning test in §6.
 
-- **STATE parity:** there is ONE `StrategyState` model. Backtest uses an in-memory instance; live uses
-  a persisted-and-reconciled instance. The strategy reads/writes the SAME typed fields either way.
-- **EXECUTION parity:** there is ONE `Executor` interface taking ONE `OrderIntent`. `BacktestExecutor`
-  produces fills by SIMULATING Alpaca's actual behavior (tradeable price, partials, slippage, the
-  per-name half-spread, rejects); `PaperExecutor`/`LiveExecutor` produce fills from real Alpaca. The
-  fill TYPE and the state transitions are identical; only the fill SOURCE differs.
+**Decision parity**
+- **REQ-D1 (single implementation).** A strategy's decision logic is written ONCE. It is *execution-
+  agnostic* and *speed-agnostic*: it yields identical decisions whether applied as a fast batch sweep
+  over a historical panel (backtest) or per-event over the live bus (production). There must be NO
+  second implementation of the same decision (no "fast-for-backtest" + "slow-for-live").
+- **REQ-D2 (purity).** `decide()` is a pure function of (feature cross-section, strategy state). No
+  I/O, no wall-clock, no RNG. Same inputs → same outputs, always.
+- **REQ-D3 (columnar-first).** `decide()` is expressible as a columnar (Polars/NumPy) operation so the
+  batch path vectorizes; inherently-sequential logic (triple-barrier/streak) is the ONLY exception and
+  is served by a single shared `quant_tick` Rust kernel both paths call (never a harness-only kernel).
 
-So a strategy = `decide()` (signal→intent, §portability doc) + a `StrategyState` model + the set of
-`OrderIntent`s it emits. None of those three know whether they're in backtest or live.
+**Execution fidelity**
+- **REQ-X1 (one executor contract).** There is ONE `Executor` interface taking ONE `OrderIntent` and
+  producing `Fill`s. `BacktestExecutor` (pretend), `PaperExecutor`/`LiveExecutor` (real Alpaca, paper
+  now) all satisfy it.
+- **REQ-X2 (Alpaca-faithful simulation).** `BacktestExecutor` simulates what Alpaca *actually does*:
+  fills at the tradeable price (≥09:35 / the correct auction print for the TIF), charges the per-name
+  half-spread + slippage, models partial fills and rejects. Its `Fill`/order-state outputs must match
+  `PaperExecutor`'s on scripted scenarios (a conformance test, REQ-X1/§6.2).
+- **REQ-X3 (full order lifecycle).** Both executors handle the full Alpaca lifecycle:
+  `NEW/PENDING/ACCEPTED/PARTIALLY_FILLED/FILLED/CANCELED/REJECTED/EXPIRED` — partials and rejects are
+  first-class, never time-outs (the prior repo's L2 wall).
+- **REQ-X4 (idempotency).** Every order carries a deterministic `client_order_id`; submitting the same
+  intent twice is a no-op at the broker and a single state entry (prior repo's L5 wall).
+- **REQ-X5 (real-broker realities).** The live executor handles rejects (surfaced, not swallowed),
+  rate limits (bounded backoff), and never logs secrets.
+
+**State**
+- **REQ-S1 (one typed model).** ONE typed `StrategyState` (positions, pending orders, realized P&L,
+  typed per-strategy counters — streak/persistence/trailing-stop). The SAME model in backtest and
+  live; the strategy reads/writes the same typed fields either way.
+- **REQ-S2 (single durable source of truth).** Live state persists to ONE durable store (the
+  strategy's Postgres schema) with an append-only fill ledger from which positions are recomputable.
+  No "dynamic state only in a volatile side-store" (prior repo's L3 wall).
+- **REQ-S3 (broker reconciliation).** The broker is the source of truth for positions. Reconciliation
+  runs at startup AND periodically; on mismatch the broker wins; large drift ALERTS (never silently
+  auto-fixes) (prior repo's L4 wall).
+- **REQ-S4 (restart-safe).** A restart recovers state and never double-trades, for every hard case:
+  mid-order (fill unknown), orphaned stop (filled while down), partial fill across restart.
+
+**Shared-account & live-execution realities (the design-audit gaps G1–G7; §9 has the design answers)**
+- **REQ-G1 (per-strategy reconcile on a SHARED account).** Multiple strategies share ONE Alpaca
+  account, so `get_all_positions()` returns the WHOLE account. Reconciliation MUST scope to THIS
+  strategy's own orders (its `client_order_id` namespace / a strategy tag); it must NEVER "adopt any
+  broker position the local state lacks" — that would pull a sibling strategy's position into this
+  one's book.
+- **REQ-G2 (fully-qualifying `client_order_id`).** The coid must uniquely identify
+  (strategy, day, minute, symbol, side) — `{model}-{YYYYMMDDTHHMMSS}-{symbol}-{side}` — so it never
+  collides across days nor drops a same-minute re-decision.
+- **REQ-G3 (ambiguous-submit-after-crash recovery).** A blind re-submit relying on broker dedupe can
+  double-trade (a first-try buying-power reject + a retry). Recovery MUST query open/closed orders by
+  coid BEFORE re-submitting.
+- **REQ-G4 (pre-trade gate).** A buying-power / PDT / margin / shortable check runs BEFORE basket
+  submission, else a multi-name basket partially rejects into a lopsided (non-neutral) book.
+- **REQ-G5 (partials change the WEIGHT, not just the cost).** A partial fill = LESS than the target
+  weight; state books the ACTUAL filled weight (modeling it as "full target weight at higher cost"
+  breaks L/S dollar-neutrality — a long-bias on illiquid shorts).
+- **REQ-G6 (corporate-actions mid-hold).** A split/dividend during a multi-day hold changes the
+  broker qty; reconciliation must apply the corporate action so broker-qty == state-qty (not flag it
+  as drift).
+- **REQ-G7 (acknowledged sim limit).** The backtest `reconcile` is a no-op (the sim book is truth),
+  so it cannot exercise a server-side close; that path is covered ONLY by the live conformance test —
+  acknowledged, not papered over.
+
+**Budget without hacks**
+- **REQ-P1 (laser-quick).** A typical `evaluate_features` battery run completes in <30–60s wall-clock
+  on the stated target scope (liquid-universe slice + ~1yr) — MEASURED.
+- **REQ-P2 (no fidelity hack for speed).** REQ-P1 is met WITHOUT a backtest-only fast-but-unfaithful
+  path that violates REQ-X2/REQ-D1. If speed ever appears to require such a fork, it is escalated as a
+  go/no-go (§7 R1), not silently taken.
+
+**Discipline / anti-self-deception (Ben's central concern — see §6.3)**
+- **REQ-A1.** The harness's own self-proofs (shuffle canary, predict-zero, known-null, planted-edge,
+  look-ahead/purge, tradeable-entry, multiple-comparisons correction, reproduce-trusted-verdicts) are
+  REQUIRED tests that must pass; if any fails, the harness is considered to be fooling itself and is
+  not trusted.
 
 ---
 
-## 3. The Executor — designed against the REAL Alpaca API
+## 2. The abstraction (contract level — signatures + behavioral contracts, NOT implementation)
 
-The `BacktestExecutor` is only trustworthy if it simulates *what Alpaca actually does*. So the
-interface is shaped by real Alpaca semantics (alpaca-py, as the live `quant-fp` containers use it:
-`TradingClient.submit_order`, `get_order_by_client_id`, `get_all_positions`, `get_account`).
+Seven contracts. Each is a small protocol; the *behavior* (the columns below), not the code, is what
+audits attack.
 
-### 3.1 The order/fill model (real semantics, not a hand-wave)
+| Contract | Shape (signature) | Behavioral guarantee (what an audit checks) |
+|---|---|---|
+| **`Strategy.decide`** | `decide(cs: CrossSection, state: StrategyState) -> list[OrderIntent]` | Pure (REQ-D2); columnar-expressible (REQ-D3); identical batch vs per-event (REQ-D1). |
+| **`OrderIntent`** | frozen record: `client_order_id, symbol, side, qty\|notional, type, limit/stop, tif, bracket?, reason` | Deterministic `client_order_id` (REQ-X4); broker-agnostic (no Alpaca types leak in). |
+| **`Fill`** | frozen event: `client_order_id, symbol, side, filled_qty(cumulative), avg_price, state, filled_at, broker_order_id?` | Models partials (cumulative qty) + the full lifecycle `state` (REQ-X3); real broker `filled_at` (prior L6). |
+| **`Executor`** | `submit(intent)->OrderState; poll(coid)->Fill; cancel(coid); positions()->{sym:Position}; account()->Acct` | Idempotent submit (REQ-X4); `BacktestExecutor` faithful to `PaperExecutor` (REQ-X2); `positions()` = broker truth live (REQ-S3). |
+| **`DataFeed`** | `events() -> Iterator[(CrossSection, ts)]` | `PanelFeed` (replay panel) and `BusFeed` (live bus) emit the SAME event shape. |
+| **`Clock`** | `now() -> datetime` | `SimClock` panel-driven (reproducible, no wall-clock); `RealClock` wall-clock + Alpaca market clock. |
+| **`StrategyState` / `StateStore`** | state: `positions, pending, realized_pnl, counters`; store: `load(id); save(state); append_fill(fill)` | One typed model (REQ-S1); `MemoryStateStore` (sim) / `PgStateStore` (live, durable SoT, append-only ledger, REQ-S2). |
+| **`Runner`** | ties `{decide, StateStore, Executor, DataFeed, Clock}` | The ONE loop both backtest and live share; only the four components swap. |
 
-```python
-@dataclass(frozen=True)
-class OrderIntent:                      # what decide() emits (broker-agnostic)
-    client_order_id: str               # DETERMINISTIC idempotency key (fixes L5)
-    symbol: str
-    side: Side                         # BUY | SELL
-    qty: float | None                  # fractional allowed; XOR notional
-    notional: float | None
-    type: OrderType                    # MARKET | LIMIT | STOP | STOP_LIMIT
-    limit_price: float | None
-    stop_price: float | None
-    tif: TimeInForce                   # DAY | CLS (MOC) | OPG (MOO) | GTC
-    bracket: Bracket | None            # optional OTO/OCO stop+target (Alpaca bracket)
-    reason: str
+The TIF set (`DAY/CLS(MOC)/OPG(MOO)/GTC`), order types (`MARKET/LIMIT/STOP/STOP_LIMIT`), bracket/OCO,
+and the partial-fill policy (`ACCEPT_RESIZE | CANCEL_REMAINDER | RETRY`, per-strategy) are enumerated,
+closed sets — no open-ended "TODO action" (prior L6). Reconciliation is a named operation
+`reconcile(state, executor) -> ReconcileReport` (broker wins; drift audited).
 
-@dataclass(frozen=True)
-class Fill:                            # a fill EVENT (one order may produce several — partials)
-    client_order_id: str
-    symbol: str
-    side: Side
-    filled_qty: float                  # cumulative
-    avg_price: float
-    status: OrderState                 # NEW|PARTIALLY_FILLED|FILLED|CANCELED|REJECTED|EXPIRED
-    filled_at: datetime | None         # the broker's real timestamp (fixes L6)
-    raw_broker_order_id: str | None
+Layering rule (architectural invariant an audit can check): `quantlib/strategy_core/` is
+self-contained; `quantlib/battery/` and the live containers DEPEND on it; nothing in `strategy_core`
+imports `battery` or a deployment package. One home for the shared decision+execution+state logic.
+
+---
+
+## 3. Prior-repo lessons (what Ben tried + where it broke)
+
+His `rust_trade_executor` is a thoughtful attempt; the trait-SHAPES are right and we keep them. It
+broke on the production-fidelity of STATE and PRETEND-VS-REAL — the exact two hard parts.
+
+**Shapes built (keep):** `TradeState` trait (`state.rs:10`, `MemoryState` sim / `RedisState` live —
+policies unaware which); `BarDelivery` trait (= our `DataFeed`); `Policy.evaluate()` runs in both sim
+and live (= our `decide()`). `alpaca.rs` already had `get_positions`, bracket/OTO, `client_order_id`.
+
+**The 6 walls (file:line evidence; each maps to a REQ that closes it):**
+
+| # | Wall | Evidence | Closed by |
+|---|---|---|---|
+| L1 | Sim NEVER placed orders — `label_gen.rs`/`simulate.rs` run `evaluate()` but never `enter_trade()`; only live `initiator.rs` does → backtest≠live | offline bins vs `initiator.rs:390` | REQ-X1/X2 (one executor; sim faithful) |
+| L2 | Partial fills unhandled — `wait_for_fill` only accepts `"filled"` (`policy/mod.rs:547`); `"partially_filled"` times out though shares bought | `policy/mod.rs:547,560` | REQ-X3 |
+| L3 | State split Postgres+Redis; dynamic stops only in volatile Redis → crash loses them, fallback rebuilds WRONG stop from params | `executor.rs:146-157` | REQ-S1/S2 |
+| L4 | No broker reconciliation live — `reconcile_closed_position` exists only on the SIM path, unused live → orphaned `IN_PROGRESS` | `simulation/live.rs:159` vs `executor.rs` | REQ-S3 |
+| L5 | Non-idempotent entry — single insert, no coid dedupe | `initiator.rs:~409` | REQ-X4 |
+| L6 | `fill_time=entry_time`; stubbed actions (`// TODO: Place limit order`) | `initiator.rs:~430`, `executor.rs:458` | REQ-X3 + closed action set |
+
+**Meta-lesson (the thing to not repeat):** sim and live were TWO execution implementations that never
+tested each other, and state was split with the dynamic part in the volatile store + no broker
+reconcile. The plan's whole job is to make those structurally impossible. (Also: a stated-but-
+unenforced UTC-everywhere tz rule — we adopt AND enforce it, REQ in §6.1.)
+
+---
+
+## 4. The architecture in one picture
+
+```
+            decide()  ── pure, columnar, written ONCE (REQ-D1/D2/D3)
+               │  reads
+   CrossSection│            StrategyState  ── one typed model (REQ-S1)
+   (from feed) │            (from store)
+               ▼
+            Runner  ── the one loop; ties the four swappable components
+        ┌──────┴───────────────────────────────────────────┐
+   BACKTEST                                              LIVE
+   PanelFeed + SimClock                                 BusFeed + RealClock
+   MemoryStateStore                                     PgStateStore (durable SoT, REQ-S2)
+   BacktestExecutor ── simulates Alpaca (REQ-X2)        PaperExecutor ── real Alpaca
+        │  fast path = run_vectorized (REQ-P1)               │  + reconcile (REQ-S3), restart-safe (REQ-S4)
+        └───────────────── SAME decide(), SAME state model, SAME OrderIntent ─────────────┘
 ```
 
-`OrderState` is the **full Alpaca lifecycle**, not just "filled" (fixes L2): `NEW`, `PENDING_NEW`,
-`ACCEPTED`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`, `EXPIRED`. The executor + state
-machine handle every terminal AND intermediate state.
+---
 
-### 3.2 The `Executor` interface (one in, faithful behavior both sides)
+## 5. Worked example (the seam made concrete, still contract-level)
 
-```python
-class Executor(Protocol):
-    def submit(self, intent: OrderIntent) -> OrderState: ...     # idempotent on client_order_id
-    def poll(self, client_order_id: str) -> Fill: ...            # current cumulative fill
-    def cancel(self, client_order_id: str) -> None: ...
-    def positions(self) -> dict[str, Position]: ...             # broker truth (live) / sim book
-    def account(self) -> AccountSnapshot: ...
-```
+Cross-sectional L/S overnight (the `overnight_beta` shape, already live):
+- `decide(cs, state)` ranks a columnar score, diffs the target book vs `state.positions`, emits
+  `OrderIntent`s with deterministic `client_order_id`s, TIF=CLS.
+- **Backtest:** `Runner(decide, MemoryStateStore, BacktestExecutor, PanelFeed, SimClock)`. Fast path
+  applies the score+rank BATCH over the panel and books simulated fills (per-name half-spread,
+  modeled partials) into the in-memory `StrategyState`.
+- **Live:** `Runner(decide, PgStateStore, PaperExecutor, BusFeed, RealClock)` — a thin harness; each
+  cycle: `BusFeed`→`decide` (same code)→`PaperExecutor.submit`→`reconcile`→`PgStateStore.save`; on
+  restart `load`+`reconcile` resume.
 
-- **`LiveExecutor` / `PaperExecutor`** (real Alpaca, paper today): `submit` → `TradingClient.submit_order`
-  with the `client_order_id` (Alpaca dedupes dup coids → idempotent retries, fixes L5). `poll` →
-  `get_order_by_client_id` mapping Alpaca's status+`filled_qty`+`filled_avg_price` into `Fill`.
-  `positions` → `get_all_positions` (the broker truth for reconciliation, §4). Handles **rejects**
-  (status REJECTED → surfaced, not swallowed), **rate limits** (429 → bounded exponential backoff +
-  a single in-flight-per-coid guard), and never logs secrets.
-- **`BacktestExecutor`** (pretend, over the panel): `submit` simulates the fill FAITHFULLY —
-  - fill price = the **tradeable entry** for the intent's TIF (≥09:35 for the open, the close print
-    for CLS/MOC, the next-open for OPG/MOO — the same tradeable-entry discipline the Panel already
-    enforces), NOT a look-ahead price;
-  - charge the **per-name half-spread** (from the panel's `half_spread_bps`) + slippage — the realistic
-    cost model already in `quantlib/strategy_core/cost.py`;
-  - **model partials**: when the intent's qty exceeds a per-bar liquidity cap (a fraction of the bar's
-    volume), fill partially and emit `PARTIALLY_FILLED` then `FILLED`/`EXPIRED` across bars — so the
-    SAME partial-fill state path the live executor exercises is exercised in backtest (fixes L1+L2);
-  - **model rejects**: a sub-$1 / halted / zero-volume name → `REJECTED`, exactly as Alpaca would.
-
-  The `BacktestExecutor` is the one place "simulate Alpaca" lives; its fidelity is the deliverable, and
-  it is **pinned by a conformance test** (§6) that asserts its `Fill`/`OrderState` outputs match the
-  `PaperExecutor`'s on the same scripted scenarios (full fill, partial, reject, cancel).
-
-### 3.3 The fidelity boundary (named honestly, not hidden)
-Some real effects the `BacktestExecutor` can only *approximate* from minute bars: intra-bar fill
-sequencing, true queue position, auction (MOC/MOO) imbalance slippage, and exact partial-fill
-schedules. The design's stance: **approximate them with an explicit, conservative model parameter**
-(e.g. half-spread + a slippage bps + a volume-participation cap), surface the assumption in the
-`BacktestResult`, and let the live `PaperExecutor`'s realized slippage *measure* the gap (exactly what
-the `overnight_beta` container already does — it logs MOC/MOO slippage vs the model). This is the
-honest version of "faithful simulation": the model is explicit and its error is measured live, not
-assumed zero. **This is also the §7 key risk.**
+The decision code, the `StrategyState` fields, and the `OrderIntent`s are identical; only
+`{StateStore, Executor, DataFeed, Clock}` swap. Existing containers (`overnight_beta`/`reversion`/
+`smoke`) re-express with their decision logic lifted UNCHANGED; their bespoke `BetStore`/`PositionStore`
+become the typed `StrategyState`+`PgStateStore` (a schema-shape change, not a logic rewrite) + add
+`reconcile`. (Own PR; no live-container behavior change without its own PR + a parity test.)
 
 ---
 
-## 4. StrategyState — first-class, persisted, reconciled, restart-safe
+## 6. ⭐ TEST STRATEGY (first-class — three tiers; each REQ has a test that would catch its violation)
 
-The prior repo's state was an untyped KV blob split across two stores (L3) with no broker
-reconciliation (L4). We make state a **typed, single-source-of-truth, broker-reconciled** model.
+The plan is only trustworthy if the tests below are specified up front. Each is named, with its pass
+condition, so an audit can check coverage and a builder cannot quietly skip one.
 
-### 4.1 The typed model (same in backtest + live)
+### 6.1 Tier 1 — UNIT (each contract/component in isolation)
 
-```python
-@dataclass
-class Position:
-    symbol: str
-    qty: float                         # signed (long +, short −)
-    avg_entry_price: float
-    opened_at: datetime
+| Test | Pass condition | Guards |
+|---|---|---|
+| `decide` purity | same (cs, state) → identical intents across repeated calls; no wall-clock/RNG/IO reachable | REQ-D2 |
+| `decide` columnar-batch == per-event | the score expression selects identical legs applied batch (whole panel) vs per-event (one slice) | REQ-D1/D3 (`test_batch_vs_per_event_select_identical_legs` — already green) |
+| `BacktestExecutor` fill at tradeable price | a MARKET/DAY intent fills at the ≥09:35 entry; CLS at the close print; OPG at next-open; never a look-ahead price | REQ-X2 |
+| `BacktestExecutor` charges per-name half-spread | net fill cost == panel `half_spread_bps` (+slippage), per name | REQ-X2 |
+| `BacktestExecutor` partial-fill model | qty > per-bar liquidity cap → `PARTIALLY_FILLED` then resolve across bars | REQ-X3 |
+| `BacktestExecutor` reject model | sub-$1 / zero-volume / halted name → `REJECTED` | REQ-X3 |
+| `OrderIntent` idempotency key | same logical intent → same deterministic `client_order_id` | REQ-X4 |
+| `StrategyState` transitions | submit→pending; partial→update cumulative; fill→position+realized P&L; close→flat; each transition deterministic | REQ-S1 |
+| Fill-ledger recompute | positions recomputed from the append-only ledger == `state.positions` | REQ-S2 |
+| UTC enforcement | a naive datetime into any contract boundary RAISES (not silently accepted) | tz rule |
 
-@dataclass
-class PendingOrder:
-    client_order_id: str
-    intent: OrderIntent
-    state: OrderState                  # last known lifecycle state
-    filled_qty: float                  # cumulative so far (partials)
-    avg_fill_price: float
+### 6.2 Tier 2 — INTEGRATION (components together; the parity + production-real behaviors)
 
-@dataclass
-class StrategyState:
-    strategy_id: str
-    positions: dict[str, Position]
-    pending: dict[str, PendingOrder]   # keyed by client_order_id
-    realized_pnl: float
-    # strategy-specific carry (streak/persistence counters, last-rebalance day, trailing stops):
-    counters: dict[str, float]         # TYPED accessors per strategy; persisted with the rest
-    last_reconciled_at: datetime | None
-```
+| Test | Pass condition | Guards |
+|---|---|---|
+| **Executor conformance (sim==paper)** | the SAME scripted scenarios (full fill, partial, reject, cancel, bracket) produce matching `Fill`/`OrderState` sequences from `BacktestExecutor` and `PaperExecutor` (paper Alpaca, sandbox) | REQ-X1/X2 — the core anti-L1 proof |
+| **decide+state parity backtest vs live** | the same `decide`+`StrategyState` run through `BacktestExecutor/PanelFeed` and `PaperExecutor/BusFeed` produce consistent positions/intents on identical feature inputs | REQ-D1/S1 |
+| **Restart-safety: mid-order** | kill the runner after `submit` before fill; restart `load`+`reconcile` → resolves the real fill from the broker, no re-submit, no double-fill | REQ-S4 |
+| **Restart-safety: orphaned stop** | broker fills a stop while the runner is down; restart `reconcile` → realizes the close from the broker, clears the position, no "re-exit dead trade" | REQ-S3/S4 |
+| **Restart-safety: partial across restart** | partial fill, kill, restart → cumulative filled_qty from the broker is authoritative; no double-count | REQ-S4 |
+| **Reconciliation: broker wins** | inject a state/broker mismatch (broker closed a position) → `reconcile` adopts broker truth, audits drift, large drift alerts | REQ-S3 |
+| **Rate-limit / reject handling** | a 429 → bounded backoff, no crash; a REJECT → surfaced to the state machine, not swallowed | REQ-X5 |
+| **Budget** | `evaluate_features` on the stated scope < 30–60s, MEASURED, with the faithful (non-hack) fill path | REQ-P1/P2 |
 
-Crucially, *dynamic* fields the prior repo lost on a Redis crash (trailing stops, streak counters,
-updated TP) live HERE, in `counters`, persisted to the **same durable store** as positions — never in
-a volatile side-store (fixes L3). The strategy reads/writes `counters` through typed helpers; the same
-helpers run in backtest (in-memory `StrategyState`) and live (persisted `StrategyState`).
+### 6.3 ⭐⭐ Tier 3 — ANTI-CHEAT self-proofs ("how do we know we're not fooling ourselves" — Ben's central concern)
 
-### 4.2 The `StateStore` interface (swappable persistence behind one shape)
+These are the harness proving it is NOT fooling itself. ALL are REQUIRED; any failure ⇒ the harness is
+untrusted (REQ-A1). Most already exist in `quantlib/backtest.py` / the battery and are LIFTED here as
+mandatory gates.
 
-```python
-class StateStore(Protocol):
-    def load(self, strategy_id: str) -> StrategyState: ...
-    def save(self, state: StrategyState) -> None: ...           # atomic, upsert by strategy_id
-    def append_fill(self, fill: Fill) -> None: ...              # append-only fill ledger (audit)
-```
+| Self-proof | Construction | PASS condition (what "honest" looks like) | If it FAILS |
+|---|---|---|---|
+| **Shuffle canary** | permute labels WITHIN each timestamp, re-score | canary IC ≈ 0; real edge must exceed it | a leak: the pipeline sees the future |
+| **Predict-zero baseline** | constant (zero) prediction | IC 0; P&L = pure cost drag (negative net) | the cost model is wrong / P&L is fictitious |
+| **Known-NULL feature (pure noise)** | feed a random-noise "feature" through the full battery | leaderboard EMPTY after BY-FDR | the harness manufactures edge from noise — fatal |
+| **Planted synthetic edge** | inject a feature = (forward return + noise) with a known IC | the cell is DETECTED (not just "conservative null") | the harness is too blunt to find real edge |
+| **Look-ahead / purge** | shift a genuine feature forward 1 bar (peeking) | the spurious edge VANISHES under the walk-forward purge | purge/embargo is broken → silent look-ahead |
+| **Tradeable-entry** | assert earliest entry ≥ 09:35 ET; attempt a 09:30-print entry | rejected / flagged by the SanityReport | the gap-fade look-ahead trap |
+| **Data-trap guards** | sub-$1 prints, per-day winsor, label-std sanity | label_std in-band; $1 floor applied; a 50–226× fake-return blow-up is FLAGGED | the illiquid-tail / bad-print traps |
+| **Multiple-comparisons** | run the whole grid on pure noise | ≤ family-FDR cells survive BY-FDR (≈0) | p-hacking across cells is undefended |
+| **Reproduce trusted verdicts** | run the existing hand-rolled findings THROUGH the battery | reproduces: trusted-baseline NULL (intraday 30/60m IC≈0, NW\|t\|≈0.1); laneC overnight full-univ HIT (IC≈0.035, NW t≈3.89, breakeven≈22bps) → liquid-1500 COLLAPSE (IC≈0.011, edge≈+0.007, t≈1.20, breakeven≈4.12) | if the harness DISAGREES with trusted results, FLAG it — either the harness or the prior result is wrong, and we must know which |
 
-- **Backtest:** `MemoryStateStore` — `StrategyState` in process. Fast; the battery's vectorized path
-  carries the per-timestamp book as columnar arrays (no per-event store calls), but the SAME typed
-  `StrategyState` is the conceptual model and the per-event reference path uses it directly.
-- **Live:** `PgStateStore` — `StrategyState` persisted to the strategy's own Postgres schema (the
-  `quant-fp` containers already own per-strategy schemas, e.g. `BetStore`/`PositionStore`). `save` is
-  atomic (one transaction); the **fill ledger is append-only** so the position is *derivable* from
-  fills (an independent recompute that can catch state corruption).
-
-### 4.3 Reconciliation — the broker is the source of truth (fixes L4)
-
-```python
-def reconcile(state: StrategyState, executor: Executor) -> ReconcileReport:
-    broker_pos = executor.positions()         # Alpaca get_all_positions — TRUTH
-    # 1. for each pending order, poll the broker; apply terminal fills/rejects to state
-    # 2. compare state.positions to broker_pos; on mismatch, the BROKER WINS:
-    #    - broker has a position state doesn't  -> adopt it (a fill we missed while down)
-    #    - state has a position broker doesn't  -> it was closed server-side (stop filled
-    #      while we were down) -> realize the P&L from the broker's closing fill, clear it
-    # 3. record drift in a ReconcileReport (audited; a large drift alerts, never silently "fixes")
-```
-
-Reconciliation runs (a) at **startup** (restart-safety) and (b) **periodically** during trading. The
-prior repo built this only for sim and never wired it live — we make it mandatory live and *also* run
-it in backtest as a no-op invariant check (state and the sim book must already agree, so a failure
-there catches an executor bug).
-
-### 4.4 Restart-safety (the hard cases, handled explicitly)
-Connecting to the platform's fc-relaunch / warm-start discipline (a restart must recover, never
-double-act):
-- **Restart with open positions:** `load()` from Postgres → `reconcile()` against the broker →
-  resume managing. Idempotent `client_order_id`s mean re-submitting a still-needed order is a no-op at
-  the broker.
-- **Restart mid-order (submitted, fill unknown):** the pending order is in `state.pending`; `poll` by
-  its `client_order_id` resolves the actual outcome from the broker; no re-submit, no double-fill.
-- **Restart after a stop filled while down (the orphan, L4):** reconciliation sees the broker has no
-  position where state did → realizes the close from the broker's fill → clears it. No "re-exit a dead
-  trade."
-- **Partial fill across a restart:** `PendingOrder.filled_qty` is persisted per poll; on restart the
-  cumulative filled_qty from the broker is authoritative.
-
-These are the exact scenarios the prior repo's §6 failure list enumerated — each now has a defined
-path, because state is typed + single-source + broker-reconciled.
+The reproduce-trusted-verdicts proof is the keystone: a brand-new abstraction that re-derives the
+team's hard-won published numbers (a HIT that collapses on the tradeable universe, and an honest null)
+is faithful; one that doesn't is suspect. This is the Phase-0 acceptance criterion.
 
 ---
 
-## 5. DataFeed + Clock (the remaining swap; unchanged from the portability doc)
+## 7. Honest risks (lead with the make-or-break)
 
-- `DataFeed`: `PanelFeed` (replays the historical panel as per-timestamp cross-sections) vs `BusFeed`
-  (the live feature-vector bus snapshot). Same event shape. (Prior repo's `BarDelivery` trait is the
-  same idea.)
-- `Clock`: `SimClock` (panel-driven, reproducible, no wall-clock — matches the feature-time rule) vs
-  `RealClock` (wall-clock + the Alpaca market clock for hours/auction windows).
-
-The `Runner` ties `{strategy.decide, StrategyState/StateStore, Executor, DataFeed, Clock}` — the ONE
-loop both paths share.
-
----
-
-## 6. Worked example — ONE strategy, ONE state model, both executors
-
-Cross-sectional L/S overnight (the `overnight_beta` shape, already live). The decision + state +
-intents are written once:
-
-```python
-# decide(): pure, columnar (STRATEGY_BATTERY_PORTABILITY.md) — unchanged
-def decide(cs: CrossSection, state: StrategyState) -> list[OrderIntent]:
-    legs = cross_sectional_ls.score_and_rank(cs, frac=0.2)      # one Polars/NumPy expression
-    intents = []
-    for leg in legs:                                            # target book -> intents (diff vs state)
-        held = state.positions.get(leg.symbol)
-        if held is None or sign(held.qty) != leg.side:
-            intents.append(OrderIntent(
-                client_order_id=coid(state.strategy_id, leg.symbol, cs.minute),  # deterministic
-                symbol=leg.symbol, side=leg.side, notional=PER_LEG, type=MARKET, tif=CLS))
-    return intents
-```
-
-**(a) Battery backtest** — `Runner(decide, MemoryStateStore, BacktestExecutor(cost_model), PanelFeed,
-SimClock)`. The fast path applies `score_and_rank` BATCH over the whole panel (vectorized,
-`run_vectorized`, <30–60s); the per-event reference path runs the SAME `decide` over `PanelFeed`
-events and books fills through `BacktestExecutor` (simulated partials/cost) into the in-memory
-`StrategyState`. The two are pinned equal (`test_batch_vs_per_event_select_identical_legs`).
-
-**(b) Live container** — `Runner(decide, PgStateStore, PaperExecutor(alpaca), BusFeed, RealClock)`. A
-THIN harness: on each cycle, `BusFeed` → `decide` (SAME code) → `PaperExecutor.submit` (real Alpaca
-CLS order with the deterministic coid) → `reconcile` updates `StrategyState` from broker fills →
-`PgStateStore.save`. On restart: `load` + `reconcile` resume.
-
-The decision code, the `StrategyState` fields, and the `OrderIntent`s are byte-identical across (a)
-and (b). Only `{StateStore, Executor, DataFeed, Clock}` are swapped. **That is the whole design.**
-
-### Existing-container fit
-`overnight_beta` / `reversion` / `smoke` already separate a pure decision core from an execution
-harness (see `STRATEGY_BATTERY_PORTABILITY.md` §4). Re-expressing them in this shape is: (1) lift
-their inline gate/cadence/cap logic into the `Executor`/`Runner` policy layer (it's execution-policy),
-(2) replace their bespoke `BetStore`/`PositionStore` with the typed `StrategyState` + `PgStateStore`
-(their stores are already per-strategy Postgres — a schema-shape change, not a logic change), (3) add
-the mandatory `reconcile`. No decision-logic rewrite. Proposed as its own PR (no live-container
-behavior change without its own PR + a per-container parity test).
+- **R1 — speed vs fill-fidelity (THE key tension, REQ-P2).** Cross-sectional basket fills ARE columnar
+  (group-by at tradeable price + per-name half-spread; rare partials as a cost adjustment), so the
+  fast batch path is faithful. The genuine tension is PATH-DEPENDENT archetypes (triple-barrier/streak)
+  whose fill schedule is sequential → the shared `quant_tick` Rust kernel both sides call. **If a
+  future archetype needs intra-bar fill sequencing that neither vectorizes nor fits the kernel, that is
+  a go/no-go to bring to Ben — NOT a silent backtest-only fast-but-fake fill path.** This is the one
+  place the plan explicitly refuses to choose unilaterally.
+- **R2 — minute-bar simulation fidelity is fundamentally limited.** We cannot perfectly simulate
+  intra-minute fills/auctions from minute bars. Mitigation (a measurement, not a hack): an explicit
+  conservative fill model (half-spread + slippage bps + volume-participation cap) surfaced in the
+  `BacktestResult`, AND the live `PaperExecutor` LOGS realized slippage vs the model (the
+  `overnight_beta` pattern) so the gap is measured and tightened, never assumed zero.
+- **R3 — reconciliation drift is real/adversarial.** Broker can close server-side (margin/halt/risk).
+  Stance: broker wins; large drift alerts (no silent auto-fix); the append-only ledger recomputes
+  positions to catch corruption; state can lag the broker between cycles but idempotent coids make a
+  lagged re-submit safe.
+- **R4 — partial-fill policy is a strategy choice, not a default to hide.** Made explicit per strategy
+  (`ACCEPT_RESIZE | CANCEL_REMAINDER | RETRY`), and the SAME policy runs in backtest so the sim
+  exercises it.
+- **R5 — over-abstraction.** The prior repo's untyped KV state was *under*-typed (→ drift); the
+  opposite failure is a generic state DSL. Guard: `StrategyState` is a small typed dataclass + a typed
+  `counters` map; `Executor`/`StateStore` are ~3-method protocols. No schema engine.
+- **R6 — the conformance test depends on paper-Alpaca availability/determinism.** Paper fills aren't
+  perfectly deterministic; the conformance test scripts SCENARIOS (full/partial/reject/cancel) and
+  asserts the lifecycle SHAPE matches, not exact prices/timings — flagged so auditors weigh it.
 
 ---
 
-## 7. Honest risks (the make-or-break tensions)
+## 8. One-page summary (for the audit packet)
 
-**R1 — Speed vs execution fidelity (THE key tension).** The battery must be <30–60s (a vectorized
-batch sweep), but the `BacktestExecutor`'s faithful per-event fill simulation (partials, sequencing)
-is naturally per-event. Resolution: the **decision** is vectorized (the expensive part — score + rank
-over the panel), and the **fill simulation for the cross-sectional L/S archetype is also columnar**
-(per-timestamp basket fills at the tradeable price + per-name half-spread = a group-by, already
-`run_vectorized`). Partials/rejects for *liquid cross-sectional baskets* are rare and modeled as a
-columnar cost adjustment, NOT a per-event loop. **The genuine tension is for PATH-DEPENDENT archetypes
-(triple-barrier/streak), where the fill schedule IS sequential** — there the fast path is the shared
-`quant_tick` Rust kernel (one kernel both backtest and live call), NOT a Python per-event loop and NOT
-a separate fast-but-unfaithful sim. **If a future archetype needs intra-bar fill sequencing that
-neither vectorizes nor fits the Rust kernel, that is the point to STOP and flag — do not add a
-backtest-only fast-but-fake fill path.** This is the one place I would bring a go/no-go to Ben rather
-than silently choose.
-
-**R2 — Simulation fidelity is fundamentally limited by minute bars.** We cannot perfectly simulate
-intra-minute fills/auctions from minute bars. Mitigation (not a hack, a measurement): explicit
-conservative fill model + the live `PaperExecutor` logs realized slippage vs model (the `overnight_beta`
-pattern), so the fidelity gap is *measured and tightened*, never assumed zero. The `BacktestResult`
-surfaces the assumed cost so a PASS is honest about what it assumed.
-
-**R3 — Reconciliation drift is real and adversarial.** The broker can close a position server-side
-(margin, halt, risk). Design stance: broker is truth; large drift ALERTS (does not silently auto-fix);
-the append-only fill ledger lets us recompute the position independently to catch corruption. We
-accept that reconciliation can't be instantaneous — between cycles, state can lag the broker; the
-window is bounded by the reconcile cadence and every order is idempotent so a lagged re-submit is safe.
-
-**R4 — Partial-fill policy is a strategy decision, not a default.** "Filled 600 of 1000 — accept and
-resize, or cancel-and-retry?" The prior repo had no answer. We make it an explicit, per-strategy
-policy on the `Executor`/`Runner` (e.g. `on_partial: ACCEPT_RESIZE | CANCEL_REMAINDER | RETRY`),
-defaulting to ACCEPT_RESIZE (book what filled, update `StrategyState` to the real qty), and the SAME
-policy runs in backtest so the sim exercises it.
-
-**R5 — Over-abstraction.** The prior repo's untyped `Value` KV state was *under*-typed (→ drift). The
-opposite failure is a generic state DSL. Guard: `StrategyState` is a small typed dataclass with a
-per-strategy `counters` dict, NOT a schema engine; the `Executor`/`StateStore` are ~3-method
-protocols. Four mechanisms + a parameter grid (portability doc) + this typed state is the whole
-surface.
+- **Requirements:** decide() written-once + pure + columnar (D1–D3); ONE Alpaca-faithful Executor with
+  full lifecycle + partials + rejects + idempotency (X1–X5); ONE typed, durable, broker-reconciled,
+  restart-safe StrategyState (S1–S4); <30–60s WITHOUT a fidelity hack (P1–P2); the anti-cheat
+  self-proofs are required (A1).
+- **Abstraction (contracts):** `Strategy.decide`, `OrderIntent`, `Fill`, `Executor`
+  (Backtest/Paper/Live), `DataFeed` (Panel/Bus), `Clock` (Sim/Real), `StrategyState`/`StateStore`
+  (Memory/Pg), `Runner` — only the four components swap between backtest and live.
+- **Prior-repo lessons:** the trait-shapes were right; it broke on (L1) sim≠live execution paths, (L2)
+  partial fills, (L3) split/volatile state, (L4) no broker reconcile, (L5) non-idempotent entry, (L6)
+  lost fill metadata. Each maps to a REQ that closes it.
+- **Test strategy:** Tier-1 UNIT (executor fill-sim fidelity, state transitions, decide purity);
+  Tier-2 INTEGRATION (sim==paper conformance, backtest==live parity, restart-safety ×3, reconciliation,
+  budget); Tier-3 ANTI-CHEAT self-proofs (shuffle canary, predict-zero, known-null→empty leaderboard,
+  planted-edge→detected, look-ahead/purge, tradeable-entry, BY-FDR multiple-comparisons, and
+  REPRODUCE the trusted baseline-null + laneC HIT→collapse — the keystone).
+- **Risks:** R1 speed-vs-fidelity for path-dependent archetypes (the go/no-go, never silently fork);
+  R2 minute-bar fidelity (measured via live slippage); R3 reconcile drift; R4 partial-fill policy
+  explicit; R5 no over-abstraction; R6 conformance test vs paper-Alpaca nondeterminism.
+- **Status:** NO build. Gated on Ben's review + a re-audit of these revisions.
 
 ---
 
-## 8. Summary for the Lead / Ben
+## 9. The design-audit gaps — concrete answers (G1–G7)
 
-- **Prior art:** the trait-shapes (`TradeState`/`BarDelivery`/`Policy`) were RIGHT and we keep them.
-  It broke on exactly the two hard parts: (L1/L2) the **sim and live were two execution paths** that
-  never tested each other and ignored partial fills; (L3/L4) **state was an untyped blob split across
-  Postgres+Redis with the dynamic part in the volatile store and no broker reconciliation**. Plus
-  (L5) non-idempotent entry and (L6) lost fill metadata.
-- **Executor:** ONE `Executor`/`OrderIntent`/`Fill` modeled on REAL Alpaca semantics (full lifecycle,
-  partials, rejects, rate limits, idempotent coids, bracket orders); `BacktestExecutor` *faithfully
-  simulates* it (tradeable price + per-name half-spread + modeled partials/rejects) and is pinned by a
-  conformance test against `PaperExecutor`.
-- **StrategyState:** ONE typed model, single durable source of truth (the strategy's Postgres schema),
-  append-only fill ledger, **mandatory broker reconciliation** (broker = truth), restart-safe for the
-  hard cases (mid-order, orphaned stop, partial across restart) — every prior failure scenario has a
-  defined path.
-- **Invariant preserved:** `decide()` written once, run batch + per-event; state + execution now also
-  parity-by-construction. Rust appears ONLY for shared sequential kernels both sides call.
-- **Key risk flagged, not hidden:** speed-vs-fill-fidelity for path-dependent archetypes (R1) — the
-  one place to bring a go/no-go rather than silently fork; and minute-bar simulation fidelity (R2),
-  mitigated by measuring the live-vs-model slippage gap.
-- **No build this cycle** — this is the foundation for Lead/Ben review before Phase 0 internals.
+The adversarial DESIGN audit cleared the L1–L6 prior-repo fixes as faithful (the foundation is
+sound). These seven are the remaining holes; each has a *design answer*, not hand-waving, and an
+owning test in §6.
+
+### G1 [HIGH] — Per-strategy reconcile on a SHARED Alpaca account
+**Problem.** The three live containers share ONE `.env` / ONE Alpaca account. `get_all_positions()`
+returns the WHOLE account's positions. The §4.3 reconcile rule "broker has a position state doesn't →
+adopt it" would, on a shared account, pull a SIBLING strategy's position into THIS strategy's book.
+
+**Answer.** A strategy owns a **namespace**, not the account. Every order's `client_order_id` is
+prefixed with the `strategy_id` (G2), so the strategy can derive ITS OWN positions from the broker by
+filtering the broker's orders/fills to its coid prefix. Reconciliation is therefore:
+- the broker truth for THIS strategy = the net of broker fills whose coid ∈ this strategy's namespace
+  (queried via `get_orders(..., nested=True)` filtered by coid prefix / a stored coid set), NOT
+  `get_all_positions()` (which is account-wide and un-attributable per strategy).
+- `reconcile(state, executor)` compares `state.positions` to THAT per-strategy broker view. A broker
+  position with NO coid in this strategy's namespace is **explicitly ignored** (it belongs to a
+  sibling), never adopted. A coid-attributed broker fill the state missed IS adopted.
+- account-wide position drift (sum of all strategies vs the account) is a separate operational
+  monitor, not a per-strategy reconcile input.
+
+This makes "broker is the source of truth" precise: the broker is the source of truth for **this
+strategy's coid-attributed fills**, not for the shared account's net. (REQ-G1; conformance test: two
+strategies on one mock account, each reconcile recovers only its own positions.)
+
+### G2 [HIGH] — Fully-qualifying `client_order_id`
+**Problem.** A minute-only coid collides across days and drops a same-minute re-decision.
+**Answer.** `coid = f"{strategy_id}-{ts:%Y%m%dT%H%M%S}-{symbol}-{side}"` — the live-proven form. It
+encodes the strategy (G1 namespace), the full date+second timestamp (no cross-day collision; second
+resolution distinguishes same-minute re-decisions if a strategy re-decides intra-minute), the symbol,
+and the side. Deterministic from `(strategy_id, decision_ts, symbol, side)` → idempotent re-submit
+(REQ-X4) AND attributable per strategy (G1). (REQ-G2.)
+
+### G3 [HIGH] — Ambiguous submit after a crash
+**Problem.** Crash between "submit sent" and "ack received": a blind re-submit relying on broker
+dedupe can double-trade — e.g. the first try was BP-rejected (so the coid is "used" but no position),
+and the retry is a NEW economic order the broker may accept.
+**Answer.** Recovery is **query-before-resubmit**, never blind-resubmit. On restart, for each pending
+coid: `get_order_by_client_id(coid)` →
+- exists + filled/partially-filled → adopt the fill into state, do NOT resubmit.
+- exists + still open (new/accepted) → leave it; the manage loop will resolve it.
+- exists + rejected/canceled/expired → the economic order did NOT execute; the strategy MAY re-decide
+  (a NEW coid for a new decision ts), but does NOT reuse the rejected coid.
+- does NOT exist → the submit never reached the broker → safe to submit THIS coid now.
+The broker's coid uniqueness is the backstop, not the primary guard. (REQ-G3; restart-mid-submit
+conformance test covers all four branches.)
+
+### G4 [MED] — Pre-trade buying-power / PDT / margin / shortable gate
+**Problem.** A 100-name basket submitted blind partially rejects (some legs fail BP/shortable) into a
+lopsided, non-dollar-neutral book.
+**Answer.** A `pre_trade_check(intents, account) -> (admitted, rejected_with_reason)` runs BEFORE the
+executor submits a basket: it sums the basket's required BP, checks against `account.buying_power`,
+checks `shortable`/`easy_to_borrow` for each short leg, and the PDT day-trade count. If the full
+basket can't be admitted, the strategy's sizing policy decides (scale the whole basket down
+pro-rata to preserve neutrality, or skip the cycle) — it never submits a basket it knows will land
+lopsided. The check is execution-policy (lives in the Executor/Runner, not `decide`). (REQ-G4.)
+
+### G5 [MED] — Partials change the WEIGHT, not just the cost
+**Problem.** §3.3's "model partials as a cost adjustment keeping the full target weight" is wrong for
+a basket: a 60%-filled short is 60% of the target weight, so the book is long-biased, not just
+costlier.
+**Answer.** `StrategyState.apply_fill` already books the **actual `filled_qty`** (REQ-S1's typed
+transition), so a partial fill yields the ACTUAL realized weight, not the target. The
+`BacktestExecutor` partial model emits a `Fill` with the partial `filled_qty` (a fraction of the
+target driven by a per-bar volume-participation cap), and the L/S P&L is computed on the realized
+book — so a chronically-under-filling short leg shows up as a measured long-bias + reduced net, not a
+hidden cost. The backtest and live share the SAME `apply_fill`, so the sim exercises the real
+weight-not-cost behavior. (REQ-G5; partial-fill conformance test asserts realized weight < target.)
+
+### G6 [MED] — Corporate actions mid-hold
+**Problem.** A split during a 2–3d hold: the broker qty changes (2:1 split doubles shares), so
+broker-qty != state-qty → spurious "drift" that reconciliation would mis-flag.
+**Answer.** Reconciliation consults the corporate-actions feed (the repo already has a
+`corporate_actions` module + a backfiller) for any action on a held symbol since the last reconcile,
+and APPLIES it to the state position (adjust qty + avg_entry by the split ratio; book the dividend to
+realized P&L) BEFORE the broker-vs-state comparison. A broker/state mismatch explained by a known
+corporate action is a *reconciled adjustment*, not drift; only an UNEXPLAINED mismatch alerts.
+(REQ-G6; split-mid-hold conformance test.)
+
+### G7 [LOW] — Backtest reconcile can't exercise server-side close (acknowledged)
+**Problem.** In backtest, `reconcile` is a no-op (the sim book IS truth), so it cannot exercise the
+"broker closed a position server-side" path.
+**Answer.** Acknowledged, not papered over. That path is covered ONLY by the live/paper conformance
+test (inject a broker-side close on the mock account → reconcile realizes it from the broker fill,
+clears the position). The backtest reconcile runs as an invariant CHECK (state must already equal the
+sim book; a mismatch there catches an executor bug), not as a fidelity claim for the server-side-close
+path. (REQ-G7.)
+
+### What this changes in the contracts (§2)
+- `OrderIntent.client_order_id` is the G2 fully-qualifying key (was minute-only).
+- `Executor` gains `pre_trade_check` (G4) and `reconcile` is per-strategy-scoped (G1) with a
+  query-before-resubmit recovery (G3).
+- `StrategyState.apply_fill` is the single transition that books realized (partial) weight (G5) and
+  applies corporate actions (G6).
+- The conformance suite (§6.2) gains: two-strategies-one-account reconcile (G1), restart-mid-submit
+  four-branch (G3), pre-trade-reject (G4), partial-realized-weight (G5), split-mid-hold (G6),
+  server-side-close (G7).
+
+**Status:** NO build. GATED on Ben's review of this revised design + a re-audit of these revisions.
