@@ -1,0 +1,37 @@
+# 24/7 LIVE news capture — an ISOLATED RAW-ACQUISITION service that streams Alpaca's news websocket
+# (v1beta1/news) into the append-only, manifest-tracked /store/news/ tape on the PRODUCTION store volume
+# (fp_store_real), so the news-hotness hunt can read it alongside the equity raw tapes.
+#
+# RAW ACQUISITION ONLY: this service computes NO features and touches NEITHER the equity feature-computer,
+# its bus fingerprint, NOR its bus. It only GROWS the /store/news/ tape (a new top-level tree under the
+# same volume the raw bars/trades/quotes live in). Features off this tape (news hotness) come LATER via a
+# separate, fingerprint-affecting PR (the Modeller's pre-registered hunt) — never here.
+#
+#   make dev-image                                                       # build/refresh shared fp-dev
+#   docker compose -f docker-compose.news.yml up -d news-capture
+#
+# Uses the PREBUILT `fp-dev` image (the SAME image the equity fc/strategies/crypto run on). NO `build:`
+# directive ON PURPOSE: a stray `up --build` must never re-tag/overwrite the good fp-dev. Refresh fp-dev
+# only via `make dev-image`.
+name: quant
+
+services:
+  news-capture:
+    container_name: news-capture
+    image: fp-dev
+    restart: unless-stopped
+    mem_limit: 1g
+    env_file: .env
+    environment:
+      PYTHONPATH: "/app"
+      # Subscribe to ALL symbols ("*") by default so we capture every article and the hunt picks its
+      # universe at read time. Override with a comma list (e.g. "AAPL,MSFT,SPY") for a bounded pilot.
+      FP_NEWS_SYMBOLS: "*"
+    volumes:
+      - fp_store_real:/store            # PRODUCTION store volume — the /store/news tree lives here
+      - .:/app                          # bind the working tree (mirrors crypto-capture)
+    command: ["python", "-m", "quantlib.features.news_capture", "/store"]
+
+volumes:
+  fp_store_real:
+    external: true
