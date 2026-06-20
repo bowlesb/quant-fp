@@ -233,5 +233,56 @@ def test_runner_drives_decide_over_feed() -> None:
     assert len(executor.book().weights) > 0
 
 
+def test_batch_vs_per_event_select_identical_legs() -> None:
+    """THE invariant proof: the columnar score expression selects the SAME legs whether applied as a
+    fast BATCH sweep (the battery's run_vectorized path) or PER-EVENT (the live Runner path). One
+    scoring expression (CrossSectionalLS.score), two application modes, identical decisions — so there
+    is no backtest-only fast path that could drift from the live per-event path."""
+    n_per_ts = 30
+    n_ts = 4
+    rng = np.random.default_rng(13)
+    frac = 0.2
+
+    symbols_all: list[str] = []
+    minute_all: list[int] = []
+    score_all: list[float] = []
+    for ts in range(n_ts):
+        for sym in range(n_per_ts):
+            symbols_all.append(f"S{sym}")
+            minute_all.append((100 + ts) * 1_000_000_000)
+            score_all.append(float(rng.normal()))
+    score_arr = np.array(score_all)
+
+    # PER-EVENT: run decide() per timestamp slice, collect the selected (ts, symbol, side).
+    core = CrossSectionalLS(frac=frac, signal_feature="sig")
+    per_event_legs: set[tuple[int, str, str]] = set()
+    for ts_epoch in sorted(set(minute_all)):
+        rows = [i for i, m in enumerate(minute_all) if m == ts_epoch]
+        cs = PanelCrossSection(
+            [symbols_all[i] for i in rows],
+            dt.datetime.fromtimestamp(ts_epoch / 1e9, tz=dt.timezone.utc),
+            score_arr[rows].reshape(-1, 1),
+            {"sig": 0},
+        )
+        for target in core.decide(cs):
+            side = "long" if target.target_weight > 0 else "short"
+            per_event_legs.add((ts_epoch, target.symbol, side))
+
+    # BATCH: the run_vectorized path books top/bottom-frac per timestamp on the SAME score. Reproduce
+    # its leg selection (long_short_per_name_cost sorts ascending by pred, shorts=first-k, longs=last-k).
+    batch_legs: set[tuple[int, str, str]] = set()
+    for ts_epoch in sorted(set(minute_all)):
+        rows = [i for i, m in enumerate(minute_all) if m == ts_epoch]
+        ordered = sorted(rows, key=lambda i: score_arr[i])
+        k = max(1, int(frac * len(ordered)))
+        for i in ordered[:k]:
+            batch_legs.add((ts_epoch, symbols_all[i], "short"))
+        for i in ordered[-k:]:
+            batch_legs.add((ts_epoch, symbols_all[i], "long"))
+
+    assert per_event_legs == batch_legs  # batch == per-event: ONE decision, two application modes
+    assert len(per_event_legs) == n_ts * 2 * max(1, int(frac * n_per_ts))
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

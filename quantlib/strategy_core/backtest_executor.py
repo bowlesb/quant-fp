@@ -23,8 +23,8 @@ import datetime as dt
 
 import numpy as np
 
-from quantlib.battery.cost import cost_curve, long_short_per_name_cost
 from quantlib.strategy_core import CrossSection
+from quantlib.strategy_core.cost import cost_curve, long_short_per_name_cost
 from quantlib.strategy_core.execution import BookState, Clock, Fill, OrderIntent
 
 # A flat slippage added on top of the per-name half-spread (bps, one-way), the laneC/baseline default.

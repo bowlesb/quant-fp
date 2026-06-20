@@ -13,7 +13,6 @@ import datetime as dt
 import numpy as np
 import pytest
 
-from quantlib.battery.cost import cost_curve, long_short_per_name_cost
 from quantlib.battery.family import benjamini_yekutieli, one_sided_p_from_t
 from quantlib.battery.panel import Panel
 from quantlib.battery.result import (
@@ -25,6 +24,7 @@ from quantlib.battery.result import (
 )
 from quantlib.battery.spec import ArchetypeSpec, Conditioner, Horizon, Sizing
 from quantlib.battery.strategy import CrossSectionalLS, _per_day_winsor_excess
+from quantlib.strategy_core.cost import cost_curve, long_short_per_name_cost
 
 
 def _epoch(day_offset: int) -> int:
