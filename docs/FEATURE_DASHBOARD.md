@@ -24,6 +24,8 @@ not re-encode any of them. The aggregation lives in `services/dashboard/feature_
 | `GET http://<host>:8088/api/feature-grid/trust-frontier` | TRUST FRONTIER: features split TRUSTED / ELIGIBLE (no open defect, earns trust on the next clean sweep) / BLOCKED (open parity defect) + projected trusted-% |
 | `http://<host>:8088/raw-coverage` | RAW-tape coverage (one layer below this grid): per raw layer (bars/trades/quotes) DEPTH + symbols-per-day BREADTH — see `docs/RAW_TAPE_COVERAGE.md` |
 | `GET http://<host>:8088/api/raw-coverage` | raw-tape coverage JSON, per layer (`?days=N`, `days=0`=full) |
+| `http://<host>:8088/sector-coverage` | SECTOR coverage: how much of the live universe carries an FMP GICS sector label — per-sector counts + classified-vs-unknown split + unclassified sample — see `docs/SECTOR_COVERAGE.md` |
+| `GET http://<host>:8088/api/sector-coverage` | sector-coverage JSON (per-sector counts, classified %, blank-row vs no-row split, unclassified sample) |
 
 All API endpoints accept `?refresh=1` to bypass the 60s TTL cache and re-aggregate. A cold build over the
 live store is ~4s; cached responses are ~1ms. There is a **↻ refresh** button on the page.

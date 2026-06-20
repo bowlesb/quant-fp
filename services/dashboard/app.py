@@ -32,6 +32,8 @@ from raw_coverage import CACHE as RAW_CACHE
 from raw_coverage_page import RAW_COVERAGE_HTML
 from scorecard import CACHE as SCORECARD_CACHE
 from scorecard_page import SCORECARD_HTML
+from sector_coverage import CACHE as SECTOR_CACHE
+from sector_coverage_page import SECTOR_COVERAGE_HTML
 from status_page import render_status_page
 
 app = FastAPI(title="Quant Dashboard")
@@ -326,6 +328,32 @@ def raw_coverage_page() -> str:
     return RAW_COVERAGE_HTML
 
 
+@app.get("/api/sector-coverage")
+def sector_coverage_json(refresh: bool = False) -> JSONResponse:
+    """SECTOR coverage: how much of the LIVE universe carries an FMP GICS-aligned sector label — a read-only
+    join of ``sector_map`` onto the latest ``universe_membership`` snapshot. Surfaces the honest partial
+    coverage (the sector unblock classified ~73% of the universe; the unmapped tail is mostly ETFs/warrants/
+    preferred bucketed as ``sector_is_unknown`` by design) and flags under-represented sectors.
+
+    Per the live universe: per-sector symbol COUNT (the 11 GICS sectors, ranked), the CLASSIFIED-vs-UNKNOWN
+    split (unknown = blank-sector row OR no ``sector_map`` row), the CLASSIFIED % headline, and a sample of
+    unclassified tickers. Plus whole-table ``sector_map`` totals. ``refresh=1`` bypasses the TTL cache.
+
+    Shape (see docs/SECTOR_COVERAGE.md):
+      {generated_at, universe_date, universe_size, n_classified, n_unknown, classified_pct,
+       n_blank_sector, n_no_row, n_distinct_sectors,
+       sectors: [{sector, n_symbols, pct_of_universe}], unclassified_sample: [...],
+       sector_map: {n_rows, n_classified, n_distinct_sectors}}
+    """
+    return JSONResponse(SECTOR_CACHE.coverage(force=refresh))
+
+
+@app.get("/sector-coverage", response_class=HTMLResponse)
+def sector_coverage_page() -> str:
+    """The visual sector-coverage surface (vanilla HTML/JS; fetches /api/sector-coverage client-side)."""
+    return SECTOR_COVERAGE_HTML
+
+
 @app.get("/api/scorecard")
 def scorecard_json(refresh: bool = False) -> JSONResponse:
     """SYSTEM PROGRESS scorecard: Ben's six platform axes (A trusted / B deployed / C trust-process health /
@@ -582,7 +610,8 @@ def dashboard() -> str:
 <a href="/progress" style="color:#58a6ff;text-decoration:none;font-size:13px;">Progress reports &rarr;</a> &nbsp;
 <a href="/feature-grid" style="color:#58a6ff;text-decoration:none;font-size:13px;">Feature coverage &amp; trust &rarr;</a> &nbsp;
 <a href="/raw-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Raw-tape coverage &rarr;</a> &nbsp;
-<a href="/liquidity-bands" style="color:#58a6ff;text-decoration:none;font-size:13px;">Liquidity bands &rarr;</a></h1>
+<a href="/liquidity-bands" style="color:#58a6ff;text-decoration:none;font-size:13px;">Liquidity bands &rarr;</a> &nbsp;
+<a href="/sector-coverage" style="color:#58a6ff;text-decoration:none;font-size:13px;">Sector coverage &rarr;</a></h1>
 <div class="muted">auto-refreshes every 30s &middot; reconciliation: {recon_html}</div></header>
 <div class="wrap">
   <div class="grid" style="margin-bottom:24px;">
