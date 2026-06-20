@@ -28,6 +28,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
 )
 from quantlib.features.registry import register
 
@@ -42,6 +43,9 @@ class OvernightIntradaySplitGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "open", "close")),
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
     )
+    # Per-session cache of the daily features keyed by the daily-snapshot content token (the snapshot is
+    # fixed all day, so its overnight/intraday split is identical every minute). Mirrors multi_day / daily_beta.
+    _daily_cache: tuple[tuple[int, int, object, float], pl.DataFrame] | None = None
 
     def declare(self) -> list[FeatureSpec]:
         return [
@@ -71,8 +75,19 @@ class OvernightIntradaySplitGroup(FeatureGroup):
         ]
 
     def _daily_features(self, ctx: BatchContext) -> pl.DataFrame:
-        """Per (symbol, date) overnight/intraday split features from the daily bar."""
-        daily = ctx.frame("daily").select(self.inputs[0].columns).sort(["symbol", "date"])
+        """Per (symbol, date) overnight/intraday split features from the daily bar. Cached on the daily-
+        snapshot identity so the (identical-all-day) daily features are computed once, not per minute."""
+        source = ctx.frame("daily")
+        token = daily_snapshot_token(source)
+        cached = self._daily_cache
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        result = self._compute_daily_features(source)
+        self._daily_cache = (token, result)
+        return result
+
+    def _compute_daily_features(self, source: pl.DataFrame) -> pl.DataFrame:
+        daily = source.select(self.inputs[0].columns).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("prev_close"))
         overnight = pl.col("open") / pl.col("prev_close") - 1.0
         intraday = pl.col("close") / pl.col("open") - 1.0

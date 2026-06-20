@@ -209,6 +209,18 @@ class FeatureGroup(ABC):
         return None
 
 
+def daily_snapshot_token(source: pl.DataFrame) -> tuple[int, int, object, float]:
+    """A cheap content witness for a daily snapshot, used to key per-session daily-feature caches. The
+    snapshot is fixed all day in production, so its derived daily features are identical every minute and
+    can be memoized; keying on ``id`` ALONE is unsafe because a garbage-collected frame's address can be
+    recycled by a different frame (the singleton-group + fresh-frame unit-test corner), returning a stale
+    cache. Pairing ``id`` with ``(height, last date, close-sum)`` makes a collision require an identical
+    content shape — robust, and O(rows) cheap relative to the rolling daily OLS the cache avoids."""
+    last_date = source["date"].max() if "date" in source.columns and source.height else None
+    close_sum = float(source["close"].sum()) if "close" in source.columns and source.height else 0.0
+    return (id(source), source.height, last_date, close_sum)
+
+
 def lagged(frame: pl.DataFrame, value: str, minutes: int, alias: str) -> pl.DataFrame:
     """Attach ``alias`` = ``value`` as of (minute − ``minutes``), via a TIME-BASED self-join per
     symbol. Time-based (not positional) so it is correct on a gappy grid and point-in-time: a cell
