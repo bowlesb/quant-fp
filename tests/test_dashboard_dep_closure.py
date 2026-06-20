@@ -37,11 +37,9 @@ REQUIREMENTS_TXT = DASHBOARD_DIR / "requirements.txt"
 WHEEL_TOP_LEVEL = "quant_tick"
 
 # Import-name -> requirements distribution-name, for the cases where they differ. Most packages
-# import under their distribution name (fastapi, redis, numpy, polars, markdown, psycopg). Currently
-# empty: the dashboard closure reaches no package whose import name differs from its distribution name
-# (the lone prior exception, alpaca -> alpaca-py, was removed when universe_coverage was decoupled from
-# the trading SDK). Kept as the extension point for any future import/dist mismatch the closure adds.
-IMPORT_TO_DISTRIBUTION: dict[str, str] = {}
+# import under their distribution name (fastapi, redis, numpy, polars, psycopg). The exception:
+# ``import yaml`` is provided by the ``pyyaml`` distribution (the group-detail-panel guide parser).
+IMPORT_TO_DISTRIBUTION: dict[str, str] = {"yaml": "pyyaml"}
 
 # Packages the dashboard imports DIRECTLY but does not list in requirements.txt because they are
 # HARD, always-installed dependencies of a package that IS listed — so the image always carries

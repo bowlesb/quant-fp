@@ -20,6 +20,30 @@ export interface GridSummary {
   universe_size: number;
 }
 
+// One feature's registry description (the "how the features differ" content, authored for every feature).
+export interface FeatureDescription {
+  name: string;
+  description: string;
+}
+
+// The curated narrative for a group (docs/feature_group_guide.yaml). null when no entry is written yet.
+export interface GroupGuide {
+  purpose?: string;
+  how_features_differ?: string;
+  value?: string;
+  example?: string;
+}
+
+// Per-column detail-panel content, baked into the matrix doc by the worker (zero request-path cost).
+export interface GroupInfo {
+  docstring: string;
+  type: string;
+  layer: string;
+  n_features: number;
+  features: FeatureDescription[];
+  guide: GroupGuide | null;
+}
+
 // `coverage[i][j]` is a 0..255 byte = (tickers with column j on date i) / universe_size. Columns are raw
 // layers first (the substrate), then feature groups trusted-first. group columns carry their `features`.
 export interface StoreGridMatrix {
@@ -32,6 +56,7 @@ export interface StoreGridMatrix {
   n_trusted_groups: number;
   dates: string[];
   columns: GridColumn[];
+  group_info: Record<string, GroupInfo>;
   coverage: number[][];
   column_coverage_pct: number[];
   summary: GridSummary;

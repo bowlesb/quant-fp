@@ -46,7 +46,25 @@ from feature_grid import (
     _read_symbols,
     trusted_feature_names,
 )
+from group_guide import build_group_info
 from raw_coverage import RAW_TIERS, _tier_coverage
+
+# Short "what it is" blurbs for the RAW tape layers (not registry features, so no docstring/catalog). The
+# detail panel shows these for a raw column; they carry no per-feature list and no curated guide.
+RAW_LAYER_INFO: dict[str, str] = {
+    "bars": (
+        "Raw Alpaca 1-minute OHLCV BARS — the base price/volume tape every price, volume, calendar, and "
+        "candlestick feature is computed from. Coverage = tickers with minute bars that day."
+    ),
+    "trades": (
+        "Raw Alpaca TICK TRADES — individual prints (price, size, conditions). The substrate for trade-flow / "
+        "order-flow / microstructure features. Tick coverage is far thinner than bars (gated by capture cost)."
+    ),
+    "quotes": (
+        "Raw Alpaca TICK QUOTES — top-of-book bid/ask updates. The substrate for spread / liquidity-provision "
+        "features. The deepest and most expensive layer; coverage is the thinnest."
+    ),
+}
 
 # Row axis: how many calendar days back from the store anchor the matrix spans. ~18 months ≈ 548 calendar days.
 # WEEKDAYS only (a local calendar proxy — no Alpaca calendar / network / secrets in the worker). Env-overridable.
@@ -306,6 +324,20 @@ def build_store_grid(
     mean_cov = round(sum(populated) / len(populated), 1) if populated else 0.0
     n_trusted_groups = len(data.fully_trusted_groups)
 
+    # Per-column detail-panel content: registry-derived per-group info (docstring + per-feature descriptions +
+    # the curated guide) for feature groups, plus a short blurb for each raw tape layer. Baked into the doc so
+    # the dashboard serves it with the grid (zero request-path cost).
+    group_info: dict[str, object] = dict(build_group_info())
+    for tier, _label in RAW_TIERS:
+        group_info[tier] = {
+            "docstring": RAW_LAYER_INFO.get(tier, ""),
+            "type": "raw_tape",
+            "layer": "raw",
+            "n_features": 0,
+            "features": [],
+            "guide": None,
+        }
+
     return {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "store_root": root,
@@ -316,6 +348,7 @@ def build_store_grid(
         "n_trusted_groups": n_trusted_groups,
         "dates": dates,
         "columns": columns,
+        "group_info": group_info,
         "coverage": coverage,
         "column_coverage_pct": column_coverage_pct,
         "summary": {
@@ -342,6 +375,7 @@ def _empty_grid(root: str, lookback_days: int) -> dict[str, object]:
         "n_trusted_groups": 0,
         "dates": [],
         "columns": [],
+        "group_info": {},
         "coverage": [],
         "column_coverage_pct": [],
         "summary": {

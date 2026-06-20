@@ -39,6 +39,9 @@ COPY quantlib ./quantlib
 # image (a hardcoded list previously omitted liquidity_bands/raw_coverage, crashing app.py's imports).
 COPY services/dashboard/*.py ./
 
+# The curated feature-group guide the worker reads at build time (group_guide.py looks here by default).
+COPY docs/feature_group_guide.yaml ./feature_group_guide.yaml
+
 # The built React store-coverage grid SPA (from the webbuild stage). app.py mounts this at /store-grid.
 COPY --from=webbuild /web/dist ./frontend/store-grid
 

@@ -1,0 +1,110 @@
+# Feature-group GUIDE — the human "what / how-they-differ / why-we-compute-it" narrative per feature group.
+#
+# This is the OPTIONAL, hand-curated layer the dashboard's group detail panel shows ON TOP of the
+# registry-derived content (which already gives every group's class docstring + per-feature descriptions for
+# free, for all 63 groups). Here we add what the registry does NOT carry: the rationale/hypothesis for why we
+# compute the group, and optional code examples.
+#
+# HONESTY DISCIPLINE: we have comprehensively NULLED most single signals (price-direction, candle/geometry,
+# quote-alpha, order-flow, news/EDGAR/sector, weekly-reversal). A "value" entry MUST NOT claim a group
+# "predicts returns" or "is an edge." Frame it as what the group MEASURES + the HYPOTHESIS for why it might
+# matter, and note honestly where it has been tested (e.g. "tested as a direction signal → null; retained as a
+# magnitude/conditioning feature"). We are inclusion-liberal: we keep features without claiming they are edges.
+#
+# SEED + GROW: only a handful of groups are populated here today. Groups WITHOUT an entry are shown by the
+# panel as "value narrative not yet written" — we do NOT fabricate a why for 63 groups. Agents fill these over
+# time, tying each to the actual null-map / experiment ledger where the group has been tested.
+#
+# Schema (all fields optional):
+#   <group_key>:
+#     purpose: one-paragraph what-it-is (plain language; complements the engineering docstring)
+#     how_features_differ: how the individual features within the group vary (windows / horizons / transforms)
+#     value: what it MEASURES + the rationale/hypothesis (+ honest test status). NOT a claim of edge.
+#     example: optional short code / usage snippet
+
+candlestick:
+  purpose: >
+    Per-minute candlestick SHAPE features — the geometry of each one-minute OHLC bar (body vs wicks) plus a
+    few classic two-candle patterns that also read the prior bar.
+  how_features_differ: >
+    body_ratio / upper_shadow_ratio / lower_shadow_ratio decompose the SAME bar into body and the two wicks
+    as fractions of its range; is_bullish / is_doji / is_hammer / is_shooting_star / is_marubozu are binary
+    pattern flags with progressively stricter shape thresholds (e.g. hammer = long lower wick >60% of range).
+  value: >
+    Measures intrabar shape — where price spent the minute relative to its range. Hypothesis: wick/body
+    geometry encodes intrabar rejection/absorption that might condition very-short-horizon behaviour. Status:
+    candle/geometry signals have been tested as direction predictors and NULLED (part of the geometry ×3
+    null-set); retained as cheap shape/context features, not as an edge.
+
+calendar:
+  purpose: >
+    Pure calendar / session features derived from the minute's exchange timestamp in ET — where in the
+    trading day (and week) this bar sits.
+  how_features_differ: >
+    minute_of_day_et / minutes_since_open / minutes_to_close locate the bar within the session; day_of_week
+    and the is_* flags mark session phase (open/close auctions, first/last N minutes, lunch lull). All are
+    deterministic functions of the timestamp — identical live vs backfill.
+  value: >
+    Measures position-in-session. Hypothesis: intraday seasonality is strong and stable (the U-shaped
+    volume/volatility curve, the auctions), so these are primarily CONDITIONING features — they let the model
+    interpret another signal differently at 09:31 than at 15:55. Not a standalone return predictor.
+
+breadth:
+  purpose: >
+    Market and sector BREADTH — what fraction of the whole universe is moving up vs down over each window.
+    A gather feature computed once per minute and broadcast to every ticker.
+  how_features_differ: >
+    breadth_up_* / breadth_down_* are the up- and down-fractions over a window (5m … 5d); breadth_net_* is
+    up minus down (a single signed market-tone scalar). The suffix is the lookback horizon.
+  value: >
+    Measures market participation / risk-on-risk-off tone. Hypothesis: a name's move means something
+    different when the whole market is moving with it (narrow vs broad breadth). Intended as a market-state
+    CONDITIONING input, not a directional signal on its own.
+
+liquidity:
+  purpose: >
+    Liquidity / trading-COST features — classic illiquidity estimators from per-minute bars + signed flow,
+    over several windows.
+  how_features_differ: >
+    Each estimator (Amihud-style return-per-dollar, effective-spread / roll proxies, turnover) is computed
+    over multiple windows; the window suffix trades responsiveness for stability.
+  value: >
+    Measures how costly the name is to trade. Hypothesis (and a recurring lesson from our edge work): many
+    apparent signals are illiquidity-concentrated and vanish net of cost, so these features are used to GATE
+    and SIZE — to discount edges that only appear in untradeable names — rather than as a signal themselves.
+
+trade_flow:
+  purpose: >
+    Trade-flow features from per-minute trade aggregates — signed order-flow imbalance and trade intensity
+    over windows.
+  how_features_differ: >
+    Features vary by window and by what they summarize: signed-volume imbalance, trade-count intensity, and
+    buy/sell pressure ratios.
+  value: >
+    Measures order-flow pressure and trade intensity. Status: the order-flow surface has been tested as a
+    cross-sectional DIRECTION signal and NULLED (0/4, BY-FDR); trade_freq / intensity dominated gain as
+    INTENSITY, not alpha. Retained as activity/intensity context — honestly NOT a direction edge.
+
+momentum:
+  purpose: >
+    Momentum / trend-consistency features from the per-minute close — is the recent path trending, and how
+    cleanly.
+  how_features_differ: >
+    Features differ by lookback window and by transform: raw cumulative return vs consistency / run-quality
+    measures (how monotone the path was, not just its endpoint).
+  value: >
+    Measures recent trend and its cleanliness. Hypothesis: a consistent path may carry different information
+    than a noisy round-trip with the same endpoint. Status: price-direction signals (including momentum-style)
+    are a settled NULL at our scale; retained as path/consistency context for conditioning, not as an edge.
+
+volatility:
+  purpose: >
+    Realized VOLATILITY features from per-minute bars over many windows — how much the name is moving.
+  how_features_differ: >
+    Two estimator families: realized vol (std of 1-minute returns) and Parkinson vol (from the high-low
+    range), each over several windows; range-based estimators react faster to a vol burst.
+  value: >
+    Measures realized movement / range. Hypothesis: vol scales the meaning of every other signal and the
+    right position size, so this is primarily a NORMALIZATION / sizing input. Note from our edge work:
+    predicting vol/RANGE (magnitude) has been a more tractable target than direction — so a magnitude/
+    conditioning use is the honest framing, still short of a demonstrated tradeable edge.

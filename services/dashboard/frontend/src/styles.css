@@ -183,7 +183,7 @@ body {
 
 /* Angled column headers (raw layers + feature groups, with feature sub-columns when expanded). */
 .col-header {
-  flex: 0 0 130px;
+  flex: 0 0 150px;
   position: relative;
   overflow: hidden;
   border-bottom: 1px solid var(--border);
@@ -193,13 +193,40 @@ body {
   position: absolute;
   bottom: 0;
   left: 58px;
-  height: 130px;
+  height: 150px;
 }
 .col-label {
   position: absolute;
   bottom: 0;
   height: 130px;
+  cursor: pointer;
+}
+.col-label:hover span {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+}
+/* A bracket + group name spanning an expanded group's columns (header region). */
+.col-span-bracket {
+  position: absolute;
+  top: 2px;
+  height: 16px;
+  border: 1.5px solid var(--accent);
+  border-bottom: none;
+  border-radius: 5px 5px 0 0;
+  background: rgba(31, 111, 235, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   pointer-events: none;
+  overflow: hidden;
+}
+.col-span-name {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+  padding: 0 4px;
 }
 .col-label span {
   position: absolute;
@@ -337,6 +364,16 @@ body {
   font-style: italic;
   font-size: 11px;
 }
+.tooltip-more {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.tooltip-more strong {
+  color: var(--accent);
+}
 .trust-yes {
   color: var(--trusted);
   font-weight: 650;
@@ -344,6 +381,172 @@ body {
 .trust-no {
   color: var(--untrusted);
   font-weight: 650;
+}
+
+/* ---------- group detail panel (hover → "more detail") ---------- */
+.detail-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  max-width: 94vw;
+  background: #fff;
+  border-left: 3px solid var(--accent);
+  display: flex;
+  flex-direction: column;
+  z-index: 40;
+  box-shadow: -12px 0 36px rgba(20, 30, 45, 0.18);
+  animation: slidein 0.16s ease;
+}
+.detail-panel.trusted {
+  border-left-color: var(--trusted);
+}
+.detail-panel.untrusted {
+  border-left-color: var(--untrusted);
+}
+.detail-panel.raw {
+  border-left-color: var(--raw);
+}
+@keyframes slidein {
+  from {
+    transform: translateX(20px);
+    opacity: 0.5;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.detail-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.detail-chip-kind {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.detail-chip-name {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.detail-trust {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.detail-trust.yes {
+  color: var(--trusted);
+  background: rgba(11, 61, 145, 0.1);
+}
+.detail-trust.no {
+  color: var(--untrusted);
+  background: rgba(160, 23, 34, 0.08);
+}
+.detail-trust.raw {
+  color: var(--raw);
+  background: rgba(58, 69, 84, 0.08);
+}
+.detail-close {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.detail-close:hover {
+  background: var(--border);
+}
+.detail-body {
+  overflow: auto;
+  padding: 14px 16px 28px;
+}
+.detail-meta {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-bottom: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.detail-section {
+  margin-bottom: 18px;
+}
+.detail-section h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.detail-section p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.detail-doc {
+  color: var(--text-dim) !important;
+  font-size: 12px !important;
+  white-space: pre-line;
+}
+.detail-howdiff {
+  color: var(--text-dim) !important;
+}
+.detail-stub {
+  color: var(--muted) !important;
+  font-style: italic;
+  font-size: 12.5px !important;
+}
+.detail-example {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+.detail-feature-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.detail-feature-list li {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.detail-feature-list code {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--accent);
+  margin-right: 8px;
+}
+.detail-feature-list span {
+  color: var(--text-dim);
 }
 
 /* ---------- first-boot screen (the ONLY loading state) ---------- */

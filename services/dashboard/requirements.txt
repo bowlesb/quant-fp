@@ -14,4 +14,7 @@ redis>=5,<6
 # 18-month coverage grid (+ drills + meta) there and the dashboard reads it, so a refresh is one indexed doc
 # fetch off the request path. pymongo is the client for both the worker and the dashboard read routes.
 pymongo>=4.6,<5
+# The curated feature-group guide (docs/feature_group_guide.yaml) the detail panel reads is parsed at worker
+# build time via PyYAML — the only new dep for the group detail panel.
+pyyaml>=6,<7
 
