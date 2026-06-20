@@ -65,24 +65,34 @@ class FakeMongo:
         return self._db
 
 
+class FakeWindow:
+    """Minimal WindowData stand-in: the worker iterates ``group_symbols`` to pre-warm each populated cell."""
+
+    def __init__(self) -> None:
+        self.group_symbols = {
+            "groupX": {"2026-06-18": {"AAA", "BBB"}},
+            "groupY": {"2026-06-18": {"AAA"}},
+        }
+
+
 def _fake_grid() -> dict[str, object]:
     return {
         "generated_at": "2026-06-20T00:00:00Z",
         "anchor_date": "2026-06-18",
         "lookback_days": 5,
-        "tickers": ["AAA", "BBB"],
+        "groups": ["groupX", "groupY"],
+        "group_trusted": [1, 0],
         "summary": {
             "n_dates": 3,
-            "n_tickers": 2,
-            "n_groups": 4,
+            "n_groups": 2,
             "n_trusted_groups": 1,
-            "mean_coverage_pct": 12.5,
+            "mean_coverage_pct": 75.0,
         },
     }
 
 
-def _fake_drill(symbol: str, *_args: object, **_kwargs: object) -> dict[str, object]:
-    return {"symbol": symbol, "groups": [], "dates": [], "cells": {}}
+def _fake_cell_drill(group: str, date: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+    return {"group": group, "date": date, "tickers": ["AAA"], "n_tickers": 1, "universe": 2}
 
 
 @pytest.fixture()
@@ -90,33 +100,35 @@ def patched(monkeypatch: pytest.MonkeyPatch) -> FakeMongo:
     """Patch the builders + the Mongo client to in-memory fakes; return the shared FakeMongo so a test can
     inspect what was written."""
     fake = FakeMongo()
-    monkeypatch.setattr(sgc, "gather_window", lambda *a, **k: object())
+    monkeypatch.setattr(sgc, "gather_window", lambda *a, **k: FakeWindow())
     monkeypatch.setattr(sgc, "build_store_grid", lambda *a, **k: _fake_grid())
-    monkeypatch.setattr(sgc, "build_ticker_drill", _fake_drill)
+    monkeypatch.setattr(sgc, "build_cell_drill", _fake_cell_drill)
     monkeypatch.setattr(sgc, "_client", lambda url=sgc.GRID_MONGO_URL: fake)
     return fake
 
 
 def test_write_then_read_round_trip(patched: FakeMongo) -> None:
-    summary = sgc.write_grid(root="/x", lookback_days=5, drill_prewarm=2)
-    assert summary["n_tickers"] == 2
-    assert summary["drills_prewarmed"] == 2
+    summary = sgc.write_grid(root="/x", lookback_days=5)
+    assert summary["n_groups"] == 2
+    # One drill doc per populated (group, date) cell: groupX|06-18 and groupY|06-18.
+    assert summary["drills_written"] == 2
     assert summary["gzip_bytes"] > 0
 
     # The grid reads back as the EXACT gzip bytes the writer stored (route serves them with Content-Encoding).
     blob = sgc.read_grid_gzip()
     assert blob is not None
-    assert json.loads(gzip.decompress(blob))["tickers"] == ["AAA", "BBB"]
+    assert json.loads(gzip.decompress(blob))["groups"] == ["groupX", "groupY"]
 
     # Meta reads back without the Mongo _id.
     meta = sgc.read_meta()
     assert meta is not None
     assert "_id" not in meta
-    assert meta["n_groups"] == 4
+    assert meta["n_groups"] == 2
 
-    # A pre-warmed drill is served from the document (uppercased id), not rebuilt.
-    drill = sgc.read_drill("aaa")
-    assert drill["symbol"] == "AAA"
+    # A pre-warmed cell drill is served from its (group, date) document.
+    drill = sgc.read_drill("groupX", "2026-06-18")
+    assert drill["group"] == "groupX"
+    assert drill["tickers"] == ["AAA"]
 
 
 def test_read_grid_cold_cache_returns_none(patched: FakeMongo) -> None:
@@ -131,9 +143,10 @@ def test_read_grid_unreachable_mongo_returns_none(monkeypatch: pytest.MonkeyPatc
     assert sgc.read_meta() is None
 
 
-def test_read_drill_unwarmed_falls_back_to_live_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Un-warmed ticker (empty cache) -> a live one-ticker build, not an error.
+def test_read_drill_cold_cache_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Un-warmed / cold cell -> an empty-but-valid drill (NOT a ~3-4min live gather on the request path).
     monkeypatch.setattr(sgc, "_client", lambda url=sgc.GRID_MONGO_URL: FakeMongo())
-    monkeypatch.setattr(sgc, "build_ticker_drill", _fake_drill)
-    drill = sgc.read_drill("zzz")
-    assert drill["symbol"] == "ZZZ"
+    drill = sgc.read_drill("groupZ", "2026-06-18")
+    assert drill["group"] == "groupZ"
+    assert drill["n_tickers"] == 0
+    assert drill["tickers"] == []

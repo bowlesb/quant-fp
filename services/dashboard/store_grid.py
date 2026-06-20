@@ -1,31 +1,30 @@
-"""TICKER × DATE feature-store coverage MATRIX — the always-warm "glimpse into the feature store" grid.
+"""DATE × FEATURE-GROUP coverage MATRIX — the always-warm "glimpse into the feature store" grid.
 
-This is the HEIC tiny-boxes view: ROWS = dates (most-recent at top, ~18 months back), COLUMNS = tickers
-(the ~7k captured universe), each CELL the PROPORTION of the feature store present for that ticker on that
-date. Darker = more complete. It replaces the old group×date glimpse with the axis Ben asked for
-(ticker×date), and is built by a permanent background worker (``store_grid_worker``) — never on a request.
+ROWS = dates (most-recent at top, ~18 months back). COLUMNS = the ~63 registry FEATURE GROUPS. This fits one
+screen and is legible — unlike the per-ticker axis (11k columns against a shallow store reads as a black void).
 
-WHAT A CELL MEANS
-  coverage = (# feature-GROUPS present for this ticker on this date) / N_REGISTRY_GROUPS.
+WHAT A CELL MEANS — coverage AGGREGATED ACROSS ALL TICKERS for that group on that date:
 
-  The denominator is the TOTAL registry group count (not "groups that have any data that date"), so the
-  18-month depth gradient reads truthfully: far-back dates where only the calendar groups backfill read
-  correctly FAINT (a few of N groups), recent fully-captured days read DARK. A ticker present in every
-  group on a date reads ~1.0. This is "how complete that ticker's features are that day" against everything
-  the store could hold. Coverage is quantized to a byte (0..255) for a compact packed matrix.
+  coverage[group][date] = (# in-universe tickers that have this GROUP's features on this date)
+                          / (# in-universe tickers captured at all that date)
+
+  The denominator is the captured universe THAT DATE (the union of tickers across all groups on that date),
+  so a universe-wide bar group reads ~full and a thin order-flow group reads faint — an honest per-group
+  breadth. A far-back date where only the calendar groups backfill shows a couple of full columns and the rest
+  blank. Coverage is quantized to a byte (0..255) for a compact packed matrix (392×63 ≈ 25k cells — trivial).
 
 BINARY TRUST (Ben: trusted vs untrusted, nothing else)
-  Trust is a per-FEATURE property (``feature_trust.trust_state = 'TRUSTED'`` — the binary system of record,
-  ``feature_grid.trusted_feature_names``). We project it onto the ticker×date cell as ONE bit: a cell is
-  "all-trusted" iff EVERY group present for that ticker×date is fully-trusted (all its features trusted).
-  Otherwise "some-untrusted". No PENDING/DIVERGENT/UNGRADED — those collapse to the single untrusted state.
+  Trust is a per-FEATURE property (``feature_trust.trust_state = 'TRUSTED'``); a GROUP is trusted iff ALL its
+  features are. Since the columns ARE groups, trust colours whole columns — the 6 trusted vs 57 untrusted are
+  immediately visible under the overlay. ``group_trusted`` is the per-column bit.
 
-COST / WHY A MATRIX BUILD IS CHEAP ENOUGH FOR A LOOP
-  The whole store is ~2.4k (group, source, date) partitions, each a handful of files; one bounded
-  evenly-sampled symbol-set read per partition (``feature_grid._read_symbols``) gives, per (group, date),
-  the set of tickers present. The matrix is then pure set membership — no extra store I/O. A full rebuild
-  measures ~3-4min (dominated by the deep calendar groups' many partitions), which the background worker pays
-  on a loop while always serving the last-good blob — never on a request.
+DRILL — click a (date × group) cell -> the per-TICKER breakdown for that group+date: which tickers have that
+group's features that day (ranked, paginated). The secondary "which names" view.
+
+COST — the whole store is ~2.4k (group, source, date) partitions, each a handful of files; one bounded
+evenly-sampled symbol-set read per partition (``feature_grid._read_symbols``) gives, per (group, date), the
+set of tickers present. The matrix is then a cheap rollup. A full rebuild measures ~3-4min, paid by the
+background worker on a loop while always serving the last-good document — never on a request.
 
 Read-side ONLY. Reuses ``feature_grid``'s bounded partition reads + the registry catalog + the trust read;
 NO new heavy I/O, NO schema/format/fingerprint change to the feature store.
@@ -49,15 +48,14 @@ from feature_grid import (
 # Row axis: how many calendar days back from the store anchor the matrix spans. ~18 months ≈ 548 calendar
 # days. We keep only WEEKDAYS as rows (a local calendar proxy — no Alpaca calendar / network / secrets in the
 # worker), which over 18 months is ~378 trading-date rows; weekend rows would always be blank, so dropping
-# them keeps the matrix tight (~30% fewer rows) without losing any captured data. Env-overridable so a
-# wider/narrower window is a config change, not a code edit.
+# them keeps the matrix tight. Env-overridable so a wider/narrower window is a config change, not a code edit.
 GRID_LOOKBACK_DAYS = int(os.environ.get("STORE_GRID_LOOKBACK_DAYS", "548"))
 
-# Coverage is quantized to a single byte for the packed matrix (0 = absent, 255 = present in every group).
+# Coverage is quantized to a single byte for the packed matrix (0 = absent, 255 = all in-universe tickers).
 COVERAGE_MAX_BYTE = 255
 
-# Drill page size: a (ticker × date) cell click opens that ticker's per-group presence on that date; the
-# whole-grid drill lists the most-covered tickers. The universe is ~7k, far too many to ship per cell.
+# Drill page size: a (date × group) cell click opens the per-ticker breakdown for that group+date, ranked and
+# paginated (the captured universe is ~7-11k, far too many to ship in full per cell).
 DRILL_DEFAULT_LIMIT = 500
 DRILL_MAX_LIMIT = 2000
 
@@ -119,8 +117,8 @@ def _group_symbols_in_window(root: str, group: str, version: str, window: set[st
 def _fully_trusted_groups(
     catalog_by_group: dict[str, list[dict[str, object]]], trusted: set[str]
 ) -> set[str]:
-    """The groups whose features are ALL trusted — a group counts as trusted in a cell only if every one of
-    its features has earned binary trust. A group with any untrusted feature taints any cell it covers."""
+    """The groups whose features are ALL trusted — a group's column is trusted only if every one of its
+    features has earned binary trust. A group with any untrusted feature is an untrusted column."""
     fully: set[str] = set()
     for group, features in catalog_by_group.items():
         if features and all(str(record["feature"]) in trusted for record in features):
@@ -130,9 +128,8 @@ def _fully_trusted_groups(
 
 @dataclass
 class WindowData:
-    """One full-store read pass over the grid window — gathered ONCE, then both the matrix and every ticker
-    drill are derived from it purely in-memory (no re-reads). This is what makes pre-warming N drills cheap:
-    the store is touched once per worker loop, not once per drill.
+    """One full-store read pass over the grid window — gathered ONCE, then the matrix and every (group, date)
+    drill are derived from it purely in-memory (no re-reads). The store is touched once per worker loop.
 
     ``group_symbols`` is {group: {date_iso: set(tickers)}} (stream∪backfill per in-window date);
     ``fully_trusted_groups`` is the set of groups all of whose features have earned binary trust."""
@@ -179,95 +176,90 @@ def gather_window(root: str = STORE_ROOT, lookback_days: int = GRID_LOOKBACK_DAY
     )
 
 
+def _universe_per_date(group_symbols: dict[str, dict[str, set[str]]], dates: list[str]) -> dict[str, int]:
+    """Per date, the size of the captured universe = the count of DISTINCT tickers present in ANY group that
+    date. This is the per-date denominator for the all-ticker coverage aggregate, so a group covering every
+    captured ticker reads full and a thin group reads faint against that day's actual universe."""
+    universe: dict[str, int] = {}
+    for date_iso in dates:
+        seen: set[str] = set()
+        for by_date in group_symbols.values():
+            symbols = by_date.get(date_iso)
+            if symbols:
+                seen |= symbols
+        universe[date_iso] = len(seen)
+    return universe
+
+
 def build_store_grid(
     root: str = STORE_ROOT,
     lookback_days: int = GRID_LOOKBACK_DAYS,
     window_data: WindowData | None = None,
 ) -> dict[str, object]:
-    """Build the ticker×date coverage + binary-trust matrix.
+    """Build the DATE × GROUP coverage + binary-trust matrix (all-ticker aggregate per group per date).
 
-    Pass a pre-gathered ``window_data`` (from ``gather_window``) to assemble the matrix without re-reading the
-    store — the worker gathers once and reuses it for the matrix AND every drill. Without it, gathers itself.
+    Pass a pre-gathered ``window_data`` (from ``gather_window``) to assemble without re-reading the store —
+    the worker gathers once and reuses it for the matrix AND every drill. Without it, gathers itself.
 
-    Output (compact, JSON-serializable — the worker writes this to Redis, the reader serves it as-is):
+    Output (compact, JSON-serializable — the worker writes this to Mongo, the reader serves it as-is):
       {generated_at, store_root, anchor_date, lookback_days, n_groups, n_trusted_groups,
-       dates: ["2026-06-20", ...],                         # rows, newest first
-       tickers: ["AAPL", ...],                             # columns, default-sorted by total coverage
-       coverage: [[byte, ...], ...],                       # rows aligned to dates, cols to tickers (0..255)
-       trusted:  [[bit, ...], ...],                        # 1 = every present group fully-trusted, else 0
-       coverage_pct: [...],                                # per-ticker mean coverage over present dates (sort key)
-       summary: {n_dates, n_tickers, n_groups, n_trusted_groups, mean_coverage_pct}}
+       dates:   ["2026-06-20", ...],                       # rows, newest first
+       groups:  ["bars_1m", ...],                          # columns (trusted-first, then alpha)
+       group_trusted: [1, 0, ...],                         # per-column binary trust bit (aligned to groups)
+       coverage: [[byte, ...], ...],                       # rows ⟂ dates, cols ⟂ groups (0..255)
+       universe: [n, ...],                                 # per-date captured-universe size (the denominator)
+       group_coverage_pct: [...],                          # per-group mean coverage over present dates
+       summary: {n_dates, n_groups, n_trusted_groups, mean_coverage_pct}}
 
-    The matrix is dense (every date × every ticker), so the packed byte/bit rows are the compact wire form;
-    a ticker absent on a date is simply byte 0. Coverage byte = round(255 * groups_present / n_groups).
+    coverage byte = round(255 * |group∩date tickers| / |captured universe that date|). The matrix is dense
+    (every date × every group); a group absent on a date is byte 0.
     """
     data = window_data if window_data is not None else gather_window(root, lookback_days)
     if data is None:
         return _empty_grid(root, lookback_days)
 
-    n_groups = data.n_groups
     dates = data.dates
     group_symbols = data.group_symbols
     fully_trusted_groups = data.fully_trusted_groups
 
-    # Per (date, ticker): how many groups present, and how many of those are fully-trusted groups.
-    all_tickers: set[str] = set()
-    for by_date in group_symbols.values():
-        for symbols in by_date.values():
-            all_tickers |= symbols
-    tickers = sorted(all_tickers)
-    ticker_index = {symbol: idx for idx, symbol in enumerate(tickers)}
-    n_tickers = len(tickers)
+    # Columns = the groups, ordered TRUSTED-FIRST then alphabetical, so the trusted columns cluster on the left
+    # and read as a block under the overlay.
+    groups = sorted(data.group_versions, key=lambda group: (group not in fully_trusted_groups, group))
+    group_index = {group: idx for idx, group in enumerate(groups)}
+    n_groups = len(groups)
+    group_trusted = [1 if group in fully_trusted_groups else 0 for group in groups]
+
+    universe = _universe_per_date(group_symbols, dates)
 
     coverage: list[list[int]] = []
-    trusted_rows: list[list[int]] = []
-    # Per-ticker accumulators for the default column sort (mean coverage over dates the ticker appears).
-    ticker_cov_sum = [0.0] * n_tickers
-    ticker_present_dates = [0] * n_tickers
+    # Per-group accumulators for the per-column mean coverage (over dates the group is present).
+    group_cov_sum = [0.0] * n_groups
+    group_present_dates = [0] * n_groups
 
     for date_iso in dates:
-        present_count = [0] * n_tickers
-        untrusted_hit = [0] * n_tickers  # 1 once an untrusted group covers the ticker this date
-        for group, by_date in group_symbols.items():
-            symbols = by_date.get(date_iso)
-            if not symbols:
-                continue
-            group_is_trusted = group in fully_trusted_groups
-            for symbol in symbols:
-                idx = ticker_index[symbol]
-                present_count[idx] += 1
-                if not group_is_trusted:
-                    untrusted_hit[idx] = 1
-
-        cov_row = [0] * n_tickers
-        trust_row = [0] * n_tickers
-        for idx in range(n_tickers):
-            count = present_count[idx]
-            if count == 0:
-                continue
-            fraction = count / n_groups
-            cov_row[idx] = min(COVERAGE_MAX_BYTE, round(COVERAGE_MAX_BYTE * fraction))
-            trust_row[idx] = 0 if untrusted_hit[idx] else 1
-            ticker_cov_sum[idx] += fraction
-            ticker_present_dates[idx] += 1
+        denom = universe[date_iso]
+        cov_row = [0] * n_groups
+        if denom > 0:
+            for group, by_date in group_symbols.items():
+                symbols = by_date.get(date_iso)
+                if not symbols:
+                    continue
+                idx = group_index[group]
+                fraction = min(1.0, len(symbols) / denom)
+                cov_row[idx] = min(COVERAGE_MAX_BYTE, round(COVERAGE_MAX_BYTE * fraction))
+                group_cov_sum[idx] += fraction
+                group_present_dates[idx] += 1
         coverage.append(cov_row)
-        trusted_rows.append(trust_row)
 
-    coverage_pct = [
-        round(100.0 * ticker_cov_sum[idx] / ticker_present_dates[idx], 1)
-        if ticker_present_dates[idx]
-        else 0.0
-        for idx in range(n_tickers)
+    group_coverage_pct = [
+        round(100.0 * group_cov_sum[idx] / group_present_dates[idx], 1) if group_present_dates[idx] else 0.0
+        for idx in range(n_groups)
     ]
 
-    # Default column order: most-covered tickers first (mean coverage over their present dates), then alpha.
-    order = sorted(range(n_tickers), key=lambda idx: (-coverage_pct[idx], tickers[idx]))
-    tickers_sorted = [tickers[idx] for idx in order]
-    coverage_pct_sorted = [coverage_pct[idx] for idx in order]
-    coverage_sorted = [[row[idx] for idx in order] for row in coverage]
-    trusted_sorted = [[row[idx] for idx in order] for row in trusted_rows]
-
-    mean_cov = round(sum(coverage_pct_sorted) / len(coverage_pct_sorted), 1) if coverage_pct_sorted else 0.0
+    # Headline mean coverage = mean over the populated cells (groups present on a date), so an all-blank
+    # far-back tail doesn't drag the number toward zero.
+    populated = [pct for idx, pct in enumerate(group_coverage_pct) if group_present_dates[idx]]
+    mean_cov = round(sum(populated) / len(populated), 1) if populated else 0.0
 
     return {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -277,37 +269,36 @@ def build_store_grid(
         "n_groups": n_groups,
         "n_trusted_groups": len(fully_trusted_groups),
         "dates": dates,
-        "tickers": tickers_sorted,
-        "coverage": coverage_sorted,
-        "trusted": trusted_sorted,
-        "coverage_pct": coverage_pct_sorted,
+        "groups": groups,
+        "group_trusted": group_trusted,
+        "coverage": coverage,
+        "universe": [universe[date_iso] for date_iso in dates],
+        "group_coverage_pct": group_coverage_pct,
         "summary": {
             "n_dates": len(dates),
-            "n_tickers": n_tickers,
             "n_groups": n_groups,
             "n_trusted_groups": len(fully_trusted_groups),
             "mean_coverage_pct": mean_cov,
         },
-        "legend": _legend(n_groups),
+        "legend": _legend(),
     }
 
 
-def _legend(n_groups: int) -> dict[str, str]:
-    """The grid's legend text: the coverage darkness scale + a note that store depth is UNEVEN, so the faint
-    far-back rows read as honest sparsity (most groups shallow, only the calendar groups deep) and not a bug.
-    """
+def _legend() -> dict[str, str]:
+    """The grid's legend text: the coverage scale (all-ticker aggregate per group per date) + a note that
+    store depth is UNEVEN, so the faint/blank far-back rows read as honest sparsity, not a bug."""
     return {
         "coverage_scale": (
-            f"Cell darkness = fraction of the {n_groups} feature-groups present for that ticker on "
-            "that date (light = few groups, dark = all groups)."
+            "Cell darkness = fraction of that date's captured tickers that have this feature-group "
+            "(across ALL tickers — light = few names covered, dark = the whole universe)."
         ),
         "trust_overlay": (
-            "Binary trust: a cell is GREEN only when every feature-group covering it is fully trusted; "
-            "anything else is the neutral untrusted shade."
+            "Binary trust: a feature-group is GREEN when ALL its features are trusted, else neutral. "
+            "Columns are trusted-first, so the trusted groups cluster on the left."
         ),
         "depth_note": (
             "Store depth is UNEVEN — only the calendar groups go back ~18 months; most groups are shallow "
-            "(recent weeks/months). Faint far-back rows are honest sparsity, not a bug."
+            "(recent weeks/months). Faint/blank far-back rows are honest sparsity, not a bug."
         ),
     }
 
@@ -322,64 +313,63 @@ def _empty_grid(root: str, lookback_days: int) -> dict[str, object]:
         "n_groups": 0,
         "n_trusted_groups": 0,
         "dates": [],
-        "tickers": [],
+        "groups": [],
+        "group_trusted": [],
         "coverage": [],
-        "trusted": [],
-        "coverage_pct": [],
+        "universe": [],
+        "group_coverage_pct": [],
         "summary": {
             "n_dates": 0,
-            "n_tickers": 0,
             "n_groups": 0,
             "n_trusted_groups": 0,
             "mean_coverage_pct": 0.0,
         },
-        "legend": _legend(0),
+        "legend": _legend(),
     }
 
 
-def build_ticker_drill(
-    symbol: str,
+def build_cell_drill(
+    group: str,
+    date: str,
     root: str = STORE_ROOT,
     lookback_days: int = GRID_LOOKBACK_DAYS,
+    limit: int = DRILL_DEFAULT_LIMIT,
     window_data: WindowData | None = None,
 ) -> dict[str, object]:
-    """Drill for one TICKER: its per-(date × group) presence + per-group binary trust — what a cell click in
-    that ticker's column opens. One row per date (newest first), one box per group, marked present/absent and
-    trusted/untrusted.
+    """Drill for one (date × group) CELL: the per-TICKER breakdown — which tickers have that group's features
+    on that date. The secondary "which names" view. Tickers are sorted alphabetically and capped at ``limit``
+    (the captured universe is large); the full count + the date's universe size are returned for context.
 
-    Pass a pre-gathered ``window_data`` (from ``gather_window``) and the drill is pure in-memory set lookups
-    over the SAME read pass the matrix used — so the worker pre-warms N drills for the cost of one store read.
-    Without it (an un-warmed ticker hitting the route live), it gathers once for that single request."""
-    symbol = symbol.upper()
+    Pass a pre-gathered ``window_data`` (from ``gather_window``) and the drill is a pure in-memory lookup over
+    the SAME read pass the matrix used. Without it (a cell hitting the route live), it gathers once."""
     data = window_data if window_data is not None else gather_window(root, lookback_days)
-    if data is None:
+    capped_limit = max(1, min(limit, DRILL_MAX_LIMIT))
+    if data is None or group not in data.group_symbols:
         return {
             "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "symbol": symbol,
-            "anchor_date": None,
-            "lookback_days": max(1, lookback_days),
-            "groups": [],
-            "dates": [],
-            "cells": {},
+            "group": group,
+            "date": date,
+            "trusted": False,
+            "n_tickers": 0,
+            "universe": 0,
+            "coverage_pct": 0.0,
+            "limit": capped_limit,
+            "tickers": [],
         }
 
-    group_rows = [
-        {"group": group, "trusted": group in data.fully_trusted_groups}
-        for group in sorted(data.group_versions)
-    ]
-
-    cells: dict[str, dict[str, bool]] = {date_iso: {} for date_iso in data.dates}
-    for group, by_date in data.group_symbols.items():
-        for date_iso, symbols in by_date.items():
-            if symbol in symbols:
-                cells[date_iso][group] = True
+    symbols = data.group_symbols[group].get(date, set())
+    universe = _universe_per_date(data.group_symbols, [date])[date]
+    tickers = sorted(symbols)
+    coverage_pct = round(100.0 * len(tickers) / universe, 1) if universe else 0.0
 
     return {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "symbol": symbol,
-        "anchor_date": data.anchor.isoformat(),
-        "lookback_days": max(1, lookback_days),
-        "groups": group_rows,
-        "dates": data.dates,
-        "cells": cells,
+        "group": group,
+        "date": date,
+        "trusted": group in data.fully_trusted_groups,
+        "n_tickers": len(tickers),
+        "universe": universe,
+        "coverage_pct": coverage_pct,
+        "limit": capped_limit,
+        "tickers": tickers[:capped_limit],
     }

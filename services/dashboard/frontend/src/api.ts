@@ -1,9 +1,9 @@
-import type { GridMeta, StoreGridMatrix, TickerDrill } from "./types";
+import type { CellDrill, GridMeta, StoreGridMatrix } from "./types";
 
-// Thin client for the dashboard's /api/store-grid/* endpoints. The grid is served under /store-grid/, so the
-// app is same-origin with the API — absolute /api/... paths hit the dashboard FastAPI directly (the Vite dev
-// server proxies them to :8088). The matrix route returns gzip; the browser transparently decodes it via the
-// Content-Encoding header, so `res.json()` works without any manual inflate.
+// Thin client for the dashboard's /api/store-grid/* endpoints. The grid IS the dashboard (served at "/"), so
+// the app is same-origin with the API — absolute /api/... paths hit the dashboard FastAPI directly (the Vite
+// dev server proxies them to :8088). The matrix route returns gzip; the browser transparently decodes it via
+// the Content-Encoding header, so `res.json()` works without any manual inflate.
 
 // Sentinel thrown when the worker has not written its first matrix yet (the API replies 503 {booting:true}).
 // The UI shows the one-and-only legitimate loading state for this; it is never a recurring "warming".
@@ -33,6 +33,7 @@ export function fetchMeta(): Promise<GridMeta> {
   return getJson<GridMeta>("/api/store-grid/meta");
 }
 
-export function fetchTickerDrill(symbol: string): Promise<TickerDrill> {
-  return getJson<TickerDrill>(`/api/store-grid/ticker/${encodeURIComponent(symbol.toUpperCase())}`);
+export function fetchCellDrill(group: string, date: string): Promise<CellDrill> {
+  const params = new URLSearchParams({ group, date });
+  return getJson<CellDrill>(`/api/store-grid/cell?${params.toString()}`);
 }

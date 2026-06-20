@@ -1,9 +1,9 @@
-"""Unit tests for the ticker×date feature-store coverage MATRIX (services/dashboard/store_grid).
+"""Unit tests for the date × feature-group coverage MATRIX (services/dashboard/store_grid).
 
 No live DB and no live store: ``trusted_feature_names`` is monkeypatched and a tiny parquet store is built in
-a tmp dir (the SAME fixture shape the feature_grid / store_glimpse tests use), so the matrix the
-``/api/store-grid/matrix`` endpoint serves is exercised end-to-end (build_store_grid + build_ticker_drill)
-against a controlled fixture.
+a tmp dir, so the matrix the ``/api/store-grid/matrix`` endpoint serves is exercised end-to-end
+(build_store_grid all-ticker aggregate per group/date + build_cell_drill per-ticker breakdown) against a
+controlled fixture.
 """
 
 from __future__ import annotations
@@ -69,12 +69,11 @@ def test_build_store_grid_coverage_and_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_catalog: None
 ) -> None:
     root = tmp_path / "store"
-    # groupX present 06-16 (AAA via stream, BBB via backfill) and 06-15 (AAA backfill).
-    _write_partition(root, "groupX", "stream", "2026-06-16", ["AAA"])
-    _write_partition(root, "groupX", "backfill", "2026-06-16", ["BBB"])
-    _write_partition(root, "groupX", "backfill", "2026-06-15", ["AAA"])
-    # groupY present 06-16 (AAA backfill only).
+    # 06-16: groupX has AAA+BBB (stream) and groupY has AAA (backfill) -> universe that date = {AAA,BBB} = 2.
+    _write_partition(root, "groupX", "stream", "2026-06-16", ["AAA", "BBB"])
     _write_partition(root, "groupY", "backfill", "2026-06-16", ["AAA"])
+    # 06-15: only groupX has AAA -> universe = {AAA} = 1.
+    _write_partition(root, "groupX", "backfill", "2026-06-15", ["AAA"])
 
     # feat_a + feat_b trusted -> groupX fully trusted; feat_c NOT -> groupY untrusted.
     monkeypatch.setattr(sg, "trusted_feature_names", lambda: {"feat_a", "feat_b"})
@@ -83,52 +82,45 @@ def test_build_store_grid_coverage_and_trust(
     assert grid["anchor_date"] == "2026-06-16"
     assert grid["n_groups"] == 2
     assert grid["n_trusted_groups"] == 1  # only groupX
-    assert grid["dates"][0] == "2026-06-16"  # newest first
     # Rows are WEEKDAYS only: 06-16 Tue, 06-15 Mon, then 06-14 Sun + 06-13 Sat dropped, 06-12 Fri kept.
     assert grid["dates"] == ["2026-06-16", "2026-06-15", "2026-06-12"]
+    # Columns are the GROUPS, trusted-first: groupX (trusted) before groupY.
+    assert grid["groups"] == ["groupX", "groupY"]
+    assert grid["group_trusted"] == [1, 0]
+    # Per-date captured-universe denominator.
+    assert grid["universe"] == [2, 1, 0]
 
-    tickers = list(grid["tickers"])
-    assert set(tickers) == {"AAA", "BBB"}
     d_idx = {date: i for i, date in enumerate(grid["dates"])}
-    t_idx = {sym: i for i, sym in enumerate(tickers)}
-
+    g_idx = {group: i for i, group in enumerate(grid["groups"])}
     coverage = grid["coverage"]
-    trusted = grid["trusted"]
 
-    # 06-16 AAA: present in groupX (stream) + groupY (backfill) = 2 of 2 groups -> full coverage byte 255.
-    aaa_1616 = coverage[d_idx["2026-06-16"]][t_idx["AAA"]]
-    assert aaa_1616 == 255
-    # AAA on 06-16 is covered by groupY (untrusted) -> cell trust bit 0.
-    assert trusted[d_idx["2026-06-16"]][t_idx["AAA"]] == 0
-
-    # 06-16 BBB: only groupX (trusted) of 2 groups -> coverage 0.5 -> round(255*0.5)=128, trust bit 1.
-    bbb_1616 = coverage[d_idx["2026-06-16"]][t_idx["BBB"]]
-    assert bbb_1616 == round(255 * 0.5)
-    assert trusted[d_idx["2026-06-16"]][t_idx["BBB"]] == 1
-
-    # 06-15 AAA: only groupX of 2 groups -> coverage 0.5; groupX trusted -> bit 1.
-    aaa_1615 = coverage[d_idx["2026-06-15"]][t_idx["AAA"]]
-    assert aaa_1615 == round(255 * 0.5)
-    assert trusted[d_idx["2026-06-15"]][t_idx["AAA"]] == 1
-
-    # An absent (far-back) date reads zero coverage for every ticker.
-    oldest = grid["dates"][-1]
-    assert all(byte == 0 for byte in coverage[d_idx[oldest]])
+    # 06-16 groupX: AAA+BBB of universe 2 -> 2/2 = full byte 255.
+    assert coverage[d_idx["2026-06-16"]][g_idx["groupX"]] == 255
+    # 06-16 groupY: AAA of universe 2 -> 1/2 -> round(255*0.5)=128.
+    assert coverage[d_idx["2026-06-16"]][g_idx["groupY"]] == round(255 * 0.5)
+    # 06-15 groupX: AAA of universe 1 -> full 255; groupY absent -> 0.
+    assert coverage[d_idx["2026-06-15"]][g_idx["groupX"]] == 255
+    assert coverage[d_idx["2026-06-15"]][g_idx["groupY"]] == 0
+    # An absent (far-back) date reads zero for every group.
+    assert all(byte == 0 for byte in coverage[d_idx["2026-06-12"]])
 
 
-def test_build_store_grid_default_sort_most_covered_first(
+def test_build_store_grid_thin_group_reads_faint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_catalog: None
 ) -> None:
     root = tmp_path / "store"
-    # WIDE present in both groups every day; THIN present in one group one day -> WIDE sorts first.
-    _write_partition(root, "groupX", "backfill", "2026-06-16", ["WIDE", "THIN"])
-    _write_partition(root, "groupY", "backfill", "2026-06-16", ["WIDE"])
-    _write_partition(root, "groupX", "backfill", "2026-06-15", ["WIDE"])
+    # groupX covers the whole universe; groupY covers 1 of 4 names -> groupY column reads much fainter.
+    _write_partition(root, "groupX", "backfill", "2026-06-16", ["A", "B", "C", "D"])
+    _write_partition(root, "groupY", "backfill", "2026-06-16", ["A"])
     monkeypatch.setattr(sg, "trusted_feature_names", lambda: set())
 
-    grid = sg.build_store_grid(str(root), lookback_days=3)
-    assert grid["tickers"][0] == "WIDE"  # higher mean coverage ranks first
-    assert grid["coverage_pct"][0] >= grid["coverage_pct"][1]
+    grid = sg.build_store_grid(str(root), lookback_days=1)
+    g_idx = {group: i for i, group in enumerate(grid["groups"])}
+    cov = grid["coverage"][0]
+    assert cov[g_idx["groupX"]] == 255  # 4/4
+    assert cov[g_idx["groupY"]] == round(255 * 0.25)  # 1/4, faint
+    assert grid["group_coverage_pct"][g_idx["groupX"]] == 100.0
+    assert grid["group_coverage_pct"][g_idx["groupY"]] == 25.0
 
 
 def test_build_store_grid_empty_store(monkeypatch: pytest.MonkeyPatch, fake_catalog: None) -> None:
@@ -136,34 +128,37 @@ def test_build_store_grid_empty_store(monkeypatch: pytest.MonkeyPatch, fake_cata
     grid = sg.build_store_grid("/nonexistent/store", lookback_days=3)
     assert grid["anchor_date"] is None
     assert grid["dates"] == []
-    assert grid["tickers"] == []
+    assert grid["groups"] == []
     assert grid["coverage"] == []
     assert grid["summary"]["n_dates"] == 0
 
 
-def test_build_ticker_drill_presence_and_trust(
+def test_build_cell_drill_tickers_and_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_catalog: None
 ) -> None:
     root = tmp_path / "store"
-    _write_partition(root, "groupX", "backfill", "2026-06-16", ["AAA"])
+    _write_partition(root, "groupX", "stream", "2026-06-16", ["AAA", "CCC"])
     _write_partition(root, "groupY", "backfill", "2026-06-16", ["AAA"])
-    _write_partition(root, "groupX", "backfill", "2026-06-15", ["AAA"])
     monkeypatch.setattr(sg, "trusted_feature_names", lambda: {"feat_a", "feat_b"})  # groupX trusted
 
-    drill = sg.build_ticker_drill("aaa", str(root), lookback_days=5)  # lowercase -> upper
-    assert drill["symbol"] == "AAA"
-    assert drill["anchor_date"] == "2026-06-16"
-    assert drill["dates"][0] == "2026-06-16"
-    group_trust = {g["group"]: g["trusted"] for g in drill["groups"]}
-    assert group_trust == {"groupX": True, "groupY": False}
-    # 06-16: AAA in both groups; 06-15: AAA only in groupX.
-    assert drill["cells"]["2026-06-16"] == {"groupX": True, "groupY": True}
-    assert drill["cells"]["2026-06-15"] == {"groupX": True}
+    drill = sg.build_cell_drill("groupX", "2026-06-16", str(root), lookback_days=5)
+    assert drill["group"] == "groupX"
+    assert drill["date"] == "2026-06-16"
+    assert drill["trusted"] is True
+    assert drill["tickers"] == ["AAA", "CCC"]  # sorted
+    assert drill["n_tickers"] == 2
+    assert drill["universe"] == 2  # {AAA, CCC} ∪ {AAA}
+    assert drill["coverage_pct"] == 100.0  # groupX covers the whole universe that date
+
+    # groupY covers 1 of 2 -> 50%, untrusted.
+    drill_y = sg.build_cell_drill("groupY", "2026-06-16", str(root), lookback_days=5)
+    assert drill_y["tickers"] == ["AAA"]
+    assert drill_y["coverage_pct"] == 50.0
+    assert drill_y["trusted"] is False
 
 
-def test_build_ticker_drill_empty_store(monkeypatch: pytest.MonkeyPatch, fake_catalog: None) -> None:
+def test_build_cell_drill_empty_store(monkeypatch: pytest.MonkeyPatch, fake_catalog: None) -> None:
     monkeypatch.setattr(sg, "trusted_feature_names", lambda: set())
-    drill = sg.build_ticker_drill("AAA", "/nonexistent/store", lookback_days=3)
-    assert drill["anchor_date"] is None
-    assert drill["dates"] == []
-    assert drill["cells"] == {}
+    drill = sg.build_cell_drill("groupX", "2026-06-16", "/nonexistent/store", lookback_days=3)
+    assert drill["n_tickers"] == 0
+    assert drill["tickers"] == []

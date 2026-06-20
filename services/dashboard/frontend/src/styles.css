@@ -277,8 +277,58 @@ body {
 .heatmap-frame {
   flex: 1;
   display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+}
+
+/* Angled feature-group column headers (the ~63 column names). A fixed header band above the scrolling body.
+   Each label is anchored at its column's left edge and rotated about that bottom-left point, so the baselines
+   are spaced exactly one column apart and long names climb up-and-right without colliding. */
+.group-header {
+  flex: 0 0 124px;
   position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-alt);
+}
+.group-header-inner {
+  position: absolute;
+  bottom: 0;
+  left: 58px;
+  height: 124px;
+}
+.group-label {
+  position: absolute;
+  bottom: 0;
+  height: 124px;
+  pointer-events: none;
+}
+.group-label span {
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: rotate(-60deg);
+  transform-origin: bottom left;
+  white-space: nowrap;
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  letter-spacing: 0.1px;
+}
+.group-label.trusted span {
+  color: var(--trusted);
+  font-weight: 600;
+}
+.group-label.active span {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.heatmap-row {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 .date-gutter {
   position: relative;
@@ -295,7 +345,7 @@ body {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  line-height: 8px;
+  line-height: 9px;
 }
 .date-tick.major {
   color: var(--text-dim);
@@ -311,7 +361,7 @@ body {
   position: absolute;
   inset: 0;
   overflow: auto;
-  cursor: crosshair;
+  cursor: pointer;
 }
 .heatmap-scroll::-webkit-scrollbar {
   width: 11px;
@@ -542,17 +592,40 @@ body {
   gap: 8px;
   margin-bottom: 7px;
 }
-.drill-date-strip {
+/* Drill summary line (n tickers of the date's universe + coverage %). */
+.drill-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 2px 12px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.drill-summary strong {
+  color: var(--text);
+  font-size: 15px;
+}
+.drill-summary-pct {
+  color: var(--accent);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The per-ticker list inside the nested card — a dense chip grid (the "which names" view). */
+.drill-ticker-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  max-height: calc(100vh - 230px);
+  overflow: auto;
 }
-.drill-date-chip {
+.drill-ticker-chip {
   background: rgba(108, 182, 255, 0.1);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 2px 7px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
   font-family: var(--mono);

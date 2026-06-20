@@ -6,8 +6,8 @@ import { Tooltip } from "./Tooltip";
 import { DrillPanel } from "./DrillPanel";
 
 // How often to re-poll the meta header for the "as of" staleness, and to pick up a freshly-built matrix. The
-// worker rebuilds every few minutes; a 60s meta poll is plenty and cheap. The matrix itself is only re-fetched
-// when its generated_at advances (avoids re-downloading the multi-hundred-KB blob every minute).
+// worker rebuilds every 10 min; a 60s meta poll is plenty and cheap. The matrix itself is only re-fetched when
+// its generated_at advances (avoids re-downloading the blob every minute).
 const META_POLL_MS = 60_000;
 
 function formatAsOf(generatedAt: string): string {
@@ -19,6 +19,12 @@ function formatAsOf(generatedAt: string): string {
   return `as of ${hhmmss} (${mins}m ago)`;
 }
 
+interface ActiveCell {
+  group: string;
+  date: string;
+  trusted: boolean;
+}
+
 export function App() {
   const [matrix, setMatrix] = useState<StoreGridMatrix | null>(null);
   const [meta, setMeta] = useState<GridMeta | null>(null);
@@ -27,11 +33,10 @@ export function App() {
   const [trustOverlay, setTrustOverlay] = useState(false);
   const [hover, setHover] = useState<HoverCell | null>(null);
   const [query, setQuery] = useState("");
-  const [activeCol, setActiveCol] = useState<number | null>(null);
-  const [scrollToCol, setScrollToCol] = useState<number | null>(null);
+  const [highlightCol, setHighlightCol] = useState<number | null>(null);
+  const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
   const matrixGeneratedAt = useRef<string | null>(null);
 
-  // Initial + conditional matrix load. We refetch the blob only when meta says a newer build exists.
   const loadMatrix = useCallback(async () => {
     try {
       const data = await fetchMatrix();
@@ -49,8 +54,8 @@ export function App() {
     loadMatrix();
   }, [loadMatrix]);
 
-  // Poll meta for staleness; if the worker produced a newer matrix, pull it. If we were booting, the first
-  // successful meta means the worker is live — load the matrix.
+  // Poll meta for staleness; pull a newer matrix when the worker produces one. A first successful meta after a
+  // boot means the worker is live — load the matrix.
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -64,7 +69,6 @@ export function App() {
       } catch (err) {
         if (cancelled) return;
         if (err instanceof BootingError) setBooting(true);
-        // a transient meta error is non-fatal: keep showing the last good matrix.
       }
     };
     poll();
@@ -82,37 +86,47 @@ export function App() {
     return () => window.clearInterval(id);
   }, []);
 
-  // Ticker search: resolve the query to a column index (exact match first, then prefix), jump + open drill.
-  const tickerIndex = useMemo(() => {
+  // Group search: resolve the query to a group column (exact, then substring), highlight that column.
+  const groupIndex = useMemo(() => {
     const map = new Map<string, number>();
-    matrix?.tickers.forEach((ticker, idx) => map.set(ticker, idx));
+    matrix?.groups.forEach((group, idx) => map.set(group.toLowerCase(), idx));
     return map;
   }, [matrix]);
 
   const runSearch = useCallback(() => {
     if (!matrix) return;
-    const upper = query.trim().toUpperCase();
-    if (!upper) return;
-    let col = tickerIndex.get(upper);
+    const needle = query.trim().toLowerCase();
+    if (!needle) {
+      setHighlightCol(null);
+      return;
+    }
+    let col = groupIndex.get(needle);
     if (col == null) {
-      col = matrix.tickers.findIndex((ticker) => ticker.startsWith(upper));
+      col = matrix.groups.findIndex((group) => group.toLowerCase().includes(needle));
       if (col < 0) col = undefined as unknown as number;
     }
     if (col == null || col < 0) {
-      setError(`ticker "${upper}" not in the grid`);
+      setError(`no feature-group matches "${query.trim()}"`);
       return;
     }
     setError(null);
-    setActiveCol(col);
-    setScrollToCol(col);
-  }, [matrix, query, tickerIndex]);
+    setHighlightCol(col);
+  }, [matrix, query, groupIndex]);
 
-  const pickColumn = useCallback((colIndex: number) => {
-    setActiveCol(colIndex);
-  }, []);
-
-  const activeSymbol = activeCol != null && matrix ? matrix.tickers[activeCol] : null;
-  const activeCoveragePct = activeCol != null && matrix ? matrix.coverage_pct[activeCol] ?? null : null;
+  const pickCell = useCallback(
+    (rowIndex: number, colIndex: number) => {
+      if (!matrix) return;
+      // Only open a drill on a populated cell (coverage byte > 0).
+      if ((matrix.coverage[rowIndex]?.[colIndex] ?? 0) <= 0) return;
+      setHighlightCol(colIndex);
+      setActiveCell({
+        group: matrix.groups[colIndex],
+        date: matrix.dates[rowIndex],
+        trusted: matrix.group_trusted[colIndex] === 1,
+      });
+    },
+    [matrix],
+  );
 
   if (booting && !matrix) {
     return (
@@ -140,13 +154,10 @@ export function App() {
           {matrix && (
             <div className="chips">
               <span className="chip">
-                <strong>{matrix.summary.n_tickers.toLocaleString()}</strong> tickers
+                <strong>{matrix.summary.n_groups}</strong> feature groups
               </span>
               <span className="chip">
                 <strong>{matrix.summary.n_dates}</strong> dates
-              </span>
-              <span className="chip">
-                <strong>{matrix.summary.n_groups}</strong> groups
               </span>
               <span className="chip trust">
                 <strong>{matrix.summary.n_trusted_groups}</strong>/{matrix.summary.n_groups} trusted
@@ -168,7 +179,7 @@ export function App() {
         <div className="search">
           <input
             type="text"
-            placeholder="search ticker (e.g. AAPL) — Enter to jump"
+            placeholder="search a feature group (e.g. candlestick) — Enter to highlight"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -176,12 +187,12 @@ export function App() {
             }}
             spellCheck={false}
           />
-          <button onClick={runSearch}>Jump</button>
+          <button onClick={runSearch}>Find</button>
         </div>
         <button
           className={trustOverlay ? "toggle on" : "toggle"}
           onClick={() => setTrustOverlay((value) => !value)}
-          title="Colour cells by binary trust instead of plain coverage"
+          title="Colour columns by binary trust instead of plain coverage"
         >
           <span className="toggle-dot" />
           Trust overlay
@@ -190,17 +201,17 @@ export function App() {
           <div className="legend">
             {!trustOverlay ? (
               <span className="legend-item">
-                <em className="ramp-end">sparse</em>
+                <em className="ramp-end">few names</em>
                 <span className="ramp coverage-ramp" />
-                <em className="ramp-end">full</em>
+                <em className="ramp-end">all names</em>
               </span>
             ) : (
               <>
                 <span className="legend-item">
-                  <span className="ramp trusted-ramp" /> all trusted
+                  <span className="ramp trusted-ramp" /> trusted group
                 </span>
                 <span className="legend-item">
-                  <span className="ramp untrusted-ramp" /> some untrusted
+                  <span className="ramp untrusted-ramp" /> untrusted group
                 </span>
               </>
             )}
@@ -222,21 +233,21 @@ export function App() {
           <CanvasHeatmap
             matrix={matrix}
             trustOverlay={trustOverlay}
-            highlightCol={activeCol}
+            highlightCol={highlightCol}
             onHoverChange={setHover}
-            onPickTicker={pickColumn}
-            scrollToCol={scrollToCol}
+            onPickCell={pickCell}
           />
         )}
       </div>
 
       {matrix && <Tooltip hover={hover} matrix={matrix} trustOverlay={trustOverlay} />}
 
-      {activeSymbol && (
+      {activeCell && (
         <DrillPanel
-          symbol={activeSymbol}
-          coveragePct={activeCoveragePct}
-          onClose={() => setActiveCol(null)}
+          group={activeCell.group}
+          date={activeCell.date}
+          trusted={activeCell.trusted}
+          onClose={() => setActiveCell(null)}
         />
       )}
     </div>

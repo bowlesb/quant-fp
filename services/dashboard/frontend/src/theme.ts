@@ -17,11 +17,13 @@ export const COLORS = {
   accent: "#6cb6ff",
 } as const;
 
-// Canvas cell sizing (CSS px before devicePixelRatio scaling). Small boxes = the HEIC tiny-boxes aesthetic.
+// Canvas cell sizing (CSS px before devicePixelRatio scaling). With ~63 GROUP columns (not 11k tickers) the
+// cells are wide enough to read as legible tiles and the group columns fit one screen; the date axis (hundreds
+// of rows) scrolls vertically. A hairline gap reads as crisp tiles rather than a smear.
 export const CELL = {
-  w: 8,
-  h: 8,
-  gap: 1, // a hairline gap between cells reads as crisp tiles rather than a smear
+  w: 22,
+  h: 9,
+  gap: 1,
 } as const;
 
 type Rgb = [number, number, number];
