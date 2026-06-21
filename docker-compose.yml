@@ -136,6 +136,14 @@ services:
       context: .
       dockerfile: services/dashboard/Dockerfile
     <<: *common
+    # Run as the HOST user (ben) so files the container writes into the ~/.quant-ops RW bind-mount below
+    # (status_dashboard.json + its .lock, via the /status reaction POST) stay owned by the host user. The
+    # hourly status board has TWO writers — this container AND the host Lead loop (status_grid.write_status_cells).
+    # As root the container would rewrite the shared file root:root 0600, locking out the host writer
+    # (PermissionDenied on the Lead's next cycle). Matching uids makes both writers coexist. The dashboard
+    # serves on 8000 (unprivileged) and only reads its image files, so non-root is safe. HOST_UID/HOST_GID
+    # come from .env (default 1000:1000 = the box's primary user).
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
       STORE_ROOT: /store
       # The cache Mongo the store-grid-worker writes; the dashboard READS the precomputed grid from here.
