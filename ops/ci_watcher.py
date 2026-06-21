@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ops.ci_scope import ScopeResult, Tier, classify
@@ -76,6 +76,7 @@ DASHBOARD_DEP_TESTS = (
     "tests/test_store_grid_cache.py",
     "tests/test_latency_expectations_route.py",
     "tests/test_news_edgar_route.py",
+    "tests/test_status_grid.py",  # imports status_grid -> filelock (a dashboard-only dep)
 )
 DASHBOARD_REQUIREMENTS = "services/dashboard/requirements.txt"
 # WALL-CLOCK TIMING tests — they measure elapsed ms against a budget/ceiling, so they FALSE-RED on a loaded
@@ -514,6 +515,12 @@ def run_suite(worktree: str) -> SuiteResult:
     lists, never false-redded by a lagging daemon.
     """
     policy = load_policy(worktree)
+    # DURABLE auto-detect: any test that ERRORs at collection in the bare fp env because it imports a
+    # dashboard-only dep (filelock/fastapi/pyyaml/pymongo/...) is auto-routed to the dashboard job, even if a
+    # PR forgot to add it to DASHBOARD_DEP_TESTS. This kills the recurring whack-a-mole false-RED (#status_grid
+    # /#news_edgar/...): a new dashboard test never reds the gate again. The static list stays as documentation
+    # + the fallback when the requirements file is unreadable.
+    policy = _augment_with_autodetected_dashboard_tests(worktree, policy)
 
     fp_job = _run_fp_job(worktree, policy)
 
@@ -533,6 +540,99 @@ def run_suite(worktree: str) -> SuiteResult:
 
     uncovered = _audit_coverage(worktree, policy)
     return SuiteResult(jobs=[fp_job, dash_job, store_job, timing_job], uncovered=uncovered)
+
+
+# Modules that base fp-dev HAS — a ModuleNotFoundError for one of these is NOT a dashboard-dep signal (it's a
+# real broken import). Only deps that live solely in services/dashboard/requirements.txt mark a test as
+# dashboard-only. polars/numpy are in both, so they're excluded from the dashboard-only set in code below.
+_FP_DEV_BASE_MODULES = frozenset({"polars", "numpy"})
+
+# requirement line -> import module name where they differ (most match after normalising extras/specifiers).
+_REQ_IMPORT_ALIASES = {"pyyaml": "yaml", "psycopg[binary]": "psycopg", "uvicorn[standard]": "uvicorn"}
+
+
+def _dashboard_dep_modules(worktree: str) -> frozenset[str]:
+    """Import-module names of the dashboard-only deps (parsed from services/dashboard/requirements.txt).
+
+    A test whose bare-fp collection error is ``No module named '<one of these>'`` is dashboard-dep by
+    construction. Returns an empty set (→ auto-detect no-ops, static list still applies) if the file is
+    unreadable, so this can never make grading stricter than before."""
+    req_path = os.path.join(worktree, DASHBOARD_REQUIREMENTS)
+    if not os.path.isfile(req_path):
+        return frozenset()
+    modules: set[str] = set()
+    with open(req_path) as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # strip version/specifier: take the package token before any of <=>!~[ space
+            name = re.split(r"[<>=!~ ]", line, maxsplit=1)[0].strip().lower()
+            module = _REQ_IMPORT_ALIASES.get(name, re.sub(r"\[.*\]$", "", name))
+            if module and module not in _FP_DEV_BASE_MODULES:
+                modules.add(module)
+    return frozenset(modules)
+
+
+_MODULE_NOT_FOUND_RE = re.compile(r"No module named '([^']+)'")
+
+
+def _autodetect_dashboard_tests(worktree: str, dashboard_modules: frozenset[str]) -> list[str]:
+    """Tests under tests/ that ERROR at bare-fp collection because they import a dashboard-only module.
+
+    Runs one ``--collect-only`` in the bare fp env capturing per-file error text, and keeps the ``tests/*.py``
+    whose error is a ``No module named '<dashboard-dep>'``. This is the durable replacement for hand-curating
+    DASHBOARD_DEP_TESTS: a freshly-added dashboard test is auto-routed to the dashboard job, never false-redded.
+    """
+    if not dashboard_modules:
+        return []
+    # -rE keeps it quiet; pytest prints "ERROR <file>" lines + a per-file ImportError block we scan together.
+    collect_cmd = "python -m pytest tests/ --collect-only -q -p no:cacheprovider 2>&1"
+    result = run([*fp_docker(worktree), "sh", "-c", collect_cmd], timeout=300)
+    output = result.stdout + "\n" + result.stderr
+    errored_files = {
+        line.split()[1]
+        for line in output.splitlines()
+        if line.startswith("ERROR ") and len(line.split()) >= 2 and line.split()[1].startswith("tests/")
+    }
+    if not errored_files:
+        return []
+    missing_modules = {match.group(1).split(".")[0] for match in _MODULE_NOT_FOUND_RE.finditer(output)}
+    is_dashboard_cause = bool(missing_modules & dashboard_modules)
+    detected: list[str] = []
+    for path in sorted(errored_files):
+        # Confirm per-file (so a non-dashboard collection error in ANOTHER file isn't misattributed): collect
+        # this file alone and check its error names a dashboard module.
+        alone = run(
+            [
+                *fp_docker(worktree),
+                "sh",
+                "-c",
+                f"python -m pytest {path} --collect-only -q -p no:cacheprovider 2>&1",
+            ],
+            timeout=120,
+        )
+        file_missing = {
+            m.group(1).split(".")[0] for m in _MODULE_NOT_FOUND_RE.finditer(alone.stdout + alone.stderr)
+        }
+        if file_missing & dashboard_modules:
+            detected.append(path)
+    if detected:
+        logger.info("auto-detected dashboard-dep tests (routed to the dashboard job): %s", detected)
+    elif is_dashboard_cause:
+        logger.info("dashboard module missing in full collect but no single file confirmed it (contention)")
+    return detected
+
+
+def _augment_with_autodetected_dashboard_tests(worktree: str, policy: TestEnvPolicy) -> TestEnvPolicy:
+    """Return ``policy`` with any auto-detected dashboard-dep tests merged into ``dashboard_dep_tests`` (so the
+    fp job --ignores them, the dashboard job runs them, and the audit treats them as known). Union with the
+    static list; if auto-detect finds nothing new, the policy is returned unchanged."""
+    detected = _autodetect_dashboard_tests(worktree, _dashboard_dep_modules(worktree))
+    new_tests = tuple(t for t in detected if t not in policy.dashboard_dep_tests)
+    if not new_tests:
+        return policy
+    return replace(policy, dashboard_dep_tests=policy.dashboard_dep_tests + new_tests)
 
 
 # Back-compat default (the daemon's own constants); _audit_coverage uses the per-checkout policy instead.

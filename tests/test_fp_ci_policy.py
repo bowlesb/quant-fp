@@ -15,6 +15,8 @@ import pytest
 from ops.ci_watcher import (
     _DEFAULT_POLICY,
     TestEnvPolicy,
+    _augment_with_autodetected_dashboard_tests,
+    _dashboard_dep_modules,
     _literal_str_tuple,
     _parse_policy_constants,
     load_policy,
@@ -88,3 +90,53 @@ def test_policy_is_frozen() -> None:
     pol = TestEnvPolicy(("a",), ("b",), ("c",), "tests/battery/")
     with pytest.raises(Exception):
         pol.dashboard_dep_tests = ("x",)  # type: ignore[misc]
+
+
+def test_status_grid_is_registered_dashboard_dep() -> None:
+    # The whack-a-mole regression: #382's tests/test_status_grid.py imports status_grid -> filelock.
+    assert "tests/test_status_grid.py" in _DEFAULT_POLICY.dashboard_dep_tests
+    assert "tests/test_status_grid.py" in _DEFAULT_POLICY.fp_excludes
+
+
+def test_dashboard_dep_modules_parses_requirements(tmp_path: object) -> None:
+    # The durable auto-detect's input: import-module names of the dashboard-only deps, normalised, with
+    # base fp-dev modules (polars/numpy) excluded and aliases (pyyaml->yaml, [extras] stripped) applied.
+    req_dir = os.path.join(str(tmp_path), "services", "dashboard")
+    os.makedirs(req_dir)
+    with open(os.path.join(req_dir, "requirements.txt"), "w") as handle:
+        handle.write("# comment\nfastapi==0.115.6\nuvicorn[standard]==0.34.0\npyyaml>=6,<7\n")
+        handle.write("filelock>=3.13,<4\npolars\nnumpy\npsycopg[binary]==3.2.3\n")
+    modules = _dashboard_dep_modules(str(tmp_path))
+    assert modules == frozenset({"fastapi", "uvicorn", "yaml", "filelock", "psycopg"})
+    assert "polars" not in modules and "numpy" not in modules  # in base fp-dev, not dashboard-only
+
+
+def test_dashboard_dep_modules_empty_when_no_requirements(tmp_path: object) -> None:
+    # No requirements file → empty set → auto-detect no-ops (never makes grading stricter).
+    assert _dashboard_dep_modules(str(tmp_path)) == frozenset()
+
+
+def test_augment_is_noop_when_nothing_detected(monkeypatch: object) -> None:
+    # When auto-detect finds no NEW dashboard tests, the policy is returned UNCHANGED (identity).
+    import ops.ci_watcher as w
+
+    monkeypatch.setattr(w, "_autodetect_dashboard_tests", lambda wt, mods: [])  # type: ignore[attr-defined]
+    pol = _DEFAULT_POLICY
+    assert _augment_with_autodetected_dashboard_tests("/nonexistent", pol) is pol
+
+
+def test_augment_merges_new_detected_test(monkeypatch: object) -> None:
+    # A detected dashboard test NOT in the static list is merged into dashboard_dep_tests (→ fp --ignores it).
+    import ops.ci_watcher as w
+
+    monkeypatch.setattr(
+        w, "_autodetect_dashboard_tests", lambda wt, mods: ["tests/test_brand_new_dash.py"]
+    )  # type: ignore[attr-defined]
+    augmented = _augment_with_autodetected_dashboard_tests("/wt", _DEFAULT_POLICY)
+    assert "tests/test_brand_new_dash.py" in augmented.dashboard_dep_tests
+    assert "tests/test_brand_new_dash.py" in augmented.fp_excludes
+    # already-registered tests are not duplicated
+    monkeypatch.setattr(
+        w, "_autodetect_dashboard_tests", lambda wt, mods: ["tests/test_status_grid.py"]
+    )  # type: ignore[attr-defined]
+    assert _augment_with_autodetected_dashboard_tests("/wt", _DEFAULT_POLICY) is _DEFAULT_POLICY
