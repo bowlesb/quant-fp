@@ -5,13 +5,21 @@ import { CanvasHeatmap, type HoverCell, type DisplayColumn } from "./CanvasHeatm
 import { Tooltip } from "./Tooltip";
 import { GroupDetailPanel } from "./GroupDetailPanel";
 import { LatencyView } from "./LatencyView";
+import { NewsEdgarView } from "./NewsEdgarView";
 
 // The worker rebuilds every 10 min; a 60s meta poll is plenty. The matrix blob is only re-fetched when its
 // generated_at advances.
 const META_POLL_MS = 60_000;
 
-// The two top-level views. The coverage grid stays the default; "latency" is the additive #321 read-side page.
-type View = "grid" | "latency";
+// The three top-level views. The coverage grid stays the default; "latency" is the additive #321 read-side
+// page; "news" is the News & Filings live-rate + store-composition tab.
+type View = "grid" | "latency" | "news";
+
+const VIEW_TITLES: Record<View, string> = {
+  grid: "Feature-store coverage",
+  latency: "Feature latency expectations",
+  news: "News & Filings",
+};
 
 function formatAsOf(generatedAt: string): string {
   const then = new Date(generatedAt);
@@ -196,7 +204,7 @@ export function App() {
       <header className="topbar">
         <div className="topbar-left">
           <span className="brand-mark" />
-          <h1>{view === "grid" ? "Feature-store coverage" : "Feature latency expectations"}</h1>
+          <h1>{VIEW_TITLES[view]}</h1>
         </div>
         <div className="topbar-center">
           {view === "grid" && meta && (
@@ -218,11 +226,19 @@ export function App() {
           >
             Latency
           </button>
+          <button
+            className={`view-tab${view === "news" ? " active" : ""}`}
+            onClick={() => setView("news")}
+          >
+            News &amp; Filings
+          </button>
         </nav>
       </header>
 
       {view === "latency" ? (
         <LatencyView />
+      ) : view === "news" ? (
+        <NewsEdgarView />
       ) : (
         <>
           <div className="controls">

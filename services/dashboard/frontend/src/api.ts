@@ -1,4 +1,11 @@
-import type { CellDrill, GridMeta, LatencyExpectations, StoreGridMatrix } from "./types";
+import type {
+  CellDrill,
+  GridMeta,
+  LatencyExpectations,
+  NewsEdgarComposition,
+  NewsEdgarStream,
+  StoreGridMatrix,
+} from "./types";
 
 // Thin client for the dashboard's /api/store-grid/* endpoints. The grid IS the dashboard (served at "/"), so
 // the app is same-origin with the API — absolute /api/... paths hit the dashboard FastAPI directly (the Vite
@@ -40,4 +47,14 @@ export function fetchCellDrill(group: string, date: string): Promise<CellDrill> 
 
 export function fetchLatencyExpectations(): Promise<LatencyExpectations> {
   return getJson<LatencyExpectations>("/api/latency-expectations");
+}
+
+// The News & Filings tab. `stream` is the live rate (polled); `composition` is the slowly-changing store
+// snapshot (TTL-cached server-side, so a single fetch per tab open is plenty).
+export function fetchNewsEdgarStream(): Promise<NewsEdgarStream> {
+  return getJson<NewsEdgarStream>("/api/news-edgar/stream");
+}
+
+export function fetchNewsEdgarComposition(): Promise<NewsEdgarComposition> {
+  return getJson<NewsEdgarComposition>("/api/news-edgar/composition");
 }

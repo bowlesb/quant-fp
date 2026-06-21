@@ -149,3 +149,83 @@ export interface LatencyExpectations {
   feature_count: number;
   groups: LatencyGroup[];
 }
+
+// Shapes returned by /api/news-edgar/* — the News & Filings tab (services/dashboard/news_edgar.py). The
+// `stream` route is the live rate (uncached); `composition` is the slowly-changing store snapshot (TTL-cached).
+
+// One source's freshness, graded business-hours-aware exactly as the data_freshness cron alert does.
+// status: OK | WARN | STALE (during SEC business hours) | INACTIVE (expected weekend/overnight lull) | ERROR.
+export interface FreshnessStatus {
+  status: string;
+  age_minutes: number | null;
+  newest_iso: string | null;
+  in_business_hours: boolean;
+  detail: string;
+}
+
+// A per-minute arrival bucket for the recent timeline.
+export interface TimelinePoint {
+  minute: string;
+  count: number;
+}
+
+// One source's live-stream block (articles or filings). `error` replaces the body if the source was briefly
+// unreachable. `per_min` is over the trailing `window_minutes`.
+export interface StreamRate {
+  per_min: number;
+  window_count: number;
+  window_minutes: number;
+  timeline: TimelinePoint[];
+  freshness: FreshnessStatus;
+  error?: string;
+}
+
+export interface NewsEdgarStream {
+  generated_at: string;
+  edgar: StreamRate | { error: string };
+  news: StreamRate | { error: string };
+}
+
+export interface SymbolCount {
+  symbol: string;
+  count: number;
+}
+
+export interface FormTypeCount {
+  form_type: string;
+  count: number;
+}
+
+export interface NewsComposition {
+  total_articles: number;
+  n_symbols: number;
+  earliest_date: string | null;
+  latest_date: string | null;
+  top_symbols: SymbolCount[];
+}
+
+export interface FilingsComposition {
+  total_filings: number;
+  stream_filings: number;
+  earliest_available_at: string | null;
+  latest_available_at: string | null;
+  form_types: FormTypeCount[];
+  error?: string;
+}
+
+// One feature computed (or coming) off the news/edgar tapes. status: LIVE | COMING.
+export interface FeatureStatus {
+  label: string;
+  source: string;
+  status: string;
+  detail: string;
+}
+
+export interface NewsEdgarComposition {
+  generated_at: string;
+  news: NewsComposition;
+  filings: FilingsComposition;
+  features: FeatureStatus[];
+  cached: boolean;
+  cache_age_seconds: number;
+}

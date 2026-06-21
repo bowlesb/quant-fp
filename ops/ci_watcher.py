@@ -67,6 +67,7 @@ DASHBOARD_DEP_TESTS = (
     "tests/test_store_grid.py",
     "tests/test_store_grid_cache.py",
     "tests/test_latency_expectations_route.py",
+    "tests/test_news_edgar_route.py",
 )
 DASHBOARD_REQUIREMENTS = "services/dashboard/requirements.txt"
 # WALL-CLOCK TIMING tests — they measure elapsed ms against a budget/ceiling, so they FALSE-RED on a loaded

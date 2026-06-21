@@ -1,0 +1,153 @@
+"""Tests for the dashboard News & Filings module + routes (services/dashboard/news_edgar.py).
+
+Covers, with NO real DB / store / Mongo (every data-access helper is monkeypatched):
+  * ``_status_for`` flattens ``data_freshness.grade_age`` into the UI shape and grades business-hours-aware.
+  * ``_news_composition`` returns an empty-but-valid payload when no partitions exist.
+  * ``composition_snapshot`` caches the heavy build (second call within the TTL is served from cache).
+  * the ``/api/news-edgar/stream`` and ``/api/news-edgar/composition`` routes return 200 with the panel shape,
+    and a DB error on a side degrades to a partial ``error`` block rather than failing the whole tab.
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import psycopg
+import pytest
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services" / "dashboard"))
+
+import news_edgar as ne  # noqa: E402  (path inserted above)
+
+# A Friday mid-morning ET instant (14:00Z = 10:00 ET) — squarely inside SEC business hours, so a fresh source
+# grades OK and a stale one grades WARN/STALE rather than the off-hours INACTIVE.
+_BUSINESS_MOMENT = datetime(2026, 6, 19, 14, 0, tzinfo=timezone.utc)
+
+
+def test_status_for_fresh_is_ok_in_business_hours() -> None:
+    newest = datetime(2026, 6, 19, 13, 50, tzinfo=timezone.utc)  # 10 min old
+    status = ne._status_for(newest, ne.NEWS_WARN_MIN, ne.NEWS_FAIL_MIN, _BUSINESS_MOMENT, "news")
+    assert status["status"] == "OK"
+    assert status["in_business_hours"] is True
+    assert status["age_minutes"] == 10.0
+
+
+def test_status_for_stale_is_graded_in_business_hours() -> None:
+    newest = datetime(2026, 6, 19, 8, 0, tzinfo=timezone.utc)  # 360 min old, past the EDGAR fail threshold
+    status = ne._status_for(newest, ne.EDGAR_WARN_MIN, ne.EDGAR_FAIL_MIN, _BUSINESS_MOMENT, "edgar")
+    assert status["status"] == "STALE"
+
+
+def test_status_for_offhours_is_inactive() -> None:
+    # A Saturday instant — outside SEC business hours, so any age is the expected lull, never a failure.
+    saturday = datetime(2026, 6, 20, 14, 0, tzinfo=timezone.utc)
+    newest = datetime(2026, 6, 19, 1, 0, tzinfo=timezone.utc)
+    status = ne._status_for(newest, ne.EDGAR_WARN_MIN, ne.EDGAR_FAIL_MIN, saturday, "edgar")
+    assert status["status"] == "INACTIVE"
+    assert status["in_business_hours"] is False
+
+
+def test_news_composition_empty_when_no_partitions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ne, "NEWS_GLOB", "/nonexistent/news/published_date=*/data.parquet")
+    payload = ne._news_composition()
+    assert payload["total_articles"] == 0
+    assert payload["n_symbols"] == 0
+    assert payload["top_symbols"] == []
+    assert payload["earliest_date"] is None
+
+
+def _stub_build(monkeypatch: pytest.MonkeyPatch, marker: list[int]) -> None:
+    """Replace the heavy composition build with a counter so cache hits are observable."""
+
+    def fake_build() -> dict[str, object]:
+        marker[0] += 1
+        return {"generated_at": "t", "news": {}, "filings": {}, "features": []}
+
+    monkeypatch.setattr(ne, "_build_composition", fake_build)
+
+
+def test_composition_snapshot_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ne, "_composition_cache", None)
+    calls = [0]
+    _stub_build(monkeypatch, calls)
+    first = ne.composition_snapshot()
+    second = ne.composition_snapshot()
+    assert calls[0] == 1  # built once, second call served from cache
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert second["cache_age_seconds"] >= 0.0
+
+
+def _import_app() -> object:
+    import app as dashboard_app  # noqa: E402  (path inserted above)
+
+    return dashboard_app
+
+
+def test_stream_route_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_stream() -> dict[str, object]:
+        return {
+            "generated_at": "2026-06-19T14:00:00+00:00",
+            "news": {
+                "per_min": 1.5,
+                "window_count": 90,
+                "window_minutes": 60,
+                "timeline": [],
+                "freshness": {},
+            },
+            "edgar": {
+                "per_min": 0.0,
+                "window_count": 0,
+                "window_minutes": 60,
+                "timeline": [],
+                "freshness": {},
+            },
+        }
+
+    dashboard_app = _import_app()
+    monkeypatch.setattr(dashboard_app, "stream_snapshot", fake_stream)
+    client = TestClient(dashboard_app.app)
+    resp = client.get("/api/news-edgar/stream")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["news"]["per_min"] == 1.5
+    assert body["edgar"]["window_count"] == 0
+
+
+def test_composition_route_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_comp() -> dict[str, object]:
+        return {
+            "generated_at": "2026-06-19T14:00:00+00:00",
+            "news": {"total_articles": 27271, "n_symbols": 6377, "top_symbols": []},
+            "filings": {"total_filings": 3175782, "form_types": []},
+            "features": [{"label": "edgar_filing_frequency", "status": "LIVE"}],
+            "cached": False,
+            "cache_age_seconds": 0.0,
+        }
+
+    dashboard_app = _import_app()
+    monkeypatch.setattr(dashboard_app, "composition_snapshot", fake_comp)
+    client = TestClient(dashboard_app.app)
+    resp = client.get("/api/news-edgar/composition")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["news"]["total_articles"] == 27271
+    assert body["filings"]["total_filings"] == 3175782
+    assert body["features"][0]["status"] == "LIVE"
+
+
+def test_stream_degrades_on_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DB outage must degrade the EDGAR side to an ``error`` block, not crash the whole stream payload."""
+
+    def raising_connect() -> object:
+        raise psycopg.OperationalError("DB down")
+
+    monkeypatch.setattr(ne, "_db_connect", raising_connect)
+    # News side reads no partitions in the test env — point it at an empty glob so it returns a quiet payload.
+    monkeypatch.setattr(ne, "recent_news_partition_paths", lambda limit: [])
+    payload = ne.stream_snapshot()
+    assert "error" in payload["edgar"]
+    assert payload["news"]["window_count"] == 0
