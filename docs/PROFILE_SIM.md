@@ -84,3 +84,30 @@ PER-GROUP compute_latest ranking (slowest shard each minute, post-warmup):
   (tick-agg / fold / reduction-emit / stateful-emit / gather / rest). Good for "which phase dominates".
 - `quantlib.features.profile_sim` (this tool) — the streaming sim with **end-to-end bar→vector latency**
   + **per-group** (not per-phase) attribution. Good for "can we make the open, and which group to fix".
+
+## The e2e latency REGRESSION GATE (`make fp-latency-e2e`)
+
+`profile_sim` above is a **pre-open eyeball** tool you run by hand. The **regression gate** turns the same
+measurement into a checked-in pytest so an e2e bar→vector slowdown can't land silently — the e2e companion
+to the per-group `docs/latency_budget.yaml` gate.
+
+```bash
+make fp-latency-e2e          # un-skips + runs tests/test_fp_latency_e2e.py (heavy; ~10-15s)
+```
+
+- **What it does:** drives the *identical* real streaming path as `profile_sim` (via the shared
+  `run_profile_sim`), at a **bounded reference scale** (256 syms / 8 shards / 10 measured minutes ≈
+  32 syms/shard — amortized like the production 1000/16 layout, NOT the tiny-N coordination-overhead
+  regime), and asserts the measured **p50/p99 stay under the ceilings in `docs/latency_e2e_budget.yaml`**.
+- **Opt-in / not in the fast suite:** it spins up a multiprocess mock + shard workers, so it is **skipped
+  unless `FP_LATENCY_E2E=1`** (the `make` target sets it). It is NOT in `make test-fp`.
+- **CEILING, not the 100ms target.** The gate enforces a **generous current-reality ceiling** (seeded
+  ~2.4x the measured value, headroom for host-load jitter) so it **PASSES at today's latency** and only
+  trips on a real >~1.6x e2e regression. The **<100ms p99 target is aspirational** — stated in the budget
+  file and the report banner, NOT enforced here (it would fail today; it is what the latency campaign
+  drives toward). Measured at seed (2026-06-21, origin/main, box load ~7.5): **p50 ~131ms / p99 ~175ms**
+  at the reference scale (cross-check at the full 1000/16/20: ~255ms / ~324ms — these numbers move with
+  host load, hence the headroom).
+- **On a breach:** investigate (a slow group, a lost incremental emit, a gather/IPC blowup). Re-run
+  `make fp-profile-sim` + `make fp-profile-latest` to attribute the slow stage, fix worktree→PR, and
+  re-seed the ceiling ONLY on a deliberate, reviewed change.

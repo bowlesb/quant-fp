@@ -1,0 +1,63 @@
+# End-to-end bar->vector latency BUDGET — the e2e regression gate's documented expectations.
+#
+# WHAT: the machine-checked expectation for the WHOLE bar->vector path, not a single group. It is the
+#   companion to docs/latency_budget.yaml (per-GROUP compute_latest budgets): that file catches a single
+#   group regressing in isolation; THIS file catches the END-TO-END number a bet actually pays — the
+#   wall-clock from a minute's last bar arriving to the universe-wide feature vector being READY (slowest
+#   shard each minute, parquet WRITE excluded, the same last-bar anchor real_capture's
+#   feature_assemble_seconds uses). The gate tests/test_fp_latency_e2e.py drives the REAL streaming path
+#   (msgpack mock -> StockDataStream -> shard workers -> incremental fast path, NOT a mock of compute) at
+#   the reference scale below and asserts the measured p50/p99 stay UNDER the ceilings here.
+#
+# WHY a separate e2e gate: the per-group budgets sum the single-shard compute_latest costs, which (a)
+#   over-count ReductionGroups (they share ONE batched incremental emit in flow, but the per-group
+#   profiler runs each group's rolling form standalone) and (b) miss the reader gather/dispatch, the
+#   reader->shard IPC, and the cross-process coordination tail. The e2e sim is the only place those
+#   in-flow costs are paid TOGETHER, so it is the only honest bar->vector number. This gate makes that
+#   number a regression GATE, not just a pre-open eyeball check.
+#
+# TARGET vs CEILING (read this before touching a number):
+#   * TARGET (aspirational, Ben 2026-06-18): p99 bar->vector < 100ms. We are NOT there and this gate does
+#     NOT enforce it — it would fail today. The 100ms goal lives in docs/PROFILE_SIM.md / the profile_sim
+#     BUDGET_MS banner and is what the latency campaign drives toward.
+#   * CEILING (what this gate enforces): a generous CURRENT-REALITY ceiling with headroom for host-load
+#     jitter, so the gate PASSES at today's latency and only TRIPS on a real >~1.6x e2e regression. It is
+#     a floor-we-must-not-cross, not a forcing function. Lower it (tighten) only on a DELIBERATE, measured
+#     win; raise it only on a reviewed, justified change. A surprise breach is a regression to investigate.
+#
+# SCALE: deliberately BOUNDED so the gate runs in ~10-15s in the sandbox (the full multiprocess
+#   1000/16/20 pre-flight takes ~6-9 min of wall — too heavy for a routine gate). At ~32 symbols/shard the
+#   per-minute fixed overhead is amortized like production (NOT the tiny-N regime, where <16 syms/shard is
+#   coordination-overhead-dominated and reads artificially HIGH ~750ms — see the cycle notes). So the
+#   absolute ms here is representative of the per-shard in-flow cost, scaled to a small universe.
+
+reference_scale:
+  n_symbols: 256
+  n_shards: 8          # ~32 symbols/shard — amortized like the production 1000/16 layout (~62/shard)
+  measure_minutes: 10  # post-warmup steady-state minutes the percentiles are taken over
+  warmup_minutes: 8    # cold-buffer minutes excluded (production measures only full-buffer minutes)
+  window_min: 120      # trailing buffer depth for the sim (shorter than prod 300 to bound the run)
+
+# Measured 2026-06-21 at this scale on the box at load ~7.5 (origin/main 226471d, 725 runnable feats,
+# fp-dev == deployed 728 incl the kind-7 Rust kernel): p50 ~131ms / p95 ~175ms / p99 ~175ms.
+# Cross-check, same path at the FULL pre-flight 1000/16/20 scale: p50 ~255ms / p95 ~300ms / p99 ~324ms
+# (the ledger's 728 baseline reads ~387/436 at higher box load — these numbers MOVE with host load,
+# which is exactly why the ceilings below carry generous headroom).
+ceilings_ms:
+  p50: 320   # ~2.4x the measured ~131ms p50 — absorbs host-load jitter, trips on a real e2e slowdown
+  p99: 420   # ~2.4x the measured ~175ms p99 — same headroom on the tail (the bet-deadline percentile)
+
+# The 100ms ASPIRATIONAL target, kept here so the gate's docstring/report can state it explicitly. NOT
+# enforced (would fail today); it is the direction the latency campaign drives, tracked in the ledger.
+aspirational_target_ms:
+  p99: 100
+
+# Per-stage decomposition (where the bar->vector ms goes, in-flow at the reference scale) — the honest
+# breakdown docs/LATENCY_PLAN.md §2.5 requires, so a regression can be ATTRIBUTED to a stage, not just a
+# number. These are context (not individually gated; the gate is on the e2e total + the per-group budgets
+# already cover the compute stage group-by-group).
+stage_notes:
+  reader_gather_dispatch: "reader buckets the minute by shard + IPC-puts each slice (route_put_ms in reader.jsonl)"
+  shard_aggregate: "tick->minute aggregation at the mark (part of the minute cost, not pre-aggregated)"
+  shard_compute: "per-group compute_latest + the shared incremental reduction emit (the bulk; per-group budgeted in latency_budget.yaml)"
+  cross_shard_tail: "the bet waits for the SLOWEST shard each minute — the e2e anchor is max-over-shards, so tail dispersion matters as much as the median group cost"
