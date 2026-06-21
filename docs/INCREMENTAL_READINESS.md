@@ -14,11 +14,42 @@
 > the P2 FP_INCREMENTAL enablement flip (now **20 of 23** reductions ready → live incremental) and the
 > Rust-resident emit kernel (the only thing that moves the ~289ms isolated per-bet floor toward <100ms).
 >
-> ⭐ REDUCTION INCREMENTAL-READINESS: **20/23 ready** — 17 always-safe + return_dynamics + volume_leads_price
-> (P2 Neumaier #283/#294) + volume (centered-std #307). **3 PARKED** (price_volume / market_beta /
-> residual_analysis) — a DISTINCT, harder corr-denom-straddle problem the centering abstraction does NOT
-> reach; they stay correctly on the batch path under FP_INCREMENTAL (no correctness loss, just no incremental
-> acceleration). See §"Parked: the corr-denom-straddle class" below.
+> ⭐ REDUCTION INCREMENTAL-READINESS: declared **20/23 incremental_safe=True**, but a REAL-DATA A/B soak
+> (2026-06-17, 30 symbols × 779 graded post-warmup minutes, production `_incremental_parity` self-check,
+> `slice_derive=True`) finds **15/20 actually CLEAN**. The synthetic degenerate stream (test_fp_incremental_
+> features) only triggers `distribution`; the real gappy/sparse tape triggers **5 rare degenerate-cell
+> guard-straddle breachers** the synthetic stream cannot reproduce — the SAME root cause as the parked
+> corr-denom class, just rarer (0.4–7.8% of minutes). These 5 are NOT yet GO for FP_INCREMENTAL:
+>
+> | group | breach freq (real A/B) | worst ratio | worst cell | straddle |
+> |---|---|---|---|---|
+> | `range_expansion` | 61/779 (7.8%) | inf (null-flip) | range_expansion_5_30m | trailing-mean RATIO denom `>0` guard |
+> | `trend_quality` | 21/779 (2.7%) | 1683× | price_r2_5m | OLS R² cov²/(var·var) (the parked corr-denom class) |
+> | `clean_momentum` | 12/779 (1.5%) | 620× | clean_momentum_score_5m | moment/std power-sum cancellation |
+> | `return_dynamics` | 4/779 (0.5%) | inf (null-flip) | autocorr_2_10m | autocorrelation denom straddle |
+> | `distribution` | 3/779 (0.4%) | 10404× | ret_kurt_10m | kurtosis higher-moment cancellation |
+>
+> **GO (15)** — clean across the whole soak: count_fano, efficiency, liquidity, momentum, momentum_consistency,
+> ohlc_vol, quote_spread, realized_range, signed_trade_ratio, trade_flow, trade_freq_z, volatility, **volume**,
+> volume_exhaustion, volume_leads_price. (`volume` is clean ONLY when the centering anchor is per-MINUTE scale,
+> see ⚠ below.)
+>
+> ⚠ **VOLUME ANCHOR SCALE (action item).** `volume`'s centered-std anchor comes from `daily.volume` =
+> the prior-day DAILY-BAR total (~`backfill_daily`), but the reduction centers PER-MINUTE volume (~390× smaller).
+> At that ~2-order scale mismatch the centering only PARTIALLY conditions → `volume` still breaches ~0.4% (worst
+> 13.7×). With a per-MINUTE-scale anchor (daily-total / ~390, or per-symbol mean-minute volume) the soak measures
+> **0/779 breaches (worst 0.0)**. The anchor source should be the per-minute volume scale, not the daily total.
+>
+> **3 PARKED** (price_volume / market_beta / residual_analysis) — a DISTINCT, harder corr-denom-straddle problem
+> the centering abstraction does NOT reach; they stay correctly on the batch path under FP_INCREMENTAL (no
+> correctness loss, just no incremental acceleration). See §"Parked: the corr-denom-straddle class" below.
+>
+> **NET: GO to flip FP_INCREMENTAL=1 PARITY=1 for the 15 clean groups** (their incremental==batch holds on
+> real data); KEEP the 5 above + the 3 parked on the batch path until the guard-straddle fix lands (the
+> per-group `incremental_safe=True` should be revoked for the 5, OR FP_INCREMENTAL must run the parity
+> self-check live and the breach metric must stay below threshold — the 5 would trip it on real data). The
+> 5 are the same engineering fix as the parked class (a cancellation-free / consistently-guarded reduction
+> denom), now with a sized, prioritized real-data target list.
 
 **63 groups / 728 features**: 23 ReductionGroup, 4 StatefulGroup, 36 hand-written FeatureGroup.
 

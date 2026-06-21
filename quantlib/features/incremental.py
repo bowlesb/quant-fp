@@ -338,7 +338,9 @@ class IncrementalEngine:
         ) = build_plan(self.groups)
         self.col_index = {col: i for i, col in enumerate(self.value_cols)}
         # Flattened metadata for the Rust assemble kernel (FP_RUST_ASSEMBLE) — built ONCE here, reused each minute.
-        self.asm_plan = build_assemble_plan(self.groups, self.windows, self.col_index, self.plan, self.reg_plan)
+        self.asm_plan = build_assemble_plan(
+            self.groups, self.windows, self.col_index, self.plan, self.reg_plan, self.centered
+        )
         self.reduce_input = self.groups[0].reduce_input if self.groups else "minute_agg"
         input_cols: list[str] = []
         for group in self.groups:
@@ -725,6 +727,7 @@ class IncrementalEngine:
             latest,
             self.plan,
             self.reg_plan,
+            self.centered,
         )
 
     def step_rust(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:

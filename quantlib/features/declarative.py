@@ -584,10 +584,15 @@ def build_assemble_plan(
     col_index: dict[str, int],
     plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
     reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+    centered: dict[str, str] | None = None,
 ) -> _AssemblePlan:
     """Flatten plan/reg_plan into the per-output-column spec the Rust kernel needs, in the SAME column order
     (per group: reduced columns then regressions, each window then stat) ``emit_numpy`` builds ``wide_cols``.
-    Pure metadata; built once and reused every minute."""
+    Pure metadata; built once and reused every minute. ``centered`` is the ``build_plan`` centered-std map
+    (base -> anchor col): a base in it has its std read from the centered power sums ``{base}__c``/``{base}__csq``
+    (idx0/idx2) so the Rust ``assemble_canonical`` std matches the centered ``assemble_from_long`` live truth —
+    without this the Rust/numpy emit re-introduce the cancellation centering exists to fix (e.g. volume)."""
+    centered = centered or {}
     win_index = {int(w): wi for wi, w in enumerate(windows)}
     win: list[int] = []
     kind: list[int] = []
@@ -614,7 +619,9 @@ def build_assemble_plan(
                         indices = [col_index[base]]
                     elif stat == "mean":
                         indices = [col_index[base], col_index[f"{base}__p"]]
-                    else:  # std
+                    elif base in centered:  # centered std: read Σ(v−a)/Σ(v−a)² (idx0/idx2), count unchanged
+                        indices = [col_index[f"{base}__c"], col_index[f"{base}__p"], col_index[f"{base}__csq"]]
+                    else:  # raw std
                         indices = [col_index[base], col_index[f"{base}__p"], col_index[f"{base}__sq"]]
                     push(window, stat, indices, f"__{stat}_{name}_{window}")
         for pgi, name, stats, group_windows, ns in reg_plan:
@@ -750,13 +757,24 @@ def emit_rust_unified(
 
 
 def _canonical_numpy(
-    sums: np.ndarray, stats: tuple[str, ...], col_index: dict[str, int], base: str
+    sums: np.ndarray,
+    stats: tuple[str, ...],
+    col_index: dict[str, int],
+    base: str,
+    *,
+    centered_base: bool = False,
 ) -> dict[str, np.ndarray]:
     """Numpy twin of ``_canonical`` for ONE reduced column over ONE window. ``sums`` is the ``(n_symbols,
     n_value_cols)`` running-sum row for the window. Reproduces the IDENTICAL algebra cell-for-cell, with
     ``np.nan`` standing in for polars ``null`` (the same guard conditions): mean = sum/count guarded count>0,
     std(ddof=1) = sqrt((sumsq - sum^2/count)/(count-1)) guarded count>1. Returns {canonical_col_name: column}
-    keyed ``__c_<stat>_<name>`` to mirror the polars path's intermediate names."""
+    keyed ``__c_<stat>_<name>`` to mirror the polars path's intermediate names.
+
+    ``centered_base`` (mirrors ``_canonical``): compute std/variance from the PER-SYMBOL-CENTERED power sums
+    ``{base}__c`` = Σ(v−a) and ``{base}__csq`` = Σ(v−a)² (a = the anchor) — value-identical (shift-invariant)
+    but float-stable on large-magnitude values. mean/sum still read the RAW ``base``. Required so this numpy
+    emit (and the Rust ``assemble_canonical`` twin) match the polars ``assemble_from_long`` live truth for a
+    centered group (e.g. volume); without it they re-introduce the very cancellation centering exists to fix."""
     total = sums[:, col_index[base]]
     out: dict[str, np.ndarray] = {}
     name = base  # key the returned dict by ``base`` (the caller looks up ``__c_<stat>_<base>`` directly)
@@ -768,13 +786,19 @@ def _canonical_numpy(
         out[f"__c_mean_{name}"] = mean
     if "std" in stats:
         count = sums[:, col_index[f"{base}__p"]]
-        sumsq = sums[:, col_index[f"{base}__sq"]]
+        if centered_base:
+            # centered variance = (Σ(v−a)² − (Σ(v−a))²/n)/(n−1) — shift-invariant == the raw var, conditioned.
+            std_total = sums[:, col_index[f"{base}__c"]]
+            sumsq = sums[:, col_index[f"{base}__csq"]]
+        else:
+            std_total = total
+            sumsq = sums[:, col_index[f"{base}__sq"]]
         safe = count > 1
         # ((sumsq - total^2/count) / (count - 1)).sqrt() — guarded count>1 (else null), matching _canonical.
         # Sentinel count=2 on unsafe rows (count<=1) so the intermediate never divides by zero; those rows are
         # then masked to NaN. On SAFE rows the algebra is bit-identical to the polars _canonical expression.
         cnt_safe = np.where(safe, count, 2.0)
-        var_calc = (sumsq - total * total / cnt_safe) / (cnt_safe - 1.0)
+        var_calc = (sumsq - std_total * std_total / cnt_safe) / (cnt_safe - 1.0)
         out[f"__c_std_{name}"] = np.where(safe, np.sqrt(var_calc), np.nan)
     return out
 
@@ -838,14 +862,17 @@ def emit_numpy(
     latest: object,
     plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
     reg_plan: list[tuple[int, str, tuple[str, ...], tuple[int, ...], str]],
+    centered: dict[str, str] | None = None,
 ) -> dict[str, pl.DataFrame]:
     """NUMPY-NATIVE alternative to ``assemble_from_long`` — builds each group's per-window canonical columns
     (``__<stat>_<name>_<w>``) DIRECTLY from the ``(n_windows, n_symbols, n_value_cols)`` running-sum array,
     BYPASSING the polars pivot. The canonical/OLS algebra is the numpy twin of ``_canonical``/``_ols_stat_exprs``
     (parity-true by construction; null↔NaN), and a column is only emitted for the windows a group actually
     declares (so the wide frame already has the accessor-expected columns, no pivot/rename). ``running`` is
-    ``WindowedSumState.running``; ``col_index`` maps value-col name -> column index. Returns the SAME
-    {group_name: feature_frame} shape as ``assemble_from_long``."""
+    ``WindowedSumState.running``; ``col_index`` maps value-col name -> column index. ``centered`` is the
+    ``build_plan`` centered-std map (base -> anchor col); a base in it computes std from the centered power
+    sums, matching ``assemble_from_long``. Returns the SAME {group_name: feature_frame} shape."""
+    centered = centered or {}
     win_index = {int(w): wi for wi, w in enumerate(windows)}
     results: dict[str, pl.DataFrame] = {}
     for gi, group in enumerate(groups):
@@ -855,7 +882,7 @@ def emit_numpy(
                 continue
             for w in group_windows:
                 row_sums = running[win_index[int(w)]]
-                canon = _canonical_numpy(row_sums, stats, col_index, base)
+                canon = _canonical_numpy(row_sums, stats, col_index, base, centered_base=base in centered)
                 for stat in stats:
                     column = canon[f"__c_{stat}_{base}"]
                     wide_cols[f"__{stat}_{name}_{w}"] = pl.Series(column, dtype=pl.Float64)
