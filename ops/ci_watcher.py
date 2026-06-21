@@ -70,6 +70,31 @@ def run(cmd: list[str], cwd: str | None = None, timeout: int | None = None) -> s
     )
 
 
+def fp_docker(worktree: str) -> list[str]:
+    """The ``docker run`` prefix for fp-dev jobs over a checkout.
+
+    Runs as the HOST user (so files written into the bind-mounted worktree are owned by us, not root — else
+    the throwaway-worktree cleanup hits PermissionError on root-owned ``__pycache__``) with bytecode writing
+    OFF, ``HOME=/tmp`` (the non-root user has no home), and NO ``.env`` (env-scrubbed — creds can't leak).
+    """
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "-e",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "-e",
+        "HOME=/tmp",
+        "-v",
+        f"{worktree}:/app",
+        "-w",
+        "/app",
+        FP_IMAGE,
+    ]
+
+
 def gh_json(args: list[str]) -> Any:
     """Run a ``gh`` command expected to emit JSON and parse it (empty -> None).
 
@@ -125,14 +150,7 @@ def fingerprint_in(worktree: str) -> int:
     """
     result = run(
         [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{worktree}:/app",
-            "-w",
-            "/app",
-            FP_IMAGE,
+            *fp_docker(worktree),
             "python",
             "-c",
             "from quantlib.bus.schema import BusSchema; print(BusSchema.from_registry().fingerprint)",
@@ -160,14 +178,7 @@ def run_suite(worktree: str) -> tuple[bool, str]:
     only at /app (its own throwaway worktree).
     """
     cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "-v",
-        f"{worktree}:/app",
-        "-w",
-        "/app",
-        FP_IMAGE,
+        *fp_docker(worktree),
         "python",
         "-m",
         "pytest",
@@ -270,9 +281,37 @@ def _find_sticky(pr_number: int) -> int | None:
 
 
 def ensure_label(pr_number: int, label: str, present: bool) -> None:
-    """Add or remove a label on the PR to match ``present``."""
-    verb = "--add-label" if present else "--remove-label"
-    run(["gh", "pr", "edit", str(pr_number), verb, label], cwd=REPO_DIR)
+    """Add or remove a label on the PR to match ``present`` (creating the repo label first if needed).
+
+    Uses the REST issues/labels API rather than ``gh pr edit`` — the latter hits the deprecated GraphQL
+    projects-classic path and errors even on a pure label change.
+    """
+    if present:
+        run(
+            ["gh", "label", "create", label, "--description", "CI-managed", "--color", "B60205", "--force"],
+            cwd=REPO_DIR,
+        )
+        result = run(
+            [
+                "gh",
+                "api",
+                "-X",
+                "POST",
+                f"repos/{_repo_slug()}/issues/{pr_number}/labels",
+                "-f",
+                f"labels[]={label}",
+            ],
+            cwd=REPO_DIR,
+        )
+    else:
+        # DELETE is 404 if the label isn't on the PR — harmless, so we don't treat that as an error.
+        result = run(
+            ["gh", "api", "-X", "DELETE", f"repos/{_repo_slug()}/issues/{pr_number}/labels/{label}"],
+            cwd=REPO_DIR,
+        )
+        return
+    if result.returncode != 0:
+        logger.error("failed to add '%s' on #%s: %s", label, pr_number, result.stderr.strip()[-200:])
 
 
 def auto_merge(pr_number: int) -> bool:

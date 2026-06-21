@@ -33,6 +33,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 from ops.ci_scope import Tier, classify, deploy_target
@@ -70,8 +71,6 @@ def run(cmd: list[str], cwd: str | None = None, timeout: int | None = None) -> s
 
 def fingerprint_at(tree: str, ref: str) -> int:
     """Fingerprint of a ref, computed in a throwaway worktree of ``tree`` in the fp-dev image."""
-    import tempfile
-
     with tempfile.TemporaryDirectory(prefix="ci-dep-") as worktree:
         run(["git", "worktree", "add", "--detach", "--force", worktree, ref], cwd=tree)
         try:
@@ -80,6 +79,12 @@ def fingerprint_at(tree: str, ref: str) -> int:
                     "docker",
                     "run",
                     "--rm",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "-e",
+                    "PYTHONDONTWRITEBYTECODE=1",
+                    "-e",
+                    "HOME=/tmp",
                     "-v",
                     f"{worktree}:/app",
                     "-w",
