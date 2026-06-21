@@ -1,9 +1,13 @@
 # In-process feature state — the general abstraction (design)
 
-> Status: DESIGN (2026-06-14). Answers: "do all feature groups share ONE flexible abstraction for the
-> in-process state they need for fast compute, with backfill engaging it consistently?" Today: clearly
-> yes for the windowed-additive class (`ReductionGroup` + `WindowedSumState`), NOT generalized to the
-> other state kinds. This is the generalization.
+> Status: DESIGN + MEASURED ADOPTION (updated 2026-06-21). Answers: "do all feature groups share ONE flexible
+> abstraction for the in-process state they need for fast compute, with backfill engaging it consistently?"
+> The KINDS (additive-window, EMA, lag/last-k, extrema) are BUILT and parity-proven; the held-state
+> `RunningState` contract (`up_to_date`/`rebuild_from_history`) is on `base.FeatureGroup`. The two remaining
+> gaps are concrete, not conceptual: (1) the ~10x incremental lever is DORMANT in the live equity fc
+> (`FP_INCREMENTAL` off) and has no equity PARITY soak backing the flip; (2) ~14 plain groups (~285 features)
+> still rebuild from the FULL trailing buffer every minute instead of folding. The measured adoption map +
+> the activation gap + the migration path are the new sections at the bottom.
 
 ## The principle that must hold (non-negotiable)
 
@@ -82,5 +86,128 @@ identical across groups because it's engine-owned, not re-implemented per group.
   as a declared KIND with the engine-owned backfill form — never hand-rolled. A genuinely novel state
   shape means adding a KIND to the engine (with its parity test), not a one-off in the group.
 
-So: clearly designed for one kind, now generalized on paper; the build is the V2-first sequence above.
-We had NOT thought the general case through before — this doc is that thinking made explicit.
+---
+
+## ADOPTION MAP — every group classified (measured 2026-06-21, live registry: 63 groups / 728 features)
+
+Ben's target: every feature is **(A) intraday-invariant → compute-once + cache** or **(B) prior-state +
+O(1)-per-minute fold**. Anything else is **BATCH** — the live path rebuilds it from the full trailing buffer
+EVERY minute (the slow path the abstraction exists to kill). Counts below are the live `feature-computer`
+registry, classified mechanically (`isinstance` + `reduce_buffer_minutes()` + `compute_latest`/`SessionCache`
+overrides), NOT from this doc's prose. The 728/63 mismatch with older "190 feature" notes is the FINGERPRINT
+feature count (728 named outputs across 63 groups); both are correct, they count different things.
+
+### Headline: the held-state contract IS landed; the GAP is the BATCH plain groups, not the kinds.
+
+| Category | groups | features | what they are |
+|---|---|---|---|
+| **A — intraday-invariant (cached or cacheable)** | 13 | 99 | static/calendar (5 groups, 31f) + `SessionCache` daily-snapshot groups (8 groups, 68f) |
+| **B — O(1) fold (incremental state)** | 19 | 288 | 15 `ReductionGroup` incremental_safe (201f) + 4 `StatefulGroup` EMA/Lag/Extrema (87f) |
+| **B-ready, FLAG-OFF** | 1 | 9 | `swing` — full RunningState held-state built, gated on `FP_SWING_STATEFUL` (currently BATCH live) |
+| **BATCH-bounded (cheap, NOT yet folding)** | 10 | 66 | plain groups with a bounded `compute_latest` window (30–62m) — recompute a SHORT window/minute, not full history |
+| **BATCH-fullbuffer (the real slow path)** | 12 | 90 | plain groups whose live `compute_latest` reads the WHOLE buffer (`reduce_buffer_minutes()==None`) every minute |
+| **NO-GO reductions (Rust-only, stay BATCH)** | 8 | 176 | `ReductionGroup incremental_safe=False` — settled value-identical float-cancellation limit; see below |
+
+(Totals: 13+19+1+10+12+8 = 63 groups; 99+288+9+66+90+176 = 728 features — verified against the live registry.)
+
+**The quantified gap Ben asked for — "how many features still rebuild from full history every minute?"**
+The **12 BATCH-fullbuffer plain groups** (90 features, `reduce_buffer_minutes()==None`) are the answer: they
+emit one row per symbol but the polars `compute()` they filter to the latest minute still scans the entire
+trailing buffer. That is the dormant per-minute cost. The 10 BATCH-bounded groups (66f) already slice to a
+30–62m window (much cheaper, parity-true by `compute_latest_on_window` semantics) but are NOT yet expressed as
+a declared B-kind. Plus the 201f of armed reductions that run BATCH-in-live only because `FP_INCREMENTAL` is
+off (the activation gap below) — the single largest "rebuilds every minute despite being B-ready" bucket.
+
+The 12 BATCH-fullbuffer groups (the migration backlog, exact list, by mechanism):
+- **session-cumulative running min/max/first** → trivially B (a running extremum is O(1)): `dumper_state` (6f,
+  session min-low), `runner_state` (6f, session max-high), `gap_fill_state` (2f). The cleanest wins — pure
+  `ExtremaState`/cumulative kind already in `stateful.py`.
+- **universe/market gather** → A-cacheable or single-pass: `market_context` (36f — already gathers only the
+  latest row but self-joins the FULL buffer for trailing returns; the heaviest single fullbuffer group).
+- **tape/microstructure rolling** → B tick-ring (the one genuinely-new KIND): `inter_arrival` (3f),
+  `large_print_burst` (3f), `microstructure_burst` (4f), `tick_runlength` (3f), `trade_size_dist` (3f).
+- **rolling OLS / run-length** → B additive (OLS power-sums) once expressed declaratively: `momentum_run` (12f).
+- **time-of-day rolling** → bounded window or A: `intraday_seasonality` (2f).
+- **filing-window count** → A session-snapshot (the available_at gate is per-session-fixed): `edgar_filing_frequency` (10f).
+
+(The 10 BATCH-bounded groups, for reference — already short-window, convert their bespoke `compute_latest` to a
+declared kind: `breadth` 30f/60m, `cross_sectional_rank` 6f/60m, `draw_range` 3f/61m, `market_turbulence`
+5f/60m, `peer_relative` 3f/30m, `print_hhi` 2f/61m, `sector_beta` 6f/62m, `sector_return` 8f/60m, `size_entropy`
+2f/61m, `subminute_gap_fano` 1f/61m.)
+
+### The NO-GO 8 (SETTLED — do not re-litigate)
+`clean_momentum / distribution / market_beta / price_volume / range_expansion / residual_analysis /
+return_dynamics / trend_quality` (176f). These ARE on the reduction contract but `incremental_safe=False`
+because the incremental `Σx²−(Σx)²/n` form diverges from the batch rolling form by ~2e-8..3e-6 on the float
+cancellation (independently re-measured 06-21; the centered-anchor #332 mechanism fixes `volume` but does NOT
+generalize to corr/OLS-denominator straddles — see SYSTEM_LOG 06-21 "NO-GO reduction-group anchor-extension =
+0 flips" and docs/ACCELERATION_ROADMAP.md). Their path to O(1) is the **centered-denom Rust OLS/corr kernel**
+(extend `reduction_anchor` + `assemble_canonical`), NOT a Python incremental fold. They stay correctly on the
+batch path under FP_INCREMENTAL; this is a numerical limit, not an un-built feature.
+
+---
+
+## ACTIVATION GAP — the ~10x lever is DORMANT in live equity, and not even recording parity evidence
+
+The B-incremental machinery for the 15 armed reduction groups is BUILT, ON MAIN, and unit-parity-green
+(tests/test_fp_incremental*.py) — but **it is OFF in the live `feature-computer`.** Measured 2026-06-21:
+
+```
+live feature-computer env:  FP_BUS=1  FP_WARM_START=1          # NO FP_INCREMENTAL*, NO FP_*PARITY
+crypto-capture env:         FP_INCREMENTAL=1 FP_INCREMENTAL_PARITY=1 FP_INCREMENTAL_SLICE=1
+```
+
+Per `capture.py:_incremental_switches`, all three FP_INCREMENTAL switches DEFAULT OFF → the live equity path is
+**byte-identical to the pure batch path**; the 15 armed groups run the slow rolling recompute every minute. The
+~10x lever is 100% dormant on equity. Worse for de-risking: because `FP_INCREMENTAL_PARITY` is also off, equity
+is **not even recording the live A/B divergence** (`feature_incremental_parity_breach_total` /
+`feature_incremental_parity_tol_ratio` in metrics.py) that is the stated evidence gate. Only crypto runs
+PARITY=1 — and on the SPARSE crypto tape, which prior soaks already flagged as +Inf null-mismatch noise, NOT
+clean parity evidence.
+
+### What the Monday flip does, and how to de-risk it (the gated click)
+1. **Flip `FP_INCREMENTAL=1 FP_INCREMENTAL_PARITY=1` on equity fc** (NOT PARITY=0 yet). With PARITY=1 the batch
+   form stays the WRITTEN TRUTH; the incremental form is computed alongside and compared each minute. Zero risk
+   to emitted values — it only starts populating the breach counter.
+2. **Soak one full RTH session** and read `feature_incremental_parity_breach_total` per `reduce_input` bucket.
+   A breach = divergence > 10× tolerance (`_PARITY_BREACH_RATIO`). The 15 armed groups should show 0 material
+   breaches (the +Inf null-mismatch class seen on crypto is sparsity, not a real divergence — split it out).
+3. **Promote: PARITY=0** once the equity soak is clean → the incremental form becomes the emitted truth and the
+   batch recompute is dropped → the live ~10x lands. `FP_INCREMENTAL_SLICE=1` is now parity-safe for sparse
+   symbols (positional tail) and rides along.
+
+This staged flip is the missing prerequisite the READINESS "FP_INCREMENTAL (15 armed)" row omits: **there is no
+equity PARITY soak backing the Monday flip today** — flipping straight to FP_INCREMENTAL=1 without the PARITY=1
+session is exactly the risk this design warns against. Same pattern for `swing` (`FP_SWING_STATEFUL=1` → morning
+soak → verify value-identical). The flip itself is the Lead's gated click; the de-risk is collecting the soak.
+
+---
+
+## THE PATH TO "every feature is A or B"
+
+1. **FLIP the dormant lever first (no new code).** Equity FP_INCREMENTAL PARITY-soak → promote. This alone moves
+   the 15 armed groups (201f) from de-facto-BATCH-in-live to actually-B-in-live. Highest leverage, already built.
+2. **Migrate the 3 session-cumulative groups to B** (`dumper_state`/`runner_state`/`gap_fill_state`): a running
+   min/max/first is the canonical `ExtremaState`/cumulative kind already in `stateful.py` — declare the kind, get
+   the `fold==reseed` parity test for free, delete the full-buffer recompute. Cleanest wins.
+3. **Cache the A-eligible BATCH groups** (`edgar_filing_frequency` and any per-session-fixed gather): route them
+   through `SessionCache` like daily_beta/prior_day already are — compute-once-per-session, O(1) lookup each minute.
+4. **Express the bounded-window BATCH groups as declared B-kinds.** The 9 BATCH-bounded groups already prove their
+   window is short; converting their bespoke `compute_latest` to the additive/extrema kind makes them fold instead
+   of re-slice, and puts them under the single parity invariant rather than the generic `compute_latest` guard.
+5. **Tape/microstructure → tick-ring kind.** The Layer-C bounded tick buffer (`inter_arrival`,
+   `large_print_burst`, `microstructure_burst`, `tick_runlength`, `trade_size_dist`) is the one genuinely-new
+   KIND still bespoke — build it once in the engine with its `fold==reseed` test, migrate all five.
+6. **Land the centered-denom Rust corr/OLS kernel** for the NO-GO 8 (the only path that makes THEM fast without
+   breaking parity) — Rust, not Python fold. Tracked in docs/ACCELERATION_ROADMAP.md; Lead-sequenced.
+
+After 1–6, every group is A (cached) or B (folds) or rides a Rust kernel — no group rebuilds from full history
+each minute. **Rule (unchanged): a group that needs state declares a KIND with the engine-owned backfill form —
+never hand-rolled incremental bookkeeping.** A novel state shape adds a KIND to the engine (with its parity
+test), not a one-off in the group. `swing` is the cautionary reference: it hand-rolled held-state, so it carries
+its OWN `up_to_date`/`rebuild_from_history` and a bespoke flag — correct, but the kind it needs (leg-state)
+should be promoted into the engine so the next such feature inherits it.
+
+So: the abstraction's KINDS are largely built and parity-proven; the work is (a) FLIP the dormant lever with a
+PARITY soak, and (b) MIGRATE the 14 full-buffer plain groups onto the existing kinds. This is the engineering
+backlog — not more design.
