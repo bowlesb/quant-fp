@@ -1,5 +1,10 @@
 # Incremental-readiness table — what compute can still move into running state
 
+> 👉 **Reading this at a glance?** See [`docs/FEATURE_LATENCY_EXPECTATIONS.md`](FEATURE_LATENCY_EXPECTATIONS.md)
+> — the human-readable front door (per-group KIND in A/B/Rust framing + measured ms + readiness, plus the
+> honest e2e bar→vector picture). THIS doc is the deeper working detail (kind/state/lever + the PARKED
+> corr-denom-straddle write-up).
+>
 > The accountability surface (auto-generated from the registry + the P0/P1/P3 classification). For
 > each of the 63 feature groups: its KIND, whether it already rides SHARED RUNNING STATE (and which
 > win put it there), and the remaining migration LEVER. Pairs with docs/latency_budget.yaml (the
