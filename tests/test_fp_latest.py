@@ -18,6 +18,7 @@ import pytest
 from quantlib.features import BatchContext, REGISTRY
 from quantlib.features.compare import runnable
 from quantlib.features.profile import build_frames
+from quantlib.features.reduction_anchor import attach_volume_anchor
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
 ALL_GROUPS = [group.name for group in REGISTRY.groups()]
@@ -72,7 +73,16 @@ def _buffer(symbols: tuple[str, ...], n: int) -> pl.DataFrame:
             close = 100.0 + offset * 2.0 + 5.0 * math.sin((i + offset) / 9.0) + i * 0.02
             rows.append({"symbol": symbol, "minute": BASE + timedelta(minutes=i), "close": close,
                          "volume": 800.0 + ((i * 7 + offset) % 40) * 25.0})
-    return pl.DataFrame(rows)
+    frame = pl.DataFrame(rows)
+    # Attach volume's centering anchor (production capture / build_frames do this where minute_agg is built)
+    # so the centered-std volume group is runnable; at this small well-conditioned volume the anchor leaves
+    # the std byte-for-byte the raw form.
+    daily = (
+        frame.group_by("symbol", maintain_order=True)
+        .agg(pl.col("volume").last().alias("volume"))
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_volume_anchor(frame, daily)
 
 
 def test_volume_latest_matches_rolling() -> None:
