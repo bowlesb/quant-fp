@@ -49,9 +49,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from quantlib.features.base import BatchContext, FeatureGroup
+from quantlib.features.base import FeatureGroup
 from quantlib.features.compare import runnable
-from quantlib.features.profile import build_frames
+from quantlib.features.profile import _live_call, build_frames
 from quantlib.features.profile_sim import run_profile_sim_raw
 from quantlib.features.registry import REGISTRY
 
@@ -376,6 +376,11 @@ GROUP_METADATA: dict[str, dict[str, str]] = {
         "mechanism": "SessionCache filings; intraday available_at<=minute gate",
         "incremental_ready": "n-a",
     },
+    "news_sentiment": {
+        "kind": "A-hybrid (event-kind)",
+        "mechanism": "news snapshot; intraday available_at<=minute point-in-time gate",
+        "incremental_ready": "n-a",
+    },
     "liquidity_rank": {
         "kind": "A cached/static",
         "mechanism": "SessionCache daily memo (#281)",
@@ -467,13 +472,16 @@ def measure_group_rows(reps: int) -> list[dict]:
 
 
 def _time_group_distribution(group: FeatureGroup, frames: dict, reps: int) -> list[float]:
-    """The sorted ms distribution of ``group.compute_latest`` over ``reps`` runs (warmup excluded)."""
-    ctx = BatchContext(frames=frames)
-    group.compute_latest(ctx)  # warmup (JIT/import/cache priming excluded from the distribution)
+    """The sorted ms distribution of the group's TRUE LIVE per-minute path over ``reps`` runs (warmup
+    excluded). ``_live_call`` (shared with the budget gate) dispatches to ``StatefulEngine.step()`` for a
+    stateful group and a live-breadth-thinned tape for a raw-trades tick group, so the JSON reflects real
+    live cost — NOT the rolling-derive backfill twin / full-universe-tape profiler artifacts (#381)."""
+    call = _live_call(group, frames)
+    call()  # warmup (JIT/import/cache priming excluded from the distribution)
     times_ms: list[float] = []
     for _ in range(reps):
         start = time.perf_counter()
-        group.compute_latest(ctx)
+        call()
         times_ms.append((time.perf_counter() - start) * 1000.0)
     return sorted(times_ms)
 

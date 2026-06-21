@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 import polars as pl
@@ -20,8 +21,19 @@ from quantlib.features.base import BatchContext, FeatureGroup
 from quantlib.features.reduction_anchor import attach_volume_anchor
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
+from quantlib.features.stateful import StatefulEngine, StatefulGroup
 
 BASE = datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc)
+
+# The TRUE live raw-tape breadth: only the tick-SUBSCRIBED symbols stream a raw trades feed (the live
+# default is the liquid canary set ``real_capture.DEFAULT_TICK_SYMBOLS``; ops widen it with FP_TICK_SYMBOLS).
+# A group that reads the ``trades`` frame therefore sees ticks for only this many symbols live — NOT the
+# full minute-bar universe. Profiling such a group over a full-universe synthetic tape over-states its live
+# cost by the breadth ratio (the #381 §2d profiler artifact), so the LIVE timing thins the tape to this
+# breadth. Bar/minute-agg groups are unaffected (they read every symbol's bar) and keep the full universe.
+# Kept as a literal so the profiler (+ its pytest budget gate) imports with NO DB/capture dependency;
+# ``test_fp_latency_budget`` asserts it stays equal to ``len(DEFAULT_TICK_SYMBOLS)``.
+LIVE_TICK_BREADTH = 24
 INTRADAY_COLS = ("open", "close", "high", "low", "volume", "n_trades", "signed_volume",
                  "mean_spread_bps", "quote_imbalance", "mean_bid_size", "mean_ask_size")
 
@@ -98,18 +110,71 @@ def _build_trades(symbols: pl.DataFrame, window_min: int) -> pl.DataFrame:
     )
 
 
-def time_group(group: FeatureGroup, frames: dict[str, pl.DataFrame], reps: int = 3, latest: bool = False) -> float:
-    """Min wall-clock ms over ``reps`` runs (after a warmup) of one group's compute. ``latest=True`` times
-    ``compute_latest`` — the LIVE path (what the per-minute budget actually pays) — instead of compute()."""
-    ctx = BatchContext(frames=frames)
-    call = (lambda: group.compute_latest(ctx)) if latest else (lambda: run_group(group, ctx, validate=False))
-    call()  # warmup
+def reads_raw_trades(group: FeatureGroup) -> bool:
+    """True iff the group consumes the raw ``trades`` tape (its declared inputs name it). These are the
+    hand-written sub-minute tick groups; live they see ticks for only the tick-SUBSCRIBED symbols
+    (``LIVE_TICK_BREADTH``), so their live cost is measured on a tape thinned to that breadth."""
+    return any(spec.name == "trades" for spec in group.inputs)
+
+
+def thin_trades_to_live_breadth(
+    frames: dict[str, pl.DataFrame], n_syms: int = LIVE_TICK_BREADTH
+) -> dict[str, pl.DataFrame]:
+    """A copy of ``frames`` with the ``trades`` tape restricted to ``n_syms`` symbols — the live raw-tape
+    breadth a tick-group actually sees. The bar/daily/reference frames are untouched (every symbol streams
+    a bar). No ``trades`` frame -> returned unchanged."""
+    if "trades" not in frames:
+        return frames
+    keep = {f"S{i}" for i in range(n_syms)}
+    thinned = dict(frames)
+    thinned["trades"] = frames["trades"].filter(pl.col("symbol").is_in(keep))
+    return thinned
+
+
+def _measure(call: Callable[[], object], reps: int) -> float:
+    """Min wall-clock ms over ``reps`` runs of ``call`` after one warmup."""
+    call()  # warmup (JIT/import/cache priming excluded)
     times = []
     for _ in range(reps):
         start = time.perf_counter()
         call()
         times.append(time.perf_counter() - start)
     return min(times) * 1000.0
+
+
+def _live_call(group: FeatureGroup, frames: dict[str, pl.DataFrame]) -> Callable[[], object]:
+    """The callable that exercises a group's TRUE live per-minute path (#381 measurement-honesty):
+
+      * a ``StatefulGroup`` -> seed its ``StatefulEngine`` once from the buffer (the warm-up, not a per-minute
+        cost) then time ``step()`` — the O(1) fold the live capture actually runs, NOT the rolling-derive
+        ``compute_latest`` backfill twin (``_state_frame_rolling`` rebuilds whole-buffer EMAs/joins each call);
+      * a raw-``trades`` tick group -> ``compute_latest`` over a tape thinned to ``LIVE_TICK_BREADTH`` symbols;
+      * everything else -> ``compute_latest`` over the full frames (already the live path)."""
+    if isinstance(group, StatefulGroup):
+        engine = StatefulEngine(group)
+        buffer_frame = frames[group.inputs[0].name]
+        engine.seed(buffer_frame)
+        ctx = BatchContext(frames=frames)
+        # A HYBRID stateful group (e.g. technical, with windowed reduction columns) needs ctx so step() can
+        # join them; a pure recursive/lag group declares none and folds with ctx=None.
+        hybrid_ctx = ctx if group.reduction_columns(ctx) is not None else None
+        return lambda: engine.step(buffer_frame, hybrid_ctx)
+    if reads_raw_trades(group):
+        ctx = BatchContext(frames=thin_trades_to_live_breadth(frames))
+        return lambda: group.compute_latest(ctx)
+    ctx = BatchContext(frames=frames)
+    return lambda: group.compute_latest(ctx)
+
+
+def time_group(group: FeatureGroup, frames: dict[str, pl.DataFrame], reps: int = 3, latest: bool = False) -> float:
+    """Min wall-clock ms over ``reps`` runs (after a warmup) of one group's compute. ``latest=True`` times
+    the TRUE LIVE per-minute path (what the per-minute budget actually pays): ``StatefulEngine.step()`` for
+    a stateful group and a live-breadth-thinned tape for a raw-trades tick group (#381), ``compute_latest``
+    otherwise; ``latest=False`` times the backfill ``compute()``."""
+    if latest:
+        return _measure(_live_call(group, frames), reps)
+    ctx = BatchContext(frames=frames)
+    return _measure(lambda: run_group(group, ctx, validate=False), reps)
 
 
 def profile(frames: dict[str, pl.DataFrame], reps: int = 3, latest: bool = False) -> pl.DataFrame:

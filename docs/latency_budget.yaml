@@ -1,18 +1,20 @@
 # Per-group live-path (compute_latest) latency budget — the machine-checked accountability layer.
 #
-# WHAT: each group's max allowed compute_latest ms at the REFERENCE shard (312 tickers, 245m window,
-#   200 daily days, with trades), measured by quantlib.features.profile.profile(latest=True). The
-#   pytest gate tests/test_fp_latency_budget.py asserts each runnable group stays UNDER its budget
-#   (re-confirming a suspect with more reps so transient host load does not flake the gate).
+# WHAT: each group's max allowed TRUE-LIVE per-minute ms at the REFERENCE shard (312 tickers, 245m
+#   window, 200 daily days, with trades), measured by quantlib.features.profile.profile(latest=True).
+#   That live path is StatefulEngine.step() for a stateful group and a live-breadth-thinned tape for a
+#   raw-trades tick group (#381 measurement-honesty) — NOT the rolling-derive backfill twin / full-
+#   universe synthetic tape. The pytest gate tests/test_fp_latency_budget.py asserts each runnable
+#   group stays UNDER its budget (re-confirming a suspect with more reps so host load does not flake).
 # WHY: replaces the two loose GLOBAL ceilings (us/feature + a trades ms) — a 3x single-group
 #   regression used to pass silently. Now every group has a checked-in expectation.
 # SEED: budget = max(2x measured, measured+5ms) — generous enough to absorb host-load jitter, tight
 #   enough to catch a real 2x+ regression / an accidental O(buffer) scan. Re-seed (raise/lower) only
 #   on a DELIBERATE, reviewed change; a surprise breach is a regression to investigate, not to bump.
-# NOTE: this is the single-shard profiling view — for ReductionGroups, compute_latest here runs the
-#   per-group rolling form, NOT the shared incremental emit the e2e sim uses (so price_volume etc. read
-#   high). The gate uses the SAME harness, so it is self-consistent for REGRESSION detection (the
-#   point), even though the absolute ms differs from the in-flow e2e per-group share.
+# NOTE: this is the single-shard TRUE-LIVE profiling view (#381). For ReductionGroups, compute_latest
+#   here runs the per-group rolling form, NOT the shared incremental emit the e2e sim uses (so
+#   price_volume etc. read high — relative ranking, not the in-flow per-group share). The gate uses the
+#   SAME harness, so it is self-consistent for REGRESSION detection (the point).
 
 reference_shard:
   n_tickers: 312
@@ -22,65 +24,66 @@ reference_shard:
 
 # group: budget_ms   (measured ms at seed time in the trailing comment)
 budgets:
-  price_volume: 219.6   # measured 109.8ms, 70 feat
-  distribution: 150.8   # measured 75.4ms, 20 feat
-  volume_leads_price: 145.6   # measured 72.8ms, 12 feat
-  liquidity: 138.6   # measured 69.3ms, 15 feat
-  return_dynamics: 110.8   # measured 55.4ms, 15 feat
-  subminute_gap_fano: 104.0   # measured 52.0ms, 1 feat
-  momentum_consistency: 97.8   # measured 48.9ms, 18 feat
-  price_returns: 88.6   # measured 44.3ms, 40 feat
-  clean_momentum: 73.4   # measured 36.7ms, 12 feat
-  market_beta: 65.6   # measured 32.8ms, 21 feat
-  momentum_run: 64.0   # measured 32.0ms, 12 feat
-  market_turbulence: 58.6   # measured 29.3ms, 5 feat
-  size_entropy: 56.8   # measured 28.4ms, 2 feat
-  breadth: 50.6   # measured 25.3ms, 30 feat
-  volume_exhaustion: 46.6   # measured 23.3ms, 10 feat
-  trend_quality: 45.2   # measured 22.6ms, 30 feat
-  swing: 43.8   # measured 21.9ms, 9 feat
-  technical: 38.4   # measured 19.2ms, 14 feat
-  momentum: 38.0   # measured 19.0ms, 22 feat
-  quote_spread: 37.8   # measured 18.9ms, 21 feat
-  ohlc_vol: 34.2   # measured 17.1ms, 12 feat
-  sector_return: 34.0   # measured 17.0ms, 8 feat
-  sector_beta: 33.8   # measured 16.9ms, 6 feat
-  residual_analysis: 33.0   # measured 16.5ms, 6 feat
-  volatility: 33.0   # measured 16.5ms, 15 feat
-  trade_flow: 31.4   # measured 15.7ms, 23 feat
-  price_levels: 27.8   # measured 13.9ms, 21 feat
-  signed_trade_ratio: 27.6   # measured 13.8ms, 4 feat
-  print_hhi: 27.0   # measured 13.5ms, 2 feat
-  return_dispersion: 26.0   # measured 13.0ms, 10 feat
-  efficiency: 25.6   # measured 12.8ms, 18 feat
-  cross_sectional_rank: 24.0   # measured 12.0ms, 6 feat
-  volume: 23.8   # measured 11.9ms, 23 feat
-  range_expansion: 21.4   # measured 10.7ms, 2 feat
-  trade_freq_z: 20.2   # measured 10.1ms, 4 feat
-  microstructure_burst: 19.2   # measured 9.6ms, 4 feat
-  candlestick: 18.8   # measured 9.4ms, 12 feat
-  realized_range: 18.2   # measured 9.1ms, 3 feat
-  inter_arrival: 18.0   # measured 9.0ms, 3 feat
-  count_fano: 17.0   # measured 8.5ms, 1 feat
-  market_context: 16.4   # measured 8.2ms, 36 feat
-  intraday_seasonality: 16.0   # measured 8.0ms, 2 feat
-  calendar_events: 15.2   # measured 7.6ms, 7 feat
-  runner_state: 12.0   # measured 6.0ms, 6 feat
-  gap_fill_state: 10.6   # measured 5.3ms, 2 feat
-  trade_size_dist: 9.9   # measured 4.9ms, 3 feat
-  calendar: 9.8   # measured 4.8ms, 4 feat
-  draw_range: 9.6   # measured 4.6ms, 3 feat
-  large_print_burst: 9.6   # measured 4.6ms, 3 feat
-  dumper_state: 9.5   # measured 4.5ms, 6 feat
-  tick_runlength: 8.9   # measured 3.9ms, 3 feat
-  prior_day: 7.7   # measured 2.7ms, 10 feat
-  sector: 7.6   # measured 2.6ms, 12 feat
-  edgar_filing_frequency: 6.9   # measured 1.9ms, 10 feat
-  liquidity_rank: 6.9   # measured 1.9ms, 2 feat
-  multi_day_returns: 6.6   # measured 1.6ms, 28 feat
-  multi_day_vwap: 6.5   # measured 1.5ms, 10 feat
-  daily_beta: 6.4   # measured 1.4ms, 3 feat
-  overnight_beta: 6.4   # measured 1.4ms, 3 feat
-  overnight_intraday_split: 6.3   # measured 1.3ms, 3 feat
-  asset_flags: 5.9   # measured 0.9ms, 4 feat
-  round_levels: 5.8   # measured 0.8ms, 3 feat
+  volume_leads_price: 127.0   # measured 63.5ms, 12 feat
+  price_volume: 106.4   # measured 53.2ms, 70 feat
+  distribution: 74.0   # measured 37.0ms, 20 feat
+  liquidity: 72.6   # measured 36.3ms, 15 feat
+  return_dynamics: 59.2   # measured 29.6ms, 15 feat
+  momentum_consistency: 53.0   # measured 26.5ms, 18 feat
+  clean_momentum: 37.6   # measured 18.8ms, 12 feat
+  swing: 37.6   # measured 18.8ms, 9 feat
+  market_turbulence: 33.8   # measured 16.9ms, 5 feat
+  breadth: 33.2   # measured 16.6ms, 30 feat
+  momentum_run: 31.4   # measured 15.7ms, 12 feat
+  market_beta: 31.2   # measured 15.6ms, 21 feat
+  trend_quality: 25.4   # measured 12.7ms, 30 feat
+  volume_exhaustion: 21.2   # measured 10.6ms, 10 feat
+  momentum: 19.6   # measured 9.8ms, 22 feat
+  volatility: 19.6   # measured 9.8ms, 15 feat
+  cross_sectional_rank: 18.6   # measured 9.3ms, 6 feat
+  trade_flow: 18.6   # measured 9.3ms, 23 feat
+  efficiency: 18.0   # measured 9.0ms, 18 feat
+  quote_spread: 18.0   # measured 9.0ms, 21 feat
+  sector_return: 17.8   # measured 8.9ms, 8 feat
+  ohlc_vol: 17.4   # measured 8.7ms, 12 feat
+  sector_beta: 16.4   # measured 8.2ms, 6 feat
+  residual_analysis: 15.8   # measured 7.9ms, 6 feat
+  signed_trade_ratio: 15.6   # measured 7.8ms, 4 feat
+  calendar_events: 13.6   # measured 6.8ms, 7 feat
+  return_dispersion: 13.6   # measured 6.8ms, 10 feat
+  volume: 12.2   # measured 6.1ms, 23 feat
+  count_fano: 12.0   # measured 6.0ms, 1 feat
+  intraday_seasonality: 11.8   # measured 5.9ms, 2 feat
+  trade_freq_z: 11.0   # measured 5.5ms, 4 feat
+  range_expansion: 10.6   # measured 5.3ms, 2 feat
+  realized_range: 10.2   # measured 5.1ms, 3 feat
+  calendar: 10.0   # measured 5.0ms, 4 feat
+  technical: 9.9   # measured 4.9ms, 14 feat
+  candlestick: 9.4   # measured 4.4ms, 12 feat
+  subminute_gap_fano: 9.2   # measured 4.2ms, 1 feat
+  price_returns: 8.8   # measured 3.8ms, 40 feat
+  size_entropy: 8.8   # measured 3.8ms, 2 feat
+  price_levels: 8.6   # measured 3.6ms, 21 feat
+  gap_fill_state: 8.0   # measured 3.0ms, 2 feat
+  dumper_state: 7.9   # measured 2.9ms, 6 feat
+  draw_range: 7.8   # measured 2.8ms, 3 feat
+  runner_state: 7.8   # measured 2.8ms, 6 feat
+  market_context: 7.7   # measured 2.7ms, 36 feat
+  print_hhi: 6.7   # measured 1.7ms, 2 feat
+  inter_arrival: 6.2   # measured 1.2ms, 3 feat
+  microstructure_burst: 6.2   # measured 1.2ms, 4 feat
+  sector: 6.2   # measured 1.2ms, 12 feat
+  multi_day_vwap: 6.0   # measured 1.0ms, 10 feat
+  prior_day: 6.0   # measured 1.0ms, 10 feat
+  daily_beta: 5.9   # measured 0.9ms, 3 feat
+  liquidity_rank: 5.9   # measured 0.9ms, 2 feat
+  multi_day_returns: 5.9   # measured 0.9ms, 28 feat
+  edgar_filing_frequency: 5.8   # measured 0.8ms, 10 feat
+  news_sentiment: 5.8   # measured 0.8ms, 9 feat
+  overnight_beta: 5.8   # measured 0.8ms, 3 feat
+  overnight_intraday_split: 5.8   # measured 0.8ms, 3 feat
+  large_print_burst: 5.7   # measured 0.7ms, 3 feat
+  tick_runlength: 5.7   # measured 0.7ms, 3 feat
+  asset_flags: 5.6   # measured 0.6ms, 4 feat
+  trade_size_dist: 5.6   # measured 0.6ms, 3 feat
+  round_levels: 5.4   # measured 0.4ms, 3 feat
