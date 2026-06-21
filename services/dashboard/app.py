@@ -7,8 +7,10 @@ DB-health home page) was removed — both the UI pages and the now-dead ops-intr
 (``/api/status/rows``, ``/api/scorecard``, ``/api/scorecard/history``, ``/api/jobs``) and their backing
 modules. Two read-only TABS sit alongside the grid in the same SPA: the latency-expectations view
 (``/api/latency-expectations``) and the News & Filings view (``/api/news-edgar/*`` — live stream rate +
-store composition). All read-side; the surface is the four grid routes + latency + the two news/edgar
-routes + ``/healthz``.
+store composition) and the hourly Status view (``/api/status-grid`` read + ``/api/status-grid/reaction``
+write — the Lead-owned hour×workstream Progress/Blockers table + Ben's per-row reaction box, persisted to an
+append-only JSON store shared with the host Lead loop). All read-side w.r.t. the feature store; the surface is
+the four grid routes + latency + the two news/edgar routes + the two status routes + ``/healthz``.
 
 The grid's data is precomputed by the ``store-grid-worker`` container into MongoDB on a 10-minute schedule and
 served here from that cache, so a page load is one indexed document fetch and the heavy ~3-4min build is never
@@ -29,6 +31,9 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from latency_expectations import load_latency_expectations
 from news_edgar import composition_snapshot, stream_snapshot
+from pydantic import BaseModel, Field
+from status_grid import append_reaction
+from status_grid import read_grid as read_status_grid
 from store_grid_cache import read_drill as read_grid_drill
 from store_grid_cache import read_grid_gzip
 from store_grid_cache import read_meta as read_grid_meta
@@ -113,6 +118,33 @@ def news_edgar_composition() -> JSONResponse:
     sentiment/hotness COMING). Served from a short-TTL in-process cache (the heavy ~3M-row filings aggregates
     change slowly), so the scan never lands repeatedly on the request path."""
     return JSONResponse(composition_snapshot(), headers={"Cache-Control": "no-store"})
+
+
+class ReactionBody(BaseModel):
+    """The POST body for Ben's reaction to an hour's status row. ``hour`` is the row id
+    (``YYYY-MM-DDTHH:00Z``); ``reaction`` is the free text (empty clears the reaction)."""
+
+    hour: str = Field(..., min_length=1)
+    reaction: str = ""
+
+
+@app.get("/api/status-grid")
+def status_grid() -> JSONResponse:
+    """The HOURLY STATUS TABLE (docs/OPERATING_MODEL.md §"The hourly status dashboard") — the eight workstream
+    columns + every hourly row (newest first), each cell a concise Progress + Blockers and each row Ben's
+    reaction. Read straight from the append-only JSON store the Lead's conductor loop writes on the host
+    (shared via the ~/.quant-ops bind-mount); returns an empty-but-valid table on the genuine first boot
+    before the first row is synthesized. ``no-store`` so Ben always sees the latest synthesized hour."""
+    return JSONResponse(read_status_grid(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/status-grid/reaction")
+def status_grid_reaction(body: ReactionBody) -> JSONResponse:
+    """Record Ben's reaction to an hour's status row — the input box's WRITE path. Append-only w.r.t. the
+    store (replaces only that row's reaction, never touches the Lead-synthesized cells), and the Lead reviews
+    these every cycle. Returns the updated row."""
+    row = append_reaction(body.hour, body.reaction)
+    return JSONResponse(row, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/healthz")

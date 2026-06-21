@@ -140,6 +140,10 @@ services:
       STORE_ROOT: /store
       # The cache Mongo the store-grid-worker writes; the dashboard READS the precomputed grid from here.
       STORE_GRID_MONGO_URL: "mongodb://quant-mongo:27017"
+      # The hourly status dashboard's append-only JSON store (matches the Dockerfile default). Shared with the
+      # HOST Lead loop via the ~/.quant-ops bind-mount below — the Lead writes rows, the container serves the
+      # read route + appends Ben's reactions.
+      STATUS_STORE_PATH: /quant-ops/status_dashboard.json
     ports:
       - "0.0.0.0:8088:8000"     # LAN-accessible: http://192.168.1.32:8088
     volumes:
@@ -147,6 +151,10 @@ services:
       # RO so the dashboard can never write. The GRID itself is served from Mongo (the worker's precompute),
       # not built here.
       - fp_store_real:/store:ro
+      # ~/.quant-ops (read-WRITE): the hourly status dashboard's append-only JSON store lives here, shared with
+      # the host Lead loop. The container serves the read route + appends Ben's reactions; the Lead writes rows.
+      # This is the ONLY writable mount and it is an ops directory, NOT the feature store — no fingerprint risk.
+      - ${HOME}/.quant-ops:/quant-ops
     depends_on:
       timescaledb:
         condition: service_healthy
