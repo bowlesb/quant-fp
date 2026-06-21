@@ -20,6 +20,7 @@ from alpaca.data.historical.news import NewsClient
 from alpaca.data.models.news import News
 from alpaca.data.requests import NewsRequest
 
+from quantlib.data.news_sentiment import MODEL_VERSION, score_article
 from quantlib.data.news_store import SRC_BACKFILL
 
 logger = logging.getLogger("news_fetchers")
@@ -41,6 +42,11 @@ def article_to_row(article: News, available_at_source: str = SRC_BACKFILL) -> di
     ``available_at`` defaults to the article's ``created_at`` (publish instant) for the backfill path;
     the live path overrides ``available_at`` to the websocket arrival instant before persisting. All
     datetimes are coerced to tz-aware UTC.
+
+    The baseline ``sentiment`` is scored here from ``headline`` + ``summary`` ONLY (the single normalization
+    point both the live capture and the historical backfill funnel through), so every stored article carries
+    a deterministic, parity-stable score stamped at first sight — identical live vs backfill because the text
+    is identical on both sides.
     """
     created = _as_utc(article.created_at)
     return {
@@ -56,6 +62,8 @@ def article_to_row(article: News, available_at_source: str = SRC_BACKFILL) -> di
         "author": article.author,
         "url": article.url or "",
         "ingested_at": dt.datetime.now(dt.timezone.utc),
+        "sentiment": score_article(article.headline, article.summary),
+        "sentiment_model_version": MODEL_VERSION,
     }
 
 

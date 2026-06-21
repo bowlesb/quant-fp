@@ -34,6 +34,7 @@ from quantlib.features.groups import (  # noqa: F401
     momentum_run,
     multi_day,
     multi_day_vwap,
+    news_sentiment,
     ohlc_vol,
     overnight_beta,
     overnight_intraday_split,

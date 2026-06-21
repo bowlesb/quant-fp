@@ -41,6 +41,8 @@ def _article(
         "author": "author",
         "url": "https://example.com/a",
         "ingested_at": ingested_at,
+        "sentiment": 0.0,
+        "sentiment_model_version": "lexicon-v1",
     }
 
 

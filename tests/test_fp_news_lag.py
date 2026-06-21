@@ -33,6 +33,8 @@ def _row(
         "author": "author",
         "url": "https://example.com/a",
         "ingested_at": available_at,
+        "sentiment": 0.0,
+        "sentiment_model_version": "lexicon-v1",
     }
 
 

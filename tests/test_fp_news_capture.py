@@ -6,6 +6,7 @@ import datetime as dt
 
 from quantlib.data.news_backfill import build_parser, day_windows
 from quantlib.data.news_fetchers import article_to_row
+from quantlib.data.news_sentiment import MODEL_VERSION, score_article
 from quantlib.data.news_store import SRC_BACKFILL, SRC_LIVE
 from quantlib.features.news_capture import live_row, news_symbols
 
@@ -32,6 +33,21 @@ def test_article_to_row_backfill_uses_created_at() -> None:
     assert row["available_at_source"] == SRC_BACKFILL
     # backfill available_at == the article publish instant (created_at)
     assert row["available_at"] == dt.datetime(2026, 6, 18, 14, 0, tzinfo=dt.timezone.utc)
+
+
+def test_article_to_row_stamps_baseline_sentiment() -> None:
+    """Both the backfill and live write paths funnel through article_to_row, so every stored article carries
+    a deterministic baseline sentiment scored from headline+summary + the model version (scored at ingest).
+    """
+    article = _FakeArticle()
+    article.headline = "Company beats earnings and raises guidance"
+    article.summary = "record revenue, strong outlook"
+    row = article_to_row(article, available_at_source=SRC_BACKFILL)
+    assert row["sentiment_model_version"] == MODEL_VERSION
+    assert row["sentiment"] == score_article(article.headline, article.summary)
+    assert row["sentiment"] > 0.0  # an unambiguously positive headline scores positive
+    # the live path stamps the SAME sentiment (it goes through article_to_row too) — parity by construction
+    assert live_row(article, article.created_at)["sentiment"] == row["sentiment"]
 
 
 def test_live_row_uses_arrival_instant() -> None:

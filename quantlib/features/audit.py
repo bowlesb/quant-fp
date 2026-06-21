@@ -13,7 +13,7 @@ import polars as pl
 
 from quantlib.features.compare import runnable, vectors
 from quantlib.features.introspect import introspect
-from quantlib.features.loaders import load_filings, load_minute_agg
+from quantlib.features.loaders import load_filings, load_minute_agg, load_news_features
 
 
 def main() -> None:
@@ -21,7 +21,11 @@ def main() -> None:
         raise SystemExit("usage: python -m quantlib.features.audit <YYYY-MM-DD> [source]")
     day = sys.argv[1]
     source = sys.argv[2] if len(sys.argv) > 2 else "backfill"
-    frames = {"minute_agg": load_minute_agg(day, source), "filings": load_filings(day)}
+    frames = {
+        "minute_agg": load_minute_agg(day, source),
+        "filings": load_filings(day),
+        "news": load_news_features(day),
+    }
     vector = vectors(frames)
     specs = [spec for group in runnable(frames) for spec in group.declare()]
     report = introspect(vector, specs)

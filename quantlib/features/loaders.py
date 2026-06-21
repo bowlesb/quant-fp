@@ -14,6 +14,8 @@ from pathlib import Path
 import polars as pl
 import psycopg
 
+from quantlib.data.news_store import load_news
+
 _BEHAVIORAL_CLUSTERS_PATH = (
     Path(__file__).parent / "data" / "behavioral_clusters_v1.parquet"
 )
@@ -191,6 +193,41 @@ def load_filings(day: str) -> pl.DataFrame:
     if frame.height == 0:
         return pl.DataFrame(schema=FILINGS_SCHEMA)
     return frame.cast(FILINGS_SCHEMA)
+
+
+NEWS_SCHEMA_FEATURE = {
+    "symbol": pl.String,
+    "available_at": pl.Datetime("us", "UTC"),
+    "sentiment": pl.Float64,
+}
+# The news_sentiment group's deepest trailing window is 7 calendar days; load a few slack days beyond it so
+# the trailing sums/means are correct from the session's first minute, not just from the day's own articles.
+NEWS_LOOKBACK_DAYS = 9
+NEWS_STORE_ROOT = os.environ.get("FP_NEWS_STORE", "/store")
+
+
+def load_news_features(day: str) -> pl.DataFrame:
+    """Session snapshot of the ``/store/news`` tape for ``day``, EXPLODED to one row per (symbol, article):
+    every article whose ``available_at`` date falls in ``[day - NEWS_LOOKBACK_DAYS, day]``, with its baseline
+    ``sentiment``. Loaded ONCE per session like ``filings`` / ``daily`` / ``reference``; the per-minute
+    ``available_at <= minute`` gate inside the news_sentiment group makes it point-in-time, so the same
+    snapshot fed to the live and backfill sides is parity-true by construction (``available_at`` AND
+    ``sentiment`` are both fixed at first sight — the score is a deterministic function of the article's own
+    text, identical live vs backfill). A multi-symbol article is counted once per tagged symbol (the explode),
+    matching how a hotness/sentiment feature attributes an article to each name it mentions."""
+    day_date = dt.date.fromisoformat(day)
+    start = day_date - dt.timedelta(days=NEWS_LOOKBACK_DAYS)
+    articles = load_news(start.isoformat(), day_date.isoformat(), store=NEWS_STORE_ROOT)
+    if articles.height == 0:
+        return pl.DataFrame(schema=NEWS_SCHEMA_FEATURE)
+    exploded = (
+        articles.select(["symbols", "available_at", "sentiment"])
+        .explode("symbols")
+        .rename({"symbols": "symbol"})
+        .filter(pl.col("symbol").is_not_null())
+        .select(["symbol", "available_at", "sentiment"])
+    )
+    return exploded.cast(NEWS_SCHEMA_FEATURE)
 
 
 def load_tiers(day: str) -> pl.DataFrame:
