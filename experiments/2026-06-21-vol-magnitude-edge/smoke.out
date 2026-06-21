@@ -1,0 +1,22 @@
+  entry = bars.filter(pl.col("ts").is_in(sample_ts)).rename({"ts": "minute"})
+  frame = frame.filter(pl.col("minute").is_in(sample_ts)).unique(subset=["symbol", "minute"])
+  full = full.filter(pl.col("symbol").is_in(adv))
+panel n_rows=5813 n_sym=150 load=22.2s eval=0.18s
+# BASELINE trailing_rv self-IC(fwdRV) = +0.8837 (nw_t +76.94) <- the persistence bar every candidate must beat (incrementally)
+# feature                     raw_ic  shuffle   nw_t   INCR_ic incr_t collapse  n_rows
+realized_vol_60m             +0.8981 -0.0035 +57.64 +0.2627  +4.69   0.293 2611
+realized_vol_5m              +0.7890 -0.0042 +75.24 +0.1277  +5.07   0.162 2611
+realized_vol_15m             +0.8784 +0.0003 +81.51 +0.1174  +2.55   0.134 2611
+spread_bps_15m               +0.6508 +0.0178 +26.61 +0.1168  +4.94   0.179 2570
+trade_freq_15m               +0.1365 -0.0014  +4.18 +0.0439  +1.60   0.322 2611
+book_depth_1m                +0.1025 -0.0161  +6.96 +0.0434  +2.90   0.424 2569
+max_runup_1m                 +0.3128 -0.0176 +26.75 +0.0146  +0.77   0.047 2596
+trade_rate_accel_1m          +0.0326 -0.0244  +1.07 +0.0128  +0.58   0.393 2596
+peak_trades_per_second_1m    +0.1157 +0.0221  +4.04 +0.0128  +0.46   0.110 2596
+ret_5m                       +0.0093 +0.0052  +0.17 +0.0084  +0.26   0.906 2608
+inter_arrival_cv_1m          +0.0933 +0.0285  +4.17 +0.0081  +0.34   0.087 2596
+quote_imbalance_15m          +0.0290 -0.0002  +1.22 +0.0014  +0.07   0.048 2570
+signed_volume_15m            +0.0255 -0.0275  +0.94 -0.0032  -0.14   0.125 2611
+ret_30m                      +0.0127 -0.0333  +0.19 -0.0040  -0.11   0.313 2546
+ret_15m                      -0.0389 +0.0169  -0.71 -0.0234  -0.72   0.601 2553
+realized_vol_30m             +0.8921 +0.0008 +68.19 -0.1431  -4.65   0.160 2611
