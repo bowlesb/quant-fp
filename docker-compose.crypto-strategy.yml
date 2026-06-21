@@ -1,0 +1,54 @@
+# The crypto-momentum strategy — the FIRST live CRYPTO strategy container. It subscribes to the SEPARATE
+# crypto feature bus (fv:crypto:<SYMBOL>), scores a trivial short-horizon momentum signal, and places +
+# manages tiny PAPER crypto orders (BTC/USD, ...) 24/7. Its job is to exercise the FULL end-to-end loop on
+# the always-on crypto stream so we catch process/integration issues off-hours, NOT to make an edge claim.
+#
+# ADDITIVE + ISOLATED: its OWN container, OWN strat_cryptomomentum Postgres schema, consuming ONLY the
+# crypto bus. It never touches the equity feature-computer, crypto-capture, or the existing equity
+# strategy containers. Launch alongside the running stack WITHOUT recreating anything:
+#
+#   make dev-image                                                         # the shared fp-dev base must exist
+#   docker compose -f docker-compose.yml -f docker-compose.crypto-strategy.yml up -d --build --no-deps crypto-momentum-strategy
+#
+# The Dockerfile is FROM fp-dev (the Rust-baked feature image) — build it only via `make dev-image`.
+# CMOM_ENABLED defaults to "0" (consume + log only, NO orders) so the first launch is a live DRY-RUN; the
+# Lead flips CMOM_ENABLED=1 to begin paper trading once the loop is observed clean.
+name: quant
+
+services:
+  crypto-momentum-strategy:
+    container_name: crypto-momentum-strategy
+    build:
+      context: .
+      dockerfile: strategies/crypto_momentum/Dockerfile
+    image: crypto-momentum-strategy
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file: .env
+    environment:
+      BUS_REDIS_URL: "redis://quant-redis:6379/0"
+      DB_HOST: "timescaledb"
+      DB_PORT: "5432"
+      DB_NAME: "quant"
+      DB_USER: "quant"
+      # The crypto pairs to subscribe (slashless bus form; the strategy maps to BTC/USD at the order edge).
+      CMOM_SYMBOLS: "BTCUSD,ETHUSD,SOLUSD,LTCUSD,DOGEUSD"
+      # Risk caps + cadence (all fail-safe defaults; override here or in .env).
+      CMOM_BET_INTERVAL_SEC: "300"
+      CMOM_NOTIONAL_USD: "50"
+      CMOM_HOLD_SEC: "1800"
+      CMOM_MAX_CONCURRENT: "3"
+      CMOM_MAX_TOTAL_NOTIONAL_USD: "200"
+      # The momentum model: which ret_{window}m to read, the logistic gain on the (raw) return, and the
+      # P(up) threshold a pair must clear before a long fires.
+      CMOM_RET_WINDOW_M: "5"
+      CMOM_SENSITIVITY: "200"
+      CMOM_THRESHOLD: "0.55"
+      # Kill switch: "0" = consume + log only, place NO orders (the default — first launch is a DRY-RUN);
+      # "1" = trade (paper). The Lead flips this to 1 once the loop is observed clean.
+      CMOM_ENABLED: "0"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes: {}

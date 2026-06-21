@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from quantlib.bus.compat import FeatureReq
 from quantlib.bus.schema import default_schema
+from quantlib.strategy_core.models.crypto_momentum import CryptoMomentumModel
 from quantlib.strategy_core.models.vwap_reversion import VwapReversionModel
+from strategies.crypto_momentum.contract import contract_for as crypto_contract_for
 from strategies.overnight_beta.contract import STRATEGY_FEATURES as OBETA_FEATURES
 from strategies.reversion.contract import contract_for
 from strategies.smoke.contract import MODEL_FOLD_FEATURES
@@ -39,6 +41,13 @@ def test_smoke_contract_matches_current_schema() -> None:
 def test_reversion_contract_is_the_models_feature() -> None:
     model = VwapReversionModel(window_m=30)
     contract = contract_for(model)
+    assert [req.name for req in contract] == [model.feature_name]
+    _assert_contract_matches_schema(contract)
+
+
+def test_crypto_momentum_contract_is_the_models_feature() -> None:
+    model = CryptoMomentumModel(window_m=5)
+    contract = crypto_contract_for(model)
     assert [req.name for req in contract] == [model.feature_name]
     _assert_contract_matches_schema(contract)
 
