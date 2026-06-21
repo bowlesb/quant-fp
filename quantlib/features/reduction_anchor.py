@@ -73,3 +73,26 @@ def attach_volume_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFra
     return frame.join(latest, on="symbol", how="left").with_columns(
         pl.col(anchor_column("volume")).fill_null(0.0)
     )
+
+
+def attach_reduction_anchors(frames: dict[str, pl.DataFrame]) -> dict[str, pl.DataFrame]:
+    """Attach every centered-std reduction anchor onto ``frames["minute_agg"]`` in place of the original
+    frame, from the per-session snapshots ``frames`` already holds — the SINGLE wiring point shared by
+    production capture (``capture.py``) and backfill (``materialize.py``) so the anchor column is present on
+    the minute frame BEFORE the reduction engine seeds/folds it (the incremental fold reads it as-is) AND
+    before ``runnable`` is evaluated (volume's ``InputSpec`` declares the anchor column, so the group is only
+    selected once the column exists). Value-additive: the centered variance is shift-invariant, so this only
+    changes float conditioning, never a feature value (fp unchanged).
+
+    Currently the volume anchor, sourced from the ``daily`` snapshot via ``attach_volume_anchor``. A no-op
+    (returns ``frames`` unchanged) when ``minute_agg`` is absent, ``daily`` is absent (no anchor source —
+    the centered groups then stay unrunnable rather than centering on a fabricated anchor), or the anchor
+    column is ALREADY present (idempotent — a frame that came pre-anchored from a test harness or a prior
+    call is not re-joined)."""
+    minute_agg = frames.get("minute_agg")
+    daily = frames.get("daily")
+    if minute_agg is None or daily is None:
+        return frames
+    if anchor_column("volume") in minute_agg.columns:
+        return frames
+    return {**frames, "minute_agg": attach_volume_anchor(minute_agg, daily)}

@@ -26,6 +26,7 @@ from quantlib.features.bus_hook import BusHook, bus_publish_enabled
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 from quantlib.features.incremental import IncrementalEngine
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 from quantlib.features.tick_capture import TICK_COLUMNS
 
 BARS_SCHEMA = {
@@ -343,6 +344,13 @@ def process_bars(
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
     frames = {"minute_agg": frame, **(snapshots or {}), **(extra_frames or {})}
+    # Attach the per-symbol reduction anchors (volume centering) onto minute_agg from the held ``daily``
+    # snapshot BEFORE the engine seeds/folds it and before ``runnable`` is evaluated — the SAME wiring point
+    # backfill (materialize._write_all) applies, so the centered-std column is identical in both paths. The
+    # batch path centers anyway (shift-invariant, value-additive); the incremental fold reads ``frame``
+    # directly (step) so the anchor must live on this exact object. No-op when ``daily`` is absent.
+    frames = attach_reduction_anchors(frames)
+    frame = frames["minute_agg"]
     ctx = BatchContext(frames=frames)
     selected = [
         group

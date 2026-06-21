@@ -22,8 +22,17 @@ from quantlib.features import BatchContext, REGISTRY, run_group
 from quantlib.features.compare import runnable
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.profile import build_frames
+from quantlib.features.reduction_anchor import anchor_column
 
 BASE = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+
+
+def _with_volume_anchor(frame: pl.DataFrame) -> pl.DataFrame:
+    """Attach volume's centering-anchor column to a hand-built ``minute_agg`` (the column volume's
+    InputSpec / centered_std now require). These degenerate-window frames carry SMALL volumes where the raw
+    power-sum is already well-conditioned, so anchor 0.0 (no centering — the value attach_volume_anchor gives
+    a symbol absent from the daily snapshot) is the correct, value-identical choice."""
+    return frame.with_columns(pl.lit(0.0).alias(anchor_column("volume")))
 
 
 def _flat_then_move(
@@ -55,7 +64,7 @@ def _flat_then_move(
             "volume": 100.0,
         }
     )
-    return pl.DataFrame(rows)
+    return _with_volume_anchor(pl.DataFrame(rows))
 
 
 def _assert_finite_or_null(out: pl.DataFrame, col: str) -> None:
@@ -130,7 +139,7 @@ def _nonconstant_then_constant_volume(symbol: str, n: int, settle_at: int) -> pl
                 "volume": vol,
             }
         )
-    return pl.DataFrame(rows)
+    return _with_volume_anchor(pl.DataFrame(rows))
 
 
 def test_volume_zscore_parity_on_constant_tail_after_varying_prefix() -> None:
@@ -182,7 +191,7 @@ def test_volume_zscore_well_conditioned_unchanged() -> None:
                 "volume": 1000.0 + rng.gauss(0.0, 300.0),
             }
         )
-    frame = pl.DataFrame(rows)
+    frame = _with_volume_anchor(pl.DataFrame(rows))
     group = REGISTRY.get_group("volume")
     ctx = BatchContext(frames={"minute_agg": frame})
     rolling = group.compute(ctx).sort("minute")

@@ -26,6 +26,7 @@ from quantlib.features.raw_loaders import (
     load_raw_tick_enriched_minute_agg,
     load_raw_trades,
 )
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 
 DEFAULT_RAW_ROOT = "/store"
 
@@ -47,6 +48,7 @@ def _write_all(
     clobbering each other (the chunked-sweep path: each 200-symbol chunk is a shard). ``shard=None`` writes
     the single ``data.parquet`` (whole-partition backfill / repair) — unchanged behaviour.
     """
+    frames = attach_reduction_anchors(frames)
     ctx = BatchContext(frames=frames)
     for group in runnable(frames):
         if only_groups is not None and group.name not in only_groups:
