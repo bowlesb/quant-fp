@@ -1,4 +1,4 @@
-"""Within-Day Parity Certifier — Phase-3 FIRST BUILD: the per-group HOT-SWAP mechanism (offline-testable).
+"""Within-Day Parity Certifier — Phase-3: the per-group HOT-SWAP mechanism (offline-testable).
 
 Per docs/WITHIN_DAY_PARITY_CONTINUOUS_DEPLOY.md §3. Replaces ONE feature group's compute LOGIC in a running
 engine BETWEEN minutes, without touching shared capture state, so a parity fix for an UNTRUSTED group can be
@@ -12,25 +12,24 @@ incremental engines, bus publisher + schema) is SEPARATE from the per-group comp
 touched by the swap; the fingerprint is UNCHANGED (same group:name:version + feature set) so the publisher /
 codec / schema are untouched — only that one group's compute swaps.
 
-The three kind-classes (§3.3):
-  * DIRECT       — batch ReductionGroup (FP_INCREMENTAL off, the live default) / stateless declarative /
-                   Class-A SessionCache group: re-import → swap. No reseed (recomputes from the shared ring).
-  * SWAP+RESEED  — a group that carries cross-minute state in a live IncrementalEngine: re-import → swap →
-                   ``IncrementalEngine.seed(ring.materialize())`` rebuilds the running sums from the buffer.
-  * ESCALATE     — the swap would change the fingerprint (feature set / version), OR a reseed-requiring group
-                   has no buffer to reseed from: REFUSE the swap and raise, so the caller escalates to the
-                   Lead (a coordinated/relaunch deploy) rather than silently corrupting state.
+⭐ THE SINGLE SELF-HEALING RULE (the consolidation — quantlib/features/running_state.py + FeatureGroup): the
+applier is KIND-AGNOSTIC. It swaps the code, then runs the ONE contract guard against the new instance:
 
-Safety conditions (all enforced here, fail-closed): fingerprint UNCHANGED before/after; the swap is applied
-in ONE atomic registry overwrite (the caller invokes it at a minute boundary, never mid-compute); a
-reseed-requiring kind without a buffer ESCALATES rather than swapping.
+    if not group.up_to_date(buffer):
+        group.rebuild_from_history(buffer)   # lazy reseed from the SAME history backfill recomputes over
+
+There is NO DIRECT/RESEED/ESCALATE classification. The former kinds collapse into what the group's OWN contract
+does internally: a stateless group (batch reduction with FP_INCREMENTAL off / declarative / Class-A cache) is
+``up_to_date()==True`` → the guard is a no-op (the old DIRECT); a group that carries cross-minute state (swing's
+leg-state, an armed incremental engine bound for the swap) reports ``False`` → ``rebuild_from_history`` reseeds
+(the old RESEED); a change that can't be restored to parity makes ``rebuild_from_history`` RAISE → the applier
+catches it and escalates (the old ESCALATE). The fingerprint is asserted UNCHANGED before/after regardless.
 """
 
 from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
-from enum import Enum
 
 import polars as pl
 
@@ -41,22 +40,16 @@ from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.registry import REGISTRY, RegistrationError, Registry
 
 
-class SwapKind(str, Enum):
-    DIRECT = "direct"  # stateless per-minute; swap takes effect next minute, no reseed
-    RESEED = "reseed"  # carries live incremental state; swap + IncrementalEngine.seed(buffer)
-    ESCALATE = "escalate"  # fingerprint-affecting or unseedable → refuse the swap, escalate to Lead
-
-
 class HotSwapError(Exception):
-    """Raised when a hot-swap is refused (fingerprint would change, group absent, or unseedable)."""
+    """Raised when a hot-swap is refused (fingerprint would change, group absent, or the contract reseed
+    cannot restore parity — the irreducible/ESCALATE case)."""
 
 
 @dataclass
 class HotSwapResult:
     group_name: str
-    kind: SwapKind
     swapped: bool
-    reseeded: bool
+    reseeded: bool  # True iff the contract's rebuild_from_history ran (the group reported not-up-to-date)
     fingerprint_before: int
     fingerprint_after: int
     note: str
@@ -82,23 +75,6 @@ def reimport_group_class(group_name: str, registry: Registry = REGISTRY) -> type
     raise HotSwapError(f"reloaded module {module.__name__} no longer defines group '{group_name}'")
 
 
-def classify_swap_kind(
-    group: FeatureGroup,
-    engines: dict[str, IncrementalEngine] | None,
-) -> SwapKind:
-    """Which kind-class this group's swap is, given the live engines (None offline / FP_INCREMENTAL off).
-
-    A ReductionGroup whose ``reduce_input`` has a LIVE IncrementalEngine carries running state → RESEED. Any
-    other group (batch with no live engine, stateless declarative, Class-A cache) recomputes per minute from
-    the shared buffer → DIRECT. (A StatefulGroup is folded through its own engine; in this first build it is
-    treated as RESEED only if a live engine carries its input, else DIRECT — its per-instance accumulators
-    rebuild from the next minute's compute, the warm-up seam documented in §3.3.)"""
-    if engines and isinstance(group, ReductionGroup):
-        if group.reduce_input in engines:
-            return SwapKind.RESEED
-    return SwapKind.DIRECT
-
-
 def hot_swap_group(
     group_name: str,
     *,
@@ -107,31 +83,25 @@ def hot_swap_group(
     buffer_frame: pl.DataFrame | None = None,
     seed_symbols: list[str] | None = None,
 ) -> HotSwapResult:
-    """Hot-swap ONE group's compute logic in ``registry``, reseeding its live incremental state if it carries
-    any. Returns a HotSwapResult describing the kind + what happened. Raises ``HotSwapError`` to ESCALATE.
+    """Hot-swap ONE group's compute logic in ``registry``, then run the SINGLE self-healing contract guard to
+    restore any carried state to parity. Returns a HotSwapResult; raises ``HotSwapError`` to ESCALATE.
 
     Args:
       registry: the registry to swap in (the live REGISTRY in prod; a sandbox Registry in tests).
-      engines: the live ``CaptureState.engines`` (None offline / when FP_INCREMENTAL is off) — used to detect
-               carried incremental state + to reseed it.
-      buffer_frame: the current raw-bar buffer (``CaptureState.ring.materialize()``) — REQUIRED to reseed a
-                    RESEED-kind group; if absent for a RESEED kind, the swap ESCALATES (raises) rather than
-                    swapping into empty state.
-      seed_symbols: the fixed session symbol set to pin the reseeded index (the shard universe), or None.
+      engines: the live ``CaptureState.engines`` (None offline / when FP_INCREMENTAL is off). When an engine
+               carries the swapped group's ``reduce_input``, it IS the group's running state — it is bound to
+               the group for the swap so the contract's ``rebuild_from_history`` reseeds it (the old RESEED kind,
+               now expressed through the one contract).
+      buffer_frame: the current raw-bar buffer (``CaptureState.ring.materialize()``) — the history the contract
+                    reseeds from. A group that reports not-up-to-date with NO buffer to reseed from ESCALATES.
+      seed_symbols: the fixed session symbol set to pin a reseeded engine index (the shard universe), or None.
 
-    Order: classify kind on the incumbent → (RESEED: require a buffer, else ESCALATE before any swap) →
-    fingerprint BEFORE → re-import (the reload routes ``@register`` through ``swap_group`` in place) →
-    fingerprint AFTER → assert UNCHANGED (else revert + escalate) → reseed if RESEED."""
+    Order: fingerprint BEFORE → re-import (the reload routes ``@register`` through ``swap_group`` in place; a
+    feature-set change raises → ESCALATE) → fingerprint AFTER → assert UNCHANGED (else revert + escalate) →
+    bind the live engine (if any) to the new instance → THE GUARD: ``if not up_to_date: rebuild_from_history``.
+    """
     incumbent = registry.get_group(group_name)
     incumbent_cls = type(incumbent)
-    kind = classify_swap_kind(incumbent, engines)
-
-    # ESCALATE BEFORE swapping: a RESEED kind with no buffer must not swap into empty state.
-    if kind is SwapKind.RESEED and buffer_frame is None:
-        raise HotSwapError(
-            f"hot_swap '{group_name}': RESEED kind (carries live incremental state) but no buffer_frame "
-            f"to reseed from — ESCALATE to a coordinated/relaunch deploy, do not swap into empty state"
-        )
 
     fingerprint_before = BusSchema.from_registry().fingerprint
     # Re-import the module: the reload re-runs @register, which (reload-aware) routes a same-feature-set
@@ -151,20 +121,31 @@ def hot_swap_group(
             f"{fingerprint_after:#018x} — reverted; ESCALATE (coordinated deploy required)"
         )
 
+    group = registry.get_group(group_name)
+    # BIND the live engine (if one carries this group's input) to the new instance, so the group's OWN contract
+    # (ReductionGroup.up_to_date / rebuild_from_history) treats the freshly-swapped engine-backed state as stale
+    # and reseeds it — the running state lives in the engine, but the contract is the single surface.
+    if engines is not None and isinstance(group, ReductionGroup) and group.reduce_input in engines:
+        group.bind_live_engine(engines[group.reduce_input], seed_symbols)
+
+    # ⭐ THE SINGLE GUARD — no kind classification. The group's contract self-reports + self-heals.
     reseeded = False
-    if kind is SwapKind.RESEED and buffer_frame is not None and engines is not None:
-        swapped_group = registry.get_group(group_name)
-        reduce_input = swapped_group.reduce_input  # type: ignore[attr-defined]  # RESEED ⇒ ReductionGroup
-        engines[reduce_input].seed(buffer_frame, seed_symbols)
+    if not group.up_to_date(buffer_frame):
+        if buffer_frame is None:
+            raise HotSwapError(
+                f"hot_swap '{group_name}': carries cross-minute state but no buffer_frame to reseed from — "
+                f"ESCALATE to a coordinated/relaunch deploy, do not swap into empty state"
+            )
+        group.rebuild_from_history(buffer_frame)
         reseeded = True
 
-    note = {
-        SwapKind.DIRECT: "swapped; stateless per-minute, no reseed (recomputes from the shared buffer)",
-        SwapKind.RESEED: "swapped + reseeded the incremental engine from the current buffer",
-    }[kind]
+    note = (
+        "swapped + contract-reseeded the carried state from the current buffer"
+        if reseeded
+        else "swapped; up-to-date (stateless / recomputes from the shared buffer), no reseed"
+    )
     return HotSwapResult(
         group_name=group_name,
-        kind=kind,
         swapped=True,
         reseeded=reseeded,
         fingerprint_before=fingerprint_before,

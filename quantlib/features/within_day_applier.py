@@ -103,7 +103,8 @@ def apply_job(
         return ApplyOutcome(job.job_id, job.group_name, "escalated", f"hot-swap refused: {error}")
 
     if confirm_tripwire(job.group_name):
-        logger.info("job %d group=%s APPLIED (%s)", job.job_id, job.group_name, result.kind.value)
+        reseed_note = "reseeded" if result.reseeded else "no-reseed"
+        logger.info("job %d group=%s APPLIED (%s)", job.job_id, job.group_name, reseed_note)
         return ApplyOutcome(job.job_id, job.group_name, "applied", result.note)
 
     # Tripwire failed: production live still != backfill. Roll back THIS group's swap, escalate.

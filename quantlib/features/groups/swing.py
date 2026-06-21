@@ -188,7 +188,7 @@ class SwingGroup(FeatureGroup):
             self.__dict__["_swing_state"] = state
         return state
 
-    def up_to_date(self, buffer: pl.DataFrame) -> bool:
+    def up_to_date(self, buffer: pl.DataFrame | None) -> bool:
         """Held-state override of the group-level RunningState contract: delegate to the carried ``SwingState``
         (False when cold / after a hot-swap / across the session boundary / on a gap → caller rebuilds). When the
         stateful flag is OFF the live path recomputes from the buffer each minute, so it is always up to date."""
@@ -196,7 +196,7 @@ class SwingGroup(FeatureGroup):
             return True
         return self._live_state.up_to_date(buffer)
 
-    def rebuild_from_history(self, buffer: pl.DataFrame) -> None:
+    def rebuild_from_history(self, buffer: pl.DataFrame | None) -> None:
         """Held-state override: reseed the carried ``SwingState`` from ``buffer`` (the SAME history backfill
         recomputes over) so the live state == backfill state by construction. No-op when the flag is OFF."""
         if os.environ.get("FP_SWING_STATEFUL") != "1":

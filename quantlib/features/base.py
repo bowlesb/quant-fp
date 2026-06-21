@@ -221,7 +221,7 @@ class FeatureGroup(ABC):
         override it (``ReductionGroup`` derives it from its declared windows)."""
         return None
 
-    def up_to_date(self, buffer: pl.DataFrame) -> bool:
+    def up_to_date(self, buffer: pl.DataFrame | None) -> bool:
         """The RunningState contract at the GROUP level — the SINGLE self-healing rule for both held-state
         features AND the hot-swap applier (quantlib/features/running_state.py).
 
@@ -232,13 +232,15 @@ class FeatureGroup(ABC):
         date — nothing to reseed. A group that carries cross-minute state (swing's leg-state, an armed incremental
         engine, a StatefulGroup accumulator) OVERRIDES this to delegate to its running-state object, so it reports
         False when cold / after a hot-swap / across a session boundary / on a gap, which makes the caller rebuild.
+        ``buffer`` may be None (no history available) — a stateless group is still up to date; a stateful override
+        reports False (it cannot verify freshness without history), so the caller escalates if it cannot reseed.
 
         THE APPLIER USES THIS to stay KIND-AGNOSTIC: it swaps the code, then ``if not group.up_to_date(buffer):
         group.rebuild_from_history(buffer)`` — no DIRECT/RESEED/ESCALATE classification. DIRECT = the default True;
         RESEED = a stateful override returns False → self-rebuild; irreducible = ``rebuild_from_history`` raises."""
         return True
 
-    def rebuild_from_history(self, buffer: pl.DataFrame) -> None:
+    def rebuild_from_history(self, buffer: pl.DataFrame | None) -> None:
         """The RunningState lazy reseed at the GROUP level. DEFAULT no-op: a stateless group has no carried state
         to rebuild (it recomputes from the ring every minute). A held-state group OVERRIDES this to reseed its
         running-state object from ``buffer`` (the SAME history backfill recomputes over), so that immediately

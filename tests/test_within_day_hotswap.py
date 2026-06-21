@@ -2,9 +2,12 @@
 change detector + the in-sandbox reconfirm fix-proof. ALL offline — a sandbox Registry / synthetic frames /
 a mock engine; NOTHING touches the live fc container, the bus, or the store.
 
-The hot-swap is covered across all three kind-classes (docs/WITHIN_DAY_PARITY_CONTINUOUS_DEPLOY.md §3.3):
-DIRECT (batch/stateless — swap, no reseed), RESEED (carries live incremental state — swap + engine.seed),
-ESCALATE (fingerprint-affecting or unseedable — refuse the swap + raise).
+The hot-swap is KIND-AGNOSTIC (docs/WITHIN_DAY_PARITY_CONTINUOUS_DEPLOY.md §3.3 — the single self-healing
+contract, no SwapKind classifier): swap the code, then ``if not group.up_to_date(buffer):
+group.rebuild_from_history(buffer)``. The three former kinds collapse into what the group's OWN contract does:
+DIRECT = a stateless group stays ``up_to_date()==True`` post-swap (no reseed); RESEED = a group carrying state
+(a bound live engine) reports ``False`` → ``rebuild_from_history`` reseeds; ESCALATE = a fingerprint-affecting
+swap, or a not-up-to-date group with no buffer to reseed from, raises ``HotSwapError``.
 """
 
 from __future__ import annotations
@@ -18,8 +21,7 @@ import pytest
 import quantlib.features.groups  # noqa: F401  populate REGISTRY
 from quantlib.bus.schema import BusSchema
 from quantlib.features import within_day_reconfirm as rc
-from quantlib.features.hot_swap import (HotSwapError, SwapKind,
-                                        classify_swap_kind, hot_swap_group)
+from quantlib.features.hot_swap import HotSwapError, hot_swap_group
 from quantlib.features.registry import REGISTRY
 from quantlib.features.within_day_watch import _changed
 
@@ -48,11 +50,10 @@ def _minute_agg(symbols: tuple[str, ...], n: int) -> pl.DataFrame:
 def test_direct_swap_replaces_instance_and_keeps_fingerprint() -> None:
     fp_before = BusSchema.from_registry().fingerprint
     old_instance = REGISTRY.get_group("momentum")
-    result = hot_swap_group("momentum", engines=None)  # no engines ⇒ DIRECT
+    result = hot_swap_group("momentum", engines=None)  # no engine ⇒ stateless ⇒ up_to_date, no reseed
     new_instance = REGISTRY.get_group("momentum")
 
-    assert result.kind is SwapKind.DIRECT
-    assert result.swapped and not result.reseeded
+    assert result.swapped and not result.reseeded  # the DIRECT case: contract guard was a no-op
     assert new_instance is not old_instance  # a FRESH instance is installed (the swap happened)
     assert new_instance.name == "momentum"
     assert result.fingerprint_before == result.fingerprint_after == fp_before
@@ -72,9 +73,14 @@ def test_direct_swap_next_compute_uses_new_instance() -> None:
     assert out.height > 0  # the swapped instance computes (same logic, fresh object)
 
 
-def test_classify_direct_when_no_live_engine() -> None:
-    assert classify_swap_kind(REGISTRY.get_group("momentum"), engines=None) is SwapKind.DIRECT
-    assert classify_swap_kind(REGISTRY.get_group("momentum"), engines={}) is SwapKind.DIRECT
+def test_stateless_group_is_up_to_date_post_swap() -> None:
+    # The DIRECT case via the contract: a reduction with NO live engine recomputes from the ring each minute,
+    # so post-swap it is up_to_date and the guard reseeds nothing.
+    frame = _minute_agg(("AAA", "BBB"), 50)
+    assert REGISTRY.get_group("momentum").up_to_date(frame) is True
+    result = hot_swap_group("momentum", engines={})  # empty engines ⇒ no bound engine ⇒ stateless
+    assert not result.reseeded
+    assert REGISTRY.get_group("momentum").up_to_date(frame) is True
 
 
 # ---- HOT-SWAP: RESEED kind ----------------------------------------------------------------------
@@ -92,32 +98,32 @@ class _MockEngine:
         self.seed_symbols = symbols
 
 
-def test_reseed_swap_classifies_and_seeds_the_engine() -> None:
-    group = REGISTRY.get_group("momentum")
-    reduce_input = group.reduce_input
+def test_reseed_swap_seeds_the_engine_via_the_contract() -> None:
+    # The RESEED case via the contract: a LIVE engine carries this group's input → it is bound to the swapped
+    # instance → up_to_date() reports False → rebuild_from_history reseeds the engine. No SwapKind classifier.
+    reduce_input = REGISTRY.get_group("momentum").reduce_input
     engine = _MockEngine()
-    engines = {reduce_input: engine}  # a LIVE engine carries this group's input ⇒ RESEED
-    assert classify_swap_kind(group, engines) is SwapKind.RESEED  # type: ignore[arg-type]
-
+    engines = {reduce_input: engine}
     frame = _minute_agg(("AAA", "BBB"), 50)
     result = hot_swap_group(
         "momentum", engines=engines, buffer_frame=frame, seed_symbols=["AAA", "BBB"]  # type: ignore[arg-type]
     )
-    assert result.kind is SwapKind.RESEED
     assert result.swapped and result.reseeded
     assert engine.seeded_with is not None  # the engine WAS reseeded from the buffer
     assert engine.seed_symbols == ["AAA", "BBB"]
     assert result.fingerprint_before == result.fingerprint_after
+    # After the contract reseed the swapped group is up to date again.
+    assert REGISTRY.get_group("momentum").up_to_date(frame) is True
 
 
 # ---- HOT-SWAP: ESCALATE kind --------------------------------------------------------------------
 
 
-def test_reseed_kind_without_buffer_escalates() -> None:
+def test_reseed_needed_without_buffer_escalates() -> None:
     group = REGISTRY.get_group("momentum")
-    engines = {group.reduce_input: _MockEngine()}  # RESEED kind...
+    engines = {group.reduce_input: _MockEngine()}  # a bound engine ⇒ not up_to_date post-swap...
     with pytest.raises(HotSwapError, match="ESCALATE"):
-        hot_swap_group("momentum", engines=engines, buffer_frame=None)  # type: ignore[arg-type]  # ...but no buffer
+        hot_swap_group("momentum", engines=engines, buffer_frame=None)  # type: ignore[arg-type]  # ...no buffer
 
 
 def test_swap_absent_group_escalates() -> None:
