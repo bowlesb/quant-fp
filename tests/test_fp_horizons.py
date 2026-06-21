@@ -10,21 +10,36 @@ import pytest
 
 from quantlib.features.base import BatchContext
 from quantlib.features.engine import run_group
+from quantlib.features.reduction_anchor import _RTH_MINUTES_PER_DAY, attach_volume_anchor
 from quantlib.features.registry import REGISTRY
 
 DAY = date(2026, 6, 12)
 
 
+def _with_volume_anchor(frame: pl.DataFrame) -> pl.DataFrame:
+    """Attach volume's per-symbol centering anchor, as production capture/backfill does where minute_agg is
+    built. Synthesize a daily snapshot at DAILY-TOTAL scale so ``attach_volume_anchor`` re-derives the
+    per-minute anchor exactly as in prod."""
+    daily = (
+        frame.group_by("symbol", maintain_order=True)
+        .agg((pl.col("volume").last() * _RTH_MINUTES_PER_DAY).alias("volume"))
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_volume_anchor(frame, daily)
+
+
 def test_volume_group() -> None:
     base = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
     n = 40
-    frame = pl.DataFrame(
-        {
-            "symbol": ["AAA"] * n,
-            "minute": [base + timedelta(minutes=i) for i in range(n)],
-            "close": [100.0 + i * 0.1 for i in range(n)],
-            "volume": [1000.0 + (i % 7) * 100 for i in range(n)],
-        }
+    frame = _with_volume_anchor(
+        pl.DataFrame(
+            {
+                "symbol": ["AAA"] * n,
+                "minute": [base + timedelta(minutes=i) for i in range(n)],
+                "close": [100.0 + i * 0.1 for i in range(n)],
+                "volume": [1000.0 + (i % 7) * 100 for i in range(n)],
+            }
+        )
     )
     out = run_group(REGISTRY.get_group("volume"), BatchContext(frames={"minute_agg": frame}))
     row = out.filter(pl.col("minute") == base + timedelta(minutes=10)).row(0, named=True)

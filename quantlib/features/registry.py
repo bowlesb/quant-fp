@@ -97,6 +97,19 @@ class Registry:
         self._groups[name] = candidate
         return candidate
 
+    def unregister(self, name: str) -> None:
+        """Remove a registered group and its feature-owner entries. The inverse of ``register`` — used to
+        restore the de-staged production set after a test imports a de-staged group's module directly (the
+        ``@register`` side effect of that import would otherwise leak the group into the GLOBAL registry and
+        pollute every downstream test's production group set / schema). A no-op if ``name`` is not
+        registered."""
+        group = self._groups.pop(name, None)
+        if group is None:
+            return
+        for spec in group.declare():
+            if self._feature_owner.get(spec.name) == name:
+                del self._feature_owner[spec.name]
+
     def groups(self) -> list[FeatureGroup]:
         return list(self._groups.values())
 

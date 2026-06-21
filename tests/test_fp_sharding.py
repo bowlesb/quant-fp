@@ -63,7 +63,10 @@ def _snapshots() -> dict[str, pl.DataFrame]:
     )
     daily = pl.DataFrame(
         [
-            {"symbol": symbol, "date": (BASE + timedelta(days=d - 9)).date(), "close": 100.0 + off + d * 0.5}
+            {"symbol": symbol, "date": (BASE + timedelta(days=d - 9)).date(), "close": 100.0 + off + d * 0.5,
+             # daily-BAR total volume (per-minute ~1000 x the session minutes) — the source
+             # attach_reduction_anchors centers volume's std on, exactly as in production capture.
+             "volume": (1000.0 + off) * 390.0}
             for off, symbol in enumerate(SYMBOLS)
             for d in range(10)
         ]
