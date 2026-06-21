@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
-from quantlib.data.realized_cost import realized_half_spread_bps
+from quantlib.data.realized_cost import realized_half_spread_bps_multi
 
 STORE = os.environ.get("STORE_ROOT", "/store")
 
@@ -469,20 +469,17 @@ def _attach_realized_half_spread(feats: pl.DataFrame, date_iso: str) -> pl.DataF
     left null (downstream coalesces to the store column / flat stub). No-op (null column) when disabled."""
     if not USE_REALIZED_COST or feats.height == 0:
         return feats.with_columns(pl.lit(None, dtype=pl.Float64).alias("half_spread_bps"))
-    measured: list[pl.DataFrame] = []
-    for minute in feats["minute"].unique().to_list():
-        at_ts = minute if minute.tzinfo is not None else minute.replace(tzinfo=dt.timezone.utc)
-        syms = feats.filter(pl.col("minute") == minute)["symbol"].to_list()
-        realized = realized_half_spread_bps(STORE, date_iso, syms, at_ts)
-        if realized.height:
-            measured.append(
-                realized.with_columns(pl.lit(minute).alias("minute")).rename(
-                    {"realized_half_spread_bps": "half_spread_bps"}
-                )
-            )
-    if not measured:
+    instants = [
+        minute if minute.tzinfo is not None else minute.replace(tzinfo=dt.timezone.utc)
+        for minute in feats["minute"].unique().to_list()
+    ]
+    syms = feats["symbol"].unique().to_list()
+    # ONE quote-file read per symbol for ALL sample instants (vs the old per-minute re-read of the same
+    # whole-day partition); the (symbol, minute) left-join keeps only the pairs actually in feats.
+    table = realized_half_spread_bps_multi(STORE, date_iso, syms, instants)
+    if table.height == 0:
         return feats.with_columns(pl.lit(None, dtype=pl.Float64).alias("half_spread_bps"))
-    table = pl.concat(measured, how="vertical").unique(subset=["symbol", "minute"], keep="first")
+    table = table.rename({"realized_half_spread_bps": "half_spread_bps"})
     return feats.join(table, on=["symbol", "minute"], how="left")
 
 

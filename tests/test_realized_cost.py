@@ -13,7 +13,7 @@ import os
 import polars as pl
 import pytest
 
-from quantlib.data.realized_cost import MIN_QUOTES, realized_half_spread_bps
+from quantlib.data.realized_cost import MIN_QUOTES, realized_half_spread_bps, realized_half_spread_bps_multi
 
 DAY = "2026-06-10"
 ENTRY = dt.datetime(2026, 6, 10, 13, 40, tzinfo=dt.timezone.utc)
@@ -110,3 +110,94 @@ def test_missing_symbol_is_omitted(tmp_path: str) -> None:
 
 def test_min_quotes_constant_is_enforced() -> None:
     assert MIN_QUOTES >= 2  # time-weighting needs at least a couple of quotes to be meaningful
+
+
+_MULTI_INSTANTS = [
+    dt.datetime(2026, 6, 10, 13, 40, tzinfo=dt.timezone.utc),
+    dt.datetime(2026, 6, 10, 14, 10, tzinfo=dt.timezone.utc),
+    dt.datetime(2026, 6, 10, 14, 40, tzinfo=dt.timezone.utc),
+]
+
+
+def test_multi_equals_per_instant_loop(tmp_path: str) -> None:
+    """``realized_half_spread_bps_multi`` is row-for-row identical to calling the single-instant
+    function once per instant — same value, same (symbol, instant) inclusion — but reads each
+    symbol's partition ONCE. The whole point of the batched fast path: equivalence, not approximation."""
+    store = str(tmp_path)
+    # AAA: dense quotes around EACH instant (measurable at every instant).
+    # BBB: quotes only around the FIRST instant (omitted at the later two -> tests selective inclusion).
+    aaa_rows = []
+    for inst in _MULTI_INSTANTS:
+        aaa_rows += [
+            {
+                "ts": inst - dt.timedelta(seconds=s),
+                "bid_price": 99.95,
+                "bid_size": 100.0,
+                "ask_price": 100.05,
+                "ask_size": 100.0,
+            }
+            for s in range(1, 90)
+        ]
+    _write_quotes(store, "AAA", aaa_rows)
+    first = _MULTI_INSTANTS[0]
+    bbb_rows = [
+        {
+            "ts": first - dt.timedelta(seconds=s),
+            "bid_price": 99.0,
+            "bid_size": 100.0,
+            "ask_price": 101.0,
+            "ask_size": 100.0,
+        }
+        for s in range(1, 60)
+    ]
+    _write_quotes(store, "BBB", bbb_rows)
+
+    symbols = ["AAA", "BBB", "ZZZ_MISSING"]
+    per_instant = []
+    for at_ts in _MULTI_INSTANTS:
+        out = realized_half_spread_bps(store, DAY, symbols, at_ts)
+        if out.height:
+            per_instant.append(out.with_columns(pl.lit(at_ts).alias("minute")))
+    expected = pl.concat(per_instant).sort(["symbol", "minute"])
+    got = realized_half_spread_bps_multi(store, DAY, symbols, _MULTI_INSTANTS).sort(["symbol", "minute"])
+
+    assert got.height == expected.height
+    merged = got.join(expected, on=["symbol", "minute"], suffix="_exp")
+    assert merged.height == got.height  # identical key set
+    max_diff = (merged["realized_half_spread_bps"] - merged["realized_half_spread_bps_exp"]).abs().max()
+    assert max_diff is not None and max_diff < 1e-9
+    # BBB present only at the first instant; AAA at all three.
+    assert set(got.filter(pl.col("minute") == first)["symbol"].to_list()) == {"AAA", "BBB"}
+    assert set(got.filter(pl.col("minute") == _MULTI_INSTANTS[-1])["symbol"].to_list()) == {"AAA"}
+
+
+def test_multi_reads_each_partition_once(tmp_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lock in the fast path: the batched call opens each symbol's quote file exactly ONCE regardless of
+    how many instants are requested (the old loop re-read the same whole-day file per instant)."""
+    import quantlib.data.realized_cost as rc
+
+    store = str(tmp_path)
+    rows = []
+    for inst in _MULTI_INSTANTS:
+        rows += [
+            {
+                "ts": inst - dt.timedelta(seconds=s),
+                "bid_price": 99.95,
+                "bid_size": 100.0,
+                "ask_price": 100.05,
+                "ask_size": 100.0,
+            }
+            for s in range(1, 90)
+        ]
+    _write_quotes(store, "AAA", rows)
+
+    reads: list[str] = []
+    real_read = rc._read_valid_quotes_day
+
+    def _counting_read(store_arg: str, symbol: str, day: dt.date) -> pl.DataFrame | None:
+        reads.append(symbol)
+        return real_read(store_arg, symbol, day)
+
+    monkeypatch.setattr(rc, "_read_valid_quotes_day", _counting_read)
+    rc.realized_half_spread_bps_multi(store, DAY, ["AAA"], _MULTI_INSTANTS)
+    assert reads == ["AAA"]  # ONE read for 3 instants, not 3

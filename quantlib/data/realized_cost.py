@@ -56,19 +56,25 @@ def _read_quote_window(
     return frame if frame.height >= MIN_QUOTES else None
 
 
-def _time_weighted_half_spread_bps(quotes: pl.DataFrame, end: dt.datetime) -> float:
-    """Time-weighted mean relative HALF-spread (bps) over the window, last quote's dwell -> ``end``."""
-    mid = (pl.col("ask_price") + pl.col("bid_price")) / 2.0
-    spread = quotes.with_columns(((pl.col("ask_price") - pl.col("bid_price")) / mid * 10000.0).alias("_sp"))
-    timestamps = spread["ts"].to_numpy()
+def _tw_half_spread_from_arrays(timestamps: np.ndarray, spread_bps: np.ndarray, end: dt.datetime) -> float:
+    """Time-weighted mean relative HALF-spread (bps): each quote's full spread weighted by how long it
+    stood, the last quote's dwell running to ``end``. ``timestamps`` is sorted datetime64[us], ascending;
+    ``spread_bps`` is the matching full relative spread in bps. Shared by both the single-instant and the
+    batched path so they are equivalent by construction."""
     end_np = np.datetime64(end.replace(tzinfo=None), "us")
     next_ts = np.append(timestamps[1:], end_np)
     dwell_seconds = (next_ts - timestamps) / np.timedelta64(1, "s")
-    spread_bps = spread["_sp"].to_numpy()
     weight_sum = float(np.sum(dwell_seconds))
     if weight_sum <= 1e-9:
         return float(np.mean(spread_bps)) / 2.0
     return float(np.sum(spread_bps * dwell_seconds) / weight_sum) / 2.0
+
+
+def _time_weighted_half_spread_bps(quotes: pl.DataFrame, end: dt.datetime) -> float:
+    """Time-weighted mean relative HALF-spread (bps) over the window, last quote's dwell -> ``end``."""
+    mid = (pl.col("ask_price") + pl.col("bid_price")) / 2.0
+    spread = quotes.with_columns(((pl.col("ask_price") - pl.col("bid_price")) / mid * 10000.0).alias("_sp"))
+    return _tw_half_spread_from_arrays(spread["ts"].to_numpy(), spread["_sp"].to_numpy(), end)
 
 
 def realized_half_spread_bps(
@@ -98,4 +104,72 @@ def realized_half_spread_bps(
             f"no realized half-spread measurable for {day} at {at_ts.isoformat()} ({len(symbols)} syms)"
         )
         return pl.DataFrame(schema={"symbol": pl.Utf8, "realized_half_spread_bps": pl.Float64})
+    return pl.DataFrame(rows)
+
+
+def _read_valid_quotes_day(store: str, symbol: str, day: dt.date) -> pl.DataFrame | None:
+    """Whole-day valid-NBBO quotes for one symbol (ts + full relative spread in bps), read ONCE.
+    Same validity filter + spread formula as ``_read_quote_window`` — only it is not pre-windowed, so the
+    one file read serves every sample instant. ``None`` when the partition is absent."""
+    path = os.path.join(partition_dir(store, "quotes", symbol, day), "data.parquet")
+    if not os.path.exists(path):
+        return None
+    mid = (pl.col("ask_price") + pl.col("bid_price")) / 2.0
+    return (
+        pl.read_parquet(path, columns=["ts", "bid_price", "bid_size", "ask_price", "ask_size"])
+        .filter(
+            (pl.col("bid_price") > 0)
+            & (pl.col("ask_price") > pl.col("bid_price"))
+            & (pl.col("bid_size") > 0)
+            & (pl.col("ask_size") > 0)
+        )
+        .sort("ts")
+        .select("ts", ((pl.col("ask_price") - pl.col("bid_price")) / mid * 10000.0).alias("_sp"))
+    )
+
+
+def realized_half_spread_bps_multi(
+    store: str,
+    day: str,
+    symbols: list[str],
+    at_ts_list: list[dt.datetime],
+    *,
+    window_min: int = DEFAULT_COST_WINDOW_MIN,
+) -> pl.DataFrame:
+    """Measured per-name realized half-spread (bps) at SEVERAL entry instants in one pass, reading each
+    symbol's whole-day quote partition exactly ONCE. Equivalent — row for row — to calling
+    ``realized_half_spread_bps`` once per instant (same window, validity filter, strict ``ts < at_ts``
+    cut, ``MIN_QUOTES`` floor, time-weighting), but collapses the per-(symbol x instant) file reads into
+    one read per symbol. Returns a ``(symbol, minute, realized_half_spread_bps)`` frame; a (symbol,
+    instant) with too few valid in-window quotes is omitted (the caller falls back)."""
+    target = dt.date.fromisoformat(day)
+    instants = sorted(at_ts_list)
+    instants_np = np.array([np.datetime64(ts.replace(tzinfo=None), "us") for ts in instants])
+    window = np.timedelta64(window_min, "m")
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        quotes = _read_valid_quotes_day(store, symbol, target)
+        if quotes is None or quotes.height == 0:
+            continue
+        timestamps = quotes["ts"].to_numpy()
+        spread_bps = quotes["_sp"].to_numpy()
+        for at_ts, at_np in zip(instants, instants_np):
+            lo_idx = int(np.searchsorted(timestamps, at_np - window, side="left"))
+            hi_idx = int(np.searchsorted(timestamps, at_np, side="left"))  # strict ts < at_ts
+            if hi_idx - lo_idx < MIN_QUOTES:
+                continue
+            half = _tw_half_spread_from_arrays(timestamps[lo_idx:hi_idx], spread_bps[lo_idx:hi_idx], at_ts)
+            rows.append({"symbol": symbol, "minute": at_ts, "realized_half_spread_bps": half})
+    if not rows:
+        logger.warning(
+            f"no realized half-spread measurable for {day} over {len(instants)} instant(s) "
+            f"({len(symbols)} syms)"
+        )
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.Utf8,
+                "minute": pl.Datetime("us", "UTC"),
+                "realized_half_spread_bps": pl.Float64,
+            }
+        )
     return pl.DataFrame(rows)
