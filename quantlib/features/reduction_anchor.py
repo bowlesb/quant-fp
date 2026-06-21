@@ -99,15 +99,21 @@ def attach_reduction_anchors(frames: dict[str, pl.DataFrame]) -> dict[str, pl.Da
     selected once the column exists). Value-additive: the centered variance is shift-invariant, so this only
     changes float conditioning, never a feature value (fp unchanged).
 
-    Currently the volume anchor, sourced from the ``daily`` snapshot via ``attach_volume_anchor``. A no-op
-    (returns ``frames`` unchanged) when ``minute_agg`` is absent, ``daily`` is absent (no anchor source —
-    the centered groups then stay unrunnable rather than centering on a fabricated anchor), or the anchor
-    column is ALREADY present (idempotent — a frame that came pre-anchored from a test harness or a prior
-    call is not re-joined)."""
+    The volume anchor is sourced from the ``daily`` snapshot via ``attach_volume_anchor``. When ``daily`` is
+    ABSENT (e.g. the 24/7 crypto capture, which has no daily-bar snapshot), the anchor column is still
+    attached but set to the 0.0 sentinel — UNCENTERED, i.e. the raw power-sum form — so volume stays
+    RUNNABLE rather than silently dropping out for want of an anchor source. 0.0 is the module's existing
+    "no centering" value (``attach_volume_anchor`` already assigns it to any symbol absent from ``daily``),
+    and it is well-conditioned where the raw form already was (crypto volume is moderate-magnitude). A no-op
+    (returns ``frames`` unchanged) when ``minute_agg`` is absent or the anchor column is ALREADY present
+    (idempotent — a frame that came pre-anchored from a test harness or a prior call is not re-joined)."""
     minute_agg = frames.get("minute_agg")
-    daily = frames.get("daily")
-    if minute_agg is None or daily is None:
+    if minute_agg is None:
         return frames
     if anchor_column("volume") in minute_agg.columns:
         return frames
+    daily = frames.get("daily")
+    if daily is None:
+        anchored = minute_agg.with_columns(pl.lit(0.0).alias(anchor_column("volume")))
+        return {**frames, "minute_agg": anchored}
     return {**frames, "minute_agg": attach_volume_anchor(minute_agg, daily)}

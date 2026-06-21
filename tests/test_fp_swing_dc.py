@@ -37,6 +37,15 @@ from quantlib.features.groups.swing_dc import (
     _FEATURE_COLS,
     swing_dc_fold_frame,
 )
+from quantlib.features.registry import REGISTRY
+
+# swing_dc is DE-STAGED (PR #270: un-registered, fp 802->728) — its module is intentionally NOT imported by
+# quantlib.features.groups.__init__, so it is absent from the production registry. Importing it HERE (for the
+# class + helpers these parity tests exercise) re-runs its ``@register`` side effect, which would leak the
+# group into the GLOBAL registry and pollute every other test's production group set (e.g. inflating
+# default_schema to 802 features and tripping test_fp_latency_budget on a group with no production budget).
+# Undo that side effect at import time — these tests use ``SwingDcGroup`` directly, not via the registry.
+REGISTRY.unregister(SwingDcGroup.name)
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 FIB_RETR = (0.382, 0.5, 0.618, 0.786)

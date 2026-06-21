@@ -221,6 +221,32 @@ class FeatureGroup(ABC):
         override it (``ReductionGroup`` derives it from its declared windows)."""
         return None
 
+    def up_to_date(self, buffer: pl.DataFrame) -> bool:
+        """The RunningState contract at the GROUP level — the SINGLE self-healing rule for both held-state
+        features AND the hot-swap applier (quantlib/features/running_state.py).
+
+        Returns True iff this group can compute ``buffer``'s latest minute and emit a value EQUAL to the backfill
+        recompute WITHOUT first rebuilding its state. DEFAULT True: a stateless group (every batch reduction with
+        FP_INCREMENTAL off, every declarative / candlestick / calendar / cross-sectional group, every Class-A
+        cache group that recomputes on a miss) re-derives from the shared ring each minute, so it is ALWAYS up to
+        date — nothing to reseed. A group that carries cross-minute state (swing's leg-state, an armed incremental
+        engine, a StatefulGroup accumulator) OVERRIDES this to delegate to its running-state object, so it reports
+        False when cold / after a hot-swap / across a session boundary / on a gap, which makes the caller rebuild.
+
+        THE APPLIER USES THIS to stay KIND-AGNOSTIC: it swaps the code, then ``if not group.up_to_date(buffer):
+        group.rebuild_from_history(buffer)`` — no DIRECT/RESEED/ESCALATE classification. DIRECT = the default True;
+        RESEED = a stateful override returns False → self-rebuild; irreducible = ``rebuild_from_history`` raises."""
+        return True
+
+    def rebuild_from_history(self, buffer: pl.DataFrame) -> None:
+        """The RunningState lazy reseed at the GROUP level. DEFAULT no-op: a stateless group has no carried state
+        to rebuild (it recomputes from the ring every minute). A held-state group OVERRIDES this to reseed its
+        running-state object from ``buffer`` (the SAME history backfill recomputes over), so that immediately
+        after, ``up_to_date(buffer)`` is True and the live state == the backfill state by construction. A group
+        whose state CANNOT be cheaply restored to parity (an irreducible change) raises here — which is exactly
+        how the applier detects "not real-time-swappable" and escalates, with no separate kind classifier."""
+        return None
+
 
 def daily_snapshot_token(source: pl.DataFrame) -> tuple[int, int, object, float]:
     """A cheap content witness for a daily snapshot, used to key per-session daily-feature caches. The
