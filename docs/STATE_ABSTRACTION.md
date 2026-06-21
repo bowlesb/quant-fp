@@ -1,13 +1,26 @@
 # In-process feature state — the general abstraction (design)
 
+> **⚠️ AUTHORITATIVE SOURCE NOTE (added 2026-06-21 per #381).** This doc is RETAINED for the state-KIND
+> taxonomy (additive-window / cumulative / extrema / lag / EMA / tick-ring) and the parity-by-construction
+> principle — those are unchanged and correct. **But its per-group COST labels in the ADOPTION MAP below are
+> SUPERSEDED by `docs/LATENCY_EXHAUSTIVE_AUDIT.md` (#381), the current authoritative per-group latency /
+> abstraction source.** #381 traced all 63 groups' LIVE per-minute path in `origin/main` source and refuted
+> three classifications here: (1) the "12 BATCH-fullbuffer / 90 features rebuild from full history every
+> minute" claim is a mechanical label on each group's BACKFILL `compute()` (`reduce_buffer_minutes()==None`),
+> NOT the live form — all 12 live `compute_latest` paths are bounded / session-cached / single-minute; (2) the
+> 5 "A SessionCache-cached" static groups are pure-ts filters, NOT `SessionCache`; (3) `return_dispersion` is
+> a hybrid (cached snapshot + 60m gather). Those rows are corrected inline below. **Read #381 for the
+> source-traced per-group truth; read this doc for the kind taxonomy.**
+>
 > Status: DESIGN + MEASURED ADOPTION (updated 2026-06-21). Answers: "do all feature groups share ONE flexible
 > abstraction for the in-process state they need for fast compute, with backfill engaging it consistently?"
 > The KINDS (additive-window, EMA, lag/last-k, extrema) are BUILT and parity-proven; the held-state
 > `RunningState` contract (`up_to_date`/`rebuild_from_history`) is on `base.FeatureGroup`. The two remaining
 > gaps are concrete, not conceptual: (1) the ~10x incremental lever is DORMANT in the live equity fc
-> (`FP_INCREMENTAL` off) and has no equity PARITY soak backing the flip; (2) ~14 plain groups (~285 features)
-> still rebuild from the FULL trailing buffer every minute instead of folding. The measured adoption map +
-> the activation gap + the migration path are the new sections at the bottom.
+> (`FP_INCREMENTAL` off) and has no equity PARITY soak backing the flip; (2) the plain groups labeled
+> "BATCH-fullbuffer" below rebuild from the full trailing buffer ONLY in their BACKFILL form — their LIVE
+> `compute_latest` is already bounded / cached / single-minute (per #381 §6.1). The measured adoption map +
+> the activation gap + the migration path are the sections at the bottom.
 
 ## The principle that must hold (non-negotiable)
 
@@ -97,33 +110,39 @@ registry, classified mechanically (`isinstance` + `reduce_buffer_minutes()` + `c
 overrides), NOT from this doc's prose. The 728/63 mismatch with older "190 feature" notes is the FINGERPRINT
 feature count (728 named outputs across 63 groups); both are correct, they count different things.
 
-### Headline: the held-state contract IS landed; the GAP is the BATCH plain groups, not the kinds.
+### Headline: the held-state contract IS landed; the remaining GAP is ACTIVATION (the dormant `FP_INCREMENTAL` flip + the Rust kernel), NOT a live full-buffer rebuild. (Updated per #381 — the "BATCH plain groups rebuild from full history every minute" framing was BACKFILL-only; live `compute_latest` is already bounded/cached.)
 
 | Category | groups | features | what they are |
 |---|---|---|---|
-| **A — intraday-invariant (cached or cacheable)** | 13 | 99 | static/calendar (5 groups, 31f) + `SessionCache` daily-snapshot groups (8 groups, 68f) |
+| **A — intraday-invariant (cached or cacheable)** | 13 | 99 | static/calendar + daily-snapshot groups. **NOTE (#381 §6.2):** of these, 5 (`sector`, `calendar`, `asset_flags`, `round_levels`, `calendar_events`, 31f) are **pure-ts/reference FILTERS, NOT `SessionCache`** — they default to full `compute()` + filter-to-T (≤6.5ms, ~0 marginal cost). The other 8 (68f) are true `SessionCache` daily-snapshot groups. A LABEL-accuracy correction, not a latency lever (caching a pure-ts filter saves nothing). |
 | **B — O(1) fold (incremental state)** | 19 | 288 | 15 `ReductionGroup` incremental_safe (201f) + 4 `StatefulGroup` EMA/Lag/Extrema (87f) |
 | **B-ready, FLAG-OFF** | 1 | 9 | `swing` — full RunningState held-state built, gated on `FP_SWING_STATEFUL` (currently BATCH live) |
 | **BATCH-bounded (cheap, NOT yet folding)** | 10 | 66 | plain groups with a bounded `compute_latest` window (30–62m) — recompute a SHORT window/minute, not full history |
-| **BATCH-fullbuffer (the real slow path)** | 12 | 90 | plain groups whose live `compute_latest` reads the WHOLE buffer (`reduce_buffer_minutes()==None`) every minute |
+| **BATCH-fullbuffer-BACKFILL-ONLY (live `compute_latest` already fast)** | 12 | 90 | **RE-LABELED per #381 §6.1.** `reduce_buffer_minutes()==None` is a mechanical label on the BACKFILL `compute()` ONLY. The LIVE `compute_latest` of all 12 is bounded / cached / single-minute (`session_cumulative_agg` memoized ×3, `compute_latest_on_window(ctx,1)` ×5 tick, 75m slice for `momentum_run`, `SessionCache` memo for `edgar`, latest-row gather for `market_context`, session single-pass for `intraday_seasonality`). **No live full-buffer rebuild exists.** See `docs/LATENCY_EXHAUSTIVE_AUDIT.md` §6.1 for the source-traced per-group verdict. |
 | **NO-GO reductions (Rust-only, stay BATCH)** | 8 | 176 | `ReductionGroup incremental_safe=False` — settled value-identical float-cancellation limit; see below |
 
 (Totals: 13+19+1+10+12+8 = 63 groups; 99+288+9+66+90+176 = 728 features — verified against the live registry.)
 
 **The quantified gap Ben asked for — "how many features still rebuild from full history every minute?"**
-The **12 BATCH-fullbuffer plain groups** (90 features, `reduce_buffer_minutes()==None`) are the answer: they
-emit one row per symbol but the polars `compute()` they filter to the latest minute still scans the entire
-trailing buffer. That is the dormant per-minute cost. The 10 BATCH-bounded groups (66f) already slice to a
-30–62m window (much cheaper, parity-true by `compute_latest_on_window` semantics) but are NOT yet expressed as
-a declared B-kind. Plus the 201f of armed reductions that run BATCH-in-live only because `FP_INCREMENTAL` is
-off (the activation gap below) — the single largest "rebuilds every minute despite being B-ready" bucket.
+**CORRECTED per #381 §6.1: the answer is ZERO — no group rebuilds from the FULL trailing buffer every LIVE
+minute.** The 12 groups previously labeled "BATCH-fullbuffer" carry `reduce_buffer_minutes()==None`, but that
+flag governs the BACKFILL `compute()`, not the live form — every one of them overrides `compute_latest` to a
+bounded / cached / single-minute pass (traced group-by-group in #381 §6.1 and listed by mechanism below). They
+are correctly a BACKFILL-only full-buffer cost, not a live one. The 10 BATCH-bounded groups (66f) already slice
+to a 30–62m window (parity-true by `compute_latest_on_window` semantics) but are NOT yet expressed as a declared
+B-kind. The genuine "rebuilds every minute despite being B-ready" bucket is the 201f of armed reductions that run
+BATCH-in-live only because `FP_INCREMENTAL` is off (the activation gap below) — the single largest live lever.
 
-The 12 BATCH-fullbuffer groups (the migration backlog, exact list, by mechanism):
-- **session-cumulative running min/max/first** → trivially B (a running extremum is O(1)): `dumper_state` (6f,
-  session min-low), `runner_state` (6f, session max-high), `gap_fill_state` (2f). The cleanest wins — pure
-  `ExtremaState`/cumulative kind already in `stateful.py`.
-- **universe/market gather** → A-cacheable or single-pass: `market_context` (36f — already gathers only the
-  latest row but self-joins the FULL buffer for trailing returns; the heaviest single fullbuffer group).
+The 12 groups (still a worthwhile B-KIND migration backlog to make their bounded `compute_latest` a DECLARED
+fold rather than a bespoke pass; their LIVE form is already fast, by mechanism):
+- **session-cumulative running min/max/first** — `dumper_state` (6f, session min-low), `runner_state` (6f,
+  session max-high), `gap_fill_state` (2f). **ALREADY DONE per #381 §2e:** their live `compute_latest` uses
+  `session_cumulative_agg()` (memoized session min/max/first via `CumulativeState`, #284) — value-identical, one
+  cached pass per snapshot. NOT a pending migration; ✅ no action.
+- **universe/market gather** → run once in the reader gather phase: `market_context` (36f). **CORRECTED per #381
+  §6.1/§2f:** its live `compute_latest` gathers only the LATEST row's index returns — it does NOT self-join /
+  lag the full buffer per minute (the earlier "heaviest fullbuffer group" claim was wrong about the live path).
+  Paid once in the gather phase, broadcast — not a per-bet cost.
 - **tape/microstructure rolling** → B tick-ring (the one genuinely-new KIND): `inter_arrival` (3f),
   `large_print_burst` (3f), `microstructure_burst` (4f), `tick_runlength` (3f), `trade_size_dist` (3f).
 - **rolling OLS / run-length** → B additive (OLS power-sums) once expressed declaratively: `momentum_run` (12f).
@@ -187,11 +206,14 @@ soak → verify value-identical). The flip itself is the Lead's gated click; the
 
 1. **FLIP the dormant lever first (no new code).** Equity FP_INCREMENTAL PARITY-soak → promote. This alone moves
    the 15 armed groups (201f) from de-facto-BATCH-in-live to actually-B-in-live. Highest leverage, already built.
-2. **Migrate the 3 session-cumulative groups to B** (`dumper_state`/`runner_state`/`gap_fill_state`): a running
-   min/max/first is the canonical `ExtremaState`/cumulative kind already in `stateful.py` — declare the kind, get
-   the `fold==reseed` parity test for free, delete the full-buffer recompute. Cleanest wins.
-3. **Cache the A-eligible BATCH groups** (`edgar_filing_frequency` and any per-session-fixed gather): route them
-   through `SessionCache` like daily_beta/prior_day already are — compute-once-per-session, O(1) lookup each minute.
+2. ~~Migrate the 3 session-cumulative groups to B.~~ **DONE per #381 §2e** — `dumper_state`/`runner_state`/
+   `gap_fill_state` already use `session_cumulative_agg()` (memoized session min/max/first, `CumulativeState`
+   #284), value-identical, one cached pass per snapshot. No live full-buffer recompute remains. Optional follow-up:
+   express them as the declared `ExtremaState`/cumulative KIND so they ride the `fold==reseed` parity test, but
+   this is a hygiene re-expression, not a latency fix.
+3. ~~Cache the A-eligible BATCH groups.~~ **`edgar_filing_frequency` already self-memoizes per #381 §2g** (its
+   `available_at` point-in-time join keys on its own `_cache`, compute-once-per-session). Any remaining
+   per-session-fixed gather can still route through `SessionCache` like daily_beta/prior_day, but edgar is done.
 4. **Express the bounded-window BATCH groups as declared B-kinds.** The 9 BATCH-bounded groups already prove their
    window is short; converting their bespoke `compute_latest` to the additive/extrema kind makes them fold instead
    of re-slice, and puts them under the single parity invariant rather than the generic `compute_latest` guard.
@@ -201,13 +223,17 @@ soak → verify value-identical). The flip itself is the Lead's gated click; the
 6. **Land the centered-denom Rust corr/OLS kernel** for the NO-GO 8 (the only path that makes THEM fast without
    breaking parity) — Rust, not Python fold. Tracked in docs/ACCELERATION_ROADMAP.md; Lead-sequenced.
 
-After 1–6, every group is A (cached) or B (folds) or rides a Rust kernel — no group rebuilds from full history
-each minute. **Rule (unchanged): a group that needs state declares a KIND with the engine-owned backfill form —
+After 1–6, every group is A (cached) or B (folds) or rides a Rust kernel. **Per #381, no group rebuilds from the
+full trailing buffer in the LIVE path TODAY** — steps 2–5 are KIND-expression hygiene (turning already-fast
+bespoke `compute_latest` passes into declared folds under the single parity invariant), and the only first-order
+LIVE wins are step 1 (the `FP_INCREMENTAL` flip) and step 6 (the Rust kernel). **Rule (unchanged): a group that needs state declares a KIND with the engine-owned backfill form —
 never hand-rolled incremental bookkeeping.** A novel state shape adds a KIND to the engine (with its parity
 test), not a one-off in the group. `swing` is the cautionary reference: it hand-rolled held-state, so it carries
 its OWN `up_to_date`/`rebuild_from_history` and a bespoke flag — correct, but the kind it needs (leg-state)
 should be promoted into the engine so the next such feature inherits it.
 
-So: the abstraction's KINDS are largely built and parity-proven; the work is (a) FLIP the dormant lever with a
-PARITY soak, and (b) MIGRATE the 14 full-buffer plain groups onto the existing kinds. This is the engineering
-backlog — not more design.
+So: the abstraction's KINDS are largely built and parity-proven; the work is (a) FLIP the dormant `FP_INCREMENTAL`
+lever with a PARITY soak (the largest live win), (b) land the centered-denom Rust kernel for the NO-GO 8, and
+(c) optionally re-express the already-fast bounded/cached plain groups as declared KINDS (hygiene, not a latency
+fix — their live form is not a full-buffer rebuild). Per #381 the un-doneness is ACTIVATION of built levers, not
+an undiscovered per-group inefficiency. This is the engineering backlog — not more design.
