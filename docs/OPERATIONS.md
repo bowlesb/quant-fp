@@ -132,3 +132,69 @@ addition to `docker start` for merely-stopped containers. So a failed relaunch s
 3. Install via `crontab -l | … | crontab -` preserving existing entries; use an off-:00 minute.
 4. Verify with `crontab -l` and watch the first real run's log.
 5. For destructive crons, confirm the recovery path (guardrail) exists.
+
+## 4. Session Cron Fabric (autonomous loops)
+
+The §3 registry above is the **durable** system crontab (survives restarts). This section is the
+**session cron fabric**: the eight `CronCreate` loops that drive the autonomous multi-agent team. Each
+loop wakes one workstream on a schedule with fresh context (it reads its charter + ledger first). The
+roles map one-to-one to `docs/OPERATING_MODEL.md`; the Lead is the conductor (`§7` there).
+
+**⚠️ These loops are SESSION-ONLY.** Unlike the durable crontab in §3, the eight loops below are
+`CronCreate` jobs that live only in the running agent session. **They are WIPED by any session
+restart or context compaction** (this happened 2026-06-21: a compaction cleared all eight, and the
+Lead had to reconstruct every schedule from conversation history). They also **auto-expire after 7
+days**. This section is the canonical copy-paste source so the next rebuild is mechanical, not
+archaeological.
+
+### The eight loops
+
+Minutes are spread so the loops never collide on the same minute. Each fires several times per hour
+(except GapHunt, which is every 2 hours).
+
+| Loop | Schedule (cron) | Mission (one line) | Full role |
+|------|-----------------|--------------------|-----------|
+| **Latency** | `7,22,37,52 * * * *` | Drive bar→feature-vector latency toward <100ms; detect/fix/verify regressions same cycle. | `OPERATING_MODEL.md` §4b |
+| **Parity** | `4,24,44 * * * *` | Make every feature reproduce real-time vs backfill; fix genuine divergence. | `OPERATING_MODEL.md` §4 |
+| **Modeller** | `9,29,49 * * * *` | Hunt the edge on the trusted store + raw tape; propose features worth building. | `OPERATING_MODEL.md` §5 |
+| **DataIntegrity** | `17,47 * * * *` | Keep the raw tape + feature lifecycle complete/current; own scheduled backfill jobs. | `OPERATING_MODEL.md` §1, §2 |
+| **Maintainer** | `14,34,54 * * * *` | Keep the codebase understandable + dead-weight-free; archive superseded docs. | `OPERATING_MODEL.md` §6 |
+| **Warehouse** | `26,56 * * * *` | Own feature-store schemas/formats + the human coverage dashboard. | `OPERATING_MODEL.md` §3 |
+| **Lead** | `11,41 * * * *` | Conduct loops 1–6, budget compute, review/merge PRs, run deploys, synthesize to Ben. **Runs the LIVENESS step (below).** | `OPERATING_MODEL.md` §7 |
+| **GapHunt** | `23 */2 * * *` | Adversarial LIVE-evidence gap-hunt across data/trust/activation/deploy surfaces. | (cross-cutting; appends to `docs/SYSTEM_GAPS.md` + the `~/.quant-ops` gap ledgers) |
+
+### Rebuild procedure (the LIVENESS step)
+
+The Lead loop's LIVENESS step is the safety net. Every Lead cycle:
+
+1. Run **`CronList`**.
+2. **If it returns EMPTY** (or is missing any of the eight) → the fabric was wiped by a restart or
+   compaction. **Recreate all eight** with the schedules in the table above, then append a one-line
+   `CONDUCTOR: CRON FABRIC REBUILT` note to `~/.quant-ops/SYSTEM_LOG.md`. Autonomous operation is
+   restored on the next fire of each loop.
+3. **If all eight are present** → record `cron N/N intact` in the liveness note and move on; do NOT
+   recreate (double-firing a loop wastes a slot and risks duplicate claims).
+
+> **CronList caveat (observed):** in some session contexts `CronList` has returned "No scheduled jobs"
+> while the loops were demonstrably still firing (the Lead received their cycles). If the loops are
+> actively firing, do NOT recreate on a bare-empty `CronList` alone — recreating would double-fire.
+> Treat a TRUE wipe (loops have gone silent / a fresh restart / a known compaction) as the recreate
+> trigger, and an enumeration discrepancy on a live fabric as benign. When in doubt, wait one interval
+> and confirm silence before rebuilding.
+
+### Weekly recreation (7-day expiry)
+
+`CronCreate` jobs auto-expire 7 days after creation. Even with no restart, **recreate all eight before
+the 7-day mark** so the fabric never silently lapses. The simplest discipline: on the LIVENESS step,
+recreate the fabric weekly regardless (idempotent — recreate replaces, it does not stack), or track
+each loop's creation date and refresh ahead of expiry.
+
+### Durable vs session — which is which
+
+- **Durable (§3 registry):** infrastructure crons in the system `crontab` — `nightly_relaunch`,
+  `daily_lifecycle` (×2), `healthcheck`, `feature_scan`, `live_monitor`, `compact_stream`,
+  `trust_random_check`, `data_freshness`. These survive restarts; never put a production-critical job
+  in the session fabric.
+- **Session (this §4):** the eight agent loops that wake the workstreams. Transient by design; the
+  LIVENESS step + weekly recreation keep them alive. The *work* they produce (PRs, backfills, deploys)
+  is durable; the *schedulers* are not.
