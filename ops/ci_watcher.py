@@ -33,11 +33,12 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ops.ci_scope import ScopeResult, Tier, classify
@@ -232,6 +233,9 @@ class JobResult:
     passed: bool
     tail: str
     gating: bool = True  # if False, the job is INFORMATIONAL — reported but never blocks the merge gate
+    # Test ids that FAILED under parallel (-n) but PASSED on isolated serial re-run → xdist-ordering flakes,
+    # NOT real reds. Reported informationally; they do not red the job. Empty in the normal case.
+    flaky_recovered: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -256,18 +260,85 @@ def _run_pytest(
     SECURITY: no ``--env-file .env`` / no secret env — the suite needs none, so the paper Alpaca creds can
     never reach a CI log. --rm; bind-mounts only the throwaway checkout at /app (+ the store RO if requested).
     """
+    passed, output = _exec_pytest(worktree, pytest_cmd, job_name, mount_store)
+    tail = "\n".join(output.splitlines()[-25:])
+    return JobResult(job_name, passed, tail, gating)
+
+
+def _exec_pytest(worktree: str, pytest_cmd: str, job_name: str, mount_store: bool) -> tuple[bool, str]:
+    """Run a pytest command in an fp-dev --rm container; return (passed, full combined output).
+
+    SECURITY: no ``--env-file .env`` / no secret env — the suite needs none, so the paper Alpaca creds can
+    never reach a CI log. --rm; bind-mounts only the throwaway checkout at /app (+ the store RO if requested).
+    """
     cmd = [*fp_docker(worktree, mount_store=mount_store), "sh", "-c", pytest_cmd]
     try:
         result = run(cmd, timeout=SUITE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return JobResult(job_name, False, f"{job_name} TIMED OUT after {SUITE_TIMEOUT_S}s", gating)
-    output = (result.stdout + "\n" + result.stderr).strip()
-    tail = "\n".join(output.splitlines()[-25:])
-    return JobResult(job_name, result.returncode == 0, tail, gating)
+        return False, f"{job_name} TIMED OUT after {SUITE_TIMEOUT_S}s"
+    return result.returncode == 0, (result.stdout + "\n" + result.stderr).strip()
+
+
+_FAILED_ID_RE = re.compile(r"^FAILED (\S+::\S+)")
+
+
+def _parse_failed_ids(output: str) -> list[str]:
+    """Extract the ``tests/...::test_*`` ids from a pytest run's ``FAILED ...`` summary lines (needs ``-rf``
+    / ``-ra``, which the fp job passes). Deduped, order-preserving."""
+    ids: list[str] = []
+    for line in output.splitlines():
+        match = _FAILED_ID_RE.match(line.strip())
+        if match and match.group(1) not in ids:
+            ids.append(match.group(1))
+    return ids
 
 
 # Every category the fp job must NOT run (each is covered by its own job or is an unrunnable orphan).
 _FP_EXCLUDES = (*DASHBOARD_DEP_TESTS, *TIMING_TESTS, *HARNESS_ORPHAN_TESTS, STORE_TEST_DIR)
+
+
+def _run_fp_job(worktree: str) -> JobResult:
+    """The gating ``fp`` job: run the whole tests/ dir in BOUNDED PARALLEL (-n), then make the result robust
+    to xdist test-ISOLATION flakes.
+
+    Parallelism (-n) can surface tests that share global state / depend on collection order: they pass
+    isolated but fail under a particular worker distribution. To avoid false-redding clean PRs, when the
+    parallel run fails we RE-RUN exactly the failed ids in ISOLATION (serial, single process). Any that pass
+    isolated were xdist-ordering FLAKES → they don't red the job (logged informationally). Any that STILL
+    fail isolated are REAL reds → the job stays RED. Standard xdist mitigation, cost = only the few that
+    failed.
+    """
+    ignores = " ".join(f"--ignore={path}" for path in _FP_EXCLUDES)
+    # -rf so the FAILED summary lists test ids we can re-run; -p no:randomly keeps order deterministic.
+    parallel_cmd = (
+        f"pip install -q --user {PYTEST_XDIST_REQ} && "
+        f"python -m pytest {SUITE_GLOB} {ignores} -n {XDIST_WORKERS} -q -rf -p no:cacheprovider"
+    )
+    passed, output = _exec_pytest(worktree, parallel_cmd, "fp", mount_store=False)
+    if passed:
+        return JobResult("fp", True, "\n".join(output.splitlines()[-25:]), gating=True)
+
+    failed_ids = _parse_failed_ids(output)
+    if not failed_ids:
+        # Failed but we couldn't parse ids (e.g. a collection error / crash) — cannot safely call it a flake.
+        return JobResult("fp", False, "\n".join(output.splitlines()[-25:]), gating=True)
+
+    logger.info("fp parallel run RED on %d test(s); re-running isolated: %s", len(failed_ids), failed_ids)
+    # Re-run exactly the failed ids, SERIALLY, single process (no -n) — the isolation check.
+    isolated_cmd = f"python -m pytest {' '.join(failed_ids)} -p no:cacheprovider -rf -q -p no:randomly"
+    isolated_passed, isolated_output = _exec_pytest(worktree, isolated_cmd, "fp-isolated", mount_store=False)
+    if isolated_passed:
+        logger.info(
+            "all %d failure(s) PASSED isolated → xdist-ordering flake; fp job GREEN", len(failed_ids)
+        )
+        tail = "\n".join(output.splitlines()[-12:]) + "\n--- isolated re-run: all passed (flake) ---\n"
+        tail += "\n".join(isolated_output.splitlines()[-8:])
+        return JobResult("fp", True, tail, gating=True, flaky_recovered=failed_ids)
+
+    still_failing = _parse_failed_ids(isolated_output)
+    logger.info("isolated re-run STILL RED on %s → real failure; fp job RED", still_failing)
+    tail = "\n".join(isolated_output.splitlines()[-20:])
+    return JobResult("fp", False, tail, gating=True)
 
 
 def run_suite(worktree: str) -> SuiteResult:
@@ -281,16 +352,11 @@ def run_suite(worktree: str) -> SuiteResult:
     - ``timing`` (NON-GATING / informational): the wall-clock latency tests. Reported but NEVER blocks.
     Then a coverage audit: any ``tests/test_*.py`` that errors collection in the fp env and is NOT a known
     other-env category is a blind spot — reported LOUDLY (RED), so a new untested class can't hide.
+
+    The fp job runs in bounded parallel (-n) and is robust to xdist test-isolation flakes via
+    ``_run_fp_job`` (failed-in-parallel ids are re-confirmed isolated before declaring RED).
     """
-    # The big fp job runs in BOUNDED parallel (pip-install xdist, -n XDIST_WORKERS) — serial it was ~30 min,
-    # too slow to grade the queue. Fixed worker count + the container --cpus cap keep it from starving live
-    # capture. The other jobs are tiny (dashboard/timing) or memory-heavy (store builds panels) → serial.
-    ignores = " ".join(f"--ignore={path}" for path in _FP_EXCLUDES)
-    fp_cmd = (
-        f"pip install -q --user {PYTEST_XDIST_REQ} && "
-        f"python -m pytest {SUITE_GLOB} {ignores} -n {XDIST_WORKERS} -q -p no:cacheprovider"
-    )
-    fp_job = _run_pytest(worktree, fp_cmd, "fp", gating=True)
+    fp_job = _run_fp_job(worktree)
 
     dash_targets = " ".join(DASHBOARD_DEP_TESTS)
     dash_cmd = (
@@ -560,9 +626,15 @@ def _comment_body(suite: SuiteResult, scope: ScopeResult, n_paths: int) -> str:
 
 
 def _job_line(job: JobResult) -> str:
-    """One job's line in the sticky comment; non-gating jobs are flagged informational."""
+    """One job's line in the sticky comment; non-gating jobs are flagged informational, and xdist-ordering
+    flakes that were recovered by the isolated re-run are noted (they passed isolated → not a real red)."""
     verdict = "✅ passed" if job.passed else "❌ FAILED"
     suffix = "" if job.gating else " _(informational — non-gating)_"
+    if job.flaky_recovered:
+        suffix += (
+            f" _(⚠️ {len(job.flaky_recovered)} xdist-ordering flake(s) passed on isolated re-run, "
+            f"not a real red: {', '.join(f'`{tid}`' for tid in job.flaky_recovered)})_"
+        )
     return f"- `{job.name}`: {verdict}{suffix}"
 
 

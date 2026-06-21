@@ -137,8 +137,25 @@ capture:
 
 Only the big `fp` job is parallelized; the others stay serial — `dashboard` / `timing` are tiny, and `store`
 builds real panels (memory-heavy, parallelism would risk OOM). The coverage audit's `--collect-only` is fast
-and serial. If a test ever proves xdist-unsafe (shared-state ordering), pin it with `pytest-xdist` grouping
-rather than dropping parallelism.
+and serial.
+
+### Robust to xdist test-isolation flakes (retry-isolated)
+
+Parallelism (`-n`) can surface tests that share global state or depend on collection order: they pass in
+isolation but fail under a particular worker distribution (e.g. `test_next_quote_tranche` passed 6/6 isolated
+yet false-redded a clean PR under `-n 6`). Left unhandled, ANY non-isolated test in the ~1200-test suite
+would intermittently false-red clean PRs — the boy-who-cried-wolf failure that erodes trust in the gate.
+
+So `_run_fp_job` is **retry-isolated**: the parallel run uses `-rf` to list failed ids; when it fails, the
+gate **re-runs exactly those ids in isolation** (serial, single process, `-p no:cacheprovider`). If they
+**pass isolated** → it was an xdist-ordering flake → the `fp` job is **GREEN** and the recovered ids are
+reported informationally (`JobResult.flaky_recovered`, shown in the sticky comment). If any **still fail
+isolated** → a **real red** → the job stays RED. Cost = only the handful that failed get re-run. This makes
+the gate robust to ALL parallel-ordering flakes, not just the one observed. `tests/test_fp_ci_gating.py`
+proves both directions (a recovered flake → GREEN; a genuine failure → RED).
+
+The proper fix for a flaky test is still to fix its isolation (it leaks state); the gate-level retry is the
+durable backstop that protects every PR in the meantime.
 
 ## Phase 1 — the CI gate (SHIPPED FIRST)
 
