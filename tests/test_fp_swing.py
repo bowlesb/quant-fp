@@ -295,6 +295,157 @@ def test_swing_fib_degenerate_microleg_guarded() -> None:
     )
 
 
+def test_swing_stateful_compute_latest_equals_backfill_every_minute(monkeypatch) -> None:
+    """STATEFUL LIVE == BACKFILL: with FP_SWING_STATEFUL=1, walking the carried per-symbol leg-state minute by
+    minute (the production live driver — a monotonically growing/sliding buffer on ONE group instance, folding
+    only the new minute each time) reaches the Rust whole-buffer backfill cell-for-cell at EVERY minute. This is
+    the O(1)/minute path's value-identity proof — folding the new bar onto carried state == re-folding the whole
+    buffer (fold == reseed)."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    stream = _stream(n_sym=6, n_min=160, seed=7)
+    minutes = sorted(stream["minute"].unique())
+    backfill = SwingGroup().compute(BatchContext(frames={"minute_agg": stream}))
+    # Simulate the live ring: a trailing buffer of at most RING_DEPTH minutes, advanced ONE minute at a time on a
+    # single carried-state instance. A bounded ring (here shorter than the stream) also exercises that a symbol's
+    # state is carried across minutes that have scrolled OUT of the buffer — the whole point of carrying state.
+    ring_depth = 45
+    group = SwingGroup()
+    for ti in range(len(minutes)):
+        minute = minutes[ti]
+        lo = minutes[max(0, ti - ring_depth + 1)]
+        buffer = stream.filter((pl.col("minute") >= lo) & (pl.col("minute") <= minute))
+        latest = group.compute_latest(BatchContext(frames={"minute_agg": buffer})).sort("symbol")
+        back_t = backfill.filter(pl.col("minute") == minute).sort("symbol")
+        for name in _FEATURES:
+            got = latest[name].to_list()
+            want = back_t[name].to_list()
+            assert len(got) == len(want), f"row count @min{ti} {name}"
+            for sym_i in range(len(got)):
+                assert _cell_equal(got[sym_i], want[sym_i]), (
+                    f"STATEFUL latest@min{ti} {name} sym{sym_i}: {got[sym_i]} != backfill {want[sym_i]}"
+                )
+
+
+def test_swing_stateful_handles_redelivered_minute(monkeypatch) -> None:
+    """A re-delivered minute (reconnect/replay of the SAME bar) is folded at most once: feeding the buffer twice
+    in a row leaves the carried state — and the emitted row — identical to a single feed (keep-last de-dup)."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    stream = _stream(n_sym=4, n_min=90, seed=3)
+    minutes = sorted(stream["minute"].unique())
+    backfill = SwingGroup().compute(BatchContext(frames={"minute_agg": stream}))
+    group = SwingGroup()
+    for ti in range(len(minutes)):
+        buffer = stream.filter(pl.col("minute") <= minutes[ti])
+        ctx = BatchContext(frames={"minute_agg": buffer})
+        group.compute_latest(ctx)  # first delivery
+        latest = group.compute_latest(ctx).sort("symbol")  # SAME minute re-delivered -> must be a no-op fold
+        back_t = backfill.filter(pl.col("minute") == minutes[ti]).sort("symbol")
+        for name in _FEATURES:
+            got, want = latest[name].to_list(), back_t[name].to_list()
+            for sym_i in range(len(got)):
+                assert _cell_equal(got[sym_i], want[sym_i]), f"redelivered@min{ti} {name} sym{sym_i}"
+
+
+def test_swing_stateful_reseeds_on_rewound_buffer(monkeypatch) -> None:
+    """A buffer that REWINDS (a fresh/replayed history ending BEFORE the carried state's last minute) drops the
+    stale state and reseeds from the buffer, so the emitted row matches the backfill at the rewound minute — the
+    carried-state path is correct regardless of call order (crash-recovery / reconnect-from-earlier safe)."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    stream = _stream(n_sym=3, n_min=120, seed=9)
+    minutes = sorted(stream["minute"].unique())
+    backfill = SwingGroup().compute(BatchContext(frames={"minute_agg": stream}))
+    group = SwingGroup()
+    # advance to a late minute, then HAND IT an earlier buffer (rewind) and assert it reseeds to the right row.
+    group.compute_latest(BatchContext(frames={"minute_agg": stream.filter(pl.col("minute") <= minutes[100])}))
+    rewound_ti = 30
+    rewound = stream.filter(pl.col("minute") <= minutes[rewound_ti])
+    latest = group.compute_latest(BatchContext(frames={"minute_agg": rewound})).sort("symbol")
+    back_t = backfill.filter(pl.col("minute") == minutes[rewound_ti]).sort("symbol")
+    for name in _FEATURES:
+        got, want = latest[name].to_list(), back_t[name].to_list()
+        for sym_i in range(len(got)):
+            assert _cell_equal(got[sym_i], want[sym_i]), f"rewound@min{rewound_ti} {name} sym{sym_i}"
+
+
+def _session_stream(
+    day: dt.date, n_sym: int = 4, n_min: int = 60, seed: int = 11, vol: float = 0.004, start_price: float = 100.0
+) -> pl.DataFrame:
+    """A noisy close stream for ONE session day (minutes from 13:30 UTC), so a concatenation of two of these
+    spans a real overnight gap — the morning-boundary parity fixture."""
+    rng = np.random.default_rng(seed)
+    base = dt.datetime(day.year, day.month, day.day, 13, 30, tzinfo=dt.timezone.utc)
+    price = {s: start_price + 5.0 * s for s in range(n_sym)}
+    rows = []
+    for mi in range(n_min):
+        minute = base + dt.timedelta(minutes=mi)
+        for s in range(n_sym):
+            price[s] *= 1.0 + rng.standard_normal() * vol
+            rows.append({"symbol": f"S{s}", "minute": minute, "close": price[s]})
+    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+
+
+def test_swing_stateful_morning_boundary_equals_per_day_backfill(monkeypatch) -> None:
+    """SESSION-BOUNDARY PARITY (the load-bearing morning-seed proof): production backfill materializes swing
+    PER DAY, so it bootstraps a FRESH leg at each session's open and never carries the leg across the overnight
+    gap. The held live state must do the SAME. This test runs the held state across a TWO-session boundary —
+    folding day1, then crossing into day2 (an overnight price gap) — and asserts every day2 minute matches the
+    PER-DAY backfill of day2 cell-for-cell (NOT a 2-day whole-buffer fold, which carries the leg and is NOT what
+    production backfill produces). If the held state carried the leg across the gap, day2's open would diverge
+    (swing_dir/n_alternations/persistence) — the exact silent morning divergence this guards against."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    d1, d2 = dt.date(2026, 6, 15), dt.date(2026, 6, 16)
+    s1 = _session_stream(d1, n_sym=4, n_min=60, seed=1)
+    s2 = _session_stream(d2, n_sym=4, n_min=60, seed=2, start_price=130.0)  # overnight GAP up
+    # Per-day backfill = the production source of truth (each session materialized alone).
+    backfill_d2 = SwingGroup().compute(BatchContext(frames={"minute_agg": s2}))
+    both = pl.concat([s1, s2]).sort(["symbol", "minute"])
+    minutes = sorted(both["minute"].unique())
+    d2_minutes = sorted(s2["minute"].unique())
+    d2_start = d2_minutes[0]
+    # Walk the WHOLE two-session stream on ONE carried-state instance with a trailing ring that straddles the
+    # gap, so the held state genuinely carries day1's leg INTO the day2 boundary and must reset there.
+    ring_depth = 90  # deep enough to hold late-day1 + early-day2 simultaneously across the boundary
+    group = SwingGroup()
+    for ti in range(len(minutes)):
+        minute = minutes[ti]
+        lo = minutes[max(0, ti - ring_depth + 1)]
+        buffer = both.filter((pl.col("minute") >= lo) & (pl.col("minute") <= minute))
+        latest = group.compute_latest(BatchContext(frames={"minute_agg": buffer})).sort("symbol")
+        if minute < d2_start:
+            continue  # only day2 is graded — that's where the boundary reset must match per-day backfill
+        back_t = backfill_d2.filter(pl.col("minute") == minute).sort("symbol")
+        for name in _FEATURES:
+            got, want = latest[name].to_list(), back_t[name].to_list()
+            assert len(got) == len(want), f"row count @{minute} {name}"
+            for sym_i in range(len(got)):
+                assert _cell_equal(got[sym_i], want[sym_i]), (
+                    f"MORNING-BOUNDARY @{minute.time()} {name} sym{sym_i}: held={got[sym_i]} != per-day backfill {want[sym_i]}"
+                )
+
+
+def test_swing_stateful_warm_start_seed_equals_backfill(monkeypatch) -> None:
+    """WARM-START SEED PARITY: at the morning open fc rehydrates the ring from that session's backfill bars
+    (``backfill_bars(day)`` — single session). The FIRST ``compute_latest`` over that warm ring is a COLD reseed
+    (no carried state) that folds the whole warm window — so it must reach the per-day backfill state at the open
+    minute exactly. This pins that the warm-start seeding path is parity-true from minute one (no cold-buffer
+    corruption), the FP_WARM_START invariant for swing."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    day = dt.date(2026, 6, 16)
+    session = _session_stream(day, n_sym=5, n_min=80, seed=4)
+    backfill = SwingGroup().compute(BatchContext(frames={"minute_agg": session}))
+    minutes = sorted(session["minute"].unique())
+    # Seed cold from the warm ring up to minute K (the rehydrated trailing window), then assert minute K matches.
+    for warm_k in (5, 20, 50, len(minutes) - 1):
+        group = SwingGroup()  # fresh instance = cold state, as a morning relaunch starts
+        warm_ring = session.filter(pl.col("minute") <= minutes[warm_k])
+        latest = group.compute_latest(BatchContext(frames={"minute_agg": warm_ring})).sort("symbol")
+        back_t = backfill.filter(pl.col("minute") == minutes[warm_k]).sort("symbol")
+        for name in _FEATURES:
+            got, want = latest[name].to_list(), back_t[name].to_list()
+            for sym_i in range(len(got)):
+                assert _cell_equal(got[sym_i], want[sym_i]), f"warm-seed@K{warm_k} {name} sym{sym_i}"
+
+
 def test_swing_features_are_valid() -> None:
     """Every declared swing feature is VALID (>= 2 unique finite values across the stream) — no dead feature."""
     stream = _stream(n_sym=6, n_min=200, seed=5)
