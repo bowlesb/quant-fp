@@ -251,3 +251,42 @@ TWO honest residuals (NOT shipped here, surfaced for the picker-upper):
    sibling fix (not this PR) would un-park distribution + return_dynamics + market_beta; this PR un-parks the
    time-axis class (trend_quality / clean_momentum / residual_analysis / price_volume.obv) value-identically.
 
+**UPDATE 2026-06-21 — the VALUE-column-centering follow-up (residual #2 above) was BUILT-AS-PROBE,
+MEASURED, and the naive return-anchor framing is REFUTED. No clean value-identical centering promotion
+exists for these 3 (the FP_CENTERED_VALUE sibling does NOT ship). Reproduce: `scripts/value_centering_
+feasibility.py`.** Centering the value column on the per-symbol WINDOW MEAN is genuinely value-identical and
+conditions the kurtosis / autocorr / market-corr cancellation to ~1e-11..1e-16 (translation-invariant central
+moments / corr-denom — the microbench claim above is correct). BUT three measured obstacles block a clean
+FP_INCREMENTAL promotion, and they are why this is NOT the volume-#307 case:
+
+  (A) **NO reproducible static per-symbol RETURN anchor exists.** The volume #307 anchor works because the
+      per-minute volume SCALE is stable day-to-day (a daily-snapshot constant). A RETURN anchor has no such
+      source: a prior-day-derived anchor (`prior_daily_drift / 390`) is uncorrelated with today's intraday
+      window mean and off by ~100 std in the breach regime → it does NOT condition. MEASURED over 3000
+      breach-regime cells (tol 1e-4): raw breaches 476×, the prior-day anchor breaches **487×** (worst 1.14e2,
+      no better than raw); only the per-window-mean anchor reaches 0 breaches — and that mean SLIDES with the
+      window, so it is path-divergent (the engine expires it, backfill recomputes a different one).
+
+  (B) **Rebase-after-the-fact re-introduces the cancellation** (so the #386 time-axis trick does NOT transfer).
+      The time axis is conditionable because the incremental engine ACCUMULATES on the already-small rebased x
+      (it controls the per-fold origin BEFORE adding). A value anchor applied by binomially rebasing the raw
+      power sums `Σ(rᵏ)` under `r→r−Δ` re-runs the SAME large-near-equal subtraction (`s4 − 4Δs3 + 6Δ²s2 −
+      …`) → conditioning is LOST (MEASURED: rebased rel 5.8e-7 vs direct-accumulated 2.1e-16). Conditioning
+      only survives if `(r−a)ᵏ` is ACCUMULATED element-wise, which needs a static `a` known before
+      accumulation → back to obstacle (A).
+
+  (C) **For the OLS/corr groups (market_beta, return_dynamics.autocorr), centering MOVES the defined-guard
+      boundary** so it is not even value-identical on the straddle cells. The production guard is
+      `denom_x > eps·(Σx)²`; centering x changes `Σx` (from ~b·spy_base to ~0), so the guard RHS changes and a
+      near-flat-window straddle cell can FLIP null↔non-null (MEASURED: ≥1 flip / 5000 near-flat cells). A flip
+      changes the feature output and the fingerprint — disqualifying for a value-identical promotion.
+
+So `distribution.ret_kurt` is centering-conditionable in PRINCIPLE but has no reproducible accumulate-time
+anchor; `market_beta` / `return_dynamics.autocorr` additionally hit the guard-perturbation wall. The REAL
+fix for all three is a **cancellation-free reduction kernel** (the Rust corr/OLS/higher-moment kernel already
+named as future engine work — accumulate the centered cross/auto/central-moment products directly so neither
+path forms a large-near-equal subtraction), NOT a centering anchor. `range_expansion` (mean of non-negatives,
+no cancellation) and `residual_analysis` (time-axis class, handled by #386) remain NOT centering problems.
+This update CLOSES the "return-anchor sibling" backlog item as measured-refuted; fp UNCHANGED (no code path
+changed — the probe is an offline script).
+
