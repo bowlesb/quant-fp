@@ -16,14 +16,20 @@ REPO_DIR="${CI_REPO_DIR:-/home/ben/quant-fp}"
 LOG_DIR="${HOME}/.quant-ops"
 mkdir -p "$LOG_DIR"
 
+# Phase-gating flags come in via the env (ci_daemon_guard sets them per the arm phase). They are APPENDED to
+# the watcher command so the guard controls grade-only (--no-auto-merge) / deploy dry-run (--dry-run) without
+# editing this wrapper. Whitespace-split (the flags carry no spaces of their own).
+read -r -a CI_EXTRA <<< "${CI_WATCHER_ARGS:-}"
+read -r -a DEPLOY_EXTRA <<< "${CI_DEPLOY_ARGS:-}"
+
 case "$ROLE" in
   ci)
     LOG="$LOG_DIR/ci_watcher.log"
-    CMD=(python -m ops.ci_watcher --poll "${CI_POLL:-60}")
+    CMD=(python -m ops.ci_watcher --poll "${CI_POLL:-60}" "${CI_EXTRA[@]}")
     ;;
   deploy)
     LOG="$LOG_DIR/ci_deploy.log"
-    CMD=(python -m ops.ci_deploy --poll "${CI_POLL:-60}")
+    CMD=(python -m ops.ci_deploy --poll "${CI_POLL:-60}" "${DEPLOY_EXTRA[@]}")
     ;;
   *)
     echo "usage: $0 {ci|deploy}" >&2

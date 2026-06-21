@@ -62,6 +62,16 @@ MATCHES+=("daily_lifecycle_late.log")
 COMMENTS+=("# 23:30 PT weekdays LATE re-acquire + re-sweep (docs/OPERATIONS.md) — Alpaca tail settles after the 18:30 sweep; idempotent, no fingerprint")
 LINES+=("30 23 * * 1-5 cd $REPO && ops/daily_lifecycle.sh >> $LATE_SWEEP_LOG 2>&1")
 
+# Every 5 min — KEEP the CI GRADE daemon alive (docs/CD_ARM_CHECKLIST.md Phase 1). The guard is a no-op when
+# the supervisor is already running and (re)launches it (incl. after a reboot) otherwise. This is the SAFE
+# Phase-1 stage: with CI_NO_AUTO_MERGE=1 (the guard's default) the watcher runs --no-auto-merge, so it only
+# posts a commit STATUS + sticky comment + tier label on each open PR's new head SHA — it NEVER merges or
+# deploys. Arming auto-merge (Phase 2) / auto-deploy (Phase 3) is a SEPARATE, Ben-gated step documented in
+# docs/CD_ARM_CHECKLIST.md (flip CI_NO_AUTO_MERGE=0 / install the deploy guard) — deliberately NOT auto-installed.
+MATCHES+=("ops/ci_daemon_guard.sh ci")
+COMMENTS+=("# every 5 min keep the CI GRADE daemon alive (docs/CD_ARM_CHECKLIST.md Phase 1) — grade-only (--no-auto-merge); NEVER merges/deploys")
+LINES+=("*/5 * * * * cd $REPO && ops/ci_daemon_guard.sh ci >> /home/ben/.quant-ops/ci_daemon_guard.log 2>&1")
+
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
