@@ -528,6 +528,13 @@ def auto_merge(pr_number: int) -> bool:
     return True
 
 
+def _should_auto_merge(passed: bool, tier: Tier, auto_merge_enabled: bool, labels: list[str]) -> bool:
+    """Pure auto-merge predicate (so the safety decision is unit-testable). A PR auto-merges iff the gate is
+    GREEN, scope is TIER-1 (fp-neutral + safe), the daemon is in auto-merge mode (NOT grade-only), and no
+    ``no-auto`` hold label is present. TIER-2 / red / grade-only / held → never."""
+    return passed and tier is Tier.AUTO and auto_merge_enabled and NO_AUTO_LABEL not in labels
+
+
 def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
     """Grade one PR: run the suite, classify scope, post status + comment + label, maybe auto-merge."""
     logger.info("grading PR #%s @ %s (%s)", pr.number, pr.head_sha[:9], pr.head_ref)
@@ -566,7 +573,7 @@ def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
     post_comment(pr.number, body)
     ensure_label(pr.number, GATED_LABEL, present=scope.tier is Tier.GATED)
 
-    if passed and scope.tier is Tier.AUTO and auto_merge_enabled and NO_AUTO_LABEL not in pr.labels:
+    if _should_auto_merge(passed, scope.tier, auto_merge_enabled, pr.labels):
         auto_merge(pr.number)
     else:
         logger.info(
