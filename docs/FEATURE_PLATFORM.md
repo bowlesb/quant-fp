@@ -562,6 +562,13 @@ sized to disk — and discover the provider's real ceiling.
       session. Target ≥10,000; if lower, the proven ceiling becomes the universe and is recorded.
       — VERIFY: subscription count log + a Prometheus `ingest_msgs_per_sec` panel screenshot of a
       full session. — EVIDENCE: the panel + a `docs/CAPTURE_CEILING.md` note with the number.
+      **→ `docs/CAPTURE_CEILING.md` now exists** (the ceiling scoping): the connection limit is
+      resolved (1 websocket / account, SIP no channel limit → not the cap), the M2 dry-run proves
+      ~512 names safe (4.35s/4 workers, zero loss), the recommended safe target is ~1000–1500 (liquid
+      B1+B2 core) and the hard ceiling is the full ~11k universe (processing is the only governor).
+      The live-session Prometheus `ingest_msgs_per_sec` panel + R10 capture-parity (FP1.b) remain the
+      remaining EVIDENCE to tick this box, gated on the actual `FP_TICK_SYMBOLS` widening (Ben/Lead
+      live-capture click; the phased ramp + verification runbook is in CAPTURE_CEILING.md §3).
 - [ ] **b. Lossless capture vs ground truth.** For a full RTH session, live raw-tick counts vs
       same-day backfill counts meet **R10 (±2%/±2 ticks for ≥98% of cells) within EVERY tier**.
       Compared cells **≥ 2,000,000** total. — VERIFY: `make capture-parity DAY=<day>` per-tier
