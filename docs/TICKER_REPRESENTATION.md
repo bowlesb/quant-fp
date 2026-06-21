@@ -97,6 +97,9 @@ STRL #218, TWLO #221, WOLF #223, VSH #226, ENPH #228, GFS #240, NUVL #245, TE #2
   low tradeable-universe value, consistent with deprioritizing them.
 - This complements `docs/BACKFILL_SCOPE.md` (which covers BARS depth vs the live universe — already good) by
   measuring the QUOTE/TRADE tape vs the tradeable ADV universe, the current deepening front.
+- The DATE-dimension sibling of the symbol-dimension widen above: `docs/QUOTE_BREADTH_DEPTH_BACKFILL.md`
+  scopes extending the broad ~3,950-sym breadth BACKWARD past the 2026-03-18 onset (3,342 non-head names ×
+  Q1 dates, ~25 GB; driver `ops/quote_breadth_depth_fill.sh`, compute `quantlib.data.quote_breadth_depth_gap`).
 
 ## Status — B4 WIDTH landed; the NEXT tranche is the tight-spread LP head
 
