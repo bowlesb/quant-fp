@@ -151,33 +151,46 @@ swaps.
 5. **Swap at a minute boundary** — the applier swaps between minutes (never mid-`process_bars`), so no minute
    sees a half-old/half-new compute.
 
-### 3.3 ⭐ The carried-state case — which group KINDS are real-time-swappable
+### 3.3 ⭐ The carried-state case — ONE self-healing rule (the `RunningState` contract)
 
-A swap replaces the group INSTANCE, so any state held **inside the instance** (or keyed to it) is lost. The
-grounding (incremental.py / stateful.py / base.py SessionCache) gives a precise classification:
+A swap replaces the group INSTANCE, so any state held inside it is lost. Rather than CLASSIFY each group
+(DIRECT / SWAP+RESEED / ESCALATE) and branch the applier per kind, the applier is **KIND-AGNOSTIC**: it swaps
+the code, then the next compute runs the SAME self-healing guard every held-state feature already runs (the
+`RunningState` contract, `quantlib/features/running_state.py` + `FeatureGroup.up_to_date()` /
+`rebuild_from_history()`):
 
-| Group kind | Carries cross-minute state? | Real-time swappable? | What the applier does |
-|---|---|---|---|
-| **BATCH ReductionGroup** (FP_INCREMENTAL OFF — the live default today) | NO — `compute_latest` re-derives from the shared raw ring buffer each minute | ✅ **SWAP DIRECTLY** any minute | re-import → next minute uses new compute; zero reseed |
-| **Declarative / candlestick / calendar / reference / cross-sectional** (stateless recompute) | NO | ✅ **SWAP DIRECTLY** | as above |
-| **Class-A SessionCache groups** (sector_beta etc. — per-instance `self._session_cache`) | YES, but cheap: a per-session-invariant cached frame | ✅ **SWAP DIRECTLY** (with ~1-min warm-up) | re-import → cache misses next minute → auto-recomputes from the daily snapshot (sub-minute); a transient first-minute cost, then identical |
-| **Incremental ReductionGroup** (FP_INCREMENTAL ON — engine `WindowedSumState` in `CaptureState.engines`) | YES — running per-(window,symbol,col) sums | ⚠️ **SWAP + RESEED** | re-import, then `IncrementalEngine.seed(ring.materialize())` rebuilds the running sums from the current buffer → next minute folds from the reseeded state (the existing seed abstraction; `seed(H);fold(m) == seed(H+m)` by the parity guarantee) |
-| **StatefulGroup** (EMA / cumulative / lag — accumulators inside the instance) | YES — recursive accumulators (EMA history, session-cumulative, lag ring) | ⚠️ **SWAP + RESEED** | re-import, then re-seed the new instance's accumulators by replaying the recent buffer (`StatefulGroup.compute()` fold == full recompute); without a reseed the EMA rebases / cumulative resets / lag empties = a warm-up seam |
+```
+# the applier, after re-importing + re-registering the group at a minute boundary:
+if not group.up_to_date(buffer):
+    group.rebuild_from_history(buffer)   # lazy reseed from the SAME history backfill recomputes over
+# ... the next minute's compute proceeds; the value == backfill by construction ...
+```
 
-**The honest bottom line on kinds:**
-- **Real-time-swappable DIRECTLY (no reseed):** batch reduction groups (the live default — FP_INCREMENTAL is
-  UNARMED in prod today), all stateless declarative kinds, and Class-A cache groups (sub-minute warm-up).
-  **This is the majority of the live feature set today**, so most fixes deploy real-time with zero reseed.
-- **Swappable WITH a reseed:** incremental-armed reduction groups + stateful groups. The reseed abstraction
-  EXISTS (`IncrementalEngine.seed`, the stateful fold==recompute guarantee), so these are swappable —
-  but the applier must call the group's reseed after the re-import, and the reseed must be part of the
-  hot-swap path (the key NEW infra to build + test for these kinds).
-- **Irreducible / relaunch-only (HONEST):** if a fix to a stateful/incremental group ALSO needs a reseed
-  whose correctness can't be cheaply proven mid-session (e.g. a session-cumulative whose semantics changed,
-  not just a per-minute bug), OR a fix that for any reason can't be made fingerprint-neutral, it is **NOT
-  real-time-swappable** → it falls back to a **fast off-RTH relaunch for ONLY that group's change**, Lead-
-  sequenced. The applier must DETECT this (the reseed-proof fails or the fingerprint moves) and **escalate
-  to the Lead rather than swap**. We do NOT pretend every kind is equally safe.
+**The 5-kind table collapses into this one rule.** The "kind" no longer lives in the applier — it only
+determines what the group's OWN `up_to_date` / `rebuild_from_history` do internally:
+
+| former kind | what it does INSIDE the contract (no applier branching) |
+|---|---|
+| batch reduction (FP_INCREMENTAL off) / stateless declarative / candlestick / calendar / cross-sectional | `up_to_date()` is the DEFAULT `True` (recomputes from the shared ring each minute) → the guard is a no-op → swaps DIRECTLY |
+| Class-A SessionCache group | DEFAULT `True`; the swapped instance's cache simply misses next minute and recomputes from the daily snapshot — a sub-minute warm-up, no applier action |
+| incremental-armed reduction / StatefulGroup / swing held-state | OVERRIDES `up_to_date()` to return `False` after a fresh swap (no carried state) → `rebuild_from_history(buffer)` reseeds (`IncrementalEngine.seed` / `StatefulEngine.seed` / `SwingState.rebuild_from_history`) → next minute folds from the reseeded state |
+| irreducible (a state change that can't be restored to parity, or a non-fp-neutral fix) | `rebuild_from_history` RAISES (it cannot reach parity) → the applier catches it and ESCALATES to the Lead — the "not real-time-swappable" case, detected by the contract, not a separate classifier |
+
+**Why this is the consolidation (Ben's maintainability ask).** ONE mechanism underlies BOTH the held-state
+features (swing's morning/backfill-parity seeding) AND the hot-swap applier. The applier has no
+DIRECT/RESEED/ESCALATE enum and no `classify_swap_kind`; it calls `up_to_date()` / `rebuild_from_history()`
+uniformly. Per-kind behavior is encapsulated where it belongs — in the group's own state object — and is proven
+ONCE by that group's contract parity test (the `up_to_date()==False → rebuild → parity-restored` proof,
+e.g. `test_swing_running_state_up_to_date_and_lazy_rebuild_restore_parity`). A guard precedes every compute, so
+a stale post-swap state can never silently emit a wrong value — it reseeds, or it's already correct. This is the
+SAME contract that resolves cold-start + morning-boundary for the held-state features (see
+`docs/FEATURE_EFFICIENCY_AUDIT.md` §"THE running-state contract").
+
+> ⭐ COORDINATION: the live-wiring applier (`quantlib/features/hot_swap.py` on `di/wdpc-live-wiring`) currently
+> carries the OLD `SwapKind` enum + `classify_swap_kind`. It REFACTORS onto this contract: `apply_in_running_loop`
+> → swap + `up_to_date()` / `rebuild_from_history()`, deleting the classifier. The `RunningState` base
+> (`FeatureGroup.up_to_date` default-True / `rebuild_from_history` default-no-op + the held-state overrides) is
+> the prerequisite, shipped with the swing migration.
 
 ### 3.4 Production-confirm latency
 
@@ -211,8 +224,9 @@ the Lead. A fix AUTO-DEPLOYS iff **ALL** of these hold (checked mechanically, fa
 6. **ADEQUATE UNIT TESTS + QA GREEN** (Ben's explicit deploy gate) — the group's unit tests (incl. the new
    regression that fails-without/passes-with the fix) + the parity suite pass; ruff/black/isort/mypy clean.
    This is the condition Ben named as the real-time-deploy gate; it is REQUIRED, not optional.
-7. **HOT-SWAP-SAFE KIND** (§3.3) — the group is directly-swappable, OR swappable-with-a-reseed whose reseed
-   proof passes. An irreducible/relaunch-only kind → escalate (do NOT auto-deploy).
+7. **HOT-SWAP-SAFE** (§3.3) — the group reseeds to parity through the `RunningState` contract: after the swap
+   `up_to_date()` is honoured and `rebuild_from_history()` either restores parity or RAISES (the irreducible case
+   → escalate, do NOT auto-deploy). No kind classification — the contract self-reports.
 
 If ANY condition fails → **NOT auto-deployed**; escalates to the Lead/human for coordinated review (the
 existing worktree→PR path). The dangerous classes — SHARED-code changes (a kernel two groups use),
@@ -220,9 +234,9 @@ fingerprint-changing changes, anything perturbing a TRUSTED feature — **never 
 they are out of scope by construction and go to a human.
 
 The check composes the **existing** `ops/bus_compat_gate.py` (fingerprint/contract safety) with the WDPC
-in-sandbox parity proof + the byte-eq-elsewhere check + the kind classifier (§3.3). Nothing new conceptually
-beyond the kind check — it's the deploy-safety we already enforce, narrowed to "owned untrusted group,
-fp-neutral, parity-flipping, hot-swap-safe."
+in-sandbox parity proof + the byte-eq-elsewhere check + the `RunningState` self-heal (§3.3 — `rebuild_from_history`
+restores parity or raises). Nothing new conceptually — it's the deploy-safety we already enforce, narrowed to
+"owned untrusted group, fp-neutral, parity-flipping, hot-swap-safe."
 
 ---
 
@@ -373,11 +387,12 @@ discipline that got Phases 1-2 in cleanly.
 **The KEY NEW INFRA (the next, separately gate-read build) = the per-group hot-swap mechanism in fc (§3).**
 This is the genuinely new piece (everything else reuses existing primitives). It is a SMALL, testable unit:
 a `hot_swap_group(name)` that, between minutes, re-imports the group's module → re-registers (overwriting
-`REGISTRY._groups[name]`) → reseeds its state if the kind requires it (§3.3) → returns the new instance, all
-guarded to a minute boundary and asserted fingerprint-unchanged. It is testable OFFLINE first (swap a group
-in a non-live engine + a captured buffer, assert the next minute's compute uses the new logic + the reseed
-yields parity) before it ever touches live fc — and its live activation rides the same RTH-dent / Lead-
-sequenced discipline. Then the scope-guard (§4) + the one-queue-one-applier CD system (§5) wire on top.
+`REGISTRY._groups[name]`) → then lets the SELF-HEALING contract reseed (§3.3 — `if not up_to_date(buffer):
+rebuild_from_history(buffer)`, which raises on the irreducible case) → returns the new instance, all guarded to
+a minute boundary and asserted fingerprint-unchanged. NO kind classifier. It is testable OFFLINE first (swap a
+group in a non-live engine + a captured buffer, assert the next minute's compute uses the new logic + the
+contract reseed yields parity) before it ever touches live fc — and its live activation rides the same RTH-dent
+/ Lead-sequenced discipline. Then the scope-guard (§4) + the one-queue-one-applier CD system (§5) wire on top.
 
 ---
 
@@ -387,11 +402,13 @@ sequenced discipline. Then the scope-guard (§4) + the one-queue-one-applier CD 
    Even fully in-scope, does Ben want SILENT auto-deploy, or auto-deploy-with-notify (apply + post to the
    Lead, who can roll back)? Recommend auto-deploy-with-notify for the first N fixes, then silent once
    trusted — the rollback path (§5.4) makes either safe.
-2. **Hot-swap-reseed correctness for stateful/incremental kinds (§3.3)** — for the swap-with-reseed kinds, is
-   the reseed-from-buffer proof (`seed(H);fold(m)==recompute`) sufficient to auto-deploy them, or should the
-   FIRST cut of real-time hot-swap be restricted to the DIRECTLY-swappable batch/stateless/cache kinds (the
-   majority today, FP_INCREMENTAL unarmed) and the reseed kinds stay relaunch-only until the reseed path is
-   itself proven live? Recommend: ship direct-swap kinds first; gate reseed-swap behind its own proof.
+2. **Reseed correctness for stateful/incremental groups (§3.3)** — for groups that reseed through the contract,
+   is the `rebuild_from_history` proof (each group's `up_to_date()==False → rebuild → parity-restored` test,
+   the SAME one the held-state migration ships) sufficient to auto-deploy them, or should the FIRST cut of
+   real-time hot-swap be restricted to the groups whose `up_to_date()` is the default `True` (no reseed needed —
+   the majority today, FP_INCREMENTAL unarmed) and reseed-requiring groups stay relaunch-only until the contract
+   reseed is itself proven live? Recommend: ship the default-`True` groups first; gate reseed-requiring groups
+   behind their own contract parity proof.
 3. **The bus `FP_BUS=1` enablement** — the bus emit is gated OFF in prod today. Enabling it for the watch
    tripwire is itself a (tiny, off-hot-path, proven-safe) change to live fc — it rides the same RTH-dent /
    Lead-sequenced discipline as the agent activation. (If the bus stays off, the tripwire degrades to
@@ -415,11 +432,12 @@ as nightly). On a real mismatch it ROOT-CAUSES (Phase-2 classifier), FIXES in it
 its owned group — anything shared is FORBIDDEN → escalates to a human), and PROVES the fix in **seconds**
 in-sandbox (`compute_latest == compute` on recent live data = the "adequate unit tests"). It submits the
 tested + in-scope fix to a **single FIFO deploy queue**; a **single serialized deployer** dequeues one at a
-time → re-checks the scope-guard (fp-unchanged, single-group, untrusted-only, hot-swap-safe kind) → auto-
+time → re-checks the scope-guard (fp-unchanged, single-group, untrusted-only, hot-swap-safe) → auto-
 merges (disjoint scope → never conflicts) → **HOT-SWAPS that one group's compute in live fc in REAL TIME**
-(re-import the module between minutes, overwriting `REGISTRY._groups[name]`; reseed its state if the kind
-carries any; shared capture state — ring buffer, publisher, schema — untouched because the fingerprint is
-unchanged) → the bus tripwire confirms live==backfill **within a minute** → cert `certified` + trust granted;
+(re-import the module between minutes, overwriting `REGISTRY._groups[name]`; the `RunningState` contract
+self-heals — `if not up_to_date(buffer): rebuild_from_history(buffer)`, no kind branching; shared capture state
+— ring buffer, publisher, schema — untouched because the fingerprint is unchanged) → the bus tripwire confirms
+live==backfill **within a minute** → cert `certified` + trust granted;
 on a tripwire failure it ROLLS BACK that one group's swap + flags the Lead. Safe because an untrusted feature
 is never traded (an in-flight value change can't affect a position), the scope-guard blocks the only real
 risks (shared-code/fingerprint/trusted-feature changes), disjoint assignment removes git conflicts, and
