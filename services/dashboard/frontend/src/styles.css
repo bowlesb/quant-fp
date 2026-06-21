@@ -46,12 +46,18 @@ body {
   background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
+/* three equal-width sections: title left, "as of" timestamp centered, tabs right */
 .topbar-left {
   display: flex;
   align-items: center;
   gap: 10px;
-  /* grow to fill the topbar so the tab group's margin-left:auto can push it to the right edge (the "as of"
-     timestamp still sits to its right via the topbar's space-between) */
+  flex: 1;
+  justify-content: flex-start;
+}
+.topbar-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 1;
 }
 .brand-mark {
@@ -608,9 +614,9 @@ body {
 .view-tabs {
   display: flex;
   gap: 4px;
-  /* push the tab group to the right edge of the topbar's left cluster (the title/branding stays pinned left,
-     the "as of" timestamp stays on the far right) */
-  margin-left: auto;
+  /* the right section of the three-part topbar — tabs pinned to the right edge */
+  flex: 1;
+  justify-content: flex-end;
 }
 .view-tab {
   background: transparent;
