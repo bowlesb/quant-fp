@@ -22,6 +22,7 @@ It REUSES the exact sim machinery (the real StockDataStream against the msgpack 
 workers and incremental fast path) — it only flips the profiler's two logging switches on and prints a
 profile-oriented report. See docs/PROFILE_SIM.md for how to read the output.
 """
+
 from __future__ import annotations
 
 import json
@@ -86,10 +87,11 @@ def end_to_end_latencies_ms(
     return latencies[warmup:]
 
 
-def rank_groups(by_minute: dict[str, list[dict]], warmup: int) -> list[tuple[str, float, float, float]]:
-    """Rank non-reduction groups by p50 of their per-group ``compute_latest`` ms. For each (group, minute)
-    we take the SLOWEST shard's time (the critical shard, consistent with the end-to-end view), then the
-    p50/p99/max across the post-warmup minutes. Returns (name, p50, p99, max) sorted slowest-first."""
+def group_samples(by_minute: dict[str, list[dict]], warmup: int) -> dict[str, list[float]]:
+    """The raw per-group ``compute_latest`` ms samples used by the rankings. For each (group, minute) we
+    take the SLOWEST shard's time (the critical shard, consistent with the end-to-end view), over the
+    post-warmup minutes. Returns ``{group: [ms, ...]}`` — the distribution from which p50/p95/p99 are taken
+    (the latency-expectations updater reads this for the full percentile set; ``rank_groups`` reduces it)."""
     minutes_sorted = sorted(by_minute)[warmup:]
     per_group: dict[str, list[float]] = defaultdict(list)
     for minute in minutes_sorted:
@@ -100,8 +102,14 @@ def rank_groups(by_minute: dict[str, list[dict]], warmup: int) -> list[tuple[str
                     slowest[name] = value
         for name, value in slowest.items():
             per_group[name].append(value)
+    return dict(per_group)
+
+
+def rank_groups(by_minute: dict[str, list[dict]], warmup: int) -> list[tuple[str, float, float, float]]:
+    """Rank non-reduction groups by p50 of their per-group ``compute_latest`` ms (slowest shard per minute,
+    over the post-warmup minutes). Returns (name, p50, p99, max) sorted slowest-first."""
     ranked: list[tuple[str, float, float, float]] = []
-    for name, values in per_group.items():
+    for name, values in group_samples(by_minute, warmup).items():
         ranked.append((name, statistics.median(values), _percentile(values, 99), max(values)))
     ranked.sort(key=lambda row: -row[1])
     return ranked
@@ -147,14 +155,14 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
         print(f"\n    TOP-3 slowest groups (p50): {top}")
 
 
-def run_profile_sim(
+def run_profile_sim_raw(
     n_symbols: int, n_shards: int, measure: int, warmup: int, window: int, root: str
-) -> tuple[list[float], list[tuple[str, float, float, float]]]:
+) -> tuple[dict[str, list[dict]], dict[str, float]]:
     """Fake-run the REAL streaming path (msgpack mock -> StockDataStream -> shard workers -> incremental
-    fast path) and return ``(end_to_end_latencies_ms, group_ranking)`` for the post-warmup minutes. This
-    is the single entry point both ``main`` (CLI report) and the e2e latency regression gate
-    (``tests/test_fp_latency_e2e.py``) drive, so the gate measures the IDENTICAL compute path the CLI
-    pre-flight does — no mock, no second code path."""
+    fast path) and return the RAW per-minute bench records ``(by_minute, dispatch_walls)``. Both the
+    reduced entry point ``run_profile_sim`` and the latency-expectations updater (which needs the full
+    per-group distribution for p50/p95/p99) build on this, so they all drive the IDENTICAL compute path —
+    no mock, no second code path."""
     total_minutes = warmup + measure
     symbols = synth_symbols(n_symbols)
     snapshots = {"reference": synth_reference(symbols), "daily": synth_daily(symbols, SESSION_DAY)}
@@ -185,8 +193,16 @@ def run_profile_sim(
     )
 
     bench = Path(root) / "_bench"
-    by_minute = _read_shard_records(bench)
-    dispatch_walls = _read_dispatch_walls(bench)
+    return _read_shard_records(bench), _read_dispatch_walls(bench)
+
+
+def run_profile_sim(
+    n_symbols: int, n_shards: int, measure: int, warmup: int, window: int, root: str
+) -> tuple[list[float], list[tuple[str, float, float, float]]]:
+    """Fake-run the REAL streaming path and return ``(end_to_end_latencies_ms, group_ranking)`` for the
+    post-warmup minutes. This is the single entry point both ``main`` (CLI report) and the e2e latency
+    regression gate (``tests/test_fp_latency_e2e.py``) drive."""
+    by_minute, dispatch_walls = run_profile_sim_raw(n_symbols, n_shards, measure, warmup, window, root)
     return (
         end_to_end_latencies_ms(by_minute, dispatch_walls, warmup),
         rank_groups(by_minute, warmup),
