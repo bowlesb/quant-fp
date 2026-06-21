@@ -155,6 +155,10 @@ class OvernightBetaStrategy:
         self._model = model
         self._panel = panel_loader
         self._last_rebalance: dt.date | None = None
+        # per-UTC-date cache of the computed legs so the expensive trailing-panel OLS runs once per day,
+        # not every 60s cycle through the close-auction window (the G5 hot-spin).
+        self._legs_cache: tuple[tuple[str, ...], tuple[str, ...], dict[str, float]] | None = None
+        self._legs_cache_date: dt.date | None = None
         # bounded detector for legs whose close-auction entry never landed (genuinely not-found): stops
         # the every-tick broker re-query spin without ever expiring a live/in-flight order.
         self._stale_entries = StaleEntryTracker()
@@ -197,11 +201,30 @@ class OvernightBetaStrategy:
         return (today - self._last_rebalance).days >= self._config.rebalance_days
 
     def maybe_enter_overnight(self) -> None:
-        """On a rebalance day, in the close-auction window, submit the beta-quintile L/S via MOC (CLS)."""
+        """On a rebalance day, in the close-auction window, submit the beta-quintile L/S via MOC (CLS).
+
+        The cheap gate (kill switch, market hours, close-auction window, already-entered) is evaluated
+        BEFORE the expensive trailing-panel load, so the loop is idle (no parquet fan-out) outside the
+        ~15-min close window / when disabled — instead of recomputing the 300-name beta panel every cycle
+        with nothing to do (the G5 hot-spin)."""
         clock = self._clock()
         mtc = self.minutes_to_close(clock)
         today = dt.datetime.now(dt.timezone.utc).date()
         if not self.is_rebalance_day(today):
+            return
+        # cheap pre-gate (prospective_names=0): the kill-switch / market-hours / close-window / already-
+        # entered reasons don't depend on the leg count, so this short-circuits the panel load when we
+        # could not possibly trade this cycle. The full gross-notional cap is re-checked below with real n.
+        pre_gate = evaluate_enter_gate(
+            self._config,
+            bool(clock.is_open),
+            mtc,
+            self._store.count_entered(),
+            self._gross_notional_estimate(),
+            prospective_names=0,
+        )
+        if not pre_gate.allowed:
+            logger.debug("no enter: %s", pre_gate.reason)
             return
         legs = self._select_legs()
         if legs is None:
@@ -234,6 +257,14 @@ class OvernightBetaStrategy:
         )
 
     def _select_legs(self) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, float]] | None:
+        """Compute the beta-quintile legs from the trailing daily-return panel, CACHED per UTC date: the
+        panel is daily-return based so the legs are invariant within a day, and the close-auction window
+        spans many 60s cycles — recomputing the 300-name OLS each cycle was pure waste (G5). The cache is
+        keyed on the date so a new session recomputes; ``None`` (insufficient panel) is not cached so a
+        later-arriving panel is retried."""
+        today = dt.datetime.now(dt.timezone.utc).date()
+        if self._legs_cache is not None and self._legs_cache_date == today:
+            return self._legs_cache
         returns_by_name, market_returns = self._panel.load()
         for sym in self._config.exclude:
             returns_by_name.pop(sym, None)
@@ -242,7 +273,10 @@ class OvernightBetaStrategy:
             logger.info("no legs (insufficient panel)")
             return None
         cap = self._config.max_names_per_leg
-        return legs.long[-cap:], legs.short[:cap], legs.betas
+        selected = (legs.long[-cap:], legs.short[:cap], legs.betas)
+        self._legs_cache = selected
+        self._legs_cache_date = today
+        return selected
 
     def _gross_notional_estimate(self) -> float:
         return self._store.count_entered() * self._config.notional_usd

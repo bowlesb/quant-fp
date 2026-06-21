@@ -46,7 +46,7 @@ from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from quantlib.strategy_core.production_execution import ProductionOrderIntent, make_client_order_id
 from quantlib.strategy_core.production_state import PgStateStore
 from strategies.lib.model import MockMLModel, Model
-from strategies.lib.stale_entry import StaleEntryTracker
+from strategies.lib.stale_entry import StaleEntryTracker, StalePendingExitTracker
 from strategies.smoke.bet_store import BetStore
 from strategies.smoke.contract import (
     MODEL_FOLD_FEATURES,
@@ -219,6 +219,10 @@ class SmokeStrategy:
         # exit on a closed market doesn't hot-log every manage tick (per-state-change, not per-tick) — the
         # same log-dedup as reversion's path. Pure legibility; zero behavior change.
         self._pending_close_logged: set[str] = set()
+        # bounded detector for exit orders stuck PENDING across a session boundary (a closed-market DAY
+        # order the broker queued `accepted` but will never fill): once stale, cancel + re-submit a fresh
+        # exit so the close completes next session, instead of hot-looping "CLOSE pending fill" forever (G4).
+        self._stale_exits = StalePendingExitTracker()
 
     def _book_fill(self, symbol: str, side: str, coid: str, qty: float, price: float) -> None:
         """Mirror a captured fill into the durable StrategyState ledger (the migration SoT). A no-op when
@@ -484,6 +488,39 @@ class SmokeStrategy:
                 raise
             logger.warning("CLOSE coid %s already submitted; reading its fill", exit_coid)
 
+    def _cancel_exit_at_broker(self, exit_coid: str) -> None:
+        """Cancel a stuck exit order at the broker by its coid (the executor's idempotent cancel — a no-op
+        if the order is already terminal or gone). Swallows the broker's not-found/already-terminal errors
+        so a race never crashes the loop; any other APIError propagates to the loop's handler."""
+        try:
+            self._executor.cancel(exit_coid)
+        except KeyError:
+            return  # the broker has no such order (already gone) — nothing to cancel
+
+    def _replace_stale_exit(
+        self, bet: dict[str, object], symbol: str, qty: float, stale_exit_coid: str
+    ) -> tuple[Order | None, str]:
+        """Recover a bet whose exit order is stuck PENDING across a session boundary (an `accepted` DAY
+        order from a prior/closed session that will never fill): cancel the stale order and re-submit a
+        FRESH exit (next retry generation) so the close completes in the next live session, instead of
+        waiting on the dead order forever (the G4 close hot-loop). Returns ``(order, exit_coid)``."""
+        entry_order_id = str(bet["entry_order_id"])
+        retry = exit_retry_count(stale_exit_coid) + 1
+        new_coid = exit_coid_for(entry_order_id, retry)
+        logger.warning(
+            "CLOSE exit %s stuck pending across session; cancelling + re-submitting fresh exit %s for %s",
+            stale_exit_coid,
+            new_coid,
+            symbol,
+        )
+        self._cancel_exit_at_broker(stale_exit_coid)
+        self._stale_exits.forget(stale_exit_coid)
+        self._pending_close_logged.discard(stale_exit_coid)
+        self._store.update_exit_coid(entry_order_id, new_coid)
+        bet["exit_order_id"] = new_coid
+        self._submit_exit(symbol, qty, entry_order_id, new_coid)
+        return self._fetch_order_by_coid(new_coid), new_coid
+
     def _resubmit_lost_exit(
         self, bet: dict[str, object], symbol: str, qty: float
     ) -> tuple[Order | None, str]:
@@ -533,13 +570,37 @@ class SmokeStrategy:
         if missing:
             exit_order, exit_coid = self._resubmit_lost_exit(bet, symbol, qty)
         if exit_order is None or not exit_order.filled_avg_price:
+            # The exit EXISTS at the broker but has not filled. If it stays pending across a session
+            # boundary (a closed-market `accepted` DAY order that will never fill), it is STALE: cancel it
+            # and re-submit a fresh exit so the close completes next session, instead of waiting forever.
+            now = dt.datetime.now(dt.timezone.utc)
+            if exit_order is not None and self._stale_exits.record_pending(exit_coid, now):
+                exit_order, exit_coid = self._replace_stale_exit(bet, symbol, qty, exit_coid)
+                if exit_order is not None and exit_order.filled_avg_price:
+                    self._finalize_close(bet, symbol, entry_price_value, qty, exit_order, exit_coid)
+                    return
             # log a pending exit ONCE per coid (not every ~1.4s manage tick) so a stale pending close on a
             # closed market doesn't hot-log forever — purely a log-legibility fix, no behavior change.
             if exit_coid not in self._pending_close_logged:
                 logger.info("CLOSE pending fill for %s (coid=%s)", symbol, exit_coid)
                 self._pending_close_logged.add(exit_coid)
             return
-        exit_price = float(exit_order.filled_avg_price)
+        self._finalize_close(bet, symbol, entry_price_value, qty, exit_order, exit_coid)
+
+    def _finalize_close(
+        self,
+        bet: dict[str, object],
+        symbol: str,
+        entry_price_value: float,
+        qty: float,
+        exit_order: Order,
+        exit_coid: str,
+    ) -> None:
+        """Book a FILLED exit: compute realized PnL, move the bet to CLOSED, mirror the fill, and clear the
+        pending/stale trackers. Shared by the normal close path and the post-stale-replace fill path."""
+        self._stale_exits.forget(exit_coid)  # resolved -> drop the pending streak
+        entry_order_id = str(bet["entry_order_id"])
+        exit_price = float(cast(float, exit_order.filled_avg_price))
         realized = (exit_price - entry_price_value) * qty
         exit_ts = exit_order.filled_at or dt.datetime.now(dt.timezone.utc)
         self._store.record_close(entry_order_id, exit_ts, exit_price, realized)

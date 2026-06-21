@@ -102,6 +102,10 @@ services:
     image: overnight-beta-strategy
     restart: unless-stopped
     mem_limit: 1g
+    # the loop is idle outside the ~15-min close window (cheap pre-gate short-circuits the panel load) and
+    # the daily-panel OLS is cached per day, so it needs at most ~1 core for the once-a-day rebalance —
+    # cap it so a pathological load can never peg multiple cores of the shared box (the G5 hot-spin guard).
+    cpus: 1.0
     env_file: .env
     volumes:
       - fp_store_real:/store:ro          # daily bars for beta estimation (read-only; NOT the bus)

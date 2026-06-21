@@ -24,7 +24,7 @@ from quantlib.bus.publisher import BusPublisher
 from quantlib.bus.schema import default_schema
 from quantlib.strategy_core.paper_alpaca_executor import PaperAlpacaExecutor
 from strategies.lib.model import MockMLModel
-from strategies.lib.stale_entry import StaleEntryTracker
+from strategies.lib.stale_entry import StaleEntryTracker, StalePendingExitTracker
 from strategies.smoke.strategy import (
     SmokeConfig,
     SmokeStrategy,
@@ -212,6 +212,8 @@ class FakeTradingClient:
     # Substrings of coids whose FIRST submit raises an Alpaca 5xx (then succeeds on re-submit).
     fail_submit_once: set[str] = field(default_factory=set)
     _failed_once: set[str] = field(default_factory=set)
+    # coids that were cancelled via cancel_order_by_id (for the stale-exit-cancel assertions).
+    canceled: list[str] = field(default_factory=list)
 
     def get_clock(self) -> FakeClock:
         return FakeClock(is_open=True)
@@ -246,6 +248,16 @@ class FakeTradingClient:
         if client_order_id in self.not_found_coids or client_order_id not in self._by_coid:
             raise APIError(NOT_FOUND_BODY % client_order_id)
         return self._by_coid[client_order_id]
+
+    def cancel_order_by_id(self, broker_order_id: str) -> None:
+        """Cancel a pending order by broker id (mirrors Alpaca): drop it from the by-coid view so a later
+        lookup reports not-found, recording the cancelled coid for assertions."""
+        for coid, order in list(self._by_coid.items()):
+            if order.id == broker_order_id:
+                self.canceled.append(coid)
+                self.not_found_coids.add(coid)
+                del self._by_coid[coid]
+                return
 
 
 class InMemoryStore:
@@ -349,6 +361,7 @@ def _strategy(config: SmokeConfig, trading: FakeTradingClient, store: InMemorySt
     strategy._last_bet_ts = None  # type: ignore[attr-defined]
     strategy._stale_entries = StaleEntryTracker()  # type: ignore[attr-defined]
     strategy._pending_close_logged = set()  # type: ignore[attr-defined]
+    strategy._stale_exits = StalePendingExitTracker()  # type: ignore[attr-defined]
     return strategy
 
 
@@ -565,6 +578,79 @@ def test_close_propagates_then_resubmits_on_server_error() -> None:
     strategy._close_bet(store.list_open()[0])  # type: ignore[attr-defined]  # next cycle resolves it
     assert store.count_open() == 0
     assert store._bets[entry_coid]["status"] == "closed"
+
+
+def test_stale_pending_exit_is_cancelled_and_replaced() -> None:
+    """G4: a bet whose exit order is stuck PENDING (an `accepted` DAY order from a prior/closed session
+    that never fills) is, after a bounded streak, CANCELLED at the broker and re-submitted as a fresh
+    exit — instead of hot-looping 'CLOSE pending fill' forever. The replacement fills and finalizes."""
+    config = _config(hold_sec=0)
+    trading = FakeTradingClient(fill_price=298.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+    # low threshold so the test resolves in 2 ticks (live default is 5 over 900s).
+    strategy._stale_exits = StalePendingExitTracker(min_checks=2, min_seconds=0.0)  # type: ignore[attr-defined]
+
+    entry_coid = "smoke-20260618T195545-AAPL-buy"
+    qty = 50.0 / 298.0
+    store.record_open("AAPL", "buy", 50.0, entry_coid, NOW, NOW)
+    store.mark_filled(entry_coid, 298.0, qty)
+    base_exit = exit_coid_for(entry_coid)
+    store.mark_closing(entry_coid, base_exit)
+    # the stuck exit EXISTS at the broker but is ACCEPTED + unfilled (the closed-market DAY order).
+    trading._by_coid[base_exit] = FakeOrder(
+        id="broker-stuck",
+        client_order_id=base_exit,
+        filled_avg_price=None,
+        filled_qty=0.0,
+        status=OrderStatus.ACCEPTED,
+    )
+    bet = store.list_open()[0]
+
+    strategy._close_bet(bet)  # tick 1: 1st pending observation (streak=1) -> still waiting
+    assert store.count_open() == 1
+    assert trading.canceled == []  # not yet stale -> not cancelled
+
+    strategy._close_bet(bet)  # tick 2: 2nd consecutive pending -> STALE -> cancel + re-submit + fill
+    assert base_exit in trading.canceled  # the stuck order was cancelled
+    assert store.count_open() == 0  # the fresh exit filled -> finalized
+    closed = store._bets[entry_coid]
+    assert closed["status"] == "closed"
+    assert closed["exit_order_id"] == exit_coid_for(entry_coid, retry=1)  # fresh retry coid
+    replacements = [order for order in trading.submitted if order.client_order_id.endswith("_r1")]
+    assert len(replacements) == 1  # exactly one replacement SELL placed
+
+
+def test_live_pending_exit_not_cancelled_before_threshold() -> None:
+    """A genuinely in-flight exit during live hours (fills within seconds) is NEVER cancelled: a single
+    pending observation (below the streak threshold) must not cancel it — only an order pending across a
+    session boundary (the bounded streak) reaches the stale threshold."""
+    config = _config(hold_sec=0)
+    trading = FakeTradingClient(fill_price=298.0)
+    store = InMemoryStore()
+    strategy = _strategy(config, trading, store)
+    strategy._stale_exits = StalePendingExitTracker(min_checks=5, min_seconds=900.0)  # type: ignore[attr-defined]
+
+    entry_coid = "smoke-20260618T195545-AAPL-buy"
+    qty = 50.0 / 298.0
+    store.record_open("AAPL", "buy", 50.0, entry_coid, NOW, NOW)
+    store.mark_filled(entry_coid, 298.0, qty)
+    base_exit = exit_coid_for(entry_coid)
+    store.mark_closing(entry_coid, base_exit)
+    trading._by_coid[base_exit] = FakeOrder(
+        id="broker-inflight",
+        client_order_id=base_exit,
+        filled_avg_price=None,
+        filled_qty=0.0,
+        status=OrderStatus.ACCEPTED,
+    )
+    bet = store.list_open()[0]
+
+    for _ in range(4):  # 4 pending ticks, below the 5-check threshold
+        strategy._close_bet(bet)
+    assert trading.canceled == []  # never cancelled a live in-flight exit
+    assert store.count_open() == 1  # still managed, waiting for the real fill
+    assert store._bets[entry_coid]["exit_order_id"] == base_exit  # original exit untouched
 
 
 def test_high_priced_symbol_sized_to_notional_not_whole_share() -> None:

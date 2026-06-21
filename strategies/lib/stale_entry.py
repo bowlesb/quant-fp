@@ -91,3 +91,59 @@ class StaleEntryTracker:
         """The current consecutive not-found count for a coid (0 if none) — for logging / tests."""
         streak = self._streaks.get(coid)
         return streak.count if streak is not None else 0
+
+
+# An exit order that has been observed PENDING-UNFILLED this long is declared stale: it is a non-terminal
+# (accepted/new) day-order from a prior/closed session that the broker queued but will never fill, so the
+# close loop must cancel it and re-submit a fresh exit rather than wait on it forever (the G4 hot-loop).
+# A spacious default so a genuinely in-flight exit during live hours (which fills in seconds) is never
+# disturbed; the binding case is an order pending across a session boundary (hours/days).
+DEFAULT_STALE_PENDING_MIN_CHECKS = 5
+DEFAULT_STALE_PENDING_MIN_SECONDS = 900.0
+
+
+class StalePendingExitTracker:
+    """Per-coid tracker for an exit order that stays PENDING (accepted/new, never filled). Declares the
+    exit stale only after a bounded streak of consecutive pending observations spanning >= min_seconds, so
+    a transient pending tick during live trading (an exit fills in seconds) is never wrongly cancelled —
+    only an order pending across a session boundary reaches the threshold. ``reset`` is called on any
+    non-pending outcome (the exit filled, or vanished), the same precise-streak discipline as
+    ``StaleEntryTracker``. In-memory per process; a restart re-observes the streak from zero (safe — it
+    just delays the cancel decision by N checks, never cancels a live fill prematurely)."""
+
+    def __init__(
+        self,
+        *,
+        min_checks: int = DEFAULT_STALE_PENDING_MIN_CHECKS,
+        min_seconds: float = DEFAULT_STALE_PENDING_MIN_SECONDS,
+    ) -> None:
+        self._min_checks = min_checks
+        self._min_seconds = min_seconds
+        self._streaks: dict[str, _Streak] = {}
+
+    def record_pending(self, coid: str, now: dt.datetime) -> bool:
+        """Record that ``coid``'s exit is still PENDING-unfilled at ``now``. Returns True iff it is now
+        declared STALE (>= min_checks consecutive pending observations spanning >= min_seconds), meaning
+        the close loop should cancel it and re-submit a fresh exit."""
+        streak = self._streaks.get(coid)
+        if streak is None:
+            self._streaks[coid] = _Streak(count=1, first_seen=now, last_seen=now)
+            return False
+        streak.count += 1
+        streak.last_seen = now
+        spanned = (streak.last_seen - streak.first_seen).total_seconds()
+        return streak.count >= self._min_checks and spanned >= self._min_seconds
+
+    def reset(self, coid: str) -> None:
+        """Clear ``coid``'s pending streak — call on ANY non-pending outcome (the exit filled or is gone),
+        so only a CONSECUTIVE pending run can ever reach the stale threshold."""
+        self._streaks.pop(coid, None)
+
+    def forget(self, coid: str) -> None:
+        """Drop a coid's tracking once its exit is resolved/replaced — keeps the map bounded."""
+        self._streaks.pop(coid, None)
+
+    def streak_count(self, coid: str) -> int:
+        """The current consecutive pending count for a coid (0 if none) — for logging / tests."""
+        streak = self._streaks.get(coid)
+        return streak.count if streak is not None else 0
