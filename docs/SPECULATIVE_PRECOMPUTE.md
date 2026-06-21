@@ -1,7 +1,13 @@
 # Speculative / anticipatory pre-compute — feature-by-feature evaluation + design
 
-> Status: DESIGN + EVAL + OFFLINE PROTOTYPE (2026-06-21). Doc-only; live fp `0x873f…`/728/63 UNTOUCHED, no
-> fc/shard-worker change, no fingerprint change. Evaluates Ben's proposed latency lever: *some features' inputs
+> Status: **BUILT — PRODUCTION MECHANISM, VALIDATED-READY (2026-06-22)** behind `FP_SPECULATIVE=1` (default
+> OFF → fp 737 UNCHANGED, not enabled in live fc — Lead/relaunch flip). Promotes the §3 design + §5 prototype to
+> the real two-phase pre-pass + tail-fold on the existing `aggregate_shard_ticks` seam. See **§7 — the build**
+> for the module/wiring, the value-identical (parity 0.0) real-tape proof, the critical-path work moved off, and
+> the Lead's activation step. Original status (the design/eval that follows below): DESIGN + EVAL + OFFLINE
+> PROTOTYPE (2026-06-21), doc-only, fp UNTOUCHED.
+>
+> Evaluates Ben's proposed latency lever: *some features' inputs
 > are fully available BEFORE the minute bar arrives at T, so they can be computed in a background pass at ~T−ε;
 > when the bar threads at T, emitting is just handing back the pre-computed value (or a tiny final tail-fold).*
 > This moves work OFF the critical path (bar-arrival → vector-ready, Ben's latency axis D) rather than merely
@@ -310,3 +316,83 @@ orders (Latency-16). So the speculative lever saves little *today*. Its payoff i
 
 This is the engineering-honest version of Ben's idea: a real, parity-true lever for a specific narrow class,
 whose value is gated on tick breadth — design it now, pull it when the breadth makes it worth more than sub-ms.
+
+---
+
+## 7. The build — production mechanism, validated-ready (2026-06-22)
+
+Promotes §3/§5 from design+prototype to the press-the-button production mechanism, behind `FP_SPECULATIVE=1`
+(default OFF → fp 737 UNCHANGED, not enabled in live fc). It is the §3 two-phase schedule on the EXISTING
+`aggregate_shard_ticks` seam (`enrich_bars_with_ticks` / `trades_frame` over `quantlib.aggregates`) — NO
+disjoint path, the single per-symbol tick fold run in two installments.
+
+### 7a. What was built
+- **`quantlib/features/speculative.py`** — the mechanism:
+  - `SpeculativeMinuteState` — the per-minute `FeatureState` of the two-installment fold: the partial ticks
+    PARTITIONED per symbol (ordered), carrying NO running window sum and NO finalized aggregate, so it is
+    drift-proof by construction (nothing to cancel).
+  - `prepass_aggregate(trades, quotes, minute_epoch)` — the PRE-PASS (idle window, OFF the critical path):
+    partitions the already-arrived minute-T ticks by symbol (the O(n) firehose-distribution share of
+    `aggregate_shard_ticks`). Touches no `TickState`, no window sum.
+  - `tail_fold_aggregate(state, bars, tail_trades, tail_quotes, tick_states)` — the TAIL-FOLD + EMIT (at the
+    bar, ON the critical path): appends ONLY the last-ε tail ticks in order, then runs the EXISTING
+    `enrich_bars_with_ticks` / `trades_frame` over the combined tape → the IDENTICAL `(enriched, trades_frame)`
+    tuple `aggregate_shard_ticks` returns.
+  - `speculative_enabled()` — the `FP_SPECULATIVE` gate (byte-identical when off, value-identical when on).
+  - `SPECULATIVE_TARGET_GROUPS` — the Class-A-PRE target set (the §6 answer): `trade_flow`, `quote_spread`,
+    `count_fano`, `trade_freq_z` (fully A-PRE tick reductions) + `liquidity`, `signed_trade_ratio` (A-PRE-partial;
+    their bar-volume term finalizes at the bar in the group's own emit, never speculated). The mechanism is
+    group-agnostic — it produces the identical `minute_agg` buffer all of them read — so the set is documentation,
+    not a code branch.
+- **`quantlib/features/sharded_capture.py`** — the wiring: `speculative_aggregate_shard_ticks` (the value-
+  identical two-phase equivalent of `aggregate_shard_ticks`, splitting the minute at the ε boundary via
+  `_split_partial_tail`), and the worker loop gated on `speculative_enabled()` — `FP_SPECULATIVE=1` takes the
+  two-phase path, default takes the unchanged one-installment path. `SPECULATIVE_TAIL_SECONDS`
+  (`FP_SPECULATIVE_TAIL_S`, default 1s) is the tail window.
+- **`tests/test_fp_speculative.py`** — the parity gate (mirrors `test_fp_incremental`): value-identity at
+  T-1s/2s/5s cutoffs, a 60-minute no-drift soak, threaded-`TickState` identity across the split, boundary-tick
+  correctness (exchange-ts bucketing), and the partition-completeness invariant. 8 tests, all green.
+
+### 7b. The parity hazard — respected by construction
+The §4 NO-GO (advancing window sums speculatively as `running − expiring + partial + tail`, the ~1e-10
+cancellation class) is NOT POSSIBLE in this build: the speculative state holds only ordered raw ticks; the
+window sums are emitted at the bar by the group's UNCHANGED `emit` over the identical `minute_agg` buffer. The
+mechanism speculates only the per-minute tick AGGREGATION. Partition-of-`partial` then append-partition-of-`tail`
+is byte-identical to partition-of-the-whole-minute (order-stable, per-tick-pure) → value-identical.
+
+### 7c. Value-identical proof + critical-path work moved off — REAL TAPE
+Bounded throwaway proof (`/tmp`, deleted) over a REAL `/store` raw-tape slice (read-only): AAPL / SPY / NUCL
+on 2026-06-15 (792k / 742k / 3.8k trades; 1.04M / 3.34M / 4.1k quotes), 120 RTH minutes, threaded `TickState`,
+both paths compared cell-for-cell each minute:
+
+```
+  minutes graded             : 120
+  max|spec - full|           : 0.000e+00      <- VALUE-IDENTICAL (0 breach minutes)
+  full at-bar (today)        : 5655.52 ms      (sum over the 120 minutes)
+  pre-pass (OFF crit path)   : 4023.14 ms      <- moved off the critical path
+  tail-fold (ON crit path)   : 1867.16 ms      <- the only work left AT the bar
+  moved off-path (of agg)    : 68.30%
+  at-bar reduction vs full   : 66.99%
+```
+
+The real-tape number is LARGER than the prototype's 32.5% (§5) because this dense real tape makes the per-symbol
+partition (the off-path installment) dominate and the 1s tail a tiny fraction — 67-68% of the tick-aggregation
+critical-path work moves off-path, value-identically. The unit test additionally pins the boundary tick.
+
+### 7d. Honest scope (unchanged from §2) + the Lead's activation step
+The value is breadth-gated: at the current ~24-symbol `FP_TICK_SYMBOLS` canary the tick groups' live cost is
+sub-ms, so the absolute saving today is small. This is built validated-ready so it is LIVE the moment tick
+breadth widens (the #388 ramp), per Ben (build now, don't defer).
+
+**Activation (Lead / relaunch only — NOT done here):**
+1. The two installments run in-line at the bar in this build (the worker receives the whole minute at once), so
+   `FP_SPECULATIVE=1` is already value-identical and exercises the full mechanism. To realize the WALL-CLOCK
+   off-path scheduling (run the pre-pass at ~T−1s before the bar threads), the reader forwards the partial tick
+   set at T−ε and the worker calls `prepass_aggregate` then; the at-bar path calls `tail_fold_aggregate`. That
+   reader-side T−ε trigger is the one live-path addition; the worker-side mechanism is complete.
+2. De-risk ladder (same as `FP_INCREMENTAL`): run `tests/test_fp_speculative.py` (green), then a live
+   `FP_SPECULATIVE` PARITY-soak breach-counter session at widened tick breadth before trusting the saving.
+3. Flip via `nightly_relaunch.sh` (env var only, fp-neutral); rollback = unset `FP_SPECULATIVE` + relaunch.
+
+Co-deploys naturally with the Monday `FP_INCREMENTAL` flip (the fold it speculates is the one being armed) and
+with `FP_TICK_SYMBOLS` widening (which is what makes the saving meaningful).
