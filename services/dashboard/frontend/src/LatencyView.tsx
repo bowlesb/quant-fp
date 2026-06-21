@@ -1,55 +1,106 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BootingError, fetchLatencyExpectations } from "./api";
 import type { LatencyExpectations, LatencyGroup } from "./types";
 
 // The per-group feature-latency expectations view (docs/feature_latency_expectations.json, #321). The data is a
-// static offline-generated artifact (not the always-warm worker cache), so a single fetch on mount is enough —
-// no polling. The grid stays the dashboard's default view; this is an additional, clearly-linked page.
+// living offline-generated artifact (a measurement loop refreshes it), not the always-warm worker cache, so a
+// single fetch on mount is enough — no polling. The grid stays the dashboard's default view; this is a tab.
+//
+// The view is a HORIZONTAL BAR CHART, one row per group, SORTED SLOWEST-FIRST (slowest at top). The bar LENGTH
+// encodes the typical per-minute cost (p50_ms); hovering a bar surfaces the TAIL (p95 + p99) plus the few extra
+// facts that explain the cost — kind, mechanism, incremental_ready, feat_count. p95_ms is being added to the
+// artifact; until it lands the hover shows p99 (always present) and omits p95 — the chart degrades gracefully.
 
 function formatMs(value: number): string {
-  // Sub-ms groups read better with two decimals; everything else to one.
+  // Sub-10ms groups read better with two decimals; everything else to one.
   return value < 10 ? value.toFixed(2) : value.toFixed(1);
 }
 
-// Tint the p99 cell from white (fast) toward a warm red (slowest) so the slowest rows pop. The scale is anchored
-// at the table's own max p99 so it stays meaningful as the numbers drift across regenerations.
-function p99Background(p99: number, maxP99: number): string {
-  if (maxP99 <= 0) return "transparent";
-  const t = Math.min(1, Math.max(0, p99 / maxP99));
-  // White -> the dashboard's untrusted-red (#a01722), gentle gamma so mid values stay legible.
-  const eased = Math.pow(t, 0.85);
-  const red = Math.round(255 + (160 - 255) * eased);
-  const green = Math.round(255 + (23 - 255) * eased);
-  const blue = Math.round(255 + (34 - 255) * eased);
+// The bar fill darkens with slowness (anchored at the slowest p50 so it stays meaningful as numbers drift). A
+// faster group is a pale blue bar; the slowest is the dashboard's deep "trusted" blue, matching the grid theme.
+function barColor(p50: number, maxP50: number): string {
+  const t = maxP50 > 0 ? Math.min(1, Math.max(0, p50 / maxP50)) : 0;
+  const eased = Math.pow(t, 0.6); // lift thin bars so they stay visible
+  // pale blue (#cfe0fb) -> deep trusted blue (#0b3d91)
+  const red = Math.round(207 + (11 - 207) * eased);
+  const green = Math.round(224 + (61 - 224) * eased);
+  const blue = Math.round(251 + (145 - 251) * eased);
   return `rgb(${red},${green},${blue})`;
 }
 
-function p99TextColor(p99: number, maxP99: number): string {
-  // Flip to white text once the cell background is dark enough to swallow dark text.
-  return maxP99 > 0 && p99 / maxP99 > 0.6 ? "#ffffff" : "var(--text)";
-}
-
-interface LatencyRowProps {
+interface HoverState {
   group: LatencyGroup;
-  maxP99: number;
+  x: number;
+  y: number;
 }
 
-function LatencyRow({ group, maxP99 }: LatencyRowProps) {
+interface LatencyBarProps {
+  group: LatencyGroup;
+  maxP50: number;
+  onHover: (state: HoverState | null) => void;
+}
+
+function LatencyBar({ group, maxP50, onHover }: LatencyBarProps) {
+  const widthPct = maxP50 > 0 ? Math.max(0.5, (group.p50_ms / maxP50) * 100) : 0;
+  const move = (event: React.MouseEvent) => onHover({ group, x: event.clientX, y: event.clientY });
   return (
-    <tr>
-      <td className="lat-group">{group.group}</td>
-      <td
-        className="lat-num lat-p99"
-        style={{ background: p99Background(group.p99_ms, maxP99), color: p99TextColor(group.p99_ms, maxP99) }}
-      >
-        {formatMs(group.p99_ms)}
-      </td>
-      <td className="lat-num">{formatMs(group.p50_ms)}</td>
-      <td>{group.kind}</td>
-      <td className="lat-mech">{group.mechanism}</td>
-      <td className={`lat-incr lat-incr-${group.incremental_ready}`}>{group.incremental_ready}</td>
-      <td className="lat-num">{group.feat_count}</td>
-    </tr>
+    <div
+      className="lat-bar-row"
+      onMouseMove={move}
+      onMouseEnter={move}
+      onMouseLeave={() => onHover(null)}
+    >
+      <div className="lat-bar-label">{group.group}</div>
+      <div className="lat-bar-track">
+        <div
+          className="lat-bar-fill"
+          style={{ width: `${widthPct}%`, background: barColor(group.p50_ms, maxP50) }}
+        />
+        <span className="lat-bar-value">{formatMs(group.p50_ms)} ms</span>
+      </div>
+    </div>
+  );
+}
+
+function LatencyTooltip({ hover }: { hover: HoverState }) {
+  const { group } = hover;
+  // Keep the tooltip on-screen: flip to the cursor's left near the right edge.
+  const flipLeft = hover.x > window.innerWidth - 280;
+  const style: React.CSSProperties = {
+    top: hover.y + 14,
+    left: flipLeft ? undefined : hover.x + 14,
+    right: flipLeft ? window.innerWidth - hover.x + 14 : undefined,
+  };
+  return (
+    <div className="lat-tooltip" style={style}>
+      <div className="lat-tip-title">{group.group}</div>
+      <div className="lat-tip-tail">
+        <span className="lat-tip-stat">
+          <span className="lat-tip-k">p50</span>
+          <span className="lat-tip-v">{formatMs(group.p50_ms)} ms</span>
+        </span>
+        {group.p95_ms !== undefined && (
+          <span className="lat-tip-stat">
+            <span className="lat-tip-k">p95</span>
+            <span className="lat-tip-v">{formatMs(group.p95_ms)} ms</span>
+          </span>
+        )}
+        <span className="lat-tip-stat">
+          <span className="lat-tip-k">p99</span>
+          <span className="lat-tip-v lat-tip-tailv">{formatMs(group.p99_ms)} ms</span>
+        </span>
+      </div>
+      <dl className="lat-tip-meta">
+        <dt>kind</dt>
+        <dd>{group.kind}</dd>
+        <dt>mechanism</dt>
+        <dd>{group.mechanism}</dd>
+        <dt>incremental</dt>
+        <dd className={`lat-incr lat-incr-${group.incremental_ready}`}>{group.incremental_ready}</dd>
+        <dt>features</dt>
+        <dd>{group.feat_count}</dd>
+      </dl>
+    </div>
   );
 }
 
@@ -57,6 +108,7 @@ export function LatencyView() {
   const [data, setData] = useState<LatencyExpectations | null>(null);
   const [booting, setBooting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hover, setHover] = useState<HoverState | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +126,15 @@ export function LatencyView() {
     };
   }, []);
 
+  // Sort slowest-first by the tail (p99) so "slowest at top" holds even if the artifact's order ever drifts;
+  // the bar length still encodes p50. maxP50 anchors the bar-length + colour scale.
+  const sorted = useMemo<LatencyGroup[]>(
+    () => (data ? [...data.groups].sort((a, b) => b.p99_ms - a.p99_ms) : []),
+    [data],
+  );
+  const maxP50 = useMemo(() => sorted.reduce((acc, group) => Math.max(acc, group.p50_ms), 0), [sorted]);
+  const hasP95 = useMemo(() => sorted.some((group) => group.p95_ms !== undefined), [sorted]);
+
   if (error) return <div className="banner-error">{error}</div>;
   if (booting && !data) {
     return (
@@ -85,11 +146,9 @@ export function LatencyView() {
   if (!data) return <div className="lat-note">Loading latency expectations…</div>;
 
   const ctx = data.e2e_context;
-  // The JSON is already sorted slowest-first; recompute the max defensively for the colour scale.
-  const maxP99 = data.groups.reduce((acc, group) => Math.max(acc, group.p99_ms), 0);
 
   return (
-    <div className="lat-view">
+    <div className="lat-view" onMouseLeave={() => setHover(null)}>
       <div className="lat-header">
         <div className="lat-headline">
           <span className="lat-metric">bar &rarr; vector (per-bet)</span>
@@ -110,29 +169,20 @@ export function LatencyView() {
           {data.group_count} groups · {data.feature_count} features · units: {data.units} ·{" "}
           {data.sorted_by} · generated {data.generated_at}
         </div>
-        <div className="lat-note">{ctx.note}</div>
+        <div className="lat-note">
+          Bar length = per-group p50 (the live per-minute compute_latest cost), slowest-first. Hover a bar for
+          the tail{hasP95 ? " (p95 + p99)" : " (p99; p95 pending in the artifact)"} and the group's kind,
+          mechanism, incremental-readiness, and feature count. {ctx.note}
+        </div>
       </div>
 
-      <div className="lat-table-wrap">
-        <table className="lat-table">
-          <thead>
-            <tr>
-              <th>group</th>
-              <th className="lat-num">p99 (ms)</th>
-              <th className="lat-num">p50 (ms)</th>
-              <th>kind</th>
-              <th>mechanism</th>
-              <th>incremental</th>
-              <th className="lat-num">feats</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.groups.map((group) => (
-              <LatencyRow key={group.group} group={group} maxP99={maxP99} />
-            ))}
-          </tbody>
-        </table>
+      <div className="lat-chart">
+        {sorted.map((group) => (
+          <LatencyBar key={group.group} group={group} maxP50={maxP50} onHover={setHover} />
+        ))}
       </div>
+
+      {hover && <LatencyTooltip hover={hover} />}
     </div>
   );
 }

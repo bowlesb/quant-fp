@@ -105,6 +105,9 @@ export interface LatencyGroup {
   mechanism: string;
   incremental_ready: string;
   p50_ms: number;
+  // p95_ms is being added to the living artifact by the measurement loop; optional so the UI degrades
+  // gracefully (bar = p50, hover = p99 always + p95 only when present) until the field lands in the JSON.
+  p95_ms?: number;
   p99_ms: number;
 }
 
