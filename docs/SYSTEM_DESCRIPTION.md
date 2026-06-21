@@ -15,15 +15,74 @@ For the platform vision and acceptance bar, start at [MISSION](MISSION.md) and
 
 ---
 
-## The data path, end to end
+## Top-level architecture
+
+Four live ingest fetchers feed two stores; the feature engine computes a parity-true feature store off the raw
+tape; vectors flow over a bus to strategy containers and on to paper execution. The trust/parity lifecycle and
+the dashboard observe the whole thing, and a separate **CI/CD lane** is the deploy mechanism that ships code
+into the live containers.
+
+```mermaid
+graph TD
+    subgraph INGEST["INGEST — live 24/7 fetchers"]
+        FC["feature-computer<br/>(equity bars/trades/quotes)"]
+        CRY["crypto-capture<br/>(crypto WS)"]
+        NEWS["news-capture<br/>(Alpaca news WS)"]
+        EDG["edgar<br/>(SEC Atom poll ~5s)"]
+    end
+
+    subgraph STORE["STORE"]
+        PARQ["parquet feature store /store<br/>bars · trades · quotes · news · features"]
+        PG[("Postgres<br/>filings · trust/parity · WDPC")]
+        MONGO[("Mongo<br/>dashboard coverage-grid cache")]
+    end
+
+    subgraph ENGINE["ENGINE — feature-computer registry (63 groups / fp 0x873f…)"]
+        COMPUTE["state-execution compute<br/>RunningState seed/fold/emit · incremental-armed"]
+    end
+
+    subgraph CONSUME["BUS + STRATEGIES"]
+        BUS{{"feature-vector BUS<br/>Redis Streams · name-resolved (FeatureView)"}}
+        STRAT["strategy containers<br/>reversion · overnight-beta · smoke · crypto-momentum"]
+        EXEC["execution + state layer<br/>Alpaca PAPER (→ real)"]
+    end
+
+    TRUST["TRUST / PARITY lifecycle<br/>nightly stream-vs-backfill sweep → trust grades"]
+    DASH["dashboard coverage grid + scorecard"]
+
+    FC --> PARQ
+    CRY --> PARQ
+    NEWS --> PARQ
+    EDG --> PG
+    PARQ --> COMPUTE
+    PG --> COMPUTE
+    COMPUTE --> PARQ
+    COMPUTE --> BUS
+    BUS --> STRAT --> EXEC
+    PARQ --> TRUST
+    COMPUTE --> TRUST
+    TRUST -.grades.-> DASH
+    PARQ -.coverage.-> MONGO --> DASH
+
+    subgraph CICD["CI/CD lane — the deploy mechanism (box-local ci_watcher)"]
+        GATE["per-PR gate: whole tests/ in fp-dev --rm<br/>+ coverage audit · scope → TIER-1 auto / TIER-2 gated"]
+        DEPLOY["deploy = FF live tree + restart container<br/>(fc only via ops/nightly_relaunch.sh)"]
+        GATE -.grading-only today; auto-merge/deploy built-not-armed.-> DEPLOY
+    end
+
+    GATE -.ships code into.-> ENGINE
+    DEPLOY -.ships code into.-> CONSUME
+```
+
+A compact text view of the same data path:
 
 ```
-Alpaca / EDGAR / news  ──►  raw tape (/store/raw)  ──►  feature compute (state-execution)  ──►  feature store (/store)
-                                                                  │                                    │
-                                                                  ▼                                    ▼
-                                                          feature-vector BUS  ──►  strategy containers  ──►  execution (paper→real)
-                                                                  │
-                              trust / parity lifecycle ◄──────────┘            dashboard coverage grid + scorecard observe it all
+Alpaca / EDGAR / news  ──►  raw tape (/store/raw) + Postgres filings  ──►  feature compute (state-execution)  ──►  feature store (/store)
+                                                                                      │                                    │
+                                                                                      ▼                                    ▼
+                                                                              feature-vector BUS  ──►  strategy containers  ──►  execution (paper→real)
+                                                                                      │
+                                  trust / parity lifecycle ◄──────────────────────────┘            dashboard coverage grid + scorecard observe it all
 ```
 
 ---
@@ -112,10 +171,23 @@ team is accountable to over time.
 [INCREMENTAL_READINESS](INCREMENTAL_READINESS.md) · [SCALABILITY](SCALABILITY.md)
 
 ### 10. EDGAR & news ingestion
-Point-in-time ingestion of SEC filings (EDGAR) and news as their own raw tapes, captured with an `available_at`
-dissemination instant so any feature derived from them is look-ahead-safe.
+Two **live alt-data fetchers**, each its own raw tape, captured with an `available_at` dissemination instant so
+any feature derived from them is look-ahead-safe (fixed at first sight → identical gated set in live and
+backfill → parity-true by construction).
+- **EDGAR** — the `edgar` compose service polls the SEC current-filings Atom feed (~5s), dedupes by accession,
+  and upserts into the Postgres `filings` event store (`db/init/08_filings.sql`; ~3.18M rows / 5628 symbols /
+  1994→2026). The live `edgar_filing_frequency` FeatureGroup (REFERENCE family, per-symbol) reads each
+  symbol's filings with `available_at <= minute` — registered and computing, no content parsing.
+- **News** — `news_capture.py` runs as a detached, restartable, 24/7 service (mirrors `crypto_capture`) that
+  streams Alpaca's news websocket into the append-only `/store/news` parquet tape, `available_at` = arrival
+  instant. The **news-hotness features are DORMANT** — no news feature group is registered yet; the hotness
+  hunt is pre-registered and gated on the `news_lag` embargo.
+- **Freshness monitoring** — `quantlib/ops/data_freshness.py` grades the TRUE newest ingest instant for both
+  sources against a market-hours-aware threshold (so the weekend SEC lull / quiet overnight news never false-
+  pages), closing the "Up-but-not-ingesting" blind spot the misleading EDGAR poll log left open.
 → **[EDGAR_INGESTION](EDGAR_INGESTION.md)** (the point-in-time ingestion design) · [EDGAR_PLAN](EDGAR_PLAN.md) ·
-[NEWS_INGESTION](NEWS_INGESTION.md)
+[NEWS_INGESTION](NEWS_INGESTION.md) · [NEWS_EDGAR_DATA_PIPELINE](NEWS_EDGAR_DATA_PIPELINE.md) (both fetchers +
+the freshness monitor + the dormant hotness hunt)
 
 ### 11. Agent operating model & ops
 How the system runs itself: seven long-lived agent workstreams (each a charter + append-only ledger), a
@@ -127,6 +199,27 @@ cron registry) · [OPERATING_LOOP](../OPERATING_LOOP.md) (root) · [RESPONSIBILI
 [SESSION_WARMUP](SESSION_WARMUP.md) · [VERIFICATION_CULTURE](VERIFICATION_CULTURE.md) ·
 [PR_WORKFLOW](PR_WORKFLOW.md) · [REVIEW_POLICY](REVIEW_POLICY.md) · [QA_LEDGER](QA_LEDGER.md) ·
 [TECH_DEBT](TECH_DEBT.md) · [AUTONOMOUS_BACKLOG](AUTONOMOUS_BACKLOG.md) · [ROADMAP](ROADMAP.md)
+
+### 12. CI/CD pipeline (the deploy mechanism)
+How code reaches the live containers safely. A **box-local** CI watcher (`ops/ci_watcher.py`, no cloud
+runner — the fp test env is the local `fp-dev` image + `/store` + DB a cloud runner can't replicate) grades
+every open PR: it checks the head SHA into a throwaway worktree, runs the **whole `tests/` dir** (fp job +
+dashboard job) in env-scrubbed `fp-dev --rm` containers plus a coverage audit that LOUDLY lists any test file
+no job ran, then posts a `ci/fp-suite` commit status. Scope classification (`ops/ci_scope.py`, reusing the WDPC
+fp-neutral vs fingerprint-affecting boundary) splits PRs into two **fail-closed** tiers:
+- **TIER-1 (auto-eligible)** — fp-neutral + scope-safe surfaces (dashboard / docs / tests / ops / non-fingerprint
+  code). Docs-only PRs like this one land here.
+- **TIER-2 (gated)** — anything that moves the feature fingerprint or touches `fc` / strategy / crypto-capture
+  code; held for the Lead's controlled, market-closed relaunch window. Uncertain scope → TIER-2.
+
+The pipeline is **grading-only today**: it posts statuses + the `tier-2-gated` label but does not yet merge or
+deploy. The auto-merge (Phase 2) and auto-deploy (Phase 3) layers are **built but not armed** — a deliberate
+"trust the gate first" deferral. The deploy itself is FF-ing the live tree + restarting the affected container
+(`fc` only via `ops/nightly_relaunch.sh`).
+→ **[CONTINUOUS_DEPLOY](CONTINUOUS_DEPLOY.md)** (the event-driven two-tier fail-closed design) ·
+[DEPLOYMENT_HARDENING_PLAN](DEPLOYMENT_HARDENING_PLAN.md) ·
+[WITHIN_DAY_PARITY_CONTINUOUS_DEPLOY](WITHIN_DAY_PARITY_CONTINUOUS_DEPLOY.md) (the per-group hot-swap deploy
+path) · `ops/ci_watcher.py` / `ops/ci_scope.py`
 
 ---
 
