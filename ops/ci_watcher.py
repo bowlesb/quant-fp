@@ -323,6 +323,9 @@ def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
     logger.info("grading PR #%s @ %s (%s)", pr.number, pr.head_sha[:9], pr.head_ref)
     post_status(pr.head_sha, "pending", "fp suite running")
 
+    # Make sure the PR head SHA is present locally before we try to check it out (the branch may be new).
+    run(["git", "fetch", "origin", pr.head_ref], cwd=REPO_DIR)
+
     with tempfile.TemporaryDirectory(prefix="ci-wt-") as worktree:
         # A detached worktree at exactly the PR head SHA. --force so a leftover dir can't block us.
         add = run(["git", "worktree", "add", "--detach", "--force", worktree, pr.head_sha], cwd=REPO_DIR)
