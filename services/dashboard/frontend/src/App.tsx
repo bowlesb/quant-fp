@@ -197,28 +197,28 @@ export function App() {
         <div className="topbar-left">
           <span className="brand-mark" />
           <h1>{view === "grid" ? "Feature-store coverage" : "Feature latency expectations"}</h1>
-          <nav className="view-tabs">
-            <button
-              className={`view-tab${view === "grid" ? " active" : ""}`}
-              onClick={() => setView("grid")}
-            >
-              Coverage grid
-            </button>
-            <button
-              className={`view-tab${view === "latency" ? " active" : ""}`}
-              onClick={() => setView("latency")}
-            >
-              Latency
-            </button>
-          </nav>
         </div>
-        <div className="topbar-right">
+        <div className="topbar-center">
           {view === "grid" && meta && (
             <span className="asof" title={`generated ${meta.generated_at}`}>
               {formatAsOf(meta.generated_at)}
             </span>
           )}
         </div>
+        <nav className="view-tabs">
+          <button
+            className={`view-tab${view === "grid" ? " active" : ""}`}
+            onClick={() => setView("grid")}
+          >
+            Coverage grid
+          </button>
+          <button
+            className={`view-tab${view === "latency" ? " active" : ""}`}
+            onClick={() => setView("latency")}
+          >
+            Latency
+          </button>
+        </nav>
       </header>
 
       {view === "latency" ? (
