@@ -14,4 +14,7 @@ pymongo>=4.6,<5
 # The curated feature-group guide (docs/feature_group_guide.yaml) the detail panel reads is parsed at worker
 # build time via PyYAML — the only new dep for the group detail panel.
 pyyaml>=6,<7
+# The hourly status dashboard's append-only JSON store is shared between the HOST Lead loop and the container's
+# reaction POST; filelock serializes the read-modify-write so neither writer clobbers the other's append.
+filelock>=3.13,<4
 
