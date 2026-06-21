@@ -240,8 +240,10 @@ def test_canary_hot_swap_mid_running_capture_loop() -> None:
         # HOT-SWAP momentum mid-run via the live-wired path (against the RUNNING state's engines + buffer).
         result = apply_in_running_loop(state, "momentum", seed_symbols=list(symbols))
         assert result.swapped
-        # FP_INCREMENTAL off in the mock => no bound engine => stateless => up_to_date => no contract reseed.
-        assert result.reseeded is False
+        # momentum is incremental_safe, so its engine is live by default (incremental is the default path now):
+        # the swap binds the carried engine => up_to_date() reports False => the contract reseeds it from the
+        # current (anchored) buffer. The reseed is value-identical (seed(H);fold(m) == seed(H+m)).
+        assert result.reseeded is True
         assert result.fingerprint_before == result.fingerprint_after == fp_start
 
         # The registry now holds a FRESH momentum instance (the swap took effect).

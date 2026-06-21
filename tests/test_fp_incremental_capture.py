@@ -1,13 +1,15 @@
 """Incremental fast path wired into ``capture.process_bars`` == the batch path, cell-for-cell.
 
 This is the live-integration parity gate for P1 #1 (per-symbol fast path). ``process_bars`` is the shared
-compute core for the mock, real, and sharded capture clients; with ``FP_INCREMENTAL=1`` it assembles the
-batched ``ReductionGroup``s from per-bucket ``IncrementalEngine`` running sums (via ``step`` — the SAME
+compute core for the mock, real, and sharded capture clients; the ``incremental_safe`` ``ReductionGroup``s
+are ALWAYS assembled from per-bucket ``IncrementalEngine`` running sums (via ``step`` — the SAME
 ``assemble_from_long`` the batch uses, so warmup/flag null handling is byte-identical) instead of
-recomputing the whole buffer each minute. Parity is sacred (CLAUDE.md): the incremental output must equal
-the batch output within tolerance, under a FLUCTUATING active symbol set (the live regime).
+recomputing the whole buffer each minute. This is the DEFAULT path now (no master env switch). Parity is
+sacred (CLAUDE.md): the incremental output must equal the batch output within tolerance, under a FLUCTUATING
+active symbol set (the live regime).
 
-Default (no env set) the path is byte-identical to the batch — guaranteed by ``test_default_is_batch``.
+The ``incremental_safe=False`` groups stay on the batch fresh-sum recompute; ``_run_all_batch`` (force every
+group to batch) provides the pure-batch baseline these tests compare the default incremental output against.
 
 KNOWN CONDITIONING CAVEAT (``test_ols_r2_near_perfect_fit_is_flagged``): sum-based OLS r2/corr near a
 PERFECT fit is a difference of large near-equal sums; the incremental running add/subtract rounds
@@ -147,7 +149,23 @@ def _flat_volume_minutes(
 
 
 def _run(stream: list[list[dict]], root: str) -> dict[str, pl.DataFrame]:
-    """Drive a stream through ``process_bars`` (accumulate in RAM, no store) and return the per-group output."""
+    """Drive a stream through ``process_bars`` (accumulate in RAM, no store) and return the per-group output.
+    The ``incremental_safe`` groups ride the incremental running sums (the default path); the unsafe groups
+    recompute from the batch fresh sums."""
+    state = CaptureState()
+    for bars in stream:
+        process_bars(state, bars, root, "mock", "2026-06-16", 120, accumulate=True, write=False)
+    return state.accumulated
+
+
+def _run_all_batch(stream: list[list[dict]], root: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, pl.DataFrame]:
+    """A pure-BATCH baseline: force EVERY reduction group onto the batch fresh-sum recompute (set
+    ``incremental_safe=False`` on all of them for this run) so ``process_bars`` never touches the incremental
+    engine. The reference the default incremental output is compared against — now that incremental is the
+    default, the batch path is no longer reachable via an env switch."""
+    for group in REGISTRY.groups():
+        if isinstance(group, ReductionGroup):
+            monkeypatch.setattr(group, "incremental_safe", False)
     state = CaptureState()
     for bars in stream:
         process_bars(state, bars, root, "mock", "2026-06-16", 120, accumulate=True, write=False)
@@ -175,26 +193,31 @@ def _worst_tol_ratio(batch: dict, inc: dict, *, cols_drop: tuple[str, ...] = ())
     return worst
 
 
-def test_default_is_batch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no env set the incremental path is inert: config reads all-off (output is the batch output)."""
-    for var in ("FP_INCREMENTAL", "FP_INCREMENTAL_PARITY", "FP_INCREMENTAL_SLICE"):
+def test_default_config_is_monitoring_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no env set, ``_incremental_config() == (parity_check=False, slice_derive=True)``. The incremental
+    fast path itself is NOT gated by an env switch anymore — the ``incremental_safe`` groups always ride the
+    running sums (the value-identical default). ``FP_INCREMENTAL_PARITY`` (monitoring-only self-check) is OFF
+    by default; ``slice_derive`` is ON by default (the verified-clean per-symbol-tail derive — its one-shot
+    seed equals the minute fold, so warm-start is value-identical). ``FP_INCREMENTAL_SLICE=0`` opts out."""
+    for var in ("FP_INCREMENTAL_PARITY", "FP_INCREMENTAL_SLICE"):
         monkeypatch.delenv(var, raising=False)
-    assert _incremental_config() == (False, False, False)
+    assert _incremental_config() == (False, True)
+    monkeypatch.setenv("FP_INCREMENTAL_SLICE", "0")
+    assert _incremental_config() == (False, False)  # explicit opt-out to the whole-buffer derive
 
 
 def test_incremental_capture_matches_batch(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """FP_INCREMENTAL=1 (gap-safe whole-buffer derive) produces the SAME per-group output as the batch path
-    on well-conditioned data, under a fluctuating active symbol set across many minutes — within a small
-    multiple of the parity tolerance (benign float drift)."""
+    """The DEFAULT incremental path (gap-safe whole-buffer derive, no env set) produces the SAME per-group
+    output as a forced-batch baseline on well-conditioned data, under a fluctuating active symbol set across
+    many minutes — within a small multiple of the parity tolerance (benign float drift)."""
     stream = _stream_minutes(n_sym=8, n_min=50, present_p=0.7, seed=3)
 
-    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
-    batch = _run(stream, str(tmp_path / "batch"))
+    with monkeypatch.context() as forced_batch:
+        batch = _run_all_batch(stream, str(tmp_path / "batch"), forced_batch)
 
-    monkeypatch.setenv("FP_INCREMENTAL", "1")
     monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)  # gap-safe whole-buffer derive (open slice constraint)
     monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
-    inc = _run(stream, str(tmp_path / "inc"))
+    inc = _run(stream, str(tmp_path / "inc"))  # default: incremental_safe groups ride the running sums
 
     assert batch, "expected reduction-group output"
     worst = _worst_tol_ratio(batch, inc)
@@ -202,13 +225,12 @@ def test_incremental_capture_matches_batch(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_parity_selfcheck_records_clean(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """FP_INCREMENTAL=1 + FP_INCREMENTAL_PARITY=1 runs BOTH paths each minute, writes the batch truth, and
+    """FP_INCREMENTAL_PARITY=1 (monitoring-only) runs BOTH paths each minute, writes the incremental truth, and
     records a within-drift divergence (no breach) on well-conditioned data. Exercises the self-check wiring."""
     stream = _stream_minutes(n_sym=6, n_min=40, present_p=0.7, seed=9)
     seen: list[tuple[str, float, bool]] = []
     monkeypatch.setattr(capture.metrics, "record_incremental_parity",
                         lambda ri, r, b: seen.append((ri, r, b)))
-    monkeypatch.setenv("FP_INCREMENTAL", "1")
     monkeypatch.setenv("FP_INCREMENTAL_PARITY", "1")
     monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
 
@@ -578,20 +600,19 @@ def test_gappy_denom_groups_stay_on_batch_under_incremental(monkeypatch: pytest.
     per-group breach above: the gate converts that breach into a no-op by serving the batch recompute.)"""
     walk = _gappy_corr_minutes(n_sym=12, n_min=28, present_p=0.40, seed=17)
 
-    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
     monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
-    batch = _run(walk, str(tmp_path / "batch"))
+    with monkeypatch.context() as forced_batch:
+        batch = _run_all_batch(walk, str(tmp_path / "batch"), forced_batch)
 
-    monkeypatch.setenv("FP_INCREMENTAL", "1")
     monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
     monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
-    inc = _run(walk, str(tmp_path / "inc"))
+    inc = _run(walk, str(tmp_path / "inc"))  # default: safe groups incremental, unsafe stay batch
 
     keys = ["symbol", "minute"]
     for name in INCREMENTAL_UNSAFE:
         assert name in batch, f"{name} expected in reduction output"
         assert batch[name].sort(keys).equals(inc[name].sort(keys)), \
-            f"{name} must be byte-identical to batch under FP_INCREMENTAL (it stays on the batch path)"
+            f"{name} must be byte-identical to the batch baseline (it stays on the batch path by its gate)"
 
 
 def test_incremental_parity_helper() -> None:
@@ -623,36 +644,34 @@ def test_unsafe_group_stays_on_batch_under_incremental(monkeypatch: pytest.Monke
     features from the conditioning corner while still serving everything else fast."""
     smooth = _stream_minutes(n_sym=8, n_min=25, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
 
-    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
     monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
-    batch = _run(smooth, str(tmp_path / "batch"))
+    with monkeypatch.context() as forced_batch:
+        batch = _run_all_batch(smooth, str(tmp_path / "batch"), forced_batch)
 
-    monkeypatch.setenv("FP_INCREMENTAL", "1")
     monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
     monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
-    inc = _run(smooth, str(tmp_path / "inc"))
+    inc = _run(smooth, str(tmp_path / "inc"))  # default: safe groups incremental, unsafe stay batch
 
     keys = ["symbol", "minute"]
     for name in INCREMENTAL_UNSAFE:
         assert name in batch, f"{name} expected in reduction output"
         # Byte-identical: the unsafe group ran the SAME batch recompute in both runs (frame_equal, not a tol).
         assert batch[name].sort(keys).equals(inc[name].sort(keys)), \
-            f"{name} must be byte-identical to batch under FP_INCREMENTAL (it stays on the batch path)"
+            f"{name} must be byte-identical to the batch baseline (it stays on the batch path by its gate)"
 
 
 def test_incremental_capture_no_breach_when_unsafe_gated(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """With the unsafe groups gated to batch, the FP_INCREMENTAL output matches the batch output within the
-    benign-drift breach ratio for EVERY group, even on the smooth near-perfect-fit walk that previously drove
-    the volume/price_volume conditioning divergence past tolerance (test_ols_near_perfect_fit_is_flagged)."""
+    """With the unsafe groups gated to batch, the DEFAULT incremental output matches a forced-batch baseline
+    within the benign-drift breach ratio for EVERY group, even on the smooth near-perfect-fit walk that
+    previously drove the volume/price_volume conditioning divergence past tolerance."""
     smooth = _stream_minutes(n_sym=8, n_min=25, present_p=0.7, seed=3, vol=0.002)
 
-    monkeypatch.delenv("FP_INCREMENTAL", raising=False)
-    batch = _run(smooth, str(tmp_path / "batch"))
+    with monkeypatch.context() as forced_batch:
+        batch = _run_all_batch(smooth, str(tmp_path / "batch"), forced_batch)
 
-    monkeypatch.setenv("FP_INCREMENTAL", "1")
     monkeypatch.delenv("FP_INCREMENTAL_SLICE", raising=False)
     monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
-    inc = _run(smooth, str(tmp_path / "inc"))
+    inc = _run(smooth, str(tmp_path / "inc"))  # default: safe groups incremental, unsafe stay batch
 
     worst = _worst_tol_ratio(batch, inc)
     assert worst < _PARITY_BREACH_RATIO, f"gated incremental still breached: worst {worst}x tolerance"

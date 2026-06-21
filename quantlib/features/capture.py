@@ -91,23 +91,27 @@ _PARITY_RTOL = 1e-6
 _PARITY_BREACH_RATIO = 10.0  # divergence beyond 10x tolerance = beyond benign drift -> record a breach
 
 
-def _incremental_config() -> tuple[bool, bool, bool]:
+def _incremental_config() -> tuple[bool, bool]:
     """Read the incremental fast-path env switches each minute (cheap; lets ops flip them without a code
-    change). Returns (enabled, parity_check, slice_derive). ALL DEFAULT OFF — with nothing set the path is
-    byte-identical to the batch (no deploy risk):
-    - ``FP_INCREMENTAL=1``    — assemble the batched reduction groups from the incremental running sums.
-    - ``FP_INCREMENTAL_PARITY=1`` — compute BOTH batch (the written truth) and incremental each minute and
-      record the divergence to Prometheus; the batch output is still what gets written. This is the live
-      evidence gate before the fast path is ever trusted as the source.
-    - ``FP_INCREMENTAL_SLICE=1`` — use the fast slice derive (per-symbol last-``max_lag+1``-rows tail). This is
-      now PARITY-SAFE for sparse symbols (the tail is positionally exact — it reaches each symbol's actual prior
-      bars even across minute gaps), gated cell-for-cell vs the whole-buffer derive by tests/test_fp_incremental
-      _features.py. DEFAULT OFF pending live A/B under ``FP_INCREMENTAL_PARITY``; the whole-buffer derive (also
-      parity-true) is used until then."""
+    change). Returns (parity_check, slice_derive).
+
+    The ``incremental_safe`` reduction groups now ALWAYS assemble from the incremental running sums — the
+    default path, value-identical to the batch fresh-sum recompute (verified cell-for-cell on the real-tape
+    A/B, docs/INCREMENTAL_READINESS.md), so there is no longer an ``FP_INCREMENTAL`` master switch.
+    - ``FP_INCREMENTAL_PARITY=1`` — OPTIONAL, default OFF, MONITORING-ONLY: additionally compute the batch
+      each minute and record the incremental-vs-batch divergence to Prometheus
+      (``feature_incremental_parity_breach_total``). The incremental output is STILL what gets written — a
+      live self-check, NOT a gate.
+    - ``slice_derive`` — DEFAULT ON (the fast per-symbol last-``max_lag+1``-rows tail). PARITY-SAFE for sparse
+      symbols (the tail is positionally exact — it reaches each symbol's actual prior bars across minute gaps)
+      AND it is the verified-clean SEED path: the slice-derive one-shot seed equals the minute-by-minute fold
+      cell-for-cell (the ``seed(H);fold(m) == seed(H+m)`` invariant), so a warm-start rehydrate-then-fold is
+      value-identical to a cold accumulate. ``FP_INCREMENTAL_SLICE=0`` opts OUT to the whole-buffer derive (a
+      DEBUG escape hatch — its one-shot SEED has a known cancellation divergence on the moment/run-length
+      power sums, docs/INCREMENTAL_READINESS.md, so it is NOT the live default)."""
     return (
-        os.environ.get("FP_INCREMENTAL") == "1",
         os.environ.get("FP_INCREMENTAL_PARITY") == "1",
-        os.environ.get("FP_INCREMENTAL_SLICE") == "1",
+        os.environ.get("FP_INCREMENTAL_SLICE") != "0",
     )
 
 
@@ -242,19 +246,27 @@ class CaptureState:
         self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
         self.last_write_ms = 0.0  # time spent WRITING last minute — excluded from the bet-relevant compute latency
         self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
-        self.engines: dict[str, IncrementalEngine] = {}  # one incremental engine per reduce_input bucket (FP_INCREMENTAL)
+        self.engines: dict[str, IncrementalEngine] = {}  # one incremental engine per reduce_input bucket (safe groups)
         self.bus_hook: BusHook | None = None  # set lazily when FP_BUS=1 (real mode) -> publishes vectors off-path
         # Set by the warm-start path (``warm_start_ring``) so the FIRST incremental engine seed runs the
         # universal ``assert_ready`` (FULL / legit-not-yet-full / FAILED) + internal invariants against the
         # rehydrated buffer — catching a present-but-not-absorbed fill loudly at init. The populated invariant
         # holds at all times regardless; this just picks the warm-start seed as a convenient call site.
         self.assert_ready_on_seed = False
+        self.snapshots: dict[str, pl.DataFrame] = {}  # reference frames (daily, …) held for engine reseed
 
     @property
     def buffer(self) -> pl.DataFrame | None:
         """The materialized trailing-window frame (the ring's per-minute slots concatenated), or None
-        before the first minute."""
-        return None if self.ring is None else self.ring.materialize()
+        before the first minute. The centering anchors are attached the SAME way ``process_bars`` attaches
+        them before the engine folds (``attach_reduction_anchors`` from the held ``snapshots``), so the
+        incremental engine RESEED history matches the per-minute STEP history cell-for-cell — the
+        ``seed(H);fold(m) == seed(H+m)`` parity invariant the reduction groups rely on (a reseed off a raw,
+        un-anchored buffer would otherwise raise on volume's ``__anchor_volume`` column)."""
+        if self.ring is None:
+            return None
+        frames = attach_reduction_anchors({"minute_agg": self.ring.materialize(), **self.snapshots})
+        return frames["minute_agg"]
 
 
 def _bars_to_frame(bars: list[dict]) -> pl.DataFrame:
@@ -340,6 +352,11 @@ def process_bars(
         depth = buffer_minutes if buffer_minutes is not None else window
         state.ring = MinuteRing(maxlen=depth, columns=project_columns)
     state.ring.push(new_frame)
+    if snapshots:
+        # Hold the slowly-changing reference frames (notably ``daily``, the volume-anchor source) so the
+        # ``buffer`` property re-attaches the SAME anchors on a reseed — keeping the engine seed history
+        # identical to the folded step history (parity-critical for a hot-swap reseed of the volume engine).
+        state.snapshots = snapshots
     frame = state.ring.materialize()
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
@@ -368,33 +385,35 @@ def process_bars(
             group_start = time.perf_counter()
             out = group.compute_latest(ctx)  # live = aggregate-at-T (fast where overridden; parity-guarded)
             outputs.append((group, out, (time.perf_counter() - group_start) * 1000.0))
-    incremental, parity_check, slice_derive = _incremental_config()
+    parity_check, slice_derive = _incremental_config()
     for reduce_input, batch_groups in batchable.items():
-        # Split the bucket: ``incremental_safe`` groups may ride the running sums; the conditioning-sensitive
-        # ones (variance/correlation of raw share volume) stay on the batch fresh-sum recompute even under
-        # FP_INCREMENTAL (their incremental-vs-batch corner divergence breaches the parity self-check — see
-        # ReductionGroup.incremental_safe). The engine is seeded over the SAFE groups ONLY, so its running sums
-        # match exactly what ``step`` assembles.
+        # Split the bucket: ``incremental_safe`` groups ALWAYS ride the running sums (the default,
+        # value-identical fast path — verified clean cell-for-cell on the real-tape A/B,
+        # docs/INCREMENTAL_READINESS.md); the conditioning-sensitive ``incremental_safe=False`` groups stay on
+        # the batch fresh-sum recompute (their incremental-vs-batch corner divergence breaches the parity
+        # self-check — see ReductionGroup.incremental_safe). The engine is seeded over the SAFE groups ONLY, so
+        # its running sums match exactly what ``step`` assembles. The Rust emit variants are faster but their
+        # warmup representation is not yet gated against the batch, so they are NOT used live (CLAUDE.md).
         safe_groups = [group for group in batch_groups if group.incremental_safe]
         unsafe_groups = [group for group in batch_groups if not group.incremental_safe]
         batch_start = time.perf_counter()
         batched: dict[str, pl.DataFrame] = {}
-        if incremental and not parity_check:
-            # Fast path is the source of truth for the safe groups: assemble from the per-bucket incremental
-            # running sums via ``step`` (the SAME ``assemble_from_long`` the batch uses — so warmup/flag null
-            # handling is byte-identical to the batch, store-parity-true). The Rust emit variants are faster but
-            # their warmup representation is not yet gated against the batch, so they are NOT used live (CLAUDE.md).
-            if safe_groups:
-                batched.update(_engine_for(state, reduce_input, safe_groups).step(frame, slice_derive=slice_derive))
-            if unsafe_groups:
-                batched.update(compute_reduction_batch(unsafe_groups, ctx))
-        else:
-            # Batch is the source of truth (default, and during the parity self-check).
-            batched = compute_reduction_batch(batch_groups, ctx)
-            if incremental and parity_check and safe_groups:
-                inc_out = _engine_for(state, reduce_input, safe_groups).step(frame, slice_derive=slice_derive)
-                tol_ratio = _incremental_parity({g.name: batched[g.name] for g in safe_groups}, inc_out)
+        if safe_groups:
+            # Incremental running sums are the SOURCE OF TRUTH for the safe groups (assembled via ``step`` —
+            # the SAME ``assemble_from_long`` the batch uses, so warmup/flag null handling is byte-identical
+            # and store-parity-true).
+            inc_out = _engine_for(state, reduce_input, safe_groups).step(frame, slice_derive=slice_derive)
+            batched.update(inc_out)
+            if parity_check:
+                # FP_INCREMENTAL_PARITY=1 — MONITORING-ONLY self-check (NOT a gate): also run the batch
+                # fresh-sum recompute and record the incremental-vs-batch divergence to Prometheus. The output
+                # ABOVE is still what is written; this just surfaces any breach
+                # (``feature_incremental_parity_breach_total``) without altering the served values.
+                batch_truth = compute_reduction_batch(safe_groups, ctx)
+                tol_ratio = _incremental_parity(batch_truth, inc_out)
                 metrics.record_incremental_parity(reduce_input, tol_ratio, tol_ratio > _PARITY_BREACH_RATIO)
+        if unsafe_groups:
+            batched.update(compute_reduction_batch(unsafe_groups, ctx))
         per_ms = (time.perf_counter() - batch_start) * 1000.0 / len(batch_groups)
         for group in batch_groups:
             outputs.append((group, batched[group.name], per_ms))
