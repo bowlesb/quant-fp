@@ -31,6 +31,8 @@ from quantlib.features.groups.swing import (
     SwingGroup,
     swing_fold_frame,
 )
+from quantlib.features.groups.swing_state import SwingState
+from quantlib.features.running_state import RunningState
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 _FEATURES = (
@@ -444,6 +446,59 @@ def test_swing_stateful_warm_start_seed_equals_backfill(monkeypatch) -> None:
             got, want = latest[name].to_list(), back_t[name].to_list()
             for sym_i in range(len(got)):
                 assert _cell_equal(got[sym_i], want[sym_i]), f"warm-seed@K{warm_k} {name} sym{sym_i}"
+
+
+def test_swing_state_satisfies_running_state_contract() -> None:
+    """SwingState IS a RunningState (the canonical up_to_date()/rebuild_from_history() cold-start contract)."""
+    assert isinstance(SwingState(), RunningState)
+
+
+def test_swing_running_state_up_to_date_and_lazy_rebuild_restore_parity() -> None:
+    """THE CONTRACT, proven: ``up_to_date()`` reports False on each staleness trigger (cold / session boundary /
+    rewind), and the lazy ``rebuild_from_history`` restores EXACT per-day-backfill parity — so the guard never
+    lets a stale state emit a wrong value. This validates the mechanism directly, beyond the group wiring."""
+    d1, d2 = dt.date(2026, 6, 15), dt.date(2026, 6, 16)
+    s1 = _session_stream(d1, n_sym=4, n_min=70, seed=1)
+    s2 = _session_stream(d2, n_sym=4, n_min=70, seed=2, start_price=130.0)
+    backfill_d2 = SwingGroup().compute(BatchContext(frames={"minute_agg": s2}))
+    d2_minutes = sorted(s2["minute"].unique())
+
+    state = SwingState()
+    # COLD: a fresh state is never up to date.
+    assert state.up_to_date(s2) is False
+    # Seed it on day1, fold day1 fully (the contract way the group would).
+    state.rebuild_from_history(s1)
+    assert state.up_to_date(s1) is True  # up to date for day1 now
+    # SESSION BOUNDARY: handed a day2 buffer, the day1-seeded state is stale -> must reseed.
+    assert state.up_to_date(s2) is False
+    state.rebuild_from_history(s2)  # lazy reseed from day2 history (per-day reset encoded here)
+    state.note_absorbed_session(int(d2_minutes[-1].timestamp()))
+    assert state.up_to_date(s2) is True
+
+    # After the rebuild the state == per-day backfill of day2 at its latest minute, cell-for-cell.
+    last = d2_minutes[-1]
+    ordered = s2.with_columns(pl.col("minute").dt.epoch("s").alias("_mi"))
+    want_row = backfill_d2.filter(pl.col("minute") == last).sort("symbol")
+    for symbol in sorted(s2["symbol"].unique().to_list()):
+        sub = ordered.filter(pl.col("symbol") == symbol).sort("_mi")
+        got = state.fold_symbol_to(symbol, sub["close"].to_list(), sub["_mi"].to_list())  # no-op (all absorbed)
+        want = {name: want_row.filter(pl.col("symbol") == symbol)[name][0] for name in _FEATURES}
+        for i, name in enumerate(_FEATURES):
+            assert _cell_equal(got[i], want[name]), f"contract rebuild parity {symbol}.{name}"
+
+    # REWIND: a buffer ending before the absorbed minute -> stale -> reseed restores parity at the earlier minute.
+    early = s2.filter(pl.col("minute") <= d2_minutes[20])
+    assert state.up_to_date(early) is False
+    state.rebuild_from_history(early)
+    state.note_absorbed_session(int(d2_minutes[20].timestamp()))
+    want_early = backfill_d2.filter(pl.col("minute") == d2_minutes[20]).sort("symbol")
+    eordered = early.with_columns(pl.col("minute").dt.epoch("s").alias("_mi"))
+    for symbol in sorted(early["symbol"].unique().to_list()):
+        sub = eordered.filter(pl.col("symbol") == symbol).sort("_mi")
+        got = state.fold_symbol_to(symbol, sub["close"].to_list(), sub["_mi"].to_list())
+        want = {name: want_early.filter(pl.col("symbol") == symbol)[name][0] for name in _FEATURES}
+        for i, name in enumerate(_FEATURES):
+            assert _cell_equal(got[i], want[name]), f"rewind rebuild parity {symbol}.{name}"
 
 
 def test_swing_features_are_valid() -> None:

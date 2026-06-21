@@ -212,26 +212,34 @@ class SwingGroup(FeatureGroup):
         return self._compute_latest_stateful(ctx)
 
     def _compute_latest_stateful(self, ctx: BatchContext) -> pl.DataFrame:
-        """Carry-state live form: advance each symbol's leg-state by its unabsorbed bars, emit the row for the
-        symbols present at the buffer's latest minute (matching ``compute().filter(minute == max)``).
+        """Carry-state live form, on the RunningState contract: GUARD then FOLD then EMIT.
 
-        THE O(1) PROPERTY: the carried state already holds every bar absorbed so far, so only bars NEWER than the
-        minimum absorbed minute need marshaling. When every present symbol has state and the buffer is advancing,
-        slice off the already-absorbed prefix BEFORE the expensive polars sort/group_by/to_list — the live cost
-        is then O(new-bars × symbols), not O(window × symbols). The cold start (a symbol without state) and a
-        rewound buffer fall back to the whole buffer so the per-symbol reseed in ``fold_symbol_to`` stays exact.
+        1. GUARD — ``if not state.up_to_date(frame): state.rebuild_from_history(frame)``. The lazy reseed (cold /
+           morning / hot-swap / gap / rewind) seeds from the SAME history backfill recomputes over, so the held
+           state == backfill state by construction; because the guard precedes every emit, a stale state can
+           never silently emit a wrong value. The session-boundary RESET is encoded in the rebuild (it re-folds
+           the buffer, which bootstraps a fresh leg per session — per-day backfill parity).
+        2. FOLD — once up to date, advance only the UNABSORBED tail (sliced off the already-absorbed prefix via
+           ``min_absorbed`` BEFORE the expensive polars sort/group_by/to_list) — O(new-bars × symbols), not
+           O(window × symbols). After a rebuild the whole buffer is already absorbed, so the tail is empty and we
+           read standing rows.
+        3. EMIT — the row for each symbol present at the buffer's latest minute (matching
+           ``compute().filter(minute == max)``).
         """
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
         if frame.height == 0:
             return swing_fold_frame(frame)
         state = self._live_state
+        # 1. GUARD: lazily reseed a stale state from the buffer history before folding/emitting anything.
+        if not state.up_to_date(frame):
+            state.rebuild_from_history(frame)
         # ONE pass adds the epoch-minute column; everything below reads it (no repeated whole-buffer scans).
         keyed = frame.with_columns(pl.col("minute").dt.epoch("s").alias("_mi"))
         latest_epoch = int(keyed["_mi"].max())  # type: ignore[arg-type]
         latest = keyed.filter(pl.col("_mi") == latest_epoch)["minute"][0]
         latest_symbols = set(keyed.filter(pl.col("_mi") == latest_epoch)["symbol"].to_list())
-        # Slice to the unabsorbed tail when safe: all present symbols known AND the buffer is not rewound (its
-        # newest minute is at/after the absorbed floor). Otherwise keep the whole buffer (cold-seed / reseed).
+        # 2. FOLD: slice to the unabsorbed tail (every known symbol's new bars are strictly newer than the MIN
+        # absorbed minute). After a rebuild this is empty; in steady state it is just the new minute(s).
         floor = state.min_absorbed(keyed["symbol"].unique().to_list())
         if floor is not None and latest_epoch >= floor:
             keyed = keyed.filter(pl.col("_mi") > floor)
@@ -242,6 +250,8 @@ class SwingGroup(FeatureGroup):
             row = state.fold_symbol_to(symbol_name, sub["close"].to_list(), sub["_mi"].to_list())
             if row is not None:
                 folded[symbol_name] = row
+        state.note_absorbed_session(latest_epoch)
+        # 3. EMIT.
         rows: list[dict[str, object]] = []
         for symbol_name in latest_symbols:
             # A symbol at the latest minute emits its just-folded row; if the slice held no new bar for it (a
