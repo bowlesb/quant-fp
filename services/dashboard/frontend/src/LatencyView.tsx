@@ -97,6 +97,12 @@ function LatencyTooltip({ hover }: { hover: HoverState }) {
         <dd>{group.mechanism}</dd>
         <dt>incremental</dt>
         <dd className={`lat-incr lat-incr-${group.incremental_ready}`}>{group.incremental_ready}</dd>
+        {group.path && (
+          <>
+            <dt>path</dt>
+            <dd>{group.path}</dd>
+          </>
+        )}
         <dt>features</dt>
         <dd>{group.feat_count}</dd>
       </dl>
