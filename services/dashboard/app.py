@@ -3,35 +3,36 @@
 The dashboard is deliberately a SINGLE thing: the always-warm ticker×date feature-store coverage grid (the
 React SPA in ``services/dashboard/frontend``), served at the ROOT ``/``. Everything that used to clutter the
 dashboard (status board, jobs, scorecard, progress reports, raw/sector/universe coverage, liquidity bands, the
-old DB-health home page) has been removed as UI — the grid is the one view that matters.
+old DB-health home page) has been removed — both the UI pages and the now-dead ops-introspection read routes
+(``/api/status/rows``, ``/api/scorecard``, ``/api/scorecard/history``, ``/api/jobs``) and their backing
+modules. The grid is the one view that matters; the surface is now exactly four grid routes + ``/healthz``.
 
 The grid's data is precomputed by the ``store-grid-worker`` container into MongoDB on a 10-minute schedule and
 served here from that cache, so a page load is one indexed document fetch and the heavy ~3-4min build is never
 on the request path. The only loading state the UI ever shows is the genuine first-ever boot before the first
 build lands (the API returns 503 ``booting``); there is no recurring "warming".
 
-A few OPS-INTROSPECTION read routes remain (``/api/status/rows``, ``/api/scorecard``, ``/api/scorecard/history``,
-``/api/jobs``): their backing JSON stores are still written by the host Lead loop + crons, so these read-only
-endpoints stay as harmless curl-able ops visibility — they have no dashboard page. ``/healthz`` is the
-container health check. NO feature-store schema/format/fingerprint change — this service is read-side only.
+CACHE DISCIPLINE: the SPA's ``index.html`` is served ``no-cache`` (must-revalidate) so a browser always
+re-fetches the HTML and never pins a stale build's JS-bundle hash (the cached-old-index → 404-on-new-hash →
+blank-page stall this fixes). The content-hashed ``/assets/*`` are immutable, so they keep a long cache. NO
+feature-store schema/format/fingerprint change — this service is read-side only.
 """
 
 import os
 from pathlib import Path
 
-import scorecard_store
-import status_store
 from fastapi import FastAPI, Response
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from jobs_page import load_status as load_jobs_status
-from scorecard import CACHE as SCORECARD_CACHE
-from store_grid import STORE_ROOT
 from store_grid_cache import read_drill as read_grid_drill
 from store_grid_cache import read_grid_gzip
 from store_grid_cache import read_meta as read_grid_meta
 
 app = FastAPI(title="Quant Coverage Grid")
+
+# The HTML must never be cached: a rebuilt image emits a new content-hashed JS bundle, and a browser holding
+# the OLD index.html would keep requesting the OLD hash (404 → blank page). must-revalidate forces a re-fetch.
+NO_CACHE_HEADERS = {"Cache-Control": "no-cache, max-age=0, must-revalidate"}
 
 
 @app.get("/api/store-grid/matrix")
@@ -86,54 +87,42 @@ def healthz() -> JSONResponse:
 @app.get("/feature-grid")
 def feature_grid_redirect() -> RedirectResponse:
     """``/feature-grid`` is Ben's canonical bookmark for the coverage grid. The grid now lives at the root ``/``,
-    so this permanently redirects there — the old URL must NEVER 404. Registered before the root StaticFiles
-    mount so it is matched as an explicit route."""
+    so this permanently redirects there — the old URL must NEVER 404. Registered before the root SPA routes so
+    it is matched as an explicit route."""
     return RedirectResponse(url="/", status_code=308)
 
 
-@app.get("/api/status/rows")
-def status_rows_json() -> JSONResponse:
-    """OPS read-only: the hourly status snapshots NEWEST-FIRST, from the append-only status store the host Lead
-    loop writes. No dashboard page renders this anymore — it stays as curl-able ops visibility.
-
-    Shape: [{ts, cells: {workstream: {progress, blockers}}, reaction}, ...] (see status_store).
+@app.get("/favicon.ico")
+def favicon() -> Response:
+    """The SPA ships no favicon, so a browser's ``/favicon.ico`` request would otherwise fall through to the SPA
+    fallback (a 200 of HTML the browser can't render as an icon). Return a quiet 204 to silence the request.
     """
-    return JSONResponse(status_store.read_rows())
-
-
-@app.get("/api/scorecard")
-def scorecard_json(refresh: bool = False) -> JSONResponse:
-    """OPS read-only: the system-progress scorecard (Ben's six platform axes), computed read-only from the
-    existing tables/manifests/doc/gh. Building through the cache appends a headline snapshot to the append-only
-    time series (the same store the Lead loop reads). ``refresh=1`` bypasses the TTL cache. No dashboard page.
-    """
-    return JSONResponse(SCORECARD_CACHE.scorecard(STORE_ROOT, force=refresh))
-
-
-@app.get("/api/scorecard/history")
-def scorecard_history_json() -> JSONResponse:
-    """OPS read-only: the persisted scorecard SNAPSHOT time series, OLDEST-FIRST (the trajectory the Lead loop
-    and any external monitor read). Shape: [{ts, axes: {...}}, ...] (see scorecard_store)."""
-    return JSONResponse(scorecard_store.read_snapshots())
-
-
-@app.get("/api/jobs")
-def jobs_json() -> JSONResponse:
-    """OPS read-only: the jobs status (scheduled crons, running job containers, recent runs) that
-    ``ops/collect_jobs_status.py`` writes on the host. Returns an empty-but-valid shape if the collector has
-    not written ``jobs_status.json`` yet. No dashboard page renders this anymore."""
-    data = load_jobs_status()
-    if data is None:
-        data = {"scheduled": [], "running": [], "recent_runs": [], "collected_at": None}
-    return JSONResponse(data)
+    return Response(status_code=204)
 
 
 # The React coverage-grid SPA (services/dashboard/frontend), built to static assets by the Dockerfile's node
-# stage into /app/frontend/store-grid. Mounted LAST (after every /api/* route is declared) at the ROOT ``/``
-# with html=True so the grid IS the dashboard: index.html serves at /, deep links fall back to it, and the
-# client-side asset paths resolve. The /api/* routes above are matched first (more specific). STATICFILES_DIR
-# is overridable; if the build is absent (a non-Docker dev run that skipped ``npm run build``), the mount is
-# skipped so the API still boots.
+# stage into /app/frontend/store-grid. The content-hashed bundle lives under /assets — mounted as StaticFiles
+# so those immutable files are served directly (and may be long-cached by the browser). index.html itself is
+# served by the explicit routes below with NO_CACHE_HEADERS so a rebuild's new bundle hash is always picked up.
+# STATICFILES_DIR is overridable; if the build is absent (a non-Docker dev run that skipped ``npm run build``),
+# the mount + SPA routes are skipped so the API still boots.
 STATICFILES_DIR = Path(os.environ.get("STORE_GRID_STATIC_DIR", "/app/frontend/store-grid"))
+INDEX_HTML = STATICFILES_DIR / "index.html"
+
 if STATICFILES_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=STATICFILES_DIR, html=True), name="grid-spa")
+    assets_dir = STATICFILES_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="grid-assets")
+
+    @app.get("/")
+    def spa_root() -> FileResponse:
+        """The SPA shell at the root. Served ``no-cache`` so the browser re-validates the HTML on every load and
+        never pins a previous build's bundle hash."""
+        return FileResponse(INDEX_HTML, headers=NO_CACHE_HEADERS)
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str) -> FileResponse:
+        """Client-side-routing fallback: any non-API, non-asset path returns the SPA shell (``no-cache``), so a
+        deep link or refresh resolves to the same always-revalidated index.html. Declared LAST, after every
+        ``/api/*`` route and the ``/assets`` mount, so those are matched first."""
+        return FileResponse(INDEX_HTML, headers=NO_CACHE_HEADERS)

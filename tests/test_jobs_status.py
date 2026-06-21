@@ -1,10 +1,9 @@
-"""Unit tests for jobs status (ops/collect_jobs_status.py writer + services/dashboard/jobs_page.load_status).
+"""Unit tests for the host-side jobs-status writer (ops/collect_jobs_status.py).
 
 No live crontab, docker, or real logs: the collector's log-classification and crontab/installed parsing are
-exercised against tmp log files and synthetic ``crontab -l`` line lists, and the page renderer is checked
-directly for the structural invariants (three sections, status badges, HTML-escaping, the missing-file
-notice). The end-to-end ``collect()`` path that shells out to ``crontab``/``docker`` is not invoked here;
-its pure pieces (classify_log, is_installed, render_*) are tested in isolation.
+exercised against tmp log files and synthetic ``crontab -l`` line lists. The end-to-end ``collect()`` path that
+shells out to ``crontab``/``docker`` is not invoked here; its pure pieces (classify_log, is_installed,
+write_status) are tested in isolation.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "ops"))
-sys.path.insert(0, str(REPO_ROOT / "services" / "dashboard"))
 
 import collect_jobs_status as cjs  # noqa: E402
 
@@ -154,21 +152,3 @@ def test_registry_matches_each_job_to_its_own_log() -> None:
     logs = [job.log for job in cjs.REGISTRY]
     assert len(logs) == len(set(logs))
     assert all(".quant-" in str(log) for log in logs)
-
-
-def test_load_status_handles_missing_and_corrupt(tmp_path, monkeypatch) -> None:
-    import jobs_page
-
-    missing = tmp_path / "absent.json"
-    monkeypatch.setattr(jobs_page, "JOBS_STATUS_PATH", missing)
-    assert jobs_page.load_status() is None
-
-    corrupt = tmp_path / "corrupt.json"
-    corrupt.write_text("{not json", encoding="utf-8")
-    monkeypatch.setattr(jobs_page, "JOBS_STATUS_PATH", corrupt)
-    assert jobs_page.load_status() is None
-
-    good = tmp_path / "good.json"
-    good.write_text(json.dumps({"scheduled": []}), encoding="utf-8")
-    monkeypatch.setattr(jobs_page, "JOBS_STATUS_PATH", good)
-    assert jobs_page.load_status() == {"scheduled": []}

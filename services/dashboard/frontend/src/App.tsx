@@ -131,6 +131,41 @@ export function App() {
     return out;
   }, [matrix, expandedGroups]);
 
+  // The group key under the cursor right now, or null over a raw layer / off-grid. Pressing "K" opens that
+  // group's detail panel without a mouse-chase to the hover tooltip's link (the affordance Ben lost when the
+  // cursor moved off the column). Mirrors the click path's feature→parent-group resolution.
+  const hoveredGroupKey = useMemo<string | null>(() => {
+    if (!hover) return null;
+    const dc = displayCols[hover.displayCol];
+    return dc ? dc.groupKey : null;
+  }, [hover, displayCols]);
+
+  const hoveredGroupRef = useRef<string | null>(null);
+  hoveredGroupRef.current = hoveredGroupKey;
+
+  // Keyboard: "K" opens the hovered group's detail panel; Esc closes it. The ref keeps the handler stable
+  // (registered once) while always reading the latest hovered group. Ignored while typing in a field.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      if (event.key === "Escape") {
+        setDetailKey(null);
+        return;
+      }
+      if (event.key === "k" || event.key === "K") {
+        const groupKey = hoveredGroupRef.current;
+        if (groupKey) {
+          event.preventDefault();
+          setDetailKey(groupKey);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const detailColumn: GridColumn | null =
     matrix && detailKey ? matrix.columns.find((c) => c.key === detailKey) ?? null : null;
 
