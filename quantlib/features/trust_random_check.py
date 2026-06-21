@@ -12,6 +12,11 @@ then re-verify every currently-TRUSTED feature against its per-type threshold on
 graded BELOW its threshold on this clean day is un-trusted, a defect is filed, and a human/agent decides:
 the check was unsound (keep) or the divergence is real (fix + re-earn at a new version, or deprecate).
 
+A graded day's illiquid raw tail can fall back below the settle gate by the time the random check re-runs,
+so ``sweep_day`` re-raises ``RawNotSettledError`` — a benign transient the nightly sweep already SKIPs. The
+random check skips such a day and tries the next one in the (shuffled) pool; if none is currently settled it
+exits cleanly with a note and retries next run. It never crashes the weekly cron on a transient.
+
 Deterministic features are not re-checked (their parity is guaranteed by construction).
 """
 
@@ -20,6 +25,8 @@ from __future__ import annotations
 import json
 import random
 import sys
+from functools import partial
+from typing import Callable
 
 import psycopg
 
@@ -27,7 +34,7 @@ from quantlib.features.materialize import DEFAULT_RAW_ROOT
 from quantlib.features.registry import REGISTRY
 from quantlib.features.trust_binary import feature_policy_map
 from quantlib.features.validation_db import DB_KWARGS
-from quantlib.features.validation_sweep import sweep_day
+from quantlib.features.validation_sweep import RawNotSettledError, sweep_day
 
 DEFAULT_FEATURE_ROOT = "/store"
 DEFAULT_VAL_ROOT = "/store/_validation"
@@ -141,7 +148,12 @@ def apply_recheck(day: str, group_of: dict[str, str]) -> dict[str, object]:
             untrusted.append(feature)
             untrust_rows.append({"feature": feature, "version": version})
             defect_rows.append(
-                {"feature": feature, "version": version, "feature_group": group_of.get(feature, "?"), "day": day}
+                {
+                    "feature": feature,
+                    "version": version,
+                    "feature_group": group_of.get(feature, "?"),
+                    "day": day,
+                }
             )
 
     with psycopg.connect(**DB_KWARGS) as conn, conn.cursor() as cur:
@@ -162,29 +174,89 @@ def apply_recheck(day: str, group_of: dict[str, str]) -> dict[str, object]:
     }
 
 
+def _sweep_one_day(feature_root: str, val_root: str, raw_root: str, day: str) -> None:
+    """Re-run the idempotent sweep for one day (re-asserts the settle gate). ``day`` is last so a roots-bound
+    ``functools.partial`` yields the ``Callable[[str], None]`` that ``sweep_first_settled`` drives."""
+    sweep_day(feature_root=feature_root, val_root=val_root, day=day, raw_root=raw_root)
+
+
+def sweep_first_settled(
+    pool: list[str], sweep: Callable[[str], None], seed: int | None = None
+) -> tuple[str | None, list[str]]:
+    """Shuffle ``pool`` and re-sweep days until one SETTLES; return (the swept day, the skipped days).
+
+    A re-check day must be re-sweepable RIGHT NOW. ``recent_graded_days`` returns days that graded once, but
+    a day's illiquid raw tail can fall back below the settle gate (or its raw be pruned), so ``sweep_day``
+    re-raises ``RawNotSettledError`` for it. That is a benign transient — the main sweep CLI already SKIPs it
+    (exit 0) rather than failing — so the random check must skip it too and try the next day, not crash the
+    weekly cron (the 2026-06-20 first-fire crash). Returns ``(None, skipped)`` if the whole pool is unsettled,
+    so the caller can exit cleanly with a note. ``seed`` makes the order reproducible for tests/replay."""
+    shuffled = list(pool)
+    random.Random(seed).shuffle(shuffled)
+    skipped: list[str] = []
+    for day in shuffled:
+        try:
+            sweep(day)
+        except RawNotSettledError:
+            skipped.append(day)
+            continue
+        return day, skipped
+    return None, skipped
+
+
 def run_random_check(
     feature_root: str = DEFAULT_FEATURE_ROOT,
     val_root: str = DEFAULT_VAL_ROOT,
     raw_root: str = DEFAULT_RAW_ROOT,
     day: str | None = None,
     seed: int | None = None,
+    dry_run: bool = False,
 ) -> dict[str, object]:
     """Pick a random recent clean day (unless ``day`` is given), re-run the sweep for it (idempotent), then
-    re-verify the TRUSTED cohort. ``seed`` makes the day choice reproducible for tests/replay."""
+    re-verify the TRUSTED cohort. Days whose raw tail is not currently settled are skipped (the next pool day
+    is tried) so the weekly cron never crashes on a transient. ``dry_run`` reports the trusted cohort that
+    WOULD be re-checked WITHOUT sweeping or mutating any trust state. ``seed`` makes the day choice
+    reproducible for tests/replay."""
     group_of = {spec.name: group.name for group, spec in REGISTRY.feature_specs()}
-    if day is None:
-        pool = recent_graded_days()
-        if not pool:
-            return {"day": None, "checked": 0, "note": "no graded days to sample a random check from"}
-        day = random.Random(seed).choice(pool)
-    sweep_day(feature_root=feature_root, val_root=val_root, day=day, raw_root=raw_root)
-    return apply_recheck(day, group_of)
+
+    if dry_run:
+        pool = [day] if day is not None else recent_graded_days()
+        checkable = trusted_checkable()
+        return {
+            "dry_run": True,
+            "candidate_days": pool[:10],
+            "n_candidate_days": len(pool),
+            "trusted_checkable": len(checkable),
+            "note": "would sweep the first settled candidate day and re-verify the trusted cohort; no mutation",
+        }
+
+    sweep = partial(_sweep_one_day, feature_root, val_root, raw_root)
+
+    if day is not None:
+        sweep(day)  # explicit day: let RawNotSettledError raise (operator asked for THIS day)
+        return apply_recheck(day, group_of)
+
+    pool = recent_graded_days()
+    if not pool:
+        return {"day": None, "checked": 0, "note": "no graded days to sample a random check from"}
+    swept_day, skipped = sweep_first_settled(pool, sweep, seed=seed)
+    if swept_day is None:
+        return {
+            "day": None,
+            "checked": 0,
+            "skipped_unsettled": len(skipped),
+            "note": "no recent graded day is currently settled to re-sweep — skipping (will retry next run)",
+        }
+    result = apply_recheck(swept_day, group_of)
+    result["skipped_unsettled"] = len(skipped)
+    return result
 
 
 def main() -> None:
     args = sys.argv[1:]
+    dry_run = "--dry-run" in args
     day = next((arg for arg in args if len(arg) == 10 and arg[4] == "-"), None)
-    result = run_random_check(day=day)
+    result = run_random_check(day=day, dry_run=dry_run)
     print(json.dumps(result, indent=2, default=str))
 
 

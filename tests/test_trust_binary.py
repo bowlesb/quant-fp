@@ -7,11 +7,17 @@ DB or store I/O.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import polars as pl
 
 from quantlib.features.base import FeatureType
 from quantlib.features.registry import REGISTRY
-from quantlib.features.trust_binary import deterministic_features, earned_features, feature_policy_map
+from quantlib.features.trust_binary import (
+    deterministic_features,
+    earned_features,
+    feature_policy_map,
+)
 from quantlib.features.trust_policy import (
     MIN_CLEAN_DAYS_TO_TRUST,
     TYPE_POLICY,
@@ -19,7 +25,8 @@ from quantlib.features.trust_policy import (
     group_content_hash,
     policy_for,
 )
-from quantlib.features.trust_random_check import failed_check
+from quantlib.features.trust_random_check import failed_check, sweep_first_settled
+from quantlib.features.validation_sweep import RawNotSettledError
 
 
 def test_one_day_earns_trust() -> None:
@@ -111,3 +118,52 @@ def test_current_git_commit_runs() -> None:
     # provenance helper must never raise (None is an acceptable result when git is unavailable).
     result = current_git_commit()
     assert result is None or isinstance(result, str)
+
+
+def _sweep_only(settled_days: set[str]) -> Callable[[str], None]:
+    """A sweep stub that succeeds for ``settled_days`` and raises the transient RawNotSettledError otherwise,
+    recording every day it was asked to sweep so the test can assert which days were attempted."""
+
+    def sweep(day: str) -> None:
+        attempted.append(day)
+        if day not in settled_days:
+            raise RawNotSettledError(f"{day} not settled")
+
+    attempted: list[str] = []
+    sweep.attempted = attempted  # type: ignore[attr-defined]
+    return sweep
+
+
+def test_sweep_first_settled_skips_unsettled_days() -> None:
+    # the first shuffled day is unsettled (raises), so the check skips it and sweeps the settled one.
+    pool = ["2026-06-15", "2026-06-16", "2026-06-17"]
+    sweep = _sweep_only({"2026-06-16"})
+    swept, skipped = sweep_first_settled(pool, sweep, seed=0)
+    assert swept == "2026-06-16"
+    assert "2026-06-16" not in skipped
+    assert set(skipped).issubset(set(pool))
+
+
+def test_sweep_first_settled_all_unsettled_returns_none() -> None:
+    # no day is currently settled -> (None, every day skipped); caller exits cleanly instead of crashing.
+    pool = ["2026-06-15", "2026-06-16", "2026-06-17"]
+    sweep = _sweep_only(set())
+    swept, skipped = sweep_first_settled(pool, sweep, seed=0)
+    assert swept is None
+    assert sorted(skipped) == sorted(pool)
+
+
+def test_sweep_first_settled_empty_pool() -> None:
+    swept, skipped = sweep_first_settled([], _sweep_only({"x"}), seed=0)
+    assert swept is None
+    assert skipped == []
+
+
+def test_sweep_first_settled_stops_at_first_success() -> None:
+    # once a day settles, no further days are attempted (the sweep is the expensive step).
+    pool = ["a", "b", "c", "d"]
+    sweep = _sweep_only({"a", "b", "c", "d"})  # all settled
+    swept, skipped = sweep_first_settled(pool, sweep, seed=0)
+    assert swept in pool
+    assert skipped == []
+    assert len(sweep.attempted) == 1  # type: ignore[attr-defined]
