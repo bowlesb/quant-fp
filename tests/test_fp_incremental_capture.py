@@ -35,7 +35,7 @@ from quantlib.features.capture import (
 )
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 from quantlib.features.incremental import IncrementalEngine
-from quantlib.features.reduction_anchor import attach_volume_anchor
+from quantlib.features.reduction_anchor import _RTH_MINUTES_PER_DAY, attach_volume_anchor
 from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
@@ -60,20 +60,32 @@ BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
 # gappy sweep cleared all three, but the REAL-DATA A/B reconciliation showed market_beta breaches (the synthetic
 # had no SPY regressor so its corr-denom was never exercised) while distribution/volatility stayed clean.
 INCREMENTAL_UNSAFE = {
-    # return_dynamics + volume_leads_price were UNGATED by P2 (#283): the Neumaier compensated running sum
-    # closes their corr-denom straddle. ``volume`` was UNGATED by the centered-power-sum std (this PR): its std
-    # now centers on the per-symbol anchor (Σ(v−a)/Σ(v−a)²), closing the batch-vs-canonical FORMULA gap that
-    # Neumaier could not (engine-vs-batch CLEAN — test_volume_centered_std_is_clean_after_centering).
+    # The PARKED corr-denom-class trio (centering does not reach these — they stay on batch under
+    # FP_INCREMENTAL with no correctness loss, just no acceleration).
     "price_volume",  # the SAME centered-std fix applies (a centered-std vertical slice for price_volume next).
     "market_beta",  # corr-denom centering on the same anchor (the sibling fix; not this PR).
     # residual_analysis: the OLS residual SSR is a difference of large near-equal centered power sums on a
     # near-perfect intraday fit — the corr-denom-class centering (sibling), not the std-class. Stays gated here.
     "residual_analysis",
+    # The 5 REAL-DATA soak NO-GO breachers (docs/INCREMENTAL_READINESS.md, 2026-06-17 A/B, set False by #332):
+    # rare guard-straddle / power-sum-cancellation cells the synthetic degenerate stream cannot reach on real
+    # gappy tape. Batch-gated until the cancellation-free reduction-denom fix lands; same class as the trio.
+    "range_expansion",  # ratio-denom `>0` guard straddle (7.8% of minutes, the most frequent)
+    "trend_quality",  # OLS R² cov²/(var·var) denom straddle (2.7%)
+    "clean_momentum",  # moment/std power-sum cancellation (1.5%)
+    "return_dynamics",  # autocorrelation denom null-flip (0.5%) — the Neumaier fix didn't reach this cell
+    "distribution",  # higher-moment (kurtosis) Σx⁴ cancellation (0.4%)
 }
-# Genuinely safe sum-ratio / time-axis-OLS groups that ride the incremental fast path. trend_quality and
-# clean_momentum regress close on a CENTERED TIME axis (x always spreads with the minutes, never collapses on a
-# gappy window) — well-conditioned — and were proven parity-true on degenerate walks by the tests below.
-INCREMENTAL_FLIPPED = {"trend_quality", "clean_momentum"}
+# The 5 groups #332 re-gated to batch on the real-data soak verdict — they must be incremental_safe=False and
+# therefore byte-identical to batch under FP_INCREMENTAL. (An earlier synthetic-only pass had flipped
+# trend_quality + clean_momentum to safe; the real-data soak reverted that.)
+INCREMENTAL_REGATED = {
+    "range_expansion",
+    "trend_quality",
+    "clean_momentum",
+    "return_dynamics",
+    "distribution",
+}
 
 
 def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float = 0.02) -> list[list[dict]]:
@@ -207,19 +219,34 @@ def test_parity_selfcheck_records_clean(monkeypatch: pytest.MonkeyPatch, tmp_pat
         f"no minute should breach on well-conditioned data; worst {max(r for _, r, _ in seen)}x tolerance"
 
 
+def test_regated_groups_are_incremental_unsafe() -> None:
+    """The 5 real-data-soak NO-GO groups carry ``incremental_safe = False`` (re-gated to batch by #332), so
+    they ride the batch path under FP_INCREMENTAL — proven byte-identical to batch by
+    ``test_unsafe_group_stays_on_batch_under_incremental`` (which iterates the whole INCREMENTAL_UNSAFE set)."""
+    regated = {
+        g.name
+        for g in REGISTRY.groups()
+        if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED
+    }
+    assert regated == INCREMENTAL_REGATED, "re-gated soak groups missing from registry"
+    assert INCREMENTAL_REGATED <= INCREMENTAL_UNSAFE, "re-gated groups must be in the unsafe set"
+    for group in REGISTRY.groups():
+        if isinstance(group, ReductionGroup) and group.name in INCREMENTAL_REGATED:
+            assert not group.incremental_safe, f"{group.name} must be incremental_safe=False (soak NO-GO)"
+
+
 @pytest.mark.parametrize("slice_derive", [True, False])
-def test_ols_near_perfect_fit_is_parity_true(slice_derive: bool) -> None:
-    """The former KNOWN CONDITIONING CAVEAT, now CLOSED at source. On a SMOOTH (near-linear) price walk the
-    OLS R²/correlation family fits near-perfectly (R²→1, the b==2 corner is exact) — the historical breach
-    source. With the time-OLS origin-rebase (PR #132) and the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT:
-    r2=1.0 / corr=sign(cov) at b==2), the IncrementalEngine now agrees with the batch CELL-FOR-CELL on the
-    flipped TIME-axis-OLS groups (trend_quality, clean_momentum) — well under the breach ratio on BOTH the live
-    slice-derive and the whole-buffer paths. This is the parity proof gating their ``incremental_safe = True``
-    flip. (``price_volume`` is gated to batch — its pv_correlation regresses on raw volume, not time.)"""
+def test_ols_near_perfect_fit_engine_matches_batch(slice_derive: bool) -> None:
+    """ENGINE-KERNEL correctness (independent of the prod gating decision): on a SMOOTH (near-linear) price
+    walk the OLS R²/correlation family fits near-perfectly (R²→1, the b==2 corner is exact) — the historical
+    breach source. With the time-OLS origin-rebase (PR #132) and the n==2 perfect-fit guard
+    (_OLS_PERFECT_FIT_COUNT: r2=1.0 / corr=sign(cov) at b==2), the IncrementalEngine agrees with the batch on
+    the time-axis-OLS groups on BOTH the live slice-derive and the whole-buffer paths. These groups are
+    PROD-GATED to batch by the real-data soak (rare gappy-tape straddles this smooth walk does not hit), but
+    the kernel itself stays well-conditioned on the smooth regime — the regression guard for the OLS rebase."""
     smooth = _stream_minutes(n_sym=8, n_min=20, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
-    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_FLIPPED]
-    assert {g.name for g in flipped} == INCREMENTAL_FLIPPED, "flipped OLS groups missing from registry"
-    assert all(g.incremental_safe for g in flipped), "flipped OLS groups must be incremental_safe=True"
+    groups = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED]
+    assert {g.name for g in groups} == INCREMENTAL_REGATED, "re-gated OLS groups missing from registry"
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
     worst = 0.0
@@ -229,12 +256,12 @@ def test_ols_near_perfect_fit_is_parity_true(slice_derive: bool) -> None:
         ring.push(_bars_to_frame(bars))
         frame = ring.materialize()
         ctx = BatchContext(frames={"minute_agg": frame})
-        batch = compute_reduction_batch(flipped, ctx)
+        batch = compute_reduction_batch(groups, ctx)
         if engine is None:
-            engine = IncrementalEngine(flipped)
+            engine = IncrementalEngine(groups)
         inc = engine.step(frame, slice_derive=slice_derive)
         worst = max(worst, _worst_tol_ratio(batch, inc))
-    assert worst < _PARITY_BREACH_RATIO, f"flipped OLS groups must be parity-true on perfect-fit walk: {worst}x"
+    assert worst < _PARITY_BREACH_RATIO, f"re-gated OLS engine must match batch on perfect-fit walk: {worst}x"
 
 
 @pytest.mark.parametrize(
@@ -246,13 +273,17 @@ def test_ols_near_perfect_fit_is_parity_true(slice_derive: bool) -> None:
         (7, 0.70, 0.020),  # well-conditioned (control)
     ],
 )
-def test_flipped_ols_groups_parity_on_degenerate_walks(seed: int, present_p: float, vol: float) -> None:
-    """Cell-for-cell batch==incremental on the FLIPPED OLS groups across degenerate regimes (n==2 perfect-fit
-    corners from sparse presence, near-flat ultra-smooth walks) AND a well-conditioned control — on the LIVE
-    slice-derive path. The n==2 perfect-fit guard + origin-rebase make the OLS r2/corr family parity-true by
-    construction: no seed/regime breaches and no null/non-null mismatch (the helper asserts the latter)."""
+def test_regated_ols_groups_engine_matches_batch_on_degenerate_walks(
+    seed: int, present_p: float, vol: float
+) -> None:
+    """ENGINE-KERNEL correctness across degenerate regimes (n==2 perfect-fit corners from sparse presence,
+    near-flat ultra-smooth walks) AND a well-conditioned control — on the LIVE slice-derive path. The n==2
+    perfect-fit guard + origin-rebase keep the OLS r2/corr family engine-vs-batch parity-true on THESE
+    synthetic regimes (no breach, no null/non-null mismatch). The groups are prod-gated to batch by the
+    real-data soak for the GAPPIER regimes these synthetic walks do not reproduce — so this is the kernel
+    regression guard, not a flip claim."""
     walk = _stream_minutes(n_sym=10, n_min=18, present_p=present_p, seed=seed, vol=vol)
-    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_FLIPPED]
+    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED]
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
     worst = 0.0
@@ -307,17 +338,20 @@ def _late_appearance_minutes(n_sym: int, n_min: int, present_p: float, seed: int
         (3, 0.15, 0.005),  # very sparse: most windows are first-appearance b==1/b==2 corners
     ],
 )
-def test_flipped_ols_parity_on_late_appearance_reseed(seed: int, present_p: float, vol: float) -> None:
-    """Cell-for-cell batch==incremental on the FLIPPED OLS groups when symbols FIRST APPEAR at later minutes
-    (no clean minute-0 warmup), so each new ticker triggers a ``SymbolSetExpanded`` re-seed that folds the whole
-    buffer through the slice-derive path for HISTORICAL minutes. Regression for the rust slice-derive future-row
-    lag leak: without the ``<= minute`` point-in-time cut a first-appearance return's prior-close lag came back
-    non-null, double-counting the OLS pairing ``b`` and emitting ``pv_correlation`` ±1.0 (the n==2 perfect-fit
-    value) where the batch correctly emits ``null`` — the FP_INCREMENTAL null/non-null A/B breach the crypto
-    soak found. The helper ``_worst_tol_ratio`` returns ``inf`` on any null/non-null mismatch, so a re-breach
-    fails here loudly."""
+def test_regated_ols_engine_matches_batch_on_late_appearance_reseed(
+    seed: int, present_p: float, vol: float
+) -> None:
+    """ENGINE-KERNEL regression guard: cell-for-cell batch==incremental on the time-axis-OLS groups when
+    symbols FIRST APPEAR at later minutes (no clean minute-0 warmup), so each new ticker triggers a
+    ``SymbolSetExpanded`` re-seed that folds the whole buffer through the slice-derive path for HISTORICAL
+    minutes. Guards the rust slice-derive future-row lag leak: without the ``<= minute`` point-in-time cut a
+    first-appearance return's prior-close lag came back non-null, double-counting the OLS pairing ``b`` and
+    emitting a ±1.0 correlation (the n==2 perfect-fit value) where the batch correctly emits ``null``. The
+    helper ``_worst_tol_ratio`` returns ``inf`` on any null/non-null mismatch, so a re-breach fails loudly.
+    (These groups are prod-gated to batch by the real-data soak; this test exercises the engine kernel
+    directly so the slice-derive correctness stays guarded regardless of the gating decision.)"""
     walk = _late_appearance_minutes(n_sym=20, n_min=40, present_p=present_p, seed=seed, vol=vol)
-    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_FLIPPED]
+    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED]
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
     worst = 0.0
@@ -340,12 +374,13 @@ def test_flipped_ols_parity_on_late_appearance_reseed(seed: int, present_p: floa
 
 def _with_volume_anchor(frame: pl.DataFrame) -> pl.DataFrame:
     """Attach volume's per-symbol centering anchor to a test minute frame — the production capture/backfill
-    attaches it where minute_agg is built; here we derive a daily snapshot from the frame's own volume (a
-    near-constant per-symbol level in these streams) and join the 2-sig-fig anchor the same way both paths
-    read it."""
+    attaches it where minute_agg is built. Production sources the anchor from the daily-BAR total volume and
+    divides by the session-minute count to reach the per-minute scale (reduction_anchor._RTH_MINUTES_PER_DAY);
+    so here we synthesize a daily snapshot at DAILY-TOTAL scale (the per-symbol per-minute level x the session
+    minutes) and let ``attach_volume_anchor`` re-derive the per-minute anchor exactly as it does in prod."""
     daily = (
         frame.group_by("symbol", maintain_order=True)
-        .agg(pl.col("volume").last().alias("volume"))
+        .agg((pl.col("volume").last() * _RTH_MINUTES_PER_DAY).alias("volume"))
         .with_columns(pl.lit(1).alias("date"))
     )
     return attach_volume_anchor(frame, daily)
