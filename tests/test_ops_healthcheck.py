@@ -9,10 +9,15 @@ from zoneinfo import ZoneInfo
 
 from quantlib.ops.healthcheck import (
     PER_MINUTE_BANDS,
+    STREAM_COVERAGE_CHECKS,
     CheckResult,
     Status,
+    build_registry,
+    count_skips,
     detect_phase,
+    equity_stream_expected,
     exit_code_for,
+    is_market_holiday,
     last_trading_day,
     render_json,
     render_text,
@@ -114,6 +119,86 @@ def test_render_json_roundtrip_fields() -> None:
     phase = detect_phase(datetime(2026, 6, 15, 12, 0, tzinfo=ET))
     results = [_result("a", Status.PASS), _result("b", Status.FAIL)]
     payload = json.loads(render_json(results, phase))
-    assert payload["summary"] == {"pass": 1, "warn": 0, "fail": 1}
+    assert payload["summary"] == {"pass": 1, "warn": 0, "fail": 1, "skip": 0}
     assert payload["exit_code"] == 1
     assert {check["name"] for check in payload["checks"]} == {"a", "b"}
+
+
+def test_is_market_holiday_juneteenth() -> None:
+    # 2026-06-19 is Juneteenth — a full-day NYSE closure even though it is a Friday.
+    moment = datetime(2026, 6, 19, 12, 0, tzinfo=ET)
+    assert is_market_holiday(moment) is True
+
+
+def test_is_market_holiday_regular_trading_day() -> None:
+    # 2026-06-18 (Thursday) is a normal session.
+    moment = datetime(2026, 6, 18, 12, 0, tzinfo=ET)
+    assert is_market_holiday(moment) is False
+
+
+def test_equity_stream_expected_trading_minute() -> None:
+    # Thursday 12:00 ET RTH — stream expected, checks should evaluate.
+    moment = datetime(2026, 6, 18, 12, 0, tzinfo=ET)
+    phase = detect_phase(moment)
+    assert phase.name == "rth"
+    assert equity_stream_expected(phase, moment) is True
+
+
+def test_equity_stream_not_expected_weekend() -> None:
+    # Sunday 12:00 ET — detect_phase => closed, no equity stream.
+    moment = datetime(2026, 6, 21, 12, 0, tzinfo=ET)
+    phase = detect_phase(moment)
+    assert phase.name == "closed"
+    assert equity_stream_expected(phase, moment) is False
+
+
+def test_equity_stream_not_expected_weekday_holiday() -> None:
+    # Juneteenth (Fri) 12:00 ET — phase reads rth by clock, but it is a holiday: no stream expected.
+    moment = datetime(2026, 6, 19, 12, 0, tzinfo=ET)
+    phase = detect_phase(moment)
+    assert phase.name == "rth"
+    assert equity_stream_expected(phase, moment) is False
+
+
+def test_registry_skips_stream_checks_off_session() -> None:
+    # Sunday: the 5 stream-coverage checks must be replaced by SKIP results. Invoke only those fns (the
+    # non-stream checks do real DB/Prometheus I/O — not exercised in this pure-logic test).
+    moment = datetime(2026, 6, 21, 12, 0, tzinfo=ET)
+    phase = detect_phase(moment)
+    registry = dict(build_registry(phase, moment))
+    skipped = {name for name in STREAM_COVERAGE_CHECKS if registry[name]().status == Status.SKIP}
+    assert skipped == set(STREAM_COVERAGE_CHECKS)
+
+
+def test_registry_skip_result_is_non_failing() -> None:
+    # An off-session run with all stream checks skipped must exit 0 (no FAIL).
+    moment = datetime(2026, 6, 21, 12, 0, tzinfo=ET)
+    phase = detect_phase(moment)
+    registry = build_registry(phase, moment)
+    skip_results = [check_fn() for name, check_fn in registry if name in STREAM_COVERAGE_CHECKS]
+    assert all(result.status == Status.SKIP for result in skip_results)
+    assert exit_code_for(skip_results) == 0
+    assert count_skips(skip_results) == len(STREAM_COVERAGE_CHECKS)
+
+
+def test_registry_keeps_stream_checks_in_session() -> None:
+    # On a real trading minute the registry must NOT substitute SKIPs — the original check fns stay.
+    in_moment = datetime(2026, 6, 18, 12, 0, tzinfo=ET)
+    off_moment = datetime(2026, 6, 21, 12, 0, tzinfo=ET)
+    in_session = dict(build_registry(detect_phase(in_moment), in_moment))
+    off_session = dict(build_registry(detect_phase(off_moment), off_moment))
+    for name in STREAM_COVERAGE_CHECKS:
+        assert in_session[name] is not off_session[name]
+
+
+def test_skip_excluded_from_summarize_counts() -> None:
+    results = [_result("a", Status.PASS), _result("b", Status.SKIP), _result("c", Status.SKIP)]
+    assert summarize(results) == (1, 0, 0)
+    assert count_skips(results) == 2
+
+
+def test_render_text_shows_skip_suffix() -> None:
+    phase = detect_phase(datetime(2026, 6, 21, 12, 0, tzinfo=ET))
+    results = [_result("a", Status.PASS), _result("b", Status.SKIP)]
+    text = render_text(results, phase)
+    assert "1 PASS / 0 WARN / 0 FAIL / 1 SKIP" in text
