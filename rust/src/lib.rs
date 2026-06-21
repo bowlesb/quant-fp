@@ -1704,9 +1704,119 @@ fn emit_row(
     out[g + 9][r] = if sigma.is_nan() { f64::NAN } else { sigma * 10_000.0 };
 }
 
+/// Per-(symbol, minute) sub-minute tape primitives in ONE pass over the minute's prints (the input is
+/// pre-sorted by (symbol, minute, ts)). Replaces the per-minute Polars group-bys of subminute_gap_fano,
+/// print_hhi, and the per-minute bin-count step of size_entropy. Parallel arrays in; one row per
+/// (symbol, minute) out. The three Python groups then do their own cheap trailing windowed reduction
+/// (rolling mean / windowed-sum-then-entropy) over these per-minute primitives, exactly as before, so
+/// the kernel is VALUE-IDENTICAL to each group's compute() (only float-summation order differs, within
+/// the declared tolerance). NaN where each group's Guard-2 makes the value undefined; the caller restores
+/// Polars null (matching is_finite backstop).
+///
+/// Outputs, one entry per (symbol, minute):
+///   out_symbol, out_minute
+///   gap_fano  — var(inter-trade gaps in us)/mean(gaps), ddof=1; NaN on <2 gaps or mean<=0 (subminute_gap_fano)
+///   hhi       — Sum(notional_i^2) / (Sum notional_i)^2 over the minute's prints, notional=price*size;
+///               NaN if total notional <= 0 (print_hhi)
+///   bin_counts — `n_size_buckets` columns: count of prints whose floor(log10(size)) clipped to
+///               [0, n_size_buckets-1] equals the bucket (size_entropy's per-minute primitive; the group
+///               windowed-SUMS these then takes -Sum p ln p, so the kernel must return the COUNTS, not a
+///               per-minute entropy).
+#[pyfunction]
+fn tick_minute_features(
+    symbol: PyReadonlyArray1<i64>,
+    minute: PyReadonlyArray1<i64>,
+    ts_us: PyReadonlyArray1<i64>, // exchange timestamp, microseconds (already sorted within minute)
+    price: PyReadonlyArray1<f64>,
+    size: PyReadonlyArray1<f64>,
+    n_size_buckets: usize, // size-entropy histogram buckets; bins are floor(log10(size)).clip(0, n-1)
+) -> PyResult<(Vec<i64>, Vec<i64>, Vec<f64>, Vec<f64>, Vec<Vec<f64>>)> {
+    let symbol = symbol.as_slice()?;
+    let minute = minute.as_slice()?;
+    let ts_us = ts_us.as_slice()?;
+    let price = price.as_slice()?;
+    let size = size.as_slice()?;
+    let n = symbol.len();
+    let mut out_sym: Vec<i64> = Vec::new();
+    let mut out_min: Vec<i64> = Vec::new();
+    let mut out_fano: Vec<f64> = Vec::new();
+    let mut out_hhi: Vec<f64> = Vec::new();
+    let mut out_bins: Vec<Vec<f64>> = (0..n_size_buckets).map(|_| Vec::new()).collect();
+
+    let last_bucket = n_size_buckets.saturating_sub(1);
+    let mut i: usize = 0;
+    while i < n {
+        let s = symbol[i];
+        let m = minute[i];
+        // Welford accumulators for the inter-trade gap variance/mean (avoids Sx^2-(Sx)^2/n cancellation).
+        let mut gap_n: u64 = 0;
+        let mut gap_mean: f64 = 0.0;
+        let mut gap_m2: f64 = 0.0;
+        let mut prev_ts: i64 = 0;
+        // notional concentration accumulators for HHI.
+        let mut notional_sum: f64 = 0.0;
+        let mut notional_sq: f64 = 0.0;
+        // per-minute size-bucket histogram.
+        let mut hist = vec![0.0f64; n_size_buckets];
+        let mut first = true;
+
+        while i < n && symbol[i] == s && minute[i] == m {
+            if !first {
+                let gap = (ts_us[i] - prev_ts) as f64; // microseconds since the prior print this minute
+                gap_n += 1;
+                let delta = gap - gap_mean;
+                gap_mean += delta / (gap_n as f64);
+                gap_m2 += delta * (gap - gap_mean);
+            }
+            let notional = price[i] * size[i];
+            notional_sum += notional;
+            notional_sq += notional * notional;
+            // Match size_entropy.py: floor(log10(size)) clipped to [0, n-1], non-positive size -> bin 0.
+            let sz = size[i];
+            let bucket = if sz > 0.0 {
+                let raw = sz.log10().floor();
+                if raw <= 0.0 {
+                    0
+                } else {
+                    (raw as usize).min(last_bucket)
+                }
+            } else {
+                0
+            };
+            hist[bucket] += 1.0;
+            prev_ts = ts_us[i];
+            first = false;
+            i += 1;
+        }
+
+        // gap Fano = var(gaps)/mean(gaps), ddof=1; NaN on <2 gaps (no variance) or mean<=0 (Guard 2).
+        let fano = if gap_n >= 2 && gap_mean > 0.0 {
+            (gap_m2 / ((gap_n - 1) as f64)) / gap_mean
+        } else {
+            f64::NAN
+        };
+        // HHI = Sum(notional^2) / (Sum notional)^2; NaN on non-positive total notional (Guard 2).
+        let hhi = if notional_sum > 0.0 {
+            notional_sq / (notional_sum * notional_sum)
+        } else {
+            f64::NAN
+        };
+
+        out_sym.push(s);
+        out_min.push(m);
+        out_fano.push(fano);
+        out_hhi.push(hhi);
+        for bucket in 0..n_size_buckets {
+            out_bins[bucket].push(hist[bucket]);
+        }
+    }
+    Ok((out_sym, out_min, out_fano, out_hhi, out_bins))
+}
+
 #[pymodule]
 fn quant_tick(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tick_run_features, m)?)?;
+    m.add_function(wrap_pyfunction!(tick_minute_features, m)?)?;
     m.add_function(wrap_pyfunction!(windowed_reduce, m)?)?;
     m.add_function(wrap_pyfunction!(windowed_sums, m)?)?;
     m.add_function(wrap_pyfunction!(slice_derive_lags, m)?)?;

@@ -42,6 +42,10 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
+from quantlib.features.groups._tick_minute_kernel import (
+    per_minute_gap_fano,
+    use_rust_tick_minute,
+)
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (60,)
@@ -87,30 +91,41 @@ class SubminuteGapFanoGroup(FeatureGroup):
         ]
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        trades = ctx.frame("trades").select(["symbol", "ts"])
-        if trades.height == 0:
-            return pl.DataFrame(schema=_OUT_SCHEMA)
-        # Order by exchange ts WITHIN each minute, so the first print of a minute has a null gap (no
-        # borrowing from the prior minute) and receive order cannot change the result.
-        ticks = trades.with_columns(pl.col("ts").dt.truncate("1m").alias("minute"))
-        ordered = ticks.sort(["symbol", "minute", "ts"])
-        gaps = ordered.with_columns(
-            pl.col("ts").diff().over(["symbol", "minute"]).dt.total_microseconds().alias("_gap_us")
-        )
-        # Per-minute gap Fano = var(gaps)/mean(gaps). The leading null gap (first print of the minute) is
-        # dropped; var/mean are over the remaining gaps. ddof=1 var (matches the research screen).
-        per_minute = gaps.group_by(["symbol", "minute"]).agg(
-            pl.col("_gap_us").drop_nulls().var().alias("_gap_var"),
-            pl.col("_gap_us").drop_nulls().mean().alias("_gap_mean"),
-        )
-        # Guard 2: denominator is a mean of non-negative gaps -> sign-robust; null on a single-trade /
-        # zero-gap minute (never a raw num/denom div-by-zero). is_finite() backstop on top.
-        fano = (
-            pl.when(pl.col("_gap_mean") > 0.0).then(pl.col("_gap_var") / pl.col("_gap_mean")).otherwise(None)
-        )
-        per_minute = per_minute.with_columns(
-            pl.when(fano.is_finite()).then(fano).otherwise(None).alias("_gap_fano")
-        ).sort(["symbol", "minute"])
+        if use_rust_tick_minute():
+            # FP_RUST_TICK_MINUTE: the per-minute gap Fano comes from the shared Rust kernel — the SAME
+            # var(gaps)/mean(gaps) (ddof=1) over each minute's consecutive print gaps in microseconds,
+            # computed with a stable Welford pass (value-identical within the declared tolerance).
+            trades = ctx.frame("trades").select(["symbol", "ts", "price", "size"])
+            if trades.height == 0:
+                return pl.DataFrame(schema=_OUT_SCHEMA)
+            per_minute = per_minute_gap_fano(trades).sort(["symbol", "minute"])
+        else:
+            trades = ctx.frame("trades").select(["symbol", "ts"])
+            if trades.height == 0:
+                return pl.DataFrame(schema=_OUT_SCHEMA)
+            # Order by exchange ts WITHIN each minute, so the first print of a minute has a null gap (no
+            # borrowing from the prior minute) and receive order cannot change the result.
+            ticks = trades.with_columns(pl.col("ts").dt.truncate("1m").alias("minute"))
+            ordered = ticks.sort(["symbol", "minute", "ts"])
+            gaps = ordered.with_columns(
+                pl.col("ts").diff().over(["symbol", "minute"]).dt.total_microseconds().alias("_gap_us")
+            )
+            # Per-minute gap Fano = var(gaps)/mean(gaps). The leading null gap (first print of the minute)
+            # is dropped; var/mean are over the remaining gaps. ddof=1 var (matches the research screen).
+            per_minute = gaps.group_by(["symbol", "minute"]).agg(
+                pl.col("_gap_us").drop_nulls().var().alias("_gap_var"),
+                pl.col("_gap_us").drop_nulls().mean().alias("_gap_mean"),
+            )
+            # Guard 2: denominator is a mean of non-negative gaps -> sign-robust; null on a single-trade /
+            # zero-gap minute (never a raw num/denom div-by-zero). is_finite() backstop on top.
+            fano = (
+                pl.when(pl.col("_gap_mean") > 0.0)
+                .then(pl.col("_gap_var") / pl.col("_gap_mean"))
+                .otherwise(None)
+            )
+            per_minute = per_minute.with_columns(
+                pl.when(fano.is_finite()).then(fano).otherwise(None).alias("_gap_fano")
+            ).sort(["symbol", "minute"])
         # Trailing windowed MEAN of the per-minute gap Fano (the bounded reduction). rolling_mean_by skips
         # the per-minute nulls, so a single-trade minute is excluded from the mean on BOTH paths.
         mats = [
