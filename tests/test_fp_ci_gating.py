@@ -14,6 +14,7 @@ from ops.ci_watcher import (
     SuiteResult,
     _FP_EXCLUDES,
     _KNOWN_COLLECTION_ERRORS,
+    _parse_failed_ids,
     STORE_TEST_DIR,
 )
 
@@ -32,6 +33,44 @@ def test_timing_flake_does_not_red_the_gate() -> None:
         jobs=[_green("fp"), _green("dashboard"), _red("timing", gating=False)],
         uncovered=[],
     )
+    assert suite.passed is True
+
+
+def test_parse_failed_ids_extracts_test_ids() -> None:
+    # The xdist-flake retry parses pytest's `FAILED ...` summary (needs -rf) to know what to re-run isolated.
+    output = (
+        "..F...\n"
+        "=== short test summary info ===\n"
+        "FAILED tests/test_next_quote_tranche.py::test_compute_tranche_filters_band_and_ranks_by_headroom\n"
+        "FAILED tests/test_foo.py::test_bar - AssertionError: 1 != 2\n"
+        "1 failed, 99 passed\n"
+    )
+    assert _parse_failed_ids(output) == [
+        "tests/test_next_quote_tranche.py::test_compute_tranche_filters_band_and_ranks_by_headroom",
+        "tests/test_foo.py::test_bar",
+    ]
+
+
+def test_parse_failed_ids_empty_when_no_failures() -> None:
+    assert _parse_failed_ids("99 passed in 2.10s\n") == []
+
+
+def test_parse_failed_ids_dedups() -> None:
+    output = "FAILED tests/a.py::test_x\nFAILED tests/a.py::test_x\n"
+    assert _parse_failed_ids(output) == ["tests/a.py::test_x"]
+
+
+def test_recovered_flake_does_not_red_the_fp_job() -> None:
+    # An fp job that passed (because its parallel failures recovered isolated) carries flaky_recovered but
+    # passed=True → the gate is GREEN. The recovered ids are reported, not blocking.
+    fp = JobResult(
+        name="fp",
+        passed=True,
+        tail="",
+        gating=True,
+        flaky_recovered=["tests/test_next_quote_tranche.py::test_compute_tranche_filters_band_and_ranks"],
+    )
+    suite = SuiteResult(jobs=[fp, _green("dashboard"), _green("store")], uncovered=[])
     assert suite.passed is True
 
 
