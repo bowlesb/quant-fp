@@ -26,6 +26,32 @@ from quantlib.strategy_core.state import StrategyState
 TS = dt.datetime(2026, 6, 19, 20, 0, tzinfo=dt.timezone.utc)
 
 
+def _teardown_paper_it_order(
+    executor: PaperAlpacaExecutor, intent: ProductionOrderIntent, symbol: str, strategy: str
+) -> None:
+    """Remove ALL residue this IT placed in the SHARED live paper account: cancel the entry order if it's
+    still non-terminal (an unfilled ACCEPTED day-order — the G8 leak the old fill-only cleanup missed) and
+    flatten any filled position. Idempotent + best-effort: cancel is a no-op when the order is already
+    terminal/gone, and a re-run reconciles whatever remains."""
+    try:
+        executor.cancel(intent.client_order_id)  # cancels an ACCEPTED/NEW entry; no-op if terminal
+    except KeyError:
+        pass  # the broker never recorded it (rejected/never-landed) — nothing to cancel
+    state = StrategyState(strategy_id=strategy)
+    reconcile(state, executor.broker_fills_for_strategy(strategy))
+    position = state.positions.get(symbol)
+    if position is not None and position.qty > 0:
+        executor.submit(
+            ProductionOrderIntent(
+                strategy_id=strategy,
+                symbol=symbol,
+                decision_ts=dt.datetime.now(dt.timezone.utc),
+                side="sell",
+                qty=position.qty,
+            )
+        )
+
+
 class _FakeOrder:
     """Minimal stand-in for alpaca.trading.models.Order with the fields the executor reads."""
 
@@ -154,48 +180,50 @@ def test_live_paper_account_integration() -> None:
     intent = ProductionOrderIntent(strategy_id=strategy, symbol=symbol, decision_ts=ts, side="buy", qty=1)
 
     record = executor.submit(intent)
-    # THE GATE: the executor faithfully reflects whatever the REAL broker did — any valid Alpaca lifecycle
-    # state (incl. a real REJECTED, e.g. a shared-account wash-trade block). The proof is that the mapping
-    # produced a real lifecycle state from a real broker call, not that the order necessarily filled.
-    assert record.state in {
-        OrderState.NEW,
-        OrderState.PENDING,
-        OrderState.ACCEPTED,
-        OrderState.PARTIALLY_FILLED,
-        OrderState.FILLED,
-        OrderState.REJECTED,
-    }, record.state
+    # the cleanup (cancel the entry coid + flatten any filled position) runs in `finally` so a test that
+    # places an order into the SHARED live paper account NEVER leaves residue — not even on an early
+    # assert/skip or if the order stays ACCEPTED unfilled (a closed-market day-order). The leaked stuck
+    # `ittest...` orders (G8) were exactly an unfilled-but-uncancelled entry the old fill-only cleanup missed.
+    try:
+        # THE GATE: the executor faithfully reflects whatever the REAL broker did — any valid Alpaca
+        # lifecycle state (incl. a real REJECTED, e.g. a shared-account wash-trade block). The proof is that
+        # the mapping produced a real lifecycle state from a real broker call, not that the order filled.
+        assert record.state in {
+            OrderState.NEW,
+            OrderState.PENDING,
+            OrderState.ACCEPTED,
+            OrderState.PARTIALLY_FILLED,
+            OrderState.FILLED,
+            OrderState.REJECTED,
+        }, record.state
 
-    if record.state == OrderState.REJECTED:
-        # a genuine broker reject (shared paper account already had an opposite-side AAPL order) — the
-        # mapping is proven; nothing placed, so no reconcile/cleanup. Re-run with ALPACA_IT_SYMBOL set to a
-        # symbol the live strategies don't hold to exercise the fill+reconcile path.
-        pytest.skip(
-            f"broker rejected the test order (shared-account state): {record.state} — mapping proven"
-        )
+        if record.state == OrderState.REJECTED:
+            # a genuine broker reject (shared paper account already had an opposite-side order) — the
+            # mapping is proven; nothing placed. Re-run with ALPACA_IT_SYMBOL set to a symbol the live
+            # strategies don't hold to exercise the fill+reconcile path.
+            pytest.skip(
+                f"broker rejected the test order (shared-account state): {record.state} — mapping proven"
+            )
 
-    # idempotency against the REAL broker: a duplicate submit reads back the same broker order.
-    again = executor.submit(intent)
-    assert again.broker_order_id == record.broker_order_id
+        # idempotency against the REAL broker: a duplicate submit reads back the same broker order.
+        again = executor.submit(intent)
+        assert again.broker_order_id == record.broker_order_id
 
-    # poll until terminal (bounded), then reconcile per-strategy (G1) — broker is the source of truth.
-    fill = executor.poll(intent.client_order_id)
-    for _ in range(30):
-        if fill.status in (OrderState.FILLED, OrderState.CANCELED, OrderState.REJECTED, OrderState.EXPIRED):
-            break
-        time.sleep(1.0)
+        # poll until terminal (bounded), then reconcile per-strategy (G1) — broker is the source of truth.
         fill = executor.poll(intent.client_order_id)
-    state = StrategyState(strategy_id=strategy)
-    reconcile(state, executor.broker_fills_for_strategy(strategy))
-    if fill.status == OrderState.FILLED:
-        assert state.positions[symbol].qty == pytest.approx(1.0)  # adopted exactly our 1 share
-    # clean up: flatten the tiny test position so the paper account doesn't accumulate IT shares.
-    if symbol in state.positions and state.positions[symbol].qty > 0:
-        close = ProductionOrderIntent(
-            strategy_id=strategy,
-            symbol=symbol,
-            decision_ts=dt.datetime.now(dt.timezone.utc),
-            side="sell",
-            qty=state.positions[symbol].qty,
-        )
-        executor.submit(close)
+        for _ in range(30):
+            if fill.status in (
+                OrderState.FILLED,
+                OrderState.CANCELED,
+                OrderState.REJECTED,
+                OrderState.EXPIRED,
+            ):
+                break
+            time.sleep(1.0)
+            fill = executor.poll(intent.client_order_id)
+        state = StrategyState(strategy_id=strategy)
+        reconcile(state, executor.broker_fills_for_strategy(strategy))
+        if fill.status == OrderState.FILLED:
+            assert state.positions[symbol].qty == pytest.approx(1.0)  # adopted exactly our 1 share
+    finally:
+        _teardown_paper_it_order(executor, intent, symbol, strategy)

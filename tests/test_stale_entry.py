@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from strategies.lib.stale_entry import StaleEntryTracker
+from strategies.lib.stale_entry import StaleEntryTracker, StalePendingExitTracker
 
 T0 = dt.datetime(2026, 6, 20, 15, 0, tzinfo=dt.timezone.utc)
 
@@ -62,3 +62,28 @@ def test_independent_per_coid() -> None:
     assert tracker.record_not_found("b", T0) is False  # b's streak is independent of a's
     assert tracker.record_not_found("a", T0 + dt.timedelta(seconds=1)) is True  # a reaches terminal
     assert tracker.streak_count("b") == 1  # b unaffected
+
+
+def test_stale_pending_exit_single_observation_not_stale() -> None:
+    tracker = StalePendingExitTracker(min_checks=5, min_seconds=900.0)
+    assert tracker.record_pending("x", T0) is False  # one pending tick never declares stale
+
+
+def test_stale_pending_exit_stale_only_after_checks_and_seconds() -> None:
+    """An exit is declared STALE only after N consecutive pending observations spanning >= M seconds, so a
+    fast burst of pending ticks during a live fill window never wrongly cancels an in-flight exit."""
+    tracker = StalePendingExitTracker(min_checks=5, min_seconds=900.0)
+    fast = [tracker.record_pending("x", T0 + dt.timedelta(seconds=s)) for s in (0, 1, 2, 3, 4)]
+    assert not any(fast)  # 5 checks but only 4s elapsed -> not stale (a live in-flight exit)
+    # spanning a session boundary: the 5th check past 900s declares it stale.
+    tracker2 = StalePendingExitTracker(min_checks=5, min_seconds=900.0)
+    spanned = [tracker2.record_pending("y", T0 + dt.timedelta(seconds=s)) for s in (0, 300, 600, 900, 1200)]
+    assert spanned == [False, False, False, False, True]
+
+
+def test_stale_pending_exit_reset_breaks_streak() -> None:
+    tracker = StalePendingExitTracker(min_checks=2, min_seconds=0.0)
+    assert tracker.record_pending("x", T0) is False
+    tracker.reset("x")  # the exit filled / vanished -> streak cleared
+    assert tracker.streak_count("x") == 0
+    assert tracker.record_pending("x", T0 + dt.timedelta(seconds=1)) is False  # restarts from 1
