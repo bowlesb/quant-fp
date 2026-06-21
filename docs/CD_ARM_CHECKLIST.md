@@ -141,7 +141,17 @@ rehearsal into the equity fc," a later Lead-gated step. Tracked on the READINESS
 
 `ops/ci_daemon_guard.sh --status` reports each role's liveness. The 5-min guard cron self-heals a dead
 supervisor. Follow-up (small): wire a stale-`ci_watcher.log` check into `ops/healthcheck.sh` so a daemon that
-dies AND fails to respawn FAILs the healthcheck loudly during business hours.
+dies AND fails to respawn FAILs the healthcheck loudly during business hours (coordinate with the G9/G10
+market-aware-healthcheck + notifier work so it's owned once).
+
+**Known behavior:** `--stop ROLE` group-kills the supervisor; if the supervisor was mid `sleep 10; restart`
+backoff it can spawn one more child before dying. Re-run `--stop` (or just `--status` a few seconds later) to
+confirm DOWN — the cron guard is the intended lifecycle manager, `--stop` is for manual intervention.
+
+**Live-verified (this pass):** the guard launched `ci_watcher.sh ci` → supervisor pid + `ci_watcher --poll 60`
+child with `--no-auto-merge` (grade-only), `--status` reported `SUPERVISED`, and `--stop ci` returned both
+roles to DOWN with no stray process. Dogfood: PR #366 (this PR) self-graded through the gate → `ci/fp-suite =
+success`, gate GREEN, TIER-1, NOT merged.
 
 ## The single biggest blocker to a fully-live arm
 
