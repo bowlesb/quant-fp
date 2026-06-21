@@ -51,7 +51,7 @@ from pathlib import Path
 
 from quantlib.features.base import FeatureGroup
 from quantlib.features.compare import runnable
-from quantlib.features.profile import _live_call, build_frames
+from quantlib.features.profile import _live_call, build_frames, runs_incremental
 from quantlib.features.profile_sim import run_profile_sim_raw
 from quantlib.features.registry import REGISTRY
 
@@ -460,6 +460,12 @@ def measure_group_rows(reps: int) -> list[dict]:
             "kind": meta["kind"],
             "mechanism": meta["mechanism"],
             "incremental_ready": meta["incremental_ready"],
+            # The EXECUTION PATH whose cost the p50/p95/p99 below reflect: "incremental (live)" for the 15
+            # armed incremental_safe reduction groups (their O(1) running-sum ``step`` fold — the default live
+            # path since #391, what the live fc actually runs), "batch" for every other group (the
+            # ``compute_latest`` recompute, incl. the 8 parked incremental_safe=False reductions). Additive
+            # field (schema_version unchanged) so the dashboard keeps binding p50/kind/incremental_ready as-is.
+            "path": "incremental (live)" if runs_incremental(group) else "batch",
             "p50_ms": _pct(ordered, 50),
             "p95_ms": _pct(ordered, 95),
             "p99_ms": _pct(ordered, 99),
@@ -550,16 +556,42 @@ def harvest_crypto_crosscheck() -> dict:
     }
 
 
-def build_document(groups: list[dict], end_to_end_ms: list[float], crypto: dict, generated_at: str) -> dict:
+def _e2e_block(end_to_end_ms: list[float], prior_e2e: dict | None) -> dict:
+    """The ``measured_at_sim_scale`` block. When THIS regen measured the e2e (``end_to_end_ms`` non-empty),
+    return its fresh percentiles. When it did NOT (``--no-e2e`` — the heavy sim is gather/IPC-bound and too
+    noisy to trust on a loaded box, so we skip it rather than write a fabricated number), CARRY FORWARD the
+    prior file's measured block verbatim (so a per-group-only regen never zeroes / fakes the e2e), flagged
+    ``measured_this_regen: false``. Only ever a real measurement or an honestly-labelled carried-forward one —
+    never a zero stand-in."""
+    if end_to_end_ms:
+        return {
+            "p50_ms": _pct(end_to_end_ms, 50),
+            "p95_ms": _pct(end_to_end_ms, 95),
+            "p99_ms": _pct(end_to_end_ms, 99),
+            "minutes": len(end_to_end_ms),
+            "measured_this_regen": True,
+        }
+    if prior_e2e:
+        carried = {
+            key: prior_e2e[key] for key in ("p50_ms", "p95_ms", "p99_ms", "minutes") if key in prior_e2e
+        }
+        carried["measured_this_regen"] = False
+        return carried
+    return {"p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "minutes": 0, "measured_this_regen": False}
+
+
+def build_document(
+    groups: list[dict],
+    end_to_end_ms: list[float],
+    crypto: dict,
+    generated_at: str,
+    prior_e2e: dict | None = None,
+) -> dict:
     """Assemble the full JSON document: header block (schema/units/e2e context/measurement provenance +
     the live crypto cross-check) then the slowest-first ``groups`` array. The header carries everything a
-    UI needs to render without reading the MD."""
-    measured_e2e = {
-        "p50_ms": _pct(end_to_end_ms, 50),
-        "p95_ms": _pct(end_to_end_ms, 95),
-        "p99_ms": _pct(end_to_end_ms, 99),
-        "minutes": len(end_to_end_ms),
-    }
+    UI needs to render without reading the MD. ``prior_e2e`` is the prior file's ``measured_at_sim_scale``,
+    carried forward when this regen skipped the e2e sim (``--no-e2e``) so the block is never zeroed."""
+    measured_e2e = _e2e_block(end_to_end_ms, prior_e2e)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -568,11 +600,17 @@ def build_document(groups: list[dict], end_to_end_ms: list[float], crypto: dict,
         "measurement": {
             "source": "quantlib.features.latency_expectations --update",
             "per_group_method": (
-                "each group's compute_latest (the LIVE per-minute path) timed in ISOLATION at the "
-                "reference shard, p50/p95/p99 over a distribution of reps. Distinct + rankable per group "
-                "(the sim splits the shared reduction emit evenly, so it cannot rank reductions); these "
-                "rows OVER-count the B incremental-sum groups (each timed standalone, not as its in-flow "
-                "shared-emit share). Use for RELATIVE ranking + regression detection."
+                "each group's TRUE LIVE per-minute path timed in ISOLATION at the reference shard, "
+                "p50/p95/p99 over a distribution of reps. The path is the one the live fc runs (see each "
+                "row's `path`): the 15 armed incremental_safe reduction groups are timed via a seeded "
+                "IncrementalEngine.step (the O(1) running-sum fold — the default live path since #391, so "
+                "the dashboard now shows the INCREMENTAL cost, not the old batch recompute); a StatefulGroup "
+                "via StatefulEngine.step; everything else (incl. the 8 parked incremental_safe=False "
+                "reductions) via the batch compute_latest. Distinct + rankable per group (the sim splits the "
+                "shared reduction emit evenly, so it cannot rank reductions); each incremental/reduction row "
+                "is timed STANDALONE (its own single-group engine), so it OVER-counts vs its true share of "
+                "the SHARED in-flow engine fold. Use for RELATIVE ranking + regression detection; the e2e "
+                "block carries the in-flow bar->vector truth."
             ),
             "e2e_method": (
                 "the REAL streaming path (run_profile_sim_raw: msgpack mock -> StockDataStream -> shard "
@@ -590,9 +628,14 @@ def build_document(groups: list[dict], end_to_end_ms: list[float], crypto: dict,
             "typical_bet_under_load_p50_ms": 935,
             "target_p99_ms": 100,
             "note": (
-                "measured_at_sim_scale is from THIS regen's sim run at the bounded sim scale; the "
-                "isolated/under-load figures are the documented production anchors. The e2e number is NOT "
-                "the sum of the per-group rows (which over-count reductions + exclude gather/IPC)."
+                "measured_at_sim_scale carries measured_this_regen: when true it is THIS regen's sim run at "
+                "the bounded sim scale; when false the e2e sim was SKIPPED this regen (--no-e2e, e.g. a "
+                "per-group-only incremental refresh) and the block is the prior measurement carried forward "
+                "verbatim, NOT a fresh number. The e2e sim is gather/IPC-bound, so it moves far less than the "
+                "per-group reduction speedup AND is run-to-run noisy on a loaded box (a quiet box is needed "
+                "for a trustworthy figure) — it is left carried-forward rather than overwritten with a noisy "
+                "value. The isolated/under-load figures are the documented production anchors. The e2e number "
+                "is NOT the sum of the per-group rows (which over-count reductions + exclude gather/IPC)."
             ),
         },
         "live_crypto_crosscheck": crypto,
@@ -618,14 +661,25 @@ def _now_iso() -> str:
     return when.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _load_prior_e2e(path: Path) -> dict | None:
+    """The prior file's ``e2e_context.measured_at_sim_scale`` (or None when the file/key is absent), so a
+    ``--no-e2e`` regen carries the last real measurement forward instead of zeroing the block."""
+    if not path.exists():
+        return None
+    prior = json.loads(path.read_text())
+    return prior.get("e2e_context", {}).get("measured_at_sim_scale")
+
+
 def measure_and_write(path: Path, reps: int, with_crypto: bool, with_e2e: bool) -> dict:
     """The one-shot re-measure: per-group isolated p50/p95/p99 + (optionally) the sim e2e block + the
     crypto cross-check, written deterministically. Returns the document written. The single entry the cron
-    + the post-optimize trigger call."""
+    + the post-optimize trigger call. When ``with_e2e`` is False the prior file's e2e block is carried
+    forward (the e2e sim is noisy on a loaded box — never overwrite it with a fabricated/zero number)."""
     groups = measure_group_rows(reps)
     end_to_end = measure_e2e() if with_e2e else []
     crypto = harvest_crypto_crosscheck() if with_crypto else {"status": "skipped"}
-    document = build_document(groups, end_to_end, crypto, _now_iso())
+    prior_e2e = None if with_e2e else _load_prior_e2e(path)
+    document = build_document(groups, end_to_end, crypto, _now_iso(), prior_e2e=prior_e2e)
     path.write_text(json.dumps(document, indent=2) + "\n")
     return document
 
@@ -662,11 +716,13 @@ def main() -> None:
         )
     if do_update:
         crypto = harvest_crypto_crosscheck() if with_crypto else {"status": "skipped"}
-        document = build_document(groups, end_to_end, crypto, _now_iso())
+        prior_e2e = None if with_e2e else _load_prior_e2e(JSON_PATH)
+        document = build_document(groups, end_to_end, crypto, _now_iso(), prior_e2e=prior_e2e)
         JSON_PATH.write_text(json.dumps(document, indent=2) + "\n")
+        e2e_status = f"{len(end_to_end)} min" if end_to_end else "carried-forward (--no-e2e)"
         print(
             f"\nwrote {JSON_PATH} ({document['group_count']} groups, {document['feature_count']} features; "
-            f"e2e: {len(end_to_end)} min; crypto cross-check: {crypto['status']})"
+            f"e2e: {e2e_status}; crypto cross-check: {crypto['status']})"
         )
     else:
         print(f"\n(dry run - pass --update to rewrite {JSON_PATH})")

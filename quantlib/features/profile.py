@@ -20,7 +20,9 @@ import polars as pl
 from quantlib.features.base import BatchContext, FeatureGroup
 from quantlib.features.reduction_anchor import attach_volume_anchor
 from quantlib.features.compare import runnable
+from quantlib.features.declarative import ReductionGroup
 from quantlib.features.engine import run_group
+from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.stateful import StatefulEngine, StatefulGroup
 
 BASE = datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc)
@@ -117,6 +119,29 @@ def reads_raw_trades(group: FeatureGroup) -> bool:
     return any(spec.name == "trades" for spec in group.inputs)
 
 
+def runs_incremental(group: FeatureGroup) -> bool:
+    """True iff the group rides the INCREMENTAL running-sum path live (the default since #391): an
+    ``incremental_safe`` ``ReductionGroup``. Live capture seeds the per-shard ``IncrementalEngine`` once and
+    folds O(1) per minute via ``step`` for exactly these groups; the conditioning-sensitive ones
+    (``incremental_safe=False`` — price_volume/market_beta/residual_analysis...) stay on the batch fresh-sum
+    recompute and so keep their batch ``compute_latest`` cost. Mirrors the live ``capture.py`` split."""
+    return isinstance(group, ReductionGroup) and group.incremental_safe
+
+
+def _incremental_step_call(group: ReductionGroup, frames: dict[str, pl.DataFrame]) -> Callable[[], object]:
+    """A callable timing one armed ``ReductionGroup``'s LIVE incremental per-minute cost: build a single-group
+    ``IncrementalEngine``, ``seed`` it once over the buffer (the warm-up the live session pays once, NOT a
+    per-minute cost), then return ``step`` over the same buffer's latest minute — the O(1) fold + assemble the
+    live capture actually runs each tick (the SAME ``assemble_from_long`` core as the batch). Timed in
+    ISOLATION (one group per engine) to stay rankable against the other per-group rows, exactly as the batch
+    rows are timed standalone; the over-count caveat (a group's true in-flow cost is its share of the SHARED
+    engine's fold, not a standalone fold) is documented in the JSON header."""
+    engine = IncrementalEngine([group])
+    buffer_frame = frames[group.inputs[0].name]
+    engine.seed(buffer_frame)
+    return lambda: engine.step(buffer_frame)
+
+
 def thin_trades_to_live_breadth(
     frames: dict[str, pl.DataFrame], n_syms: int = LIVE_TICK_BREADTH
 ) -> dict[str, pl.DataFrame]:
@@ -148,6 +173,10 @@ def _live_call(group: FeatureGroup, frames: dict[str, pl.DataFrame]) -> Callable
       * a ``StatefulGroup`` -> seed its ``StatefulEngine`` once from the buffer (the warm-up, not a per-minute
         cost) then time ``step()`` — the O(1) fold the live capture actually runs, NOT the rolling-derive
         ``compute_latest`` backfill twin (``_state_frame_rolling`` rebuilds whole-buffer EMAs/joins each call);
+      * an ``incremental_safe`` ``ReductionGroup`` (the 15 armed since #391) -> seed an ``IncrementalEngine``
+        once then time ``step()`` — the O(1) running-sum fold the live capture folds each minute, NOT the
+        whole-buffer ``compute_latest`` batch recompute (which the profiler used to time, so the dashboard
+        showed the BATCH cost even though the live fc runs the incremental fast path);
       * a raw-``trades`` tick group -> ``compute_latest`` over a tape thinned to ``LIVE_TICK_BREADTH`` symbols;
       * everything else -> ``compute_latest`` over the full frames (already the live path)."""
     if isinstance(group, StatefulGroup):
@@ -159,6 +188,8 @@ def _live_call(group: FeatureGroup, frames: dict[str, pl.DataFrame]) -> Callable
         # join them; a pure recursive/lag group declares none and folds with ctx=None.
         hybrid_ctx = ctx if group.reduction_columns(ctx) is not None else None
         return lambda: engine.step(buffer_frame, hybrid_ctx)
+    if runs_incremental(group):
+        return _incremental_step_call(group, frames)
     if reads_raw_trades(group):
         ctx = BatchContext(frames=thin_trades_to_live_breadth(frames))
         return lambda: group.compute_latest(ctx)

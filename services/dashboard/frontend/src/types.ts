@@ -124,6 +124,10 @@ export interface LatencyGroup {
   kind: string;
   mechanism: string;
   incremental_ready: string;
+  // The execution path whose cost p50/p95/p99 reflect: "incremental (live)" for the 15 armed incremental_safe
+  // reduction groups (the O(1) running-sum fold — the default live path since #391) or "batch" for everything
+  // else. Optional so the UI degrades gracefully until the field lands in the JSON (additive, schema_version 2).
+  path?: string;
   p50_ms: number;
   // p95_ms is being added to the living artifact by the measurement loop; optional so the UI degrades
   // gracefully (bar = p50, hover = p99 always + p95 only when present) until the field lands in the JSON.
