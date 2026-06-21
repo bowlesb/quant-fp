@@ -18,6 +18,8 @@ output cell-for-cell (tests/test_fp_swing.py).
 """
 from __future__ import annotations
 
+import os
+
 import polars as pl
 import quant_tick
 
@@ -28,6 +30,7 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
+from quantlib.features.groups.swing_state import SwingState
 from quantlib.features.registry import register
 
 # Deterministic for parity: a fixed reversal threshold as a fractional return (0.5%). A volatility-multiple
@@ -173,3 +176,73 @@ class SwingGroup(FeatureGroup):
         """BACKFILL (source of truth): the point-in-time swing fold over the whole buffer, one row per minute."""
         frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
         return swing_fold_frame(frame)
+
+    @property
+    def _live_state(self) -> SwingState:
+        """The per-instance carried leg-state for the O(1)/minute live path (lazy). The registry holds ONE
+        ``SwingGroup`` instance reused every minute, so the state persists across ``compute_latest`` calls.
+        """
+        state = self.__dict__.get("_swing_state")
+        if state is None:
+            state = SwingState()
+            self.__dict__["_swing_state"] = state
+        return state
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        """LIVE: emit the latest minute's row per symbol. Default (``FP_SWING_STATEFUL`` unset) keeps the
+        certified whole-buffer fold (``compute().filter(last)``) — the source of truth. With the flag set, carry
+        the per-symbol leg-state and fold ONLY the minutes not yet absorbed (O(symbols × new-bars), not
+        O(symbols × window)); guarded == the whole-buffer fold by tests/test_fp_swing.py + tests/test_fp_latest.py.
+        """
+        if os.environ.get("FP_SWING_STATEFUL") != "1":
+            return super().compute_latest(ctx)
+        return self._compute_latest_stateful(ctx)
+
+    def _compute_latest_stateful(self, ctx: BatchContext) -> pl.DataFrame:
+        """Carry-state live form: advance each symbol's leg-state by its unabsorbed bars, emit the row for the
+        symbols present at the buffer's latest minute (matching ``compute().filter(minute == max)``).
+
+        THE O(1) PROPERTY: the carried state already holds every bar absorbed so far, so only bars NEWER than the
+        minimum absorbed minute need marshaling. When every present symbol has state and the buffer is advancing,
+        slice off the already-absorbed prefix BEFORE the expensive polars sort/group_by/to_list — the live cost
+        is then O(new-bars × symbols), not O(window × symbols). The cold start (a symbol without state) and a
+        rewound buffer fall back to the whole buffer so the per-symbol reseed in ``fold_symbol_to`` stays exact.
+        """
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+        if frame.height == 0:
+            return swing_fold_frame(frame)
+        state = self._live_state
+        # ONE pass adds the epoch-minute column; everything below reads it (no repeated whole-buffer scans).
+        keyed = frame.with_columns(pl.col("minute").dt.epoch("s").alias("_mi"))
+        latest_epoch = int(keyed["_mi"].max())  # type: ignore[arg-type]
+        latest = keyed.filter(pl.col("_mi") == latest_epoch)["minute"][0]
+        latest_symbols = set(keyed.filter(pl.col("_mi") == latest_epoch)["symbol"].to_list())
+        # Slice to the unabsorbed tail when safe: all present symbols known AND the buffer is not rewound (its
+        # newest minute is at/after the absorbed floor). Otherwise keep the whole buffer (cold-seed / reseed).
+        floor = state.min_absorbed(keyed["symbol"].unique().to_list())
+        if floor is not None and latest_epoch >= floor:
+            keyed = keyed.filter(pl.col("_mi") > floor)
+        ordered = keyed.sort(["symbol", "_mi"])
+        folded: dict[str, tuple[float, ...]] = {}
+        for symbol, sub in ordered.group_by("symbol", maintain_order=True):
+            symbol_name = symbol[0] if isinstance(symbol, tuple) else symbol
+            row = state.fold_symbol_to(symbol_name, sub["close"].to_list(), sub["_mi"].to_list())
+            if row is not None:
+                folded[symbol_name] = row
+        rows: list[dict[str, object]] = []
+        for symbol_name in latest_symbols:
+            # A symbol at the latest minute emits its just-folded row; if the slice held no new bar for it (a
+            # re-delivered minute with no advance) re-serve its standing row — the row the whole-buffer fold
+            # would still emit at ``latest`` since no later bar exists to change it.
+            row = folded.get(symbol_name) or state.standing_row(symbol_name)
+            if row is not None:
+                rows.append({"symbol": symbol_name, "minute": latest, **dict(zip(_FEATURE_COLS, row))})
+        if not rows:
+            return pl.DataFrame(schema=_SCHEMA)
+        out = pl.DataFrame(rows, schema=_SCHEMA)
+        # Restore the kernel's NaN sentinels to Polars null exactly as swing_fold_frame does, so the live cells
+        # are MISSING (warmup) not finite — byte-identical missing-representation to the backfill path.
+        out = out.with_columns(
+            [pl.col(name).fill_nan(None) for name in ("minutes_since_pivot", "fib_retracement")]
+        )
+        return out.select(["symbol", "minute", *_FEATURE_COLS])

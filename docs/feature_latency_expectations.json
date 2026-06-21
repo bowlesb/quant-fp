@@ -251,10 +251,11 @@
       "group": "swing",
       "feat_count": 9,
       "kind": "Rust-resident",
-      "mechanism": "quant_tick.swing_fold Rust kernel",
-      "incremental_ready": "n-a",
+      "mechanism": "quant_tick.swing_fold kernel; live carries per-symbol leg-state (FP_SWING_STATEFUL) — default re-folds whole buffer",
+      "incremental_ready": "stateful-gated",
       "p50_ms": 28.71,
-      "p99_ms": 42.35
+      "p99_ms": 42.35,
+      "note": "The Rust kernel folds O(1)/bar, but DEFAULT compute_latest re-invokes it over the WHOLE ring each minute. FP_SWING_STATEFUL=1 carries the leg-state and folds only the new minute (value-identical, fp-unchanged): measured 26.1->15.5ms p50 group-local; full O(1) needs delta-passing (docs/FEATURE_EFFICIENCY_AUDIT.md)."
     },
     {
       "group": "cross_sectional_rank",

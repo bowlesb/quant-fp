@@ -295,6 +295,78 @@ def test_swing_fib_degenerate_microleg_guarded() -> None:
     )
 
 
+def test_swing_stateful_compute_latest_equals_backfill_every_minute(monkeypatch) -> None:
+    """STATEFUL LIVE == BACKFILL: with FP_SWING_STATEFUL=1, walking the carried per-symbol leg-state minute by
+    minute (the production live driver — a monotonically growing/sliding buffer on ONE group instance, folding
+    only the new minute each time) reaches the Rust whole-buffer backfill cell-for-cell at EVERY minute. This is
+    the O(1)/minute path's value-identity proof — folding the new bar onto carried state == re-folding the whole
+    buffer (fold == reseed)."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    stream = _stream(n_sym=6, n_min=160, seed=7)
+    minutes = sorted(stream["minute"].unique())
+    backfill = SwingGroup().compute(BatchContext(frames={"minute_agg": stream}))
+    # Simulate the live ring: a trailing buffer of at most RING_DEPTH minutes, advanced ONE minute at a time on a
+    # single carried-state instance. A bounded ring (here shorter than the stream) also exercises that a symbol's
+    # state is carried across minutes that have scrolled OUT of the buffer — the whole point of carrying state.
+    ring_depth = 45
+    group = SwingGroup()
+    for ti in range(len(minutes)):
+        minute = minutes[ti]
+        lo = minutes[max(0, ti - ring_depth + 1)]
+        buffer = stream.filter((pl.col("minute") >= lo) & (pl.col("minute") <= minute))
+        latest = group.compute_latest(BatchContext(frames={"minute_agg": buffer})).sort("symbol")
+        back_t = backfill.filter(pl.col("minute") == minute).sort("symbol")
+        for name in _FEATURES:
+            got = latest[name].to_list()
+            want = back_t[name].to_list()
+            assert len(got) == len(want), f"row count @min{ti} {name}"
+            for sym_i in range(len(got)):
+                assert _cell_equal(got[sym_i], want[sym_i]), (
+                    f"STATEFUL latest@min{ti} {name} sym{sym_i}: {got[sym_i]} != backfill {want[sym_i]}"
+                )
+
+
+def test_swing_stateful_handles_redelivered_minute(monkeypatch) -> None:
+    """A re-delivered minute (reconnect/replay of the SAME bar) is folded at most once: feeding the buffer twice
+    in a row leaves the carried state — and the emitted row — identical to a single feed (keep-last de-dup)."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    stream = _stream(n_sym=4, n_min=90, seed=3)
+    minutes = sorted(stream["minute"].unique())
+    backfill = SwingGroup().compute(BatchContext(frames={"minute_agg": stream}))
+    group = SwingGroup()
+    for ti in range(len(minutes)):
+        buffer = stream.filter(pl.col("minute") <= minutes[ti])
+        ctx = BatchContext(frames={"minute_agg": buffer})
+        group.compute_latest(ctx)  # first delivery
+        latest = group.compute_latest(ctx).sort("symbol")  # SAME minute re-delivered -> must be a no-op fold
+        back_t = backfill.filter(pl.col("minute") == minutes[ti]).sort("symbol")
+        for name in _FEATURES:
+            got, want = latest[name].to_list(), back_t[name].to_list()
+            for sym_i in range(len(got)):
+                assert _cell_equal(got[sym_i], want[sym_i]), f"redelivered@min{ti} {name} sym{sym_i}"
+
+
+def test_swing_stateful_reseeds_on_rewound_buffer(monkeypatch) -> None:
+    """A buffer that REWINDS (a fresh/replayed history ending BEFORE the carried state's last minute) drops the
+    stale state and reseeds from the buffer, so the emitted row matches the backfill at the rewound minute — the
+    carried-state path is correct regardless of call order (crash-recovery / reconnect-from-earlier safe)."""
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    stream = _stream(n_sym=3, n_min=120, seed=9)
+    minutes = sorted(stream["minute"].unique())
+    backfill = SwingGroup().compute(BatchContext(frames={"minute_agg": stream}))
+    group = SwingGroup()
+    # advance to a late minute, then HAND IT an earlier buffer (rewind) and assert it reseeds to the right row.
+    group.compute_latest(BatchContext(frames={"minute_agg": stream.filter(pl.col("minute") <= minutes[100])}))
+    rewound_ti = 30
+    rewound = stream.filter(pl.col("minute") <= minutes[rewound_ti])
+    latest = group.compute_latest(BatchContext(frames={"minute_agg": rewound})).sort("symbol")
+    back_t = backfill.filter(pl.col("minute") == minutes[rewound_ti]).sort("symbol")
+    for name in _FEATURES:
+        got, want = latest[name].to_list(), back_t[name].to_list()
+        for sym_i in range(len(got)):
+            assert _cell_equal(got[sym_i], want[sym_i]), f"rewound@min{rewound_ti} {name} sym{sym_i}"
+
+
 def test_swing_features_are_valid() -> None:
     """Every declared swing feature is VALID (>= 2 unique finite values across the stream) — no dead feature."""
     stream = _stream(n_sym=6, n_min=200, seed=5)
