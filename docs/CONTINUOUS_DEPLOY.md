@@ -70,23 +70,42 @@ reproducible, and has the real environment. So CI is a **watcher daemon on the b
 ## Coverage honesty — the gate runs EVERYTHING, and is loud about what it can't
 
 A gate that runs only `test_fp_*.py` would silently skip **90 of 156** test files — exactly the half-tested
-pattern. So the gate runs the **whole `tests/` dir** as two jobs, and audits for blind spots:
+pattern. So the gate runs the **whole `tests/` dir** across jobs, and audits for blind spots:
 
-- **`fp` job** — the entire `tests/` dir in base `fp-dev`, `--ignore`-ing only the dashboard-dep files below.
-- **`dashboard` job** — `test_group_guide.py`, `test_store_grid.py`, `test_store_grid_cache.py`,
+- **`fp` job** (GATING) — the entire `tests/` dir in base `fp-dev`, `--ignore`-ing only the dashboard-dep
+  files and the timing files below.
+- **`dashboard` job** (GATING) — `test_group_guide.py`, `test_store_grid.py`, `test_store_grid_cache.py`,
   `test_latency_expectations_route.py` run in `fp-dev` after `pip install -r
   services/dashboard/requirements.txt`. These import `fastapi` / `pyyaml` / `pymongo`, which are NOT in the
   base `fp-dev` image, so they ERROR at collection there (a real, pre-existing CI blind spot). Installing the
   dashboard's own (authoritative, drift-proof) requirements lets them run. They are **excluded explicitly and
   visibly**, never silently skipped.
+- **`timing` job** (NON-GATING / informational) — see the next section.
 - **coverage audit** — after the jobs, the gate `--collect-only`s `tests/` and reports any `test_*.py` that
   errors at collection yet is NOT a known dashboard-dep file. A NEW test that pulls an uninstalled dep (the
   same failure mode) is flagged **loudly and turns the gate RED**, so a whole untested class can never hide
   behind a green badge.
 
-The PR is **green only if every job passes AND the audit is empty**. The sticky comment lists each job's
-verdict and any uncovered files. When a new dashboard-dep test appears, add it to `DASHBOARD_DEP_TESTS` in
-`ops/ci_watcher.py` (the audit will have already turned the gate red to force the decision).
+The PR is **green only if every GATING job passes AND the audit is empty**. The sticky comment lists each
+job's verdict (with the timing job flagged informational) and any uncovered files. When a new dashboard-dep
+test appears, add it to `DASHBOARD_DEP_TESTS` in `ops/ci_watcher.py` (the audit will have already turned the
+gate red to force the decision).
+
+## Wall-clock timing tests must not false-red the gate
+
+A few tests assert on **measured elapsed milliseconds** against a budget/ceiling
+(`test_fp_latency_budget.py`, `test_fp_latency.py`, `test_fp_latency_e2e.py`). On a loaded box — the agent
+fleet routinely pushes load to ~48 — these false-red (e.g. `volatility 37.3ms > 33ms`, passes clean in
+isolation). They are **wall-clock** tests, not correctness tests. If they could red the blocking gate, the
+gate would cry wolf on legitimate PRs and lose all credibility.
+
+So they run as a **separate, non-gating `timing` job** (`TIMING_TESTS` in `ops/ci_watcher.py`): their result
+is **reported informationally** in the sticky comment but **never** affects the `ci/fp-suite` commit status.
+**Correctness gates hard; timing never blocks.** Note this demotes only elapsed-time assertions —
+`test_fp_latency_metrics.py` / `_drilldown.py` / `_expectations.py` assert on recorded *values* (logic), so
+they stay in the gating `fp` job. `SuiteResult.passed` is unit-tested for exactly this:
+`tests/test_fp_ci_gating.py` proves a timing-job failure stays GREEN while a correctness failure or a
+coverage blind spot goes RED.
 
 ## Phase 1 — the CI gate (SHIPPED FIRST)
 

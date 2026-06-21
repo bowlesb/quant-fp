@@ -68,6 +68,17 @@ DASHBOARD_DEP_TESTS = (
     "tests/test_latency_expectations_route.py",
 )
 DASHBOARD_REQUIREMENTS = "services/dashboard/requirements.txt"
+# WALL-CLOCK TIMING tests — they measure elapsed ms against a budget/ceiling, so they FALSE-RED on a loaded
+# box (the agent fleet routinely pushes load to ~48). They run as a SEPARATE, NON-GATING `timing` job:
+# reported informationally, but NEVER blocking the merge gate — a timing flake must not red a correct PR, or
+# the gate cries wolf and gets ignored. CORRECTNESS (parity / fingerprint / value-identity / metric LOGIC)
+# gates hard; only these elapsed-time assertions are demoted. test_fp_latency_metrics/_drilldown/_expectations
+# are NOT here — they assert on recorded VALUES, not wall-clock, so they stay in the gate.
+TIMING_TESTS = (
+    "tests/test_fp_latency_budget.py",  # per-group profile(latest) ms < budget — the flaky one
+    "tests/test_fp_latency.py",  # us/feature + trades-live ceilings (measured ms)
+    "tests/test_fp_latency_e2e.py",  # opt-in sim e2e latency (self-skips without FP_LATENCY_E2E)
+)
 # Bound a single suite run so a hung test can't wedge the daemon. The full suite is well under this.
 SUITE_TIMEOUT_S = int(os.environ.get("CI_SUITE_TIMEOUT_S", "1200"))
 
@@ -192,6 +203,7 @@ class JobResult:
     name: str
     passed: bool
     tail: str
+    gating: bool = True  # if False, the job is INFORMATIONAL — reported but never blocks the merge gate
 
 
 @dataclass
@@ -203,11 +215,12 @@ class SuiteResult:
 
     @property
     def passed(self) -> bool:
-        # Green only if EVERY job passes AND nothing is uncovered — never "green" with a class untested.
-        return all(job.passed for job in self.jobs) and not self.uncovered
+        # Green iff every GATING job passes AND nothing is uncovered. Non-gating (timing) jobs are reported
+        # but never block — a wall-clock flake under load must not red a correct PR.
+        return all(job.passed for job in self.jobs if job.gating) and not self.uncovered
 
 
-def _run_pytest(worktree: str, pytest_cmd: str, job_name: str) -> JobResult:
+def _run_pytest(worktree: str, pytest_cmd: str, job_name: str, gating: bool = True) -> JobResult:
     """Run one pytest invocation in an fp-dev --rm container (env-scrubbed, host-user). sh -c so globs expand.
 
     SECURITY: no ``--env-file .env`` / no secret env — the suite needs none, so the paper Alpaca creds can
@@ -217,34 +230,42 @@ def _run_pytest(worktree: str, pytest_cmd: str, job_name: str) -> JobResult:
     try:
         result = run(cmd, timeout=SUITE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return JobResult(job_name, False, f"{job_name} TIMED OUT after {SUITE_TIMEOUT_S}s")
+        return JobResult(job_name, False, f"{job_name} TIMED OUT after {SUITE_TIMEOUT_S}s", gating)
     output = (result.stdout + "\n" + result.stderr).strip()
     tail = "\n".join(output.splitlines()[-25:])
-    return JobResult(job_name, result.returncode == 0, tail)
+    return JobResult(job_name, result.returncode == 0, tail, gating)
 
 
 def run_suite(worktree: str) -> SuiteResult:
     """Run every CI job over the checkout + audit that no test file went unrun.
 
-    Job 1 (fp): the WHOLE ``tests/`` dir in base fp-dev, ``--ignore``-ing the dashboard-dep files (which can't
-    import there). Job 2 (dashboard): exactly those files, in fp-dev after installing the dashboard's own
-    requirements (the authoritative dep closure). Then a coverage audit: every ``tests/test_*.py`` on disk
-    must be run by some job — anything else is reported LOUDLY (it makes the suite RED), so a new untested
-    class can never hide behind a green badge.
+    - ``fp`` (GATING): the WHOLE ``tests/`` dir in base fp-dev, ``--ignore``-ing the dashboard-dep files AND
+      the wall-clock TIMING files (those are flaky under box load and run separately, non-gating).
+    - ``dashboard`` (GATING): the dashboard-dep files, in fp-dev after installing the dashboard's own
+      requirements (the authoritative dep closure).
+    - ``timing`` (NON-GATING / informational): the wall-clock latency tests. Reported but NEVER blocks the
+      merge — a timing flake on a loaded box must not red a correct PR.
+    Then a coverage audit: every ``tests/test_*.py`` on disk must be run by some job — anything else is
+    reported LOUDLY (RED), so a new untested class can never hide behind a green badge.
     """
-    ignores = " ".join(f"--ignore={path}" for path in DASHBOARD_DEP_TESTS)
+    fp_excludes = (*DASHBOARD_DEP_TESTS, *TIMING_TESTS)
+    ignores = " ".join(f"--ignore={path}" for path in fp_excludes)
     fp_cmd = f"python -m pytest {SUITE_GLOB} {ignores} -q -p no:cacheprovider"
-    fp_job = _run_pytest(worktree, fp_cmd, "fp")
+    fp_job = _run_pytest(worktree, fp_cmd, "fp", gating=True)
 
     dash_targets = " ".join(DASHBOARD_DEP_TESTS)
     dash_cmd = (
         f"pip install -q --user -r {DASHBOARD_REQUIREMENTS} && "
         f"python -m pytest {dash_targets} -q -p no:cacheprovider"
     )
-    dash_job = _run_pytest(worktree, dash_cmd, "dashboard")
+    dash_job = _run_pytest(worktree, dash_cmd, "dashboard", gating=True)
+
+    timing_targets = " ".join(TIMING_TESTS)
+    timing_cmd = f"python -m pytest {timing_targets} -q -p no:cacheprovider"
+    timing_job = _run_pytest(worktree, timing_cmd, "timing", gating=False)
 
     uncovered = _audit_coverage(worktree)
-    return SuiteResult(jobs=[fp_job, dash_job], uncovered=uncovered)
+    return SuiteResult(jobs=[fp_job, dash_job, timing_job], uncovered=uncovered)
 
 
 def _audit_coverage(worktree: str) -> list[str]:
@@ -423,8 +444,10 @@ def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
     passed = suite.passed
     tier_str = "TIER-1 (auto)" if scope.tier is Tier.AUTO else "TIER-2 (gated)"
     state = "success" if passed else "failure"
-    jobs_str = ", ".join(f"{job.name}={'ok' if job.passed else 'RED'}" for job in suite.jobs)
-    summary = f"suite {'GREEN' if passed else 'RED'} ({jobs_str}) — {tier_str}"
+    jobs_str = ", ".join(
+        f"{job.name}={'ok' if job.passed else 'RED'}{'' if job.gating else '*'}" for job in suite.jobs
+    )
+    summary = f"gate {'GREEN' if passed else 'RED'} ({jobs_str}; *=non-gating) — {tier_str}"
     post_status(pr.head_sha, state, summary)
 
     body = _comment_body(suite, scope, len(paths))
@@ -447,19 +470,18 @@ def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
 def _comment_body(suite: SuiteResult, scope: ScopeResult, n_paths: int) -> str:
     """Render the sticky CI comment — per-job verdicts + the coverage-honesty audit + scope."""
     passed = suite.passed
-    status_line = "✅ **suite GREEN**" if passed else "❌ **suite RED**"
+    status_line = "✅ **gate GREEN**" if passed else "❌ **gate RED**"
     tier = scope.tier.value
     reasons = "\n".join(f"- {reason}" for reason in scope.reasons)
-    job_lines = "\n".join(
-        f"- `{job.name}`: {'✅ passed' if job.passed else '❌ FAILED'}" for job in suite.jobs
-    )
+    job_lines = "\n".join(_job_line(job) for job in suite.jobs)
     lines = [
         f"## CI — `{STATUS_CONTEXT}`",
         "",
         status_line,
         f"**Scope:** `{tier}` ({n_paths} changed paths)",
         "",
-        "**Jobs** (every job must pass — the dashboard-dep tests run in their own env, not silently skipped):",
+        "**Jobs** (gating jobs must pass; the `timing` job is informational — wall-clock tests that flake "
+        "under box load never block a correct PR; dashboard-dep tests run in their own env, not skipped):",
         job_lines,
     ]
     if suite.uncovered:
@@ -473,9 +495,10 @@ def _comment_body(suite: SuiteResult, scope: ScopeResult, n_paths: int) -> str:
     lines += ["", "**Scope reasons:**", reasons]
     for job in suite.jobs:
         if not job.passed:
+            note = "" if job.gating else " — INFORMATIONAL, does not block the gate"
             lines += [
                 "",
-                f"<details><summary>{job.name} job output (tail)</summary>",
+                f"<details><summary>{job.name} job output (tail){note}</summary>",
                 "",
                 "```",
                 job.tail,
@@ -483,10 +506,17 @@ def _comment_body(suite: SuiteResult, scope: ScopeResult, n_paths: int) -> str:
                 "</details>",
             ]
     if tier == Tier.AUTO.value and passed:
-        lines += ["", "_TIER-1 + green → eligible for auto-merge._"]
+        lines += ["", "_TIER-1 + gate green → eligible for auto-merge._"]
     elif tier == Tier.GATED.value:
         lines += ["", "_TIER-2 → gated to the Lead's controlled relaunch window; will NOT auto-merge._"]
     return "\n".join(lines)
+
+
+def _job_line(job: JobResult) -> str:
+    """One job's line in the sticky comment; non-gating jobs are flagged informational."""
+    verdict = "✅ passed" if job.passed else "❌ FAILED"
+    suffix = "" if job.gating else " _(informational — non-gating)_"
+    return f"- `{job.name}`: {verdict}{suffix}"
 
 
 _BASE_FP_CACHE: tuple[str, int] | None = None
