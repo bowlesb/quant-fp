@@ -175,7 +175,7 @@ else
       printf '%s\n' "$PY_JSON" | jq -r '
         "HEALTHCHECK phase=\(.phase) ts=\(.ts)",
         (.checks[] | "  \(.status|.[0:4]) \(.name)  \(.detail)"),
-        "HEALTHCHECK \(.summary.pass) PASS / \(.summary.warn) WARN / \(.summary.fail) FAIL"
+        "HEALTHCHECK \(.summary.pass) PASS / \(.summary.warn) WARN / \(.summary.fail) FAIL\((.summary.skip // 0) | if . > 0 then " / \(.) SKIP" else "" end)"
       '
     else
       printf '%s\n' "$PY_JSON"

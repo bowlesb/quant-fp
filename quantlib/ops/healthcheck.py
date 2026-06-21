@@ -76,6 +76,7 @@ class Status(str, Enum):
     PASS = "PASS"
     WARN = "WARN"
     FAIL = "FAIL"
+    SKIP = "SKIP"  # not graded this run (e.g. market closed) — never counts as a failure
 
 
 @dataclass
@@ -138,6 +139,57 @@ def resolve_phase(requested: str, reference: datetime | None = None) -> Phase:
     moment = reference if reference is not None else now_et()
     et_moment = moment.astimezone(ET)
     return Phase(requested, et_moment.hour * 60 + et_moment.minute)
+
+
+# NYSE full-day closures. detect_phase() already maps weekends + off-hours to the "closed" phase, so the
+# only gap a wall-clock-only predicate misses is a WEEKDAY holiday (e.g. Juneteenth 2026-06-19): the store
+# has no equity stream that day but the phase would otherwise read premarket/rth. Listing the full-day
+# closures keeps the store-coverage gate network-free (the only calendar source the codebase has is the
+# Alpaca API, too heavy/flaky to hit every cron tick). Early-close days (e.g. day after Thanksgiving) are
+# deliberately omitted — the market IS open, so coverage should still be graded.
+MARKET_HOLIDAYS: frozenset[date] = frozenset(
+    {
+        date(2026, 1, 1),  # New Year's Day
+        date(2026, 1, 19),  # MLK Jr. Day
+        date(2026, 2, 16),  # Washington's Birthday
+        date(2026, 4, 3),  # Good Friday
+        date(2026, 5, 25),  # Memorial Day
+        date(2026, 6, 19),  # Juneteenth
+        date(2026, 7, 3),  # Independence Day (observed)
+        date(2026, 9, 7),  # Labor Day
+        date(2026, 11, 26),  # Thanksgiving
+        date(2026, 12, 25),  # Christmas
+        date(2027, 1, 1),  # New Year's Day
+        date(2027, 1, 18),  # MLK Jr. Day
+        date(2027, 2, 15),  # Washington's Birthday
+        date(2027, 3, 26),  # Good Friday
+        date(2027, 5, 31),  # Memorial Day
+        date(2027, 6, 18),  # Juneteenth (observed)
+        date(2027, 7, 5),  # Independence Day (observed)
+        date(2027, 9, 6),  # Labor Day
+        date(2027, 11, 25),  # Thanksgiving
+        date(2027, 12, 24),  # Christmas (observed)
+    }
+)
+
+
+def is_market_holiday(reference: datetime | None = None) -> bool:
+    """True if the ET calendar date of ``reference`` is a known NYSE full-day closure."""
+    return et_today(reference) in MARKET_HOLIDAYS
+
+
+def equity_stream_expected(phase: Phase, reference: datetime | None = None) -> bool:
+    """True when a live equity stream (and thus today's store partition) should exist.
+
+    False off-session — the "closed" phase (weekends + overnight, from detect_phase) or a market holiday.
+    The store-coverage checks gate on this so they SKIP rather than FAIL when there is legitimately no
+    stream to read (mirrors data_freshness's INACTIVE off-business-hours grading).
+    """
+    if phase.name == "closed":
+        return False
+    if is_market_holiday(reference):
+        return False
+    return True
 
 
 def db_connect() -> psycopg.Connection:
@@ -668,10 +720,49 @@ def check_db_growth() -> CheckResult:
 
 CheckFn = Callable[[], CheckResult]
 
+# Checks that read today's equity *stream* partition (glob over source=stream/date=<today>). Off-session
+# that glob is empty and the underlying polars scan raises ComputeError "expanded paths were empty", which
+# the fault-isolating dispatcher turns into a FAIL — a false alarm every weekend/holiday. When no equity
+# stream is expected these SKIP instead (see equity_stream_expected); on a trading minute they evaluate
+# normally. Kept as an explicit set so adding a stream-reading check is a one-line opt-in.
+STREAM_COVERAGE_CHECKS: frozenset[str] = frozenset(
+    {
+        "newest_minute_age",
+        "distinct_symbol_coverage",
+        "per_minute_active",
+        "alphabetical_bias",
+        "ohlc_invariants",
+    }
+)
 
-def build_registry(phase: Phase) -> list[tuple[str, CheckFn]]:
-    """Named checks in run order. Phase-dependent checks are bound to the resolved phase here."""
-    return [
+
+def skip_off_session(name: str, phase: Phase, reference: datetime | None = None) -> CheckResult:
+    """The SKIP result a stream-coverage check yields when no equity stream is expected."""
+    reason = "market holiday" if is_market_holiday(reference) else f"market closed (phase={phase.name})"
+    return CheckResult(
+        name,
+        Status.SKIP,
+        f"skipped: {reason} — no equity stream to grade off-session",
+    )
+
+
+def make_skip_fn(name: str, phase: Phase, reference: datetime | None) -> CheckFn:
+    """A zero-arg CheckFn yielding the off-session SKIP for ``name`` (binds name/phase/reference)."""
+
+    def _skip() -> CheckResult:
+        return skip_off_session(name, phase, reference)
+
+    return _skip
+
+
+def build_registry(phase: Phase, reference: datetime | None = None) -> list[tuple[str, CheckFn]]:
+    """Named checks in run order. Phase-dependent checks are bound to the resolved phase here.
+
+    When no equity stream is expected (off-session/holiday), the stream-coverage checks are replaced by a
+    SKIP so an empty store partition reads as "not graded" rather than a hard FAIL. ``reference`` injects
+    the wall-clock for the off-session predicate (the cron passes None -> real time; tests pin a date).
+    """
+    base: list[tuple[str, CheckFn]] = [
         ("newest_minute_age", check_newest_minute_age),
         ("worker_targets_up", check_worker_targets_up),
         ("universe_size", check_universe_size),
@@ -687,6 +778,12 @@ def build_registry(phase: Phase) -> list[tuple[str, CheckFn]]:
         ("trust_grades", check_trust_grades),
         ("disk_space", check_disk_space),
         ("db_growth", check_db_growth),
+    ]
+    if equity_stream_expected(phase, reference):
+        return base
+    return [
+        (name, make_skip_fn(name, phase, reference) if name in STREAM_COVERAGE_CHECKS else check_fn)
+        for name, check_fn in base
     ]
 
 
@@ -717,11 +814,16 @@ def run_all(phase: Phase) -> list[CheckResult]:
 
 
 def summarize(results: list[CheckResult]) -> tuple[int, int, int]:
-    """(n_pass, n_warn, n_fail)."""
+    """(n_pass, n_warn, n_fail). SKIP is excluded — neither healthy nor a failure; see count_skips."""
     n_pass = sum(1 for result in results if result.status == Status.PASS)
     n_warn = sum(1 for result in results if result.status == Status.WARN)
     n_fail = sum(1 for result in results if result.status == Status.FAIL)
     return n_pass, n_warn, n_fail
+
+
+def count_skips(results: list[CheckResult]) -> int:
+    """Number of checks not graded this run (e.g. stream-coverage off-session)."""
+    return sum(1 for result in results if result.status == Status.SKIP)
 
 
 def exit_code_for(results: list[CheckResult]) -> int:
@@ -739,17 +841,20 @@ def render_text(results: list[CheckResult], phase: Phase) -> str:
             f"  {result.status.value:<4} {result.name:<{name_width}}  {result.detail}{metric}"
         )
     n_pass, n_warn, n_fail = summarize(results)
-    lines.append(f"HEALTHCHECK {n_pass} PASS / {n_warn} WARN / {n_fail} FAIL")
+    n_skip = count_skips(results)
+    skip_suffix = f" / {n_skip} SKIP" if n_skip else ""
+    lines.append(f"HEALTHCHECK {n_pass} PASS / {n_warn} WARN / {n_fail} FAIL{skip_suffix}")
     return "\n".join(lines)
 
 
 def render_json(results: list[CheckResult], phase: Phase) -> str:
     n_pass, n_warn, n_fail = summarize(results)
+    n_skip = count_skips(results)
     payload = {
         "ts": datetime.now(tz=timezone.utc).isoformat(),
         "phase": phase.name,
         "et_minute_of_day": phase.et_minute_of_day,
-        "summary": {"pass": n_pass, "warn": n_warn, "fail": n_fail},
+        "summary": {"pass": n_pass, "warn": n_warn, "fail": n_fail, "skip": n_skip},
         "exit_code": exit_code_for(results),
         "checks": [result.to_dict() for result in results],
     }
