@@ -12,9 +12,13 @@ form), NOT a number to bump. Re-seed a budget only on a DELIBERATE, reviewed cha
 
 from __future__ import annotations
 
+import importlib
+
 from pathlib import Path
 
-from quantlib.features.profile import build_frames, profile
+import pytest
+
+from quantlib.features.profile import LIVE_TICK_BREADTH, build_frames, profile
 
 _BUDGET_PATH = Path(__file__).resolve().parents[1] / "docs" / "latency_budget.yaml"
 _SCREEN_REPS = 5  # first pass — min over these to shake off most contention noise
@@ -83,6 +87,21 @@ def test_every_group_under_its_latency_budget() -> None:
             f"({row['ms'] / budgets[row['group']]:.2f}x)"
             for row in sorted(confirmed, key=lambda r: -r["ms"] / budgets[r["group"]])
         )
+    )
+
+
+def test_live_tick_breadth_matches_capture_default() -> None:
+    """The profiler's live raw-tape breadth (used to thin the tick groups' tape to true live cost, #381)
+    must equal the live capture default tick-subscribed set. Kept as a literal in profile.py so the gate
+    imports with no DB/capture dependency; this guards it from silently drifting from the source. Skipped
+    only when real_capture cannot import (no DB env) — the literal is then unverifiable here, not wrong."""
+    try:
+        real_capture = importlib.import_module("quantlib.features.real_capture")
+    except (ImportError, KeyError) as exc:  # KeyError: loaders reads os.environ["DB_PASSWORD"] at import
+        pytest.skip(f"real_capture not importable (no DB env): {exc}")
+    assert LIVE_TICK_BREADTH == len(real_capture.DEFAULT_TICK_SYMBOLS), (
+        f"profile.LIVE_TICK_BREADTH ({LIVE_TICK_BREADTH}) drifted from "
+        f"real_capture.DEFAULT_TICK_SYMBOLS ({len(real_capture.DEFAULT_TICK_SYMBOLS)}) — update the literal"
     )
 
 

@@ -99,11 +99,13 @@ order a UI renders. The schema is stable so the dashboard viz binds to it:
 `quantlib.features.latency_expectations` produces **two** measurements, both reproducible, neither touching
 live capture:
 
-1. **Per-group p50/p95/p99 (the rankable `groups` array)** — each runnable group's `compute_latest` (the LIVE
-   per-minute path) timed in **isolation** at the reference shard, over a distribution of reps, keeping the
-   full distribution so all three percentiles are real. *Why isolated, not the sim:* the streaming sim splits
-   the shared reduction emit **evenly** across its reduction groups, so it reports one identical number for
-   all of them and cannot rank them against each other — the isolated path gives each group its own cost.
+1. **Per-group p50/p95/p99 (the rankable `groups` array)** — each runnable group's **TRUE LIVE per-minute
+   path** timed in **isolation** at the reference shard, over a distribution of reps, keeping the full
+   distribution so all three percentiles are real. *Why isolated, not the sim:* the streaming sim splits the
+   shared reduction emit **evenly** across its reduction groups, so it reports one identical number for all of
+   them and cannot rank them against each other — the isolated path gives each group its own cost. *What "true
+   live path" means (the #381 measurement-honesty correction):* the timing dispatches per group so the JSON
+   reflects what live capture actually pays, not a profiler artifact — see the next subsection.
 2. **The in-flow e2e block (`e2e_context.measured_at_sim_scale`)** — p50/p95/p99 of the real bar→vector
    wall-clock from driving the **REAL streaming path**: the #315 sim harness `run_profile_sim_raw`
    (protocol-faithful msgpack mock → a real `StockDataStream` → the same shard workers → the incremental fast
@@ -119,6 +121,55 @@ the **crypto live numbers** are the "is this in the right ballpark of real captu
 
 Absolute ms moves with host load; that is why the JSON is RE-measured (not hand-edited) whenever the latency
 picture changes, and why the pytest ceilings carry generous headroom.
+
+## Measurement honesty — profiling the TRUE live path (#381 item #8)
+
+The per-group timing is **dispatched** (`quantlib.features.profile._live_call`) so each group is measured on
+the path live capture actually runs, not a same-name but different-cost profiler twin. Two whole classes were
+over-stated before this correction (the #381 exhaustive audit, §0/§2b/§2d named them; this is the measurement
+fix):
+
+- **The 4 `StatefulGroup`s** (`price_returns`, `technical`, `price_levels`, `candlestick`). Their
+  `compute_latest` runs `_state_frame_rolling` — the **backfill rolling-derive twin** that rebuilds every
+  EMA/lag/extrema over the whole buffer each call. Live, capture instead seeds a `StatefulEngine` **once**
+  then folds **one minute** per bar (`StatefulEngine.step()`, O(symbols×state)). The profiler now **seeds once
+  (warm-up, excluded) then times `step()`** — the real per-minute cost.
+- **The raw-`trades` tick groups** (the `kind: hand-written` set — `subminute_gap_fano`, `size_entropy`,
+  `print_hhi`, `inter_arrival`, `microstructure_burst`, `large_print_burst`, `tick_runlength`,
+  `trade_size_dist`). The synthetic frames carry a tape for the **full** reference universe (312 symbols), but
+  live only the **tick-SUBSCRIBED** symbols stream a raw trades feed (`real_capture.DEFAULT_TICK_SYMBOLS`, 24
+  today; ops widen with `FP_TICK_SYMBOLS`). The profiler now thins the `trades` frame to `LIVE_TICK_BREADTH`
+  for these groups (detected declaratively: a group whose `inputs` name `trades`). Bar/minute-agg groups
+  (incl. the reduction tick groups `count_fano`/`trade_flow`/`trade_freq_z`, which read `minute_agg`, not the
+  tape) read every symbol's bar and are unchanged.
+
+`swing` is **not** corrected here: it is a `FeatureGroup` (not a `StatefulGroup`), and its cost is a real
+flag-gated lever (`FP_SWING_STATEFUL`), not a measurement artifact — its `compute_latest` is the honest
+default-path number.
+
+**Before → after (the corrected groups, p50 / p99 ms):**
+
+| group | before p50 | after p50 | before p99 | after p99 |
+|---|---|---|---|---|
+| `price_returns` | 42.7 | **3.4** | 48.5 | **4.0** |
+| `subminute_gap_fano` | 48.6 | **4.3** | 65.3 | **7.6** |
+| `size_entropy` | 21.6 | **3.8** | 26.8 | **5.2** |
+| `technical` | 17.4 | **5.0** | 21.9 | **5.7** |
+| `price_levels` | 14.4 | **3.5** | 18.5 | **4.4** |
+| `print_hhi` | 11.3 | **1.2** | 12.8 | **2.0** |
+| `candlestick` | 8.9 | **3.1** | 11.3 | **6.0** |
+| `inter_arrival` | 6.2 | **1.1** | 8.0 | **1.6** |
+| `microstructure_burst` | 6.6 | **1.2** | 8.9 | ~1.6\* |
+| `large_print_burst` | 2.6 | **0.7** | 4.3 | **1.0** |
+| `tick_runlength` | 2.1 | **0.7** | 4.1 | **0.8** |
+| `trade_size_dist` | 1.5 | **0.5** | 2.3 | **0.6** |
+
+\* `microstructure_burst` p50 dropped 6.6→1.2; its p99 is a single-rep contention tail (the JSON cell carries
+whatever the regen measured). `price_returns` fell from the **#5 slowest group** off the slow list entirely.
+The regression budgets (`docs/latency_budget.yaml`) were re-seeded on these true-live numbers with the SAME
+`max(2×measured, measured+5ms)` rule, so the gate now detects a real regression on a now-fast group that the
+old artifact-inflated budgets would have masked (verified: an injected 40ms slowdown on `price_returns` —
+3.4ms live, 8.8ms budget — is caught; the old 88.6ms budget would not have).
 
 ## The recompute loop
 
