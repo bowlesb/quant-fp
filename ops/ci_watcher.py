@@ -177,16 +177,10 @@ def run_suite(worktree: str) -> tuple[bool, str]:
     paper Alpaca creds never reach a CI log. The container is --rm and bind-mounts the checkout read-write
     only at /app (its own throwaway worktree).
     """
-    cmd = [
-        *fp_docker(worktree),
-        "python",
-        "-m",
-        "pytest",
-        *SUITE_GLOB.split(),
-        "-q",
-        "-p",
-        "no:cacheprovider",
-    ]
+    # Run through ``sh -c`` so the container shell expands the ``test_fp_*.py`` glob (pytest itself does not
+    # glob; passed literally it errors "file or directory not found").
+    pytest_cmd = f"python -m pytest {SUITE_GLOB} -q -p no:cacheprovider"
+    cmd = [*fp_docker(worktree), "sh", "-c", pytest_cmd]
     try:
         result = run(cmd, timeout=SUITE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
