@@ -108,6 +108,28 @@ On a new merge to `main`, the deploy watcher:
 `fc` / fingerprint / strategy / crypto deploys are **never** auto — `fc` only via `ops/nightly_relaunch.sh`
 at the controlled window. The deploy allowlist physically cannot name `fc`.
 
+## Installing the daemons
+
+After PR #348 merges, run the two watchers as supervised loops. The restart-loop wrapper is
+`ops/ci_watcher.sh` (it restarts the python daemon after a 10s backoff if it dies, so a transient
+`gh`/`docker` hiccup can't take CI offline):
+
+```bash
+# The CI gate + auto-merge watcher (Phase 1-2)
+nohup ops/ci_watcher.sh ci    >> ~/.quant-ops/ci_watcher.log 2>&1 &
+# The auto-deploy watcher (Phase 3)
+nohup ops/ci_watcher.sh deploy >> ~/.quant-ops/ci_deploy.log  2>&1 &
+```
+
+A systemd unit (`Restart=always`, `WorkingDirectory=/home/ben/quant-fp`) is the durable form; until then the
+`nohup` loop or a `@reboot` cron line suffices. Phase-2 auto-merge is enabled by running the gate WITHOUT
+`--no-auto-merge` (the daemon default). To roll out conservatively, start with `--no-auto-merge` (gate +
+status only), watch it grade a few PRs correctly, then drop the flag.
+
+Env knobs: `CI_REPO_DIR` (default `/home/ben/quant-fp`), `CI_FP_IMAGE` (default `fp-dev`),
+`CI_POLL` (seconds), `CI_SUITE_GLOB` (default the full `tests/test_fp_*.py`), `CI_SUITE_TIMEOUT_S`,
+`CI_LIVE_TREE` (deploy watcher's live checkout).
+
 ## Hard boundaries (encoded in the code, not just here)
 
 - worktree → PR off `origin/main`; the watcher never edits the live `quantlib` tree.
