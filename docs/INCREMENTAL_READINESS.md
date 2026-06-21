@@ -182,3 +182,39 @@ on gappy windows); residual_analysis is the perfect-fit-SSR variant.
 VALIDATION when picked up: the gate tests `test_gappy_denom_group_still_breaches_gate_load_bearing[price_volume]`
 + `test_market_beta_breaches_on_real_gappy_spy_regressor` FLIP from breach→clean; full-set byte-eq; fp unchanged.
 
+**UPDATE 2026-06-21 — candidate (2) (cancellation-free Kahan/compensated denom) MEASURED + REFUTED; the
+ACTUAL root cause re-characterized (the prior "RETURN regressor" framing above was the wrong cell).** A
+Dekker TwoProduct difference-of-products (FMA-free — py3.12 has no `math.fma`) was built for
+`b·Σx²−(Σx)²` and `b·Σxy−Σx·Σy`, verified accurate to the EXACT denom of each path's sums (0 rel-err vs
+`Fraction`), and run on the 8 parked groups (force-`incremental_safe`) through the real-data soak
+(`scripts/incremental_realdata_soak.py`, 2026-06-17, 779 graded minutes). Findings:
+
+- **dop does NOT close the breach.** At the worst material cell (`trend_quality` `price_r2_5m` PFE/T,
+  `clean_momentum_score_5m`): corr naive Δ = 7.997e-5, corr **dop Δ = 8.291e-5** (marginally WORSE). The
+  breach is NOT the subtraction's own rounding — it is that the batch and incremental paths feed
+  DIFFERENTLY-CONDITIONED input sums, and compensated arithmetic on the subtraction cannot reconcile two
+  differently-rounded operand sets.
+- **The material breaches are the TIME-AXIS regressions, not the return regressor.** The `kind="time"` /
+  OBV (`kind="cumulative"`) regressions (`trend_quality.trend`, `clean_momentum`, `price_volume.obv`) form
+  `cov_n = b·Σxy − Σx·Σy` on a RAW epoch-minute axis where `Σxy ~ 1e12` (catastrophic cancellation), while
+  the incremental engine uses a small REBASED origin (axis ~tens, `Σxy ~ tens`, well-conditioned). OLS is
+  origin-invariant mathematically, so `denom_x` comes out bit-identical (rel 0) across the wildly-different
+  raw sums — but `cov_n`/`corr` round the SAME quantity differently because one path is ill-conditioned and
+  the other is not. MEASURED: re-centering the BATCH time axis shifts its corr by ~5e-6–9e-6 (the same order
+  as the cross-path Δ) toward the incremental value — i.e. the conditioning IS the axis origin scale.
+- **The `pv_correlation` (return-vs-volume) and `market_beta` breaches are the tiny-denom Class B, not value
+  bugs.** Their input sums differ by ~1 ULP (~1e-20) and the corr Δ is 5e-16…5e-13 — BELOW the 1e-6
+  tolerance. The parity-self-check ratio metric trips because the TRUE denom is near-zero (genuinely flat
+  window), not because the value is wrong; dop neither helps nor hurts (no material divergence to fix).
+
+**THE REAL FIX (re-aimed for the picker-upper): condition the TIME AXIS identically on BOTH paths.**
+Generalize `rebase_time_axis` (already applied in the incremental engine) to the BATCH marshal —
+`compute_reduction_batch` should center / origin-shift the `kind="time"` x-column (and the OBV cumulative
+slot) before forming the windowed sums, so the batch computes `cov_n`/`denom` on the SAME small-magnitude,
+well-conditioned axis the incremental path uses. Origin-invariant ⇒ value-preserving on good cells; it
+removes the ill-conditioning at its source (the operand scale) instead of trying to repair it after the
+subtraction. This is adjacent to RustIncremental's reduction_anchor work (task #67) — coordinate. The
+cancellation-free-denom candidate (2) is CLOSED (measured-refuted); candidate (1) (a per-symbol RETURN
+anchor) is moot for the material breaches (they are time-axis, not return-regressor). NO code shipped this
+pass (the investigation was measure-first and the approach did not clear the bar); fp UNCHANGED.
+
