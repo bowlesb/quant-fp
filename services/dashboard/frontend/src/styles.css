@@ -50,6 +50,9 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* grow to fill the topbar so the tab group's margin-left:auto can push it to the right edge (the "as of"
+     timestamp still sits to its right via the topbar's space-between) */
+  flex: 1;
 }
 .brand-mark {
   width: 16px;
@@ -605,7 +608,9 @@ body {
 .view-tabs {
   display: flex;
   gap: 4px;
-  margin-left: 14px;
+  /* push the tab group to the right edge of the topbar's left cluster (the title/branding stays pinned left,
+     the "as of" timestamp stays on the far right) */
+  margin-left: auto;
 }
 .view-tab {
   background: transparent;
