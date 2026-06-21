@@ -121,6 +121,25 @@ they stay in the gating `fp` job. `SuiteResult.passed` is unit-tested for exactl
 `tests/test_fp_ci_gating.py` proves a timing-job failure stays GREEN while a correctness failure or a
 coverage blind spot goes RED.
 
+## Speed — bounded parallelism (never starve live capture)
+
+The `fp` gating job is ~1200 tests; run serially it took **~30 min/PR** — too slow to grade the queue, so the
+gate becomes a bottleneck nobody waits for. It runs in **bounded parallel**: the job `pip install`s
+`pytest-xdist` and runs `-n CI_XDIST_WORKERS` (default **6**), dropping the fp job to ~5-8 min.
+
+Two hard guardrails, because this is a **32-core SHARED box** where `fc` / crypto / strategies do live
+capture:
+
+- **Never `-n auto`.** On 32 cores `auto` spawns ~32 workers and spikes load past 100, starving live capture.
+  A FIXED small worker count (6) is used.
+- **`--cpus` cap on every CI container** (`CI_DOCKER_CPUS`, default 6) — a belt-and-suspenders ceiling so a
+  grade can never saturate the box regardless of worker count.
+
+Only the big `fp` job is parallelized; the others stay serial — `dashboard` / `timing` are tiny, and `store`
+builds real panels (memory-heavy, parallelism would risk OOM). The coverage audit's `--collect-only` is fast
+and serial. If a test ever proves xdist-unsafe (shared-state ordering), pin it with `pytest-xdist` grouping
+rather than dropping parallelism.
+
 ## Phase 1 — the CI gate (SHIPPED FIRST)
 
 `ops/ci_watcher.py` — a polling daemon (default 60s) that:
@@ -180,8 +199,9 @@ A systemd unit (`Restart=always`, `WorkingDirectory=/home/ben/quant-fp`) is the 
 status only), watch it grade a few PRs correctly, then drop the flag.
 
 Env knobs: `CI_REPO_DIR` (default `/home/ben/quant-fp`), `CI_FP_IMAGE` (default `fp-dev`),
-`CI_POLL` (seconds), `CI_SUITE_GLOB` (default the full `tests/test_fp_*.py`), `CI_SUITE_TIMEOUT_S`,
-`CI_LIVE_TREE` (deploy watcher's live checkout).
+`CI_POLL` (seconds), `CI_SUITE_GLOB` (default `tests/`), `CI_SUITE_TIMEOUT_S`, `CI_XDIST_WORKERS` (default 6),
+`CI_DOCKER_CPUS` (default 6), `CI_STORE_VOLUME` (default `fp_store_real`), `CI_LIVE_TREE` (deploy watcher's
+live checkout).
 
 ## Hard boundaries (encoded in the code, not just here)
 

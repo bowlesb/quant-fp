@@ -89,6 +89,14 @@ STORE_TEST_DIR = "tests/battery/"
 # ANY repo-based CI env. lightgbm IS in fp-dev so their importorskip(lightgbm) does NOT skip them. They are
 # excluded + flagged (the coverage audit lists any NEW such orphan), never allowed to silently red the gate.
 HARNESS_ORPHAN_TESTS = ("tests/test_experimenter_transient.py",)
+# Parallelism for the big `fp` job (~1200 tests). Serial it took ~30 min — too slow to grade the queue. We
+# pip-install pytest-xdist and run `-n CI_XDIST_WORKERS`. FIXED small worker count, NEVER `-n auto`: this is a
+# 32-core SHARED box (fc / crypto / strategies live-capture), and `auto` spawns ~32 workers and spikes load
+# past 100, starving capture. CI_DOCKER_CPUS additionally caps the container's CPU so a grade can never
+# saturate the box regardless of worker count. 6 workers ≈ 5-8 min for the fp job, leaving the box headroom.
+XDIST_WORKERS = int(os.environ.get("CI_XDIST_WORKERS", "6"))
+DOCKER_CPUS = os.environ.get("CI_DOCKER_CPUS", "6")
+PYTEST_XDIST_REQ = os.environ.get("CI_XDIST_REQ", "pytest-xdist")
 # Bound a single suite run so a hung test can't wedge the daemon. The full suite is well under this.
 SUITE_TIMEOUT_S = int(os.environ.get("CI_SUITE_TIMEOUT_S", "1200"))
 
@@ -123,6 +131,9 @@ def fp_docker(worktree: str, mount_store: bool = False) -> list[str]:
         "docker",
         "run",
         "--rm",
+        # Cap CPU so a CI grade can never starve live capture (fc / crypto / strategies share this box).
+        "--cpus",
+        DOCKER_CPUS,
         "--user",
         f"{os.getuid()}:{os.getgid()}",
         "-e",
@@ -271,8 +282,14 @@ def run_suite(worktree: str) -> SuiteResult:
     Then a coverage audit: any ``tests/test_*.py`` that errors collection in the fp env and is NOT a known
     other-env category is a blind spot — reported LOUDLY (RED), so a new untested class can't hide.
     """
+    # The big fp job runs in BOUNDED parallel (pip-install xdist, -n XDIST_WORKERS) — serial it was ~30 min,
+    # too slow to grade the queue. Fixed worker count + the container --cpus cap keep it from starving live
+    # capture. The other jobs are tiny (dashboard/timing) or memory-heavy (store builds panels) → serial.
     ignores = " ".join(f"--ignore={path}" for path in _FP_EXCLUDES)
-    fp_cmd = f"python -m pytest {SUITE_GLOB} {ignores} -q -p no:cacheprovider"
+    fp_cmd = (
+        f"pip install -q --user {PYTEST_XDIST_REQ} && "
+        f"python -m pytest {SUITE_GLOB} {ignores} -n {XDIST_WORKERS} -q -p no:cacheprovider"
+    )
     fp_job = _run_pytest(worktree, fp_cmd, "fp", gating=True)
 
     dash_targets = " ".join(DASHBOARD_DEP_TESTS)
