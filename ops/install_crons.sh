@@ -11,7 +11,6 @@
 #
 # Managed entries:
 #   - trust_random_check : DAILY RANDOM trust re-check (docs/TRUST_REDESIGN.md), 14:45 PT (skips unsettled days).
-#   - collect_jobs_status: refresh the /jobs dashboard's jobs_status.json every 5 min (off-:00), READ-ONLY.
 #   - compact_stream     : nightly fold of SETTLED stream partitions' per-minute files, 22:33 PT weekdays.
 #   - late re-sweep      : 23:30 PT weekday re-acquire + re-sweep once Alpaca's illiquid tail has settled
 #                          (the 18:30 sweep often RawNotSettled-SKIPs) — the trust-jump unblock.
@@ -22,7 +21,6 @@ set -uo pipefail
 
 REPO="${REPO:-/home/ben/quant-fp}"
 TRUST_LOG=/home/ben/.quant-validation/trust_random_check.log
-JOBS_LOG=/home/ben/.quant-ops/collect_jobs_status.log
 COMPACT_LOG=/home/ben/.quant-validation/compact_stream.log
 LATE_SWEEP_LOG=/home/ben/.quant-validation/daily_lifecycle_late.log
 GLIMPSE_LOG=/home/ben/.quant-ops/collect_store_glimpse.log
@@ -36,12 +34,6 @@ declare -a MATCHES COMMENTS LINES
 MATCHES+=("ops/trust_random_check.sh")
 COMMENTS+=("# 14:45 PT DAILY RANDOM trust re-check (docs/TRUST_REDESIGN.md) — conservative; only un-trusts a clean-day failure; skips unsettled days")
 LINES+=("45 14 * * * cd $REPO && ops/trust_random_check.sh >> $TRUST_LOG 2>&1")
-
-# Every 5 min on the :03/:08/... cadence (off-:00, staggered from the other crons). READ-ONLY: parses
-# crontab -l + each cron's verify-log + docker ps and writes ~/.quant-ops/jobs_status.json for the /jobs page.
-MATCHES+=("ops/collect_jobs_status.py")
-COMMENTS+=("# every 5 min (off-:00) refresh the /jobs dashboard's jobs_status.json — READ-ONLY collector")
-LINES+=("3-58/5 * * * * cd $REPO && python3 ops/collect_jobs_status.py >> $JOBS_LOG 2>&1")
 
 # Every 3 min on the :01/:04/... cadence (off-:00, staggered from the other collectors). PRECOMPUTE the
 # /store-glimpse grid + per-group ticker drills into the persistent (Redis) cache so the page serves sub-ms
