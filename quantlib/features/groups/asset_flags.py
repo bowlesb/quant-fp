@@ -66,3 +66,5 @@ class AssetFlagsGroup(FeatureGroup):
         joined = minutes.join(self.reference_flags(ctx), on="symbol", how="left")
         names = [feature for feature, _ in FLAGS]
         return joined.with_columns(self.exprs()).select(["symbol", "minute", *names])
+
+# CI tier-2 proof: harmless comment touching a feature-group file (danger path).
