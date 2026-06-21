@@ -234,6 +234,7 @@ from quantlib.features.declarative import (
 )
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.real_capture import _reader_bench_path, _shard_snapshots, build_stream
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 from quantlib.features.sharded_capture import INDEX_SYMBOLS, REDUCE_GROUPS, shard_of
 from quantlib.features.stateful import (
     StatefulEngine,
@@ -400,7 +401,13 @@ def process_stream_minute(
 
     latest = frame["minute"].max()
     target_day = day or str(latest.date())
-    frames = {"minute_agg": frame, **(snapshots or {})}
+    # Attach the centered-std reduction anchors BEFORE runnable() — the SAME single wiring point production
+    # capture (capture.py) and backfill (materialize.py) use. Without it the sim runs volume-BLIND: volume's
+    # InputSpec declares the anchor column, so runnable() silently DROPS it (and the reduction engine would
+    # fold the un-anchored frame), under-counting the e2e latency the gate measures. ``frame`` is rebound to
+    # the anchored minute frame so the engine seed/fold (which uses ``frame`` directly) sees the anchor too.
+    frames = attach_reduction_anchors({"minute_agg": frame, **(snapshots or {})})
+    frame = frames["minute_agg"]
     ctx = BatchContext(frames=frames)
     selected = [g for g in runnable(frames) if g.name not in REDUCE_GROUPS]
     reduction_groups = [g for g in selected if isinstance(g, ReductionGroup)]
@@ -440,7 +447,12 @@ def process_stream_minute(
         # symbol prints every minute) the last DERIVE_SLICE+1 minute slots contain exactly those rows, so
         # handing just those slots is equivalent to handing the whole buffer — and far cheaper. (The live
         # ``step`` path hands the whole buffer, the parity-safe source for sparse symbols.)
-        fold_slice = state.ring.last_minutes(IncrementalEngine.DERIVE_SLICE + 1)
+        # The fold slice comes from the RING (un-anchored frames); attach the centered-std anchor onto it the
+        # same way the per-minute ``frames`` above is anchored, so volume's centered ``__c``/``__csq`` derive
+        # (which reads ``__anchor_volume``) resolves during the fold too.
+        fold_slice = attach_reduction_anchors(
+            {"minute_agg": state.ring.last_minutes(IncrementalEngine.DERIVE_SLICE + 1), **(snapshots or {})}
+        )["minute_agg"]
         state.engine.state.update(int(latest.timestamp()), state.engine._matrix_at(fold_slice, latest, slice_derive=True))
         state.engine.state.trim()
     state.fold_ms = (time.perf_counter() - fold_start) * 1000.0
