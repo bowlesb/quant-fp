@@ -72,7 +72,11 @@ class CleanMomentumScoreGroup(ReductionGroup):
     # n>=3) plus the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT) emitting r2=1.0 exactly at the b==2 corner
     # — batch==incremental cell-for-cell on smooth/degenerate/n==2 walks. The guard changes the degenerate r2
     # value (0.9998->1.0), which flows into the score/flag at those cells -> the version bump above.
-    incremental_safe = True
+    # NO-GO for FP_INCREMENTAL: the real-data A/B soak (docs/INCREMENTAL_READINESS.md, 2026-06-17) finds a
+    # residual moment/std power-sum cancellation on real gappy tape the synthetic stream can't reach
+    # (clean_momentum_score_5m, 1.5% of minutes, worst ~620x) — same class as the parked corr-denom groups.
+    # Stays on the batch path under FP_INCREMENTAL until the cancellation-free reduction-denom fix lands.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs: list[FeatureSpec] = []

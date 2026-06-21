@@ -38,6 +38,17 @@ _ANCHOR_SIG_FIGS = 2  # round the anchor to 2 significant figures: |v−a|/v <= 
 # ten anchor was too coarse (up to 5x off -> the cancellation persisted, measured); 2 sig figs is the sweet
 # spot — close enough to condition the squared sums, coarse enough to be reproducible.
 
+# The reduction centers PER-MINUTE volume, but the ``daily`` snapshot carries each symbol's daily-BAR total
+# (~one trading session's worth of minutes larger). Divide the daily total by the session-minute count to
+# land the anchor at the per-minute scale the centering must track; otherwise |v−a|/v is ~SESSION_MINUTES
+# (a ~2-order mismatch) and the centering only partially conditions the squared sums (the residual volume
+# breach the real-data FP_INCREMENTAL soak surfaced: ~0.4% of minutes, worst ratio 209x). RTH is 6.5h = 390
+# minutes; captured days run longer (extended hours, 440-950 min by name), so /390 slightly OVER-estimates
+# per-minute volume for extended-hours-heavy names — but 2-sig-fig rounding absorbs that: a real-data A/B
+# soak measured 0/779 breaches (worst 0.0) at /390, /600 AND /780, vs 4/779 at /1. /390 is the principled,
+# well-known constant and sits safely inside the breach-free band.
+SESSION_MINUTES = 390.0
+
 
 def sigfig_rounded_anchor(value: pl.Expr) -> pl.Expr:
     """A magnitude-tracking, reproducible per-symbol anchor: ``value`` rounded to ``_ANCHOR_SIG_FIGS``
@@ -59,15 +70,18 @@ def attach_volume_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFra
     the live seed path apply, so the anchor column is identical in both — the parity-critical invariant.
 
     ``daily`` is the per-session-fixed snapshot (symbol, date, volume); the anchor uses each symbol's LATEST
-    daily volume (the prior completed day in production), rounded to 2 sig figs. A symbol not in ``daily``
-    gets 0.0.
+    daily volume (the prior completed day in production), DIVIDED by the session-minute count so it lands at
+    the per-minute scale the centering tracks (see ``SESSION_MINUTES``), then rounded to 2 sig figs. A symbol
+    not in ``daily`` gets 0.0.
     """
     latest = (
         daily.select(["symbol", "date", "volume"])
         .sort(["symbol", "date"])
         .group_by("symbol", maintain_order=True)
         .agg(pl.col("volume").last().alias("_vol"))
-        .with_columns(sigfig_rounded_anchor(pl.col("_vol")).alias(anchor_column("volume")))
+        .with_columns(
+            sigfig_rounded_anchor(pl.col("_vol") / SESSION_MINUTES).alias(anchor_column("volume"))
+        )
         .select(["symbol", anchor_column("volume")])
     )
     return frame.join(latest, on="symbol", how="left").with_columns(

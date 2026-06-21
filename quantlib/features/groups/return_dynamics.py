@@ -37,8 +37,13 @@ class ReturnDynamicsGroup(ReductionGroup):
     # match the batch fresh sum, so this straddle no longer breaches — engine-vs-batch is CLEAN (0/295 across
     # adversarial gappy/large-magnitude seeds; guarded by test_gappy_denom_group_now_clean_after_p2_neumaier).
     # NOT the same class as `volume` (whose blocker is a batch-vs-canonical std FORMULA gap, drift-independent,
-    # still gated). Incremental_safe so it rides the running sums when FP_INCREMENTAL is enabled.
-    incremental_safe = True
+    # still gated).
+    # NO-GO for FP_INCREMENTAL: the P2 Neumaier fix cleaned the adversarial synthetic seeds (0/295), but the
+    # real-data A/B soak (docs/INCREMENTAL_READINESS.md, 2026-06-17) still finds an autocorrelation denom
+    # null-flip straddle on real gappy tape (autocorr_2_10m, 0.5% of minutes) those seeds didn't reproduce.
+    # Stays on the batch path under FP_INCREMENTAL until the residual straddle is closed (the soak is the
+    # arming authority; the synthetic adversarial set is necessary-not-sufficient).
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

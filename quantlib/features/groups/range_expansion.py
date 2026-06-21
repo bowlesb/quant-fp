@@ -48,6 +48,12 @@ class RangeExpansionGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.VOLATILITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "high", "low", "close")),)
+    # NO-GO for FP_INCREMENTAL: the feature is a RATIO of two trailing mean-range windows, and the real-data
+    # A/B soak (docs/INCREMENTAL_READINESS.md, 2026-06-17) finds the ratio-denominator `>0` guard straddles
+    # null/non-null on real gappy tape the synthetic stream can't reach (range_expansion_5_30m, 7.8% of
+    # minutes — the most frequent breacher, null-flip). Stays on the batch path under FP_INCREMENTAL until the
+    # consistently-guarded ratio denom lands.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         return [

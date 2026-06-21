@@ -51,13 +51,16 @@ def test_centered_std_is_value_identical_and_closes_the_cancellation() -> None:
         ), f"base={base:.0e}: centered std not machine-precise"
 
 
-def test_attach_volume_anchor_joins_per_symbol_from_daily() -> None:
+def test_attach_volume_anchor_joins_per_symbol_at_minute_scale_from_daily() -> None:
     daily = pl.DataFrame({"symbol": ["A", "A", "B"], "date": [1, 2, 1], "volume": [5.0e6, 5.1e6, 3.0e3]})
     frame = pl.DataFrame({"symbol": ["A", "B", "C"], "minute": [10, 10, 10]})
     attached = attach_volume_anchor(frame, daily)
     by_symbol = {r["symbol"]: r[anchor_column("volume")] for r in attached.iter_rows(named=True)}
-    assert by_symbol["A"] == 5.1e6  # the LATEST daily volume, 2-sig-fig
-    assert by_symbol["B"] == 3.0e3
+    # The anchor is the LATEST daily-BAR volume divided by the session-minute count (390), then 2-sig-fig
+    # rounded — landing it at the PER-MINUTE scale the centering tracks (not the ~390x-larger daily total,
+    # which left the centering only partly conditioned; see reduction_anchor._SESSION_MINUTES).
+    assert by_symbol["A"] == 13000.0  # sigfig2(5.1e6 / 390) = sigfig2(13076.9)
+    assert by_symbol["B"] == 7.7  # sigfig2(3.0e3 / 390) = sigfig2(7.69)
     assert (
         by_symbol["C"] == 0.0
     )  # absent from daily -> 0.0 (no centering; a small/new name is well-conditioned)

@@ -30,6 +30,12 @@ class DistributionGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.VOLATILITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
+    # NO-GO for FP_INCREMENTAL: the higher-moment stats (skew/kurtosis) are 3rd/4th power-sums whose
+    # Σx⁴−... cancellation the real-data A/B soak (docs/INCREMENTAL_READINESS.md, 2026-06-17) finds breaching
+    # on real gappy tape (ret_kurt_10m, 0.4% of minutes, worst ~10404x) — the higher-moment analogue of the
+    # parked corr-denom class (the synthetic degenerate stream triggers this one but not the gappier 5).
+    # Stays on the batch path under FP_INCREMENTAL until a cancellation-free higher-moment reduction lands.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
