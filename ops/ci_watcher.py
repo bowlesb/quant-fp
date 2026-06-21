@@ -79,6 +79,16 @@ TIMING_TESTS = (
     "tests/test_fp_latency.py",  # us/feature + trades-live ceilings (measured ms)
     "tests/test_fp_latency_e2e.py",  # opt-in sim e2e latency (self-skips without FP_LATENCY_E2E)
 )
+# STORE-dependent tests — they build a real daily/intraday panel from the feature store, so bare fp-dev (no
+# /store volume) gives an empty glob -> `cannot concat empty list`. They run in a dedicated GATING `store`
+# job WITH the read-only store mounted (`-v fp_store_real:/store:ro`), so they get REAL coverage, not a skip.
+# The whole tests/battery/ dir is the clean boundary (its panel-building harness is what needs the store).
+STORE_TEST_DIR = "tests/battery/"
+# HARNESS-orphan tests — they `import main` from a research-harness entry (services/experimenter) that does
+# NOT exist in this repo checkout (it lives only in the experimenter image), so they ERROR at collection in
+# ANY repo-based CI env. lightgbm IS in fp-dev so their importorskip(lightgbm) does NOT skip them. They are
+# excluded + flagged (the coverage audit lists any NEW such orphan), never allowed to silently red the gate.
+HARNESS_ORPHAN_TESTS = ("tests/test_experimenter_transient.py",)
 # Bound a single suite run so a hung test can't wedge the daemon. The full suite is well under this.
 SUITE_TIMEOUT_S = int(os.environ.get("CI_SUITE_TIMEOUT_S", "1200"))
 
@@ -96,14 +106,20 @@ def run(cmd: list[str], cwd: str | None = None, timeout: int | None = None) -> s
     )
 
 
-def fp_docker(worktree: str) -> list[str]:
+STORE_VOLUME = os.environ.get("CI_STORE_VOLUME", "fp_store_real")
+
+
+def fp_docker(worktree: str, mount_store: bool = False) -> list[str]:
     """The ``docker run`` prefix for fp-dev jobs over a checkout.
 
     Runs as the HOST user (so files written into the bind-mounted worktree are owned by us, not root — else
     the throwaway-worktree cleanup hits PermissionError on root-owned ``__pycache__``) with bytecode writing
     OFF, ``HOME=/tmp`` (the non-root user has no home), and NO ``.env`` (env-scrubbed — creds can't leak).
+
+    ``mount_store`` mounts the feature store READ-ONLY at /store (``-v fp_store_real:/store:ro``) for the
+    store-dependent panel-building tests. RO so CI can never write the live store.
     """
-    return [
+    prefix = [
         "docker",
         "run",
         "--rm",
@@ -115,10 +131,11 @@ def fp_docker(worktree: str) -> list[str]:
         "HOME=/tmp",
         "-v",
         f"{worktree}:/app",
-        "-w",
-        "/app",
-        FP_IMAGE,
     ]
+    if mount_store:
+        prefix += ["-v", f"{STORE_VOLUME}:/store:ro", "-e", "STORE_ROOT=/store"]
+    prefix += ["-w", "/app", FP_IMAGE]
+    return prefix
 
 
 def gh_json(args: list[str]) -> Any:
@@ -220,13 +237,15 @@ class SuiteResult:
         return all(job.passed for job in self.jobs if job.gating) and not self.uncovered
 
 
-def _run_pytest(worktree: str, pytest_cmd: str, job_name: str, gating: bool = True) -> JobResult:
+def _run_pytest(
+    worktree: str, pytest_cmd: str, job_name: str, gating: bool = True, mount_store: bool = False
+) -> JobResult:
     """Run one pytest invocation in an fp-dev --rm container (env-scrubbed, host-user). sh -c so globs expand.
 
     SECURITY: no ``--env-file .env`` / no secret env — the suite needs none, so the paper Alpaca creds can
-    never reach a CI log. --rm; bind-mounts only the throwaway checkout at /app.
+    never reach a CI log. --rm; bind-mounts only the throwaway checkout at /app (+ the store RO if requested).
     """
-    cmd = [*fp_docker(worktree), "sh", "-c", pytest_cmd]
+    cmd = [*fp_docker(worktree, mount_store=mount_store), "sh", "-c", pytest_cmd]
     try:
         result = run(cmd, timeout=SUITE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
@@ -236,20 +255,23 @@ def _run_pytest(worktree: str, pytest_cmd: str, job_name: str, gating: bool = Tr
     return JobResult(job_name, result.returncode == 0, tail, gating)
 
 
+# Every category the fp job must NOT run (each is covered by its own job or is an unrunnable orphan).
+_FP_EXCLUDES = (*DASHBOARD_DEP_TESTS, *TIMING_TESTS, *HARNESS_ORPHAN_TESTS, STORE_TEST_DIR)
+
+
 def run_suite(worktree: str) -> SuiteResult:
     """Run every CI job over the checkout + audit that no test file went unrun.
 
-    - ``fp`` (GATING): the WHOLE ``tests/`` dir in base fp-dev, ``--ignore``-ing the dashboard-dep files AND
-      the wall-clock TIMING files (those are flaky under box load and run separately, non-gating).
-    - ``dashboard`` (GATING): the dashboard-dep files, in fp-dev after installing the dashboard's own
-      requirements (the authoritative dep closure).
-    - ``timing`` (NON-GATING / informational): the wall-clock latency tests. Reported but NEVER blocks the
-      merge — a timing flake on a loaded box must not red a correct PR.
-    Then a coverage audit: every ``tests/test_*.py`` on disk must be run by some job — anything else is
-    reported LOUDLY (RED), so a new untested class can never hide behind a green badge.
+    - ``fp`` (GATING): the WHOLE ``tests/`` dir in base fp-dev, ``--ignore``-ing every category that needs a
+      different env (dashboard / timing / store / harness-orphan) — each handled below or flagged.
+    - ``dashboard`` (GATING): the dashboard-dep files in fp-dev + the dashboard's own requirements.
+    - ``store`` (GATING): the panel-building ``tests/battery/`` dir WITH the feature store mounted RO
+      (``-v fp_store_real:/store:ro``) — real coverage, not a skip.
+    - ``timing`` (NON-GATING / informational): the wall-clock latency tests. Reported but NEVER blocks.
+    Then a coverage audit: any ``tests/test_*.py`` that errors collection in the fp env and is NOT a known
+    other-env category is a blind spot — reported LOUDLY (RED), so a new untested class can't hide.
     """
-    fp_excludes = (*DASHBOARD_DEP_TESTS, *TIMING_TESTS)
-    ignores = " ".join(f"--ignore={path}" for path in fp_excludes)
+    ignores = " ".join(f"--ignore={path}" for path in _FP_EXCLUDES)
     fp_cmd = f"python -m pytest {SUITE_GLOB} {ignores} -q -p no:cacheprovider"
     fp_job = _run_pytest(worktree, fp_cmd, "fp", gating=True)
 
@@ -260,23 +282,31 @@ def run_suite(worktree: str) -> SuiteResult:
     )
     dash_job = _run_pytest(worktree, dash_cmd, "dashboard", gating=True)
 
+    store_cmd = f"python -m pytest {STORE_TEST_DIR} -q -p no:cacheprovider"
+    store_job = _run_pytest(worktree, store_cmd, "store", gating=True, mount_store=True)
+
     timing_targets = " ".join(TIMING_TESTS)
     timing_cmd = f"python -m pytest {timing_targets} -q -p no:cacheprovider"
     timing_job = _run_pytest(worktree, timing_cmd, "timing", gating=False)
 
     uncovered = _audit_coverage(worktree)
-    return SuiteResult(jobs=[fp_job, dash_job, timing_job], uncovered=uncovered)
+    return SuiteResult(jobs=[fp_job, dash_job, store_job, timing_job], uncovered=uncovered)
+
+
+# Test files that legitimately ERROR at collection in the bare fp env because they belong to another job /
+# are unrunnable orphans — so a collection error on THESE is expected, not a blind spot.
+_KNOWN_COLLECTION_ERRORS = frozenset((*DASHBOARD_DEP_TESTS, *HARNESS_ORPHAN_TESTS))
 
 
 def _audit_coverage(worktree: str) -> list[str]:
     """Detect ``tests/test_*.py`` files the fp job would silently DROP at collection — the real blind spot.
 
-    A new test that imports a dep absent from base fp-dev (the dashboard pattern) ERRORs at collection. With
-    a plain ``tests/`` run that surfaces as a hard failure, but a careless future ``--continue-on-collection``
-    could hide it; this audit makes the blind-spot explicit regardless. We ``--collect-only`` the fp env over
-    ``tests/`` (NOT ignoring the dashboard set) and report any file that errors collection yet is NOT a known
-    dashboard-dep test — i.e. a NEW uncovered class. Known dashboard-dep files are covered by the dashboard
-    job, so they are excluded from the blind-spot list.
+    A new test importing a dep absent from base fp-dev (dashboard pattern), needing the store, or importing a
+    harness entry not in the repo (experimenter pattern) ERRORs at collection. We ``--collect-only`` the fp
+    env over ``tests/`` and report any file that errors yet is NOT a KNOWN other-env category — i.e. a NEW
+    uncovered class that must be triaged into a job (or its list) before the gate can be trusted green. Store
+    tests live under ``tests/battery/`` and collect fine in the bare env (they only FAIL at run-time without
+    the store), so they don't appear here; they're covered by the store job.
     """
     collect_cmd = "python -m pytest tests/ --collect-only -q -p no:cacheprovider"
     result = run([*fp_docker(worktree), "sh", "-c", collect_cmd], timeout=300)
@@ -285,8 +315,7 @@ def _audit_coverage(worktree: str) -> list[str]:
         for line in result.stdout.splitlines()
         if line.startswith("ERROR ") and len(line.split()) >= 2
     }
-    # Errored files that the dashboard job DOESN'T cover are genuine blind spots.
-    return sorted(errored - set(DASHBOARD_DEP_TESTS))
+    return sorted(errored - _KNOWN_COLLECTION_ERRORS)
 
 
 def post_status(sha: str, state: str, description: str) -> None:
@@ -480,8 +509,9 @@ def _comment_body(suite: SuiteResult, scope: ScopeResult, n_paths: int) -> str:
         status_line,
         f"**Scope:** `{tier}` ({n_paths} changed paths)",
         "",
-        "**Jobs** (gating jobs must pass; the `timing` job is informational — wall-clock tests that flake "
-        "under box load never block a correct PR; dashboard-dep tests run in their own env, not skipped):",
+        "**Jobs** (gating jobs must pass; `timing` is informational — wall-clock tests that flake under box "
+        "load never block a correct PR. `dashboard` + `store` run env-dependent tests in their own env "
+        "(dashboard deps installed / feature store mounted RO), not silently skipped):",
         job_lines,
     ]
     if suite.uncovered:
