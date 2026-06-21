@@ -50,6 +50,9 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* grow to fill the topbar so the tab group's margin-left:auto can push it to the right edge (the "as of"
+     timestamp still sits to its right via the topbar's space-between) */
+  flex: 1;
 }
 .brand-mark {
   width: 16px;
@@ -605,7 +608,9 @@ body {
 .view-tabs {
   display: flex;
   gap: 4px;
-  margin-left: 14px;
+  /* push the tab group to the right edge of the topbar's left cluster (the title/branding stays pinned left,
+     the "as of" timestamp stays on the far right) */
+  margin-left: auto;
 }
 .view-tab {
   background: transparent;
@@ -682,55 +687,125 @@ body {
   line-height: 1.5;
   max-width: 920px;
 }
-.lat-table-wrap {
+/* horizontal bar chart — one row per group, sorted slowest-first, bar length = p50 */
+.lat-chart {
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+  background: var(--bg);
 }
-.lat-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12.5px;
-}
-.lat-table thead th {
-  position: sticky;
-  top: 0;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  text-align: left;
-  padding: 9px 12px;
-  font-weight: 650;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.lat-table td {
-  padding: 7px 12px;
+.lat-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 12px;
   border-bottom: 1px solid var(--border-soft);
-  vertical-align: top;
+  cursor: default;
 }
-.lat-table tbody tr:hover td {
+.lat-bar-row:last-child {
+  border-bottom: none;
+}
+.lat-bar-row:hover {
   background: var(--panel-alt);
 }
-.lat-table tbody tr:hover td.lat-p99 {
-  /* keep the p99 heat tint readable on row-hover (its inline background wins) */
-  filter: brightness(0.97);
-}
-.lat-group {
+.lat-bar-label {
+  flex: 0 0 168px;
   font-family: var(--mono);
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
-}
-.lat-num {
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: right;
+}
+.lat-bar-track {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  height: 16px;
+}
+.lat-bar-fill {
+  height: 13px;
+  border-radius: 3px;
+  min-width: 2px;
+  transition: filter 0.1s ease;
+}
+.lat-bar-row:hover .lat-bar-fill {
+  filter: brightness(0.93);
+}
+.lat-bar-value {
+  margin-left: 8px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
   white-space: nowrap;
 }
-.lat-p99 {
-  font-weight: 700;
+
+/* hover tooltip — the tail (p95/p99) + the explanatory facts */
+.lat-tooltip {
+  position: fixed;
+  z-index: 50;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 22px rgba(20, 30, 45, 0.16);
+  padding: 10px 12px;
+  min-width: 220px;
+  max-width: 320px;
+  pointer-events: none;
+  font-size: 12px;
 }
-.lat-mech {
-  color: var(--text-dim);
+.lat-tip-title {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.lat-tip-tail {
+  display: flex;
+  gap: 16px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.lat-tip-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lat-tip-k {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.lat-tip-v {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.lat-tip-tailv {
+  color: var(--untrusted);
+}
+.lat-tip-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 12px;
+  margin: 0;
+}
+.lat-tip-meta dt {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.lat-tip-meta dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
 }
 .lat-incr {
   font-weight: 600;
