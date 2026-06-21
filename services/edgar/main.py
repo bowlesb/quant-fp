@@ -43,12 +43,8 @@ EDGAR_ATOM_URL = os.environ.get(
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&company="
     "&dateb=&owner=include&count=100&output=atom",
 )
-COMPANY_TICKERS_URL = os.environ.get(
-    "EDGAR_TICKERS_URL", "https://www.sec.gov/files/company_tickers.json"
-)
-SUBMISSIONS_BASE = os.environ.get(
-    "EDGAR_SUBMISSIONS_BASE", "https://data.sec.gov/submissions"
-)
+COMPANY_TICKERS_URL = os.environ.get("EDGAR_TICKERS_URL", "https://www.sec.gov/files/company_tickers.json")
+SUBMISSIONS_BASE = os.environ.get("EDGAR_SUBMISSIONS_BASE", "https://data.sec.gov/submissions")
 
 POLL_SECONDS = int(os.environ.get("EDGAR_POLL_SECONDS", "5"))
 SEC_MAX_RPS = float(os.environ.get("EDGAR_SEC_MAX_RPS", "4.0"))
@@ -57,17 +53,13 @@ CIK_REFRESH_SECONDS = int(os.environ.get("EDGAR_CIK_REFRESH_SECONDS", str(24 * 3
 HTTP_TIMEOUT = float(os.environ.get("EDGAR_HTTP_TIMEOUT", "30.0"))
 EDGAR_MODE = os.environ.get("EDGAR_MODE", "stream")
 BACKFILL_SYMBOLS = [
-    s.strip().upper()
-    for s in os.environ.get("EDGAR_BACKFILL_SYMBOLS", "").split(",")
-    if s.strip()
+    s.strip().upper() for s in os.environ.get("EDGAR_BACKFILL_SYMBOLS", "").split(",") if s.strip()
 ]
 # Form types we collect. Empty/"*" = collect ALL forms (Phase 1 is breadth-first — keep everything,
 # filter at feature time). A comma list restricts to those forms.
 _form_filter_env = os.environ.get("EDGAR_FORMS", "").strip()
 FORM_FILTER: set[str] | None = (
-    None
-    if _form_filter_env in ("", "*")
-    else {f.strip().upper() for f in _form_filter_env.split(",")}
+    None if _form_filter_env in ("", "*") else {f.strip().upper() for f in _form_filter_env.split(",")}
 )
 
 
@@ -86,9 +78,7 @@ def db_kwargs() -> dict[str, object]:
 
 def normalize_cik(cik: str) -> str:
     """SEC CIK as a zero-padded 10-digit string (the form company_tickers.json and the mapper use)."""
-    return (
-        cik.strip().lstrip("0").zfill(10) if cik.strip().lstrip("0") else "0".zfill(10)
-    )
+    return cik.strip().lstrip("0").zfill(10) if cik.strip().lstrip("0") else "0".zfill(10)
 
 
 def parse_company_tickers(payload: dict[str, dict[str, object]]) -> dict[str, str]:
@@ -115,9 +105,7 @@ def parse_atom_updated(text: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def parse_atom_entry(
-    entry: ET.Element, cik_to_ticker: dict[str, str]
-) -> dict[str, object] | None:
+def parse_atom_entry(entry: ET.Element, cik_to_ticker: dict[str, str]) -> dict[str, object] | None:
     """Parse one Atom <entry> into a filing dict with the THREE timestamps.
 
     Returns None when the entry is unparseable or filtered out by FORM_FILTER. The returned dict is
@@ -148,9 +136,7 @@ def parse_atom_entry(
     if FORM_FILTER is not None and form_type not in FORM_FILTER:
         return None
 
-    summary_text = (
-        summary_elem.text if (summary_elem is not None and summary_elem.text) else ""
-    )
+    summary_text = summary_elem.text if (summary_elem is not None and summary_elem.text) else ""
     id_text = id_elem.text if (id_elem is not None and id_elem.text) else ""
     accession = extract_accession(summary_text, id_text)
     if accession is None:
@@ -165,9 +151,7 @@ def parse_atom_entry(
         # live feed always carries the CIK in the link path (.../edgar/data/<CIK>/...) or the title,
         # so this is rare/malformed — skip it (don't fabricate a null-cik row that would fail the
         # UPSERT and stall the whole batch).
-        logger.warning(
-            "skipping entry with no extractable CIK: title=%r link=%r", title, link
-        )
+        logger.warning("skipping entry with no extractable CIK: title=%r link=%r", title, link)
         return None
     symbol = cik_to_ticker.get(cik)
     company_name = extract_company_name(title)
@@ -237,9 +221,7 @@ def extract_company_name(title: str) -> str | None:
     return None
 
 
-def parse_atom_feed(
-    feed_xml: str, cik_to_ticker: dict[str, str]
-) -> list[dict[str, object]]:
+def parse_atom_feed(feed_xml: str, cik_to_ticker: dict[str, str]) -> list[dict[str, object]]:
     """Parse a full Atom feed payload into a list of filing dicts (skipping unparseable/filtered)."""
     root = ET.fromstring(feed_xml)
     filings: list[dict[str, object]] = []
@@ -321,6 +303,93 @@ def upsert_filings(conn: psycopg.Connection, filings: list[dict[str, object]]) -
     return len(filings)
 
 
+def accessions_with_live_row(conn: psycopg.Connection, accessions: list[str]) -> set[str]:
+    """Of ``accessions``, the subset already stored from the LIVE feed (available_at_source='atom_feed').
+
+    The live atom ``<updated>`` dissemination instant is the AUTHORITATIVE ``available_at`` (the moment a
+    real-time consumer could have known — see docs/EDGAR_INGESTION.md "the parity crux"). The backfill's
+    ``acceptanceDateTime`` is an explicitly lower-confidence reconstruction used only for filings we never
+    saw live. So when the live feed already captured an accession, a backfill row for it would NOT add a
+    point-in-time-correct value — it would only double-row the filing under a second ``available_at``
+    (~4h off, the ET-offset seam) and inflate the filing-frequency features. Backfill therefore skips
+    those accessions and defers to the canonical live row.
+    """
+    if not accessions:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT accession_number FROM filings "
+            "WHERE available_at_source = 'atom_feed' AND accession_number = ANY(%s)",
+            (accessions,),
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
+SEAM_DUP_SELECT_SQL = """
+WITH seam AS (
+    SELECT accession_number
+    FROM filings
+    GROUP BY accession_number
+    HAVING count(*) FILTER (WHERE available_at_source = 'atom_feed') > 0
+       AND count(*) FILTER (WHERE available_at_source = 'submissions_accepted') > 0
+)
+SELECT accession_number, available_at
+FROM filings
+WHERE available_at_source = 'submissions_accepted'
+  AND accession_number IN (SELECT accession_number FROM seam)
+ORDER BY accession_number, available_at
+"""
+
+
+def find_seam_dup_rows(
+    conn: psycopg.Connection,
+) -> list[tuple[str, datetime]]:
+    """The backfill (``submissions_accepted``) rows of accessions that ALSO have a live (``atom_feed``)
+    row — i.e. the duplicate rows the cross-seam gap created. The live row is the canonical keeper; these
+    are the rows the one-time dedup deletes. Read-only.
+    """
+    with conn.cursor() as cur:
+        cur.execute(SEAM_DUP_SELECT_SQL)
+        return [(str(row[0]), row[1]) for row in cur.fetchall()]
+
+
+def delete_seam_dup_rows(conn: psycopg.Connection, rows: list[tuple[str, datetime]]) -> int:
+    """Delete the given (accession_number, available_at) backfill duplicate rows. Idempotent: a re-run
+    after a successful delete finds nothing to delete (the rows are gone) and returns 0. Targets each row
+    by its full PK so it can NEVER touch the canonical live row (different available_at).
+    """
+    if not rows:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            "DELETE FROM filings WHERE accession_number = %s AND available_at = %s "
+            "AND available_at_source = 'submissions_accepted'",
+            rows,
+        )
+        return cur.rowcount
+
+
+def drop_seam_dups(conn: psycopg.Connection, filings: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Filter a BACKFILL batch down to filings whose accession is NOT already stored live.
+
+    This closes the cross-seam double-row at ingest time (the #311 G4 gap): the live and backfill paths
+    assign different ``available_at`` for the same accession, so the ``(accession_number, available_at)``
+    PK does not dedupe across the seam. Deferring backfill to an existing live row keeps ONE canonical
+    (authoritative) row per accession.
+    """
+    if not filings:
+        return filings
+    accessions = [str(filing["accession_number"]) for filing in filings]
+    live = accessions_with_live_row(conn, accessions)
+    if not live:
+        return filings
+    kept = [filing for filing in filings if str(filing["accession_number"]) not in live]
+    skipped = len(filings) - len(kept)
+    if skipped:
+        logger.info("backfill: skipped %d filing(s) already captured live (seam dedup)", skipped)
+    return kept
+
+
 def poll_once(
     conn: psycopg.Connection,
     client: httpx.Client,
@@ -378,9 +447,7 @@ def parse_submissions(
         form_type = str(form).upper()
         if FORM_FILTER is not None and form_type not in FORM_FILTER:
             continue
-        accepted_at = (
-            parse_atom_updated(str(acceptance_str)) if acceptance_str else None
-        )
+        accepted_at = parse_atom_updated(str(acceptance_str)) if acceptance_str else None
         if accepted_at is None:
             # No acceptance time -> no defensible available_at; skip rather than fabricate one.
             continue
@@ -409,9 +476,7 @@ def parse_submissions(
 def parse_filing_date(date_str: str) -> datetime:
     """Company filingDate ('YYYY-MM-DD') -> midnight-UTC datetime. METADATA only (see the parity note)."""
     parsed_date: date = date.fromisoformat(date_str.strip())
-    return datetime(
-        parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=timezone.utc
-    )
+    return datetime(parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=timezone.utc)
 
 
 def backfill_symbol(
@@ -436,6 +501,7 @@ def backfill_symbol(
         response.raise_for_status()
         payload = response.json()
     filings = parse_submissions(payload, cik, cik_mapper.mapping)
+    filings = drop_seam_dups(conn, filings)
     written = upsert_filings(conn, filings)
     logger.info("backfill %s (CIK %s): %d filings upserted", symbol, cik, written)
     return written
