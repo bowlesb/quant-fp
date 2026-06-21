@@ -6,9 +6,15 @@ the **arming runbook**: the exact, ordered commands to take it live, each phase 
 clicks the final live arm; everything before it is grade-only / dry-run and safe.** Companion: `docs/
 SYSTEM_GAPS.md` G1 (the gap this closes), `~/.quant-ops/READINESS.md` (the CI/Auto-merge/Auto-deploy rows).
 
-Everything runs from `/home/ben/quant-fp` (the live tree). The watchers never edit the live `quantlib` tree,
-never touch `fc`/strategies/crypto on the AUTO path, run CI containers env-scrubbed (no `.env`) and CPU-capped
-(`--cpus 6`, `-n 6` workers — never `-n auto` on this shared 32-core box), and fail closed on uncertain scope.
+The grade/ci watcher runs from a **dedicated CI checkout** (`/home/ben/.ci-repo`) that the guard keeps reset
+`--hard` to `origin/main` every cycle — NEVER the `/home/ben/quant-fp` fc bind-mount tree (which is PINNED at
+a controlled SHA; FF-ing it is the gated fc-relaunch deploy step, and it may not even contain the latest ops
+scripts). This decoupling is what makes the daemon (a) actually start — the fc tree can lag and lack
+`ci_daemon_guard.sh` — and (b) grade with the CURRENT exclude policy. The deploy watcher alone reads the fc
+tree (`CI_LIVE_TREE`), because it performs the real `compose up` there. The watchers never edit the live
+`quantlib` tree, never touch `fc`/strategies/crypto on the AUTO path, run CI containers env-scrubbed (no
+`.env`) and CPU-capped (`--cpus 6`, `-n 6` workers — never `-n auto` on this shared 32-core box), and fail
+closed on uncertain scope.
 
 ## The safety boundary (why incremental arming is safe)
 
@@ -64,8 +70,10 @@ ops/install_crons.sh               # install it — PRs now get graded continuou
 tail -f ~/.quant-ops/ci_watcher.log     # watch it grade new/updated PRs
 ```
 
-The cron runs `ops/ci_daemon_guard.sh grade`, which keeps `ci_watcher.sh grade` alive
-(`ci_watcher --poll 60 --no-auto-merge`). Grade-only is the ONLY thing `install_crons.sh` auto-installs.
+The cron self-bootstraps the dedicated CI repo (`git clone` if `/home/ben/.ci-repo` is absent) then runs THAT
+checkout's `ops/ci_daemon_guard.sh grade`, which resets the CI repo to `origin/main` and keeps
+`ci_watcher.sh grade` alive (`ci_watcher --poll 60 --no-auto-merge`) running from it. It never `cd`s into the
+pinned fc tree. Grade-only is the ONLY thing `install_crons.sh` auto-installs.
 
 **Phase-1 done when:** the daemon is running and has correctly graded ≥2 real PRs (one green, one red or
 TIER-2) with status+comment+label visible on GitHub.

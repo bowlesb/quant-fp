@@ -20,6 +20,9 @@
 set -uo pipefail
 
 REPO="${REPO:-/home/ben/quant-fp}"
+# The DEDICATED CI checkout the grade daemon runs from (decoupled from the pinned fc bind-mount $REPO). The
+# guard keeps it reset --hard to origin/main; the cron clones it if absent. NEVER the fc tree.
+CI_REPO="${CI_REPO:-/home/ben/.ci-repo}"
 TRUST_LOG=/home/ben/.quant-validation/trust_random_check.log
 COMPACT_LOG=/home/ben/.quant-validation/compact_stream.log
 LATE_SWEEP_LOG=/home/ben/.quant-validation/daily_lifecycle_late.log
@@ -68,9 +71,15 @@ LINES+=("30 23 * * 1-5 cd $REPO && ops/daily_lifecycle.sh >> $LATE_SWEEP_LOG 2>&
 # sticky comment + tier label on each open PR's new head SHA — it NEVER merges or deploys. Arming auto-merge
 # (Phase 2 = swap `grade`→`ci`) / auto-deploy (Phase 3) is a SEPARATE, Ben-gated step documented in
 # docs/CD_ARM_CHECKLIST.md — deliberately NOT auto-installed.
-MATCHES+=("ops/ci_daemon_guard.sh grade")
-COMMENTS+=("# every 5 min keep the CI GRADE daemon alive (docs/CD_ARM_CHECKLIST.md Phase 1) — grade-only (--no-auto-merge); NEVER merges/deploys")
-LINES+=("*/5 * * * * cd $REPO && ops/ci_daemon_guard.sh grade >> /home/ben/.quant-ops/ci_daemon_guard.log 2>&1")
+#
+# CRITICAL: the cron runs the guard from the DEDICATED CI repo ($CI_REPO), NOT $REPO (the fc bind-mount tree).
+# $REPO is PINNED at a controlled SHA and may not even contain ci_daemon_guard.sh (it was added after the pin)
+# → `cd $REPO && ops/ci_daemon_guard.sh` would "not found" every 5 min. The line self-bootstraps: clone the CI
+# repo if absent, then exec ITS guard. The guard then keeps that CI repo reset --hard to origin/main each cycle
+# and runs the grade watcher from it — fully decoupled from the pinned fc tree (which we NEVER FF here).
+MATCHES+=("ci_daemon_guard.sh grade")
+COMMENTS+=("# every 5 min keep the CI GRADE daemon alive (docs/CD_ARM_CHECKLIST.md Phase 1) — runs from the DEDICATED CI repo (NOT the pinned fc tree); grade-only (--no-auto-merge); NEVER merges/deploys")
+LINES+=("*/5 * * * * { [ -d $CI_REPO/.git ] || git clone -q \$(git -C $REPO remote get-url origin) $CI_REPO; } && $CI_REPO/ops/ci_daemon_guard.sh grade >> /home/ben/.quant-ops/ci_daemon_guard.log 2>&1")
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
