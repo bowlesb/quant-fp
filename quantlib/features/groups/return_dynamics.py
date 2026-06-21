@@ -36,9 +36,12 @@ class ReturnDynamicsGroup(ReductionGroup):
     # compensated running sum (``_comp`` carries the add/expire rounding loss) makes the corr-denom power sums
     # match the batch fresh sum, so this straddle no longer breaches — engine-vs-batch is CLEAN (0/295 across
     # adversarial gappy/large-magnitude seeds; guarded by test_gappy_denom_group_now_clean_after_p2_neumaier).
-    # NOT the same class as `volume` (whose blocker is a batch-vs-canonical std FORMULA gap, drift-independent,
-    # still gated). Incremental_safe so it rides the running sums when FP_INCREMENTAL is enabled.
-    incremental_safe = True
+    # NOT the same class as `volume` (whose blocker is a batch-vs-canonical std FORMULA gap, drift-independent).
+    # NO-GO for FP_INCREMENTAL (real-data soak, scripts/incremental_realdata_soak.py, 2026-06-17): the P2
+    # Neumaier compensation cleared the adversarial-seed corr-denom straddle, but the real gappy tape still
+    # breaches on ~0.5% of minutes (null/non-null flip at autocorr_2_10m) — a degenerate-cell defined-guard
+    # straddle the synthetic seeds don't reproduce. Stays on the batch path until the cancellation-free fix lands.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

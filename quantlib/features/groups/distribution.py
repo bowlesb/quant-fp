@@ -30,6 +30,12 @@ class DistributionGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.VOLATILITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
+    # NO-GO for FP_INCREMENTAL (the ONLY breacher the synthetic degenerate stream also catches, plus the
+    # real-data soak scripts/incremental_realdata_soak.py 2026-06-17): breaches the incremental==batch parity
+    # self-check on ~0.4% of real minutes (worst ~10404x) at ret_kurt_10m — a higher-moment (kurtosis) power-sum
+    # cancellation. Tracked as DEEP_WINDOW_KNOWN_BREACHERS in tests/test_fp_incremental_features.py. Stays on the
+    # batch path until the cancellation-free reduction fix lands.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

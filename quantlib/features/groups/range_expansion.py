@@ -48,6 +48,12 @@ class RangeExpansionGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.VOLATILITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "high", "low", "close")),)
+    # NO-GO for FP_INCREMENTAL (real-data soak, scripts/incremental_realdata_soak.py, 2026-06-17): breaches the
+    # incremental==batch parity self-check on ~7.8% of minutes (null/non-null flip at range_expansion_5_30m) —
+    # the trailing-mean RATIO denom `>0` guard straddles between the batch fresh-sum and the incremental
+    # running-sum on a near-zero-range trailing window. The synthetic stream doesn't reproduce the real gappy
+    # structure. Stays on the batch path until the consistently-guarded reduction-denom fix lands.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         return [

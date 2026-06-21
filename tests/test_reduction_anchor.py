@@ -56,8 +56,10 @@ def test_attach_volume_anchor_joins_per_symbol_from_daily() -> None:
     frame = pl.DataFrame({"symbol": ["A", "B", "C"], "minute": [10, 10, 10]})
     attached = attach_volume_anchor(frame, daily)
     by_symbol = {r["symbol"]: r[anchor_column("volume")] for r in attached.iter_rows(named=True)}
-    assert by_symbol["A"] == 5.1e6  # the LATEST daily volume, 2-sig-fig
-    assert by_symbol["B"] == 3.0e3
+    # The anchor is the LATEST daily-bar total scaled to the PER-MINUTE volume the reduction centers
+    # (/ _RTH_MINUTES_PER_DAY = 390), then 2-sig-fig rounded. A: 5.1e6/390 = 13076.9 -> 13000.
+    assert by_symbol["A"] == 13000.0  # round(5.1e6 / 390, 2 sig figs)
+    assert by_symbol["B"] == 7.7  # round(3.0e3 / 390, 2 sig figs) = 7.692 -> 7.7
     assert (
         by_symbol["C"] == 0.0
     )  # absent from daily -> 0.0 (no centering; a small/new name is well-conditioned)

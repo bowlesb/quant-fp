@@ -70,13 +70,12 @@ def load_minute_agg(date: str, symbols: list[str]) -> pl.DataFrame:
     )
 
 
-def daily_snapshot(minute_agg: pl.DataFrame, scale: str = "minute_mean") -> pl.DataFrame:
-    """A per-symbol daily volume snapshot (the anchor source). ``scale``:
-      - ``minute_mean``: the per-symbol MEAN MINUTE volume — the scale the centered std actually centers
-        (volume is reduced per-minute), so |v−a|/v stays small (CORRECT, breach-free).
-      - ``daily_total``: the per-symbol whole-day total (~390x larger) — what production's daily-bar volume
-        currently provides; ~2-order mismatch vs the per-minute value → centering only partly conditions
-        (the residual volume breach this soak surfaces)."""
+def daily_snapshot(minute_agg: pl.DataFrame, scale: str = "daily_total") -> pl.DataFrame:
+    """A per-symbol daily volume snapshot (the anchor source) — production-faithful: ``daily_total`` = the
+    per-symbol whole-day total volume, exactly what production's daily-bar ``daily.volume`` provides. The
+    per-minute scaling now lives INSIDE ``attach_volume_anchor`` (``/ _RTH_MINUTES_PER_DAY``), so feeding the
+    raw daily total here exercises the real production anchor path. (``minute_mean`` remains for A/B-ing the
+    pre-fix mismatch — it pre-scales to the per-minute mean.)"""
     agg = pl.col("volume").mean() if scale == "minute_mean" else pl.col("volume").sum()
     return minute_agg.group_by("symbol").agg(agg.alias("volume")).with_columns(pl.lit(1).alias("date"))
 
