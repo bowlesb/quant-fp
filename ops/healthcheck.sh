@@ -184,7 +184,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Combined exit code
+# 6. Page on failure (G9). Fire the single host notifier when the FAIL count exceeds the baseline. After
+#    the G10 market-aware SKIP fix the baseline on a healthy trading day is 0, and store-coverage checks
+#    SKIP (not FAIL) off-session — so this pages on a REAL outage, not every weekend. notify.py is a no-op
+#    when QUANT_ALERT_WEBHOOK is unset and rate-limits the same dedup key, so this is safe + non-spammy.
+# ---------------------------------------------------------------------------
+PY_FAIL_COUNT=0
+FAIL_NAMES=""
+if [ -n "${PY_JSON:-}" ] && command -v jq >/dev/null 2>&1; then
+  PY_FAIL_COUNT=$(printf '%s\n' "$PY_JSON" | jq -r '.summary.fail // 0' 2>/dev/null || echo 0)
+  FAIL_NAMES=$(printf '%s\n' "$PY_JSON" | jq -r '[.checks[] | select(.status=="FAIL") | .name] | join(", ")' 2>/dev/null || echo "")
+fi
+TOTAL_FAIL=$(( HOST_FAIL + PY_FAIL_COUNT ))
+if [ "$TOTAL_FAIL" -gt "${HEALTHCHECK_FAIL_BASELINE:-0}" ]; then
+  NOTIFY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notify.py"
+  [ -n "$FAIL_NAMES" ] || FAIL_NAMES="host-level check"
+  python3 "$NOTIFY" --dedup-key healthcheck-fail \
+    --title "healthcheck: ${TOTAL_FAIL} FAIL" \
+    --body "failing: ${FAIL_NAMES} (host_fail=${HOST_FAIL}, py_fail=${PY_FAIL_COUNT})" >/dev/null 2>&1 || true
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Combined exit code
 # ---------------------------------------------------------------------------
 if [ "$HOST_FAIL" -eq 1 ] || [ "$PY_EXIT" -eq 1 ]; then
   exit 1

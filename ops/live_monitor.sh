@@ -72,6 +72,19 @@ for svc in quant-redis quant-timescaledb-1 smoke-strategy reversion-strategy ove
   if docker start "$svc" >/dev/null 2>&1; then note "restarted:$svc(was:$st)"; else note "FAILED-restart:$svc(was:$st)"; fi
 done
 
+# --- 1b. Page on a PROTECTED-container restart (G9). Every svc in the loop above is in PROTECTED_SET, so
+#         any restart/relaunch action (or a failed one) means the live apparatus went down and was auto-
+#         healed — exactly the silent-failure the 06-17 fc outage represented. Fire the single notifier
+#         (no-op when QUANT_ALERT_WEBHOOK is unset; rate-limited per dedup key so a crash-loop pages once
+#         per cooldown, not every 3-minute tick). ---
+RESTART_EVENTS=$(printf '%s' "$ACTIONS" | tr ',' '\n' | grep -E 'restarted:|relaunched:|FAILED-restart:|FAILED-relaunch:' | tr -d '"' | paste -sd '; ' -)
+if [ -n "$RESTART_EVENTS" ]; then
+  NOTIFY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notify.py"
+  python3 "$NOTIFY" --dedup-key "live-restart:${RESTART_EVENTS}" --cooldown-s 900 \
+    --title "live_monitor restarted a PROTECTED container" \
+    --body "auto-heal actions: ${RESTART_EVENTS}" >/dev/null 2>&1 || true
+fi
+
 # --- 2. host-memory guard: if free RAM < 8%, pause EVERY non-protected heavy/backfill job (not just one
 #        hardcoded name) so no job — however named — can OOM-starve the live capture. ---
 MEM_FREE_PCT=$(free | awk '/Mem:/{printf "%d", ($7/$2)*100}')
