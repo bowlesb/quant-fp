@@ -34,6 +34,13 @@
 > volume_exhaustion, volume_leads_price. (`volume` is clean ONLY when the centering anchor is per-MINUTE scale,
 > see ⚠ below.)
 >
+> ⛔ **#386's 4 time-axis groups (trend_quality / clean_momentum / residual_analysis / price_volume) do NOT
+> expand this set.** The DataIntegrity real-tape promotion gate (2026-06-21, see "REAL-TAPE PROMOTION GATE"
+> below) measured `FP_CENTERED_TIME=1` vs `=0` on real /store tape and found the breach UNCHANGED (1683× /
+> 620× / inf, identical ON vs OFF) — the flag conditions the OLS x-axis (slope is value-identical) but the
+> self-check trips on the price_r2 / score near-perfect-fit y-side SSR cancellation, which it does not touch.
+> NET: relaunch flip set stays **15** (NOT 19); the 4 stay correctly on the batch path under FP_INCREMENTAL.
+>
 > ⚠ **VOLUME ANCHOR SCALE (action item).** `volume`'s centered-std anchor comes from `daily.volume` =
 > the prior-day DAILY-BAR total (~`backfill_daily`), but the reduction centers PER-MINUTE volume (~390× smaller).
 > At that ~2-order scale mismatch the centering only PARTIALLY conditions → `volume` still breaches ~0.4% (worst
@@ -250,6 +257,51 @@ TWO honest residuals (NOT shipped here, surfaced for the picker-upper):
    (already mean-centered; its lever is the time axis above) are NOT centering problems. So the return-anchor
    sibling fix (not this PR) would un-park distribution + return_dynamics + market_beta; this PR un-parks the
    time-axis class (trend_quality / clean_momentum / residual_analysis / price_volume.obv) value-identically.
+
+**⛔ UPDATE 2026-06-21 (DataIntegrity) — REAL-TAPE PROMOTION GATE for the 4 #386 groups: the synthetic
+"value-identical" claim is REFUTED on real tape. FP_CENTERED_TIME does NOT close the parity breach for
+trend_quality / clean_momentum; it is a NO-OP for price_volume.obv (already clean); only residual_analysis is
+clean (and was clean OFF too). NET PROMOTABLE FROM THIS PR: 0 of 4 (the relaunch flip set stays 15, NOT 19).**
+Reproduce: the offline real-store replay below (`/store/raw/bars/2026-06-17`, 30 syms, 779 graded post-warmup
+minutes, the EXACT production self-check `capture._incremental_parity` = `compute_reduction_batch` vs
+`IncrementalEngine.step(slice_derive=True)`), run twice — `FP_CENTERED_TIME=1` and `=0`. The 4 groups were
+force-`incremental_safe=True` in the probe ONLY (no prod flag flipped; fp UNCHANGED — offline script).
+
+| group | worst tol-ratio ON (=1) | worst tol-ratio OFF (=0) | flag effect | verdict |
+|---|---|---|---|---|
+| `trend_quality` | **1683×** (price_r2_5m, NKE) | **1683×** (identical) | none — breach unchanged | **NO-GO** |
+| `clean_momentum` | **620×** (clean_momentum_score_5m, NKE) | **620×** (identical) | none — breach unchanged | **NO-GO** |
+| `price_volume` | **inf** (pv_correlation null-flip) | **inf** (identical) | n/a — obv_slope clean both, pv_corr breaches | **NO-GO (group)** |
+| `residual_analysis` | 0.59× (clean) | 0.59× (clean) | none — clean both | GO, but NOT a #386 win |
+
+**WHY THE FLAG DOESN'T CLOSE IT (root cause, measured at the worst cell).** At NKE `price_r2_5m`,
+incremental=0.9456719506 (flag-independent — incremental never read the flag) vs batch ON=0.9424033698 /
+batch OFF=0.9424033025. The conditioning moves the BATCH value by ~6.7e-8 while the actual batch↔incremental
+divergence is **~3.3e-3** — five orders of magnitude too small to matter. Decomposing the OLS outputs at that
+cell: `price_slope_5m` is value-identical (diff 1.1e-13 — the TIME-AXIS x term the flag conditions is already
+well-conditioned, slope matches to machine precision), but `price_r2_5m` diverges 3.8e-3. The breach lives in
+the **R² goodness-of-fit y-side** (`1 − SSR/SST` on a near-perfect-fit window, r²≈0.94 → catastrophic
+SSR/SST cancellation in the RESIDUAL/y-variance term), NOT the time-axis x cov term. #386 conditioned x; the
+breach is in y. `clean_momentum_score` is the same SSR-fit cancellation (r²-derived). So the #386 mechanism is
+correct for what it targets (the slope/cov on the raw-epoch axis) but does not reach the price_r2 / momentum
+near-perfect-fit residual cancellation that the real-tape self-check actually trips on.
+
+**price_volume nuance.** Per-column isolation shows `obv_slope_{3..120}m` is bit-identical (tol-ratio 0.0)
+ON AND OFF — the #386-targeted cumulative time axis was never the price_volume breach source and needs no
+conditioning. The price_volume group still cannot promote: its breach is entirely `pv_correlation_{3,5,10,20}m`
+(inf null-flips), the parked return-vs-volume corr-denom class (§387 — not a time-axis problem).
+
+**residual_analysis** is clean (worst 0.59×) — but it is clean with the flag OFF too, so it is NOT promoted
+*by* #386. If the Lead wants to promote residual_analysis it can ride the 15-set flip on its own real-tape
+clean record (its lever per the table is the time axis, but the gate shows no time-axis breach to fix here).
+
+**WHAT A REAL FIX WOULD NEED.** The r²/score breach is the near-perfect-fit SSR/SST cancellation (the same
+class the §Parked table flags for `residual_analysis.resid_std`): batch and incremental form `SST − SSR`
+(or `cov²/(var·var)`) from differently-conditioned running vs fresh y-sums, and origin-shifting x does not
+touch it. The fix is a cancellation-free R²/residual kernel (centered SSR accumulation computed identically
+in both paths), the same Rust corr/OLS kernel named for §387 — NOT a time-axis conditioning. So #386 should
+NOT expand the relaunch flip set; the 4 stay on the batch path under FP_INCREMENTAL (correct, just not
+accelerated). The relaunch flip set is the 15 Parity-12 GO groups, real-tape-verified, unchanged by #386.
 
 **UPDATE 2026-06-21 — the VALUE-column-centering follow-up (residual #2 above) was BUILT-AS-PROBE,
 MEASURED, and the naive return-anchor framing is REFUTED. No clean value-identical centering promotion
