@@ -29,6 +29,14 @@ trust must not move an equity trust grade, and vice versa.
 | Universe | the symbol-discovery path | the symbol SET (equity ~11k; crypto a handful of liquid pairs) |
 | Container | the `fp-dev` image (Rust kernels) | the CONTAINER (`feature-computer` vs `crypto-capture`) |
 
+> **The store separation is by ROOT, NOT by a source tag.** crypto-capture runs `mode="real"`, so via
+> `store.source_for_mode` it writes `source=stream` — the SAME source tag equity writes. Crypto is isolated
+> from equity ONLY because it writes to a different store ROOT (the `fp_store_crypto` volume) and a different
+> bus namespace (`fv:crypto:*`); there is NO `source=crypto` tag. (The `crypto_capture` module docstring's
+> "crypto source marker" line is aspirational — the code does not set one.) So the crypto sweep reads
+> `source=stream` / `source=backfill` from the CRYPTO root, exactly like the equity sweep reads from `/store`.
+> Do NOT rely on a source tag to tell crypto from equity — use the store root.
+
 ### Why a SEPARATE crypto trust ledger (not an `asset_class` column on `feature_trust`)
 
 The equity trust model is keyed `(feature, version)` GLOBALLY — `feature_trust`, `feature_parity_defect`,
