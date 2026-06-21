@@ -1,11 +1,14 @@
-"""Quant dashboard — the feature-store COVERAGE GRID, and nothing else.
+"""Quant dashboard — the feature-store COVERAGE GRID, plus two read-only sibling tabs.
 
-The dashboard is deliberately a SINGLE thing: the always-warm ticker×date feature-store coverage grid (the
-React SPA in ``services/dashboard/frontend``), served at the ROOT ``/``. Everything that used to clutter the
-dashboard (status board, jobs, scorecard, progress reports, raw/sector/universe coverage, liquidity bands, the
-old DB-health home page) has been removed — both the UI pages and the now-dead ops-introspection read routes
+The dashboard centers on the always-warm ticker×date feature-store coverage grid (the React SPA in
+``services/dashboard/frontend``), served at the ROOT ``/``. Everything that used to clutter the dashboard
+(status board, jobs, scorecard, progress reports, raw/sector/universe coverage, liquidity bands, the old
+DB-health home page) was removed — both the UI pages and the now-dead ops-introspection read routes
 (``/api/status/rows``, ``/api/scorecard``, ``/api/scorecard/history``, ``/api/jobs``) and their backing
-modules. The grid is the one view that matters; the surface is now exactly four grid routes + ``/healthz``.
+modules. Two read-only TABS sit alongside the grid in the same SPA: the latency-expectations view
+(``/api/latency-expectations``) and the News & Filings view (``/api/news-edgar/*`` — live stream rate +
+store composition). All read-side; the surface is the four grid routes + latency + the two news/edgar
+routes + ``/healthz``.
 
 The grid's data is precomputed by the ``store-grid-worker`` container into MongoDB on a 10-minute schedule and
 served here from that cache, so a page load is one indexed document fetch and the heavy ~3-4min build is never
@@ -25,6 +28,7 @@ from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from latency_expectations import load_latency_expectations
+from news_edgar import composition_snapshot, stream_snapshot
 from store_grid_cache import read_drill as read_grid_drill
 from store_grid_cache import read_grid_gzip
 from store_grid_cache import read_meta as read_grid_meta
@@ -91,6 +95,24 @@ def latency_expectations() -> JSONResponse:
             status_code=503,
         )
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/news-edgar/stream")
+def news_edgar_stream() -> JSONResponse:
+    """The LIVE STREAMING panel for the News & Filings tab — current articles/min + filings/min, a recent
+    per-minute timeline, and ACTIVE/WARN/STALE freshness per source (business-hours-aware, matching the
+    data_freshness cron alert). Cheap and uncached: a few-ms recent-window filings query + the newest news
+    partition scan. ``no-store`` so the UI always sees the live rate, never a cached one."""
+    return JSONResponse(stream_snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/news-edgar/composition")
+def news_edgar_composition() -> JSONResponse:
+    """The STORE COMPOSITION panel for the News & Filings tab — total articles + span + top symbols, total
+    filings + span + per-form-type breakdown, and the feature status (edgar_filing_frequency LIVE; news
+    sentiment/hotness COMING). Served from a short-TTL in-process cache (the heavy ~3M-row filings aggregates
+    change slowly), so the scan never lands repeatedly on the request path."""
+    return JSONResponse(composition_snapshot(), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/healthz")
