@@ -24,6 +24,7 @@ from pathlib import Path
 from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from latency_expectations import load_latency_expectations
 from store_grid_cache import read_drill as read_grid_drill
 from store_grid_cache import read_grid_gzip
 from store_grid_cache import read_meta as read_grid_meta
@@ -75,6 +76,21 @@ def store_grid_cell_drill(group: str, date: str) -> JSONResponse:
     on that date (ranked, paginated), plus the date's captured-universe size + coverage %. Served from the
     worker's pre-warmed cell doc; a cold/unreachable cache returns an empty-but-valid drill."""
     return JSONResponse(read_grid_drill(group, date))
+
+
+@app.get("/api/latency-expectations")
+def latency_expectations() -> JSONResponse:
+    """The per-group feature-latency expectations (#321) for the latency view — the slowest-first
+    ``compute_latest`` profile plus the e2e bar->vector context header. Served straight from the JSON baked
+    into the image (``docs/feature_latency_expectations.json``); the UI renders ``groups`` as a slowest-first
+    table. Returns 503 ``booting`` if the artifact is absent (mirrors the grid's first-boot state)."""
+    data = load_latency_expectations()
+    if data is None:
+        return JSONResponse(
+            {"booting": True, "detail": "latency expectations artifact not present"},
+            status_code=503,
+        )
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/healthz")

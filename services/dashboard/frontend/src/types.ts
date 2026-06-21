@@ -95,3 +95,34 @@ export interface BootingResponse {
   booting: true;
   detail?: string;
 }
+
+// Shapes returned by /api/latency-expectations (docs/feature_latency_expectations.json, #321). One per-group
+// `compute_latest` latency profile, served slowest-first, with the e2e bar->vector context header.
+export interface LatencyGroup {
+  group: string;
+  feat_count: number;
+  kind: string;
+  mechanism: string;
+  incremental_ready: string;
+  p50_ms: number;
+  p99_ms: number;
+}
+
+export interface LatencyE2EContext {
+  metric: string;
+  single_bet_isolated_p50_ms: number;
+  typical_bet_under_load_p50_ms: number;
+  target_p99_ms: number;
+  note: string;
+}
+
+export interface LatencyExpectations {
+  schema_version: number;
+  generated_at: string;
+  units: string;
+  sorted_by: string;
+  e2e_context: LatencyE2EContext;
+  group_count: number;
+  feature_count: number;
+  groups: LatencyGroup[];
+}

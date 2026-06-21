@@ -42,6 +42,10 @@ COPY services/dashboard/*.py ./
 # The curated feature-group guide the worker reads at build time (group_guide.py looks here by default).
 COPY docs/feature_group_guide.yaml ./feature_group_guide.yaml
 
+# The per-group feature-latency expectations the /api/latency-expectations route serves (latency_expectations.py
+# looks here by default). Read-side only: a static JSON the dashboard renders as a slowest-first table.
+COPY docs/feature_latency_expectations.json ./feature_latency_expectations.json
+
 # The built React store-coverage grid SPA (from the webbuild stage). app.py mounts this at /store-grid.
 COPY --from=webbuild /web/dist ./frontend/store-grid
 
