@@ -6,8 +6,14 @@
 > per-group budget gate) — this table says WHERE the compute lives; the budget says how much it costs.
 >
 > Regenerate after any group add/migration. The two REAL remaining latency levers are Lead/Ben-gated:
-> the P2 FP_INCREMENTAL enablement flip (the 23 reductions → live incremental) and the Rust-resident
-> emit kernel (the only thing that moves the ~289ms isolated per-bet floor toward <100ms).
+> the P2 FP_INCREMENTAL enablement flip (now **20 of 23** reductions ready → live incremental) and the
+> Rust-resident emit kernel (the only thing that moves the ~289ms isolated per-bet floor toward <100ms).
+>
+> ⭐ REDUCTION INCREMENTAL-READINESS: **20/23 ready** — 17 always-safe + return_dynamics + volume_leads_price
+> (P2 Neumaier #283/#294) + volume (centered-std #307). **3 PARKED** (price_volume / market_beta /
+> residual_analysis) — a DISTINCT, harder corr-denom-straddle problem the centering abstraction does NOT
+> reach; they stay correctly on the batch path under FP_INCREMENTAL (no correctness loss, just no incremental
+> acceleration). See §"Parked: the corr-denom-straddle class" below.
 
 **63 groups / 728 features**: 23 ReductionGroup, 4 StatefulGroup, 36 hand-written FeatureGroup.
 
@@ -20,24 +26,24 @@
 | `distribution` | 20 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `efficiency` | 18 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `liquidity` | 15 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `market_beta` | 21 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | P2-followup: corr-denom stable form, then enable |
+| `market_beta` | 21 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | PARKED — corr-denom-straddle (see §Parked); centering does NOT apply (regressors small) |
 | `momentum` | 22 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `momentum_consistency` | 18 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `ohlc_vol` | 12 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `price_volume` | 70 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | P2-followup: corr-denom stable form, then enable |
+| `price_volume` | 70 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | PARKED — corr-denom-straddle on the RETURN regressor (see §Parked); centering volume does NOT fix it (measured) |
 | `quote_spread` | 21 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `range_expansion` | 2 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `realized_range` | 3 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `residual_analysis` | 6 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | P2-followup: corr-denom stable form, then enable |
-| `return_dynamics` | 15 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | P2-followup: corr-denom stable form, then enable |
+| `residual_analysis` | 6 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | PARKED — near-perfect-fit SSR cancellation (see §Parked); already mean-centered, anchor N/A |
+| `return_dynamics` | 15 | shared running-sum (WindowedSumState) | READY — un-gated by P2 Neumaier (#283/#294); incremental==batch parity-green |
 | `signed_trade_ratio` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_flow` | 23 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_freq_z` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trend_quality` | 30 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `volatility` | 15 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `volume` | 23 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | P2-followup: corr-denom stable form, then enable |
+| `volume` | 23 | shared running-sum (WindowedSumState) + centered-std (#307) | READY — un-gated by the centered-power-sum std; incremental==batch parity-green |
 | `volume_exhaustion` | 10 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `volume_leads_price` | 12 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | P2-followup: corr-denom stable form, then enable |
+| `volume_leads_price` | 12 | shared running-sum (WindowedSumState) | READY — un-gated by P2 Neumaier (#283/#294); incremental==batch parity-green |
 
 ## StatefulGroup (4 groups, 87 feat)
 
@@ -88,4 +94,37 @@
 | `swing` | 9 | resident quant_tick.swing_fold Rust kernel | DONE — Rust-resident |
 | `tick_runlength` | 3 | hand-written compute_latest | candidate: latest-only / shared-pass / kind migration |
 | `trade_size_dist` | 3 | hand-written compute_latest | candidate: latest-only / shared-pass / kind migration |
+
+## Parked: the corr-denom-straddle class (price_volume / market_beta / residual_analysis)
+
+> A DISTINCT reduction-stability problem, PARKED (Lead decision 2026-06-20): the 3 remaining gated reductions
+> are NOT the centering class. They stay correctly on the batch fresh-sum path under FP_INCREMENTAL (no
+> correctness loss, no incremental acceleration). 20/23 ready is the win; this captures the last 3 as a
+> ready-to-pick-up backlog item, not lost knowledge.
+
+**THE PROBLEM (why centering does NOT apply).** volume's gate (#307) was a MAGNITUDE cancellation: the std
+power sum `Σv²−(Σv)²/n` on raw share volume ~1e6 — closed by centering on a per-symbol anchor (`Σ(v−a)²`,
+shift-invariant, machine precision). The remaining 3 are a DIFFERENT root cause: a **corr/OLS DEFINED-GUARD
+sign-flip on degenerate cells** — the guard threshold (`denom > eps·(Σz)²`, the #122/#131 sign-at-threshold
+class) lands on OPPOSITE sides between the batch FRESH window sums and the incremental RUNNING sums when the
+regressor collapses to near-constant over a gappy window. Incremental emits a value where batch NULLs (or the
+reverse) → a null/non-null parity breach. There is no large-magnitude regressor to center it away.
+
+| group | the degenerate cell | why the anchor can't fix it |
+|---|---|---|
+| `price_volume` (pv_correlation) | sparse symbol's one-minute RETURN regressor `x≈0` over the window → `denom_x = b·Σx²−(Σx)²` straddles the guard floor | MEASURED: centering the volume `y` regressor on the anchor leaves the breach (it is in `denom_x`, the small RETURN, not the volume magnitude). |
+| `market_beta` (market_corr/idio_vol) | gappy satellite vs a dense SPY whose return is near-constant over the few paired bars → corr `denom` straddle (real 06-18 MO/SLB: corr=±1 / idio_vol=0 where batch NULLs) | BOTH regressors are small returns (~1e-3) — nothing large to center; the straddle is the guard threshold, not a magnitude term. |
+| `residual_analysis` (resid_std) | near-perfect intraday fit → SSR = `noise/noise` (r²≈1) where the centered power sums round past the breach ratio | already MEAN-centered in the formula (`sxx_c = sxx − sx²/b`); the residue is the perfect-fit cancellation, not a per-symbol-anchor magnitude. |
+
+**CANDIDATE FIXES (the two identified, ready to evaluate).**
+1. **Consistent guard-threshold rounding** — make the `denom > eps·(Σz)²` defined-guard evaluate IDENTICALLY
+   on both paths so a degenerate cell is classified the same (null on both, or defined on both). E.g. snap
+   the guard input to a shared rounded form, or widen `eps` to swallow the running-vs-fresh-sum residue at
+   the threshold (the #131-class relative-floor approach, applied to the corr/OLS denom on these 3).
+2. **n==2-style exact-degenerate treatment** — generalize the existing `_OLS_PERFECT_FIT_COUNT` (b==2 → emit
+   the EXACT sign(cov)/r²==1 in all three twins) to the broader near-degenerate-corr cells, so both paths
+   emit the same exact degenerate value rather than racing the guard threshold.
+
+VALIDATION when picked up: the gate tests `test_gappy_denom_group_still_breaches_gate_load_bearing[price_volume]`
++ `test_market_beta_breaches_on_real_gappy_spy_regressor` FLIP from breach→clean; full-set byte-eq; fp unchanged.
 
