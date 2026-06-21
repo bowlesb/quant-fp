@@ -90,6 +90,35 @@ def attach_volume_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFra
     )
 
 
+def attach_close_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFrame:
+    """Attach the per-symbol CLOSE centering anchor to ``frame`` (keyed on symbol), from the ``daily``
+    snapshot's most-recent per-symbol close. The SAME join the backfill batch path and the live seed path
+    apply, so the anchor column is identical in both — the parity-critical invariant the y-side OLS
+    conditioning (``FP_RUST_REDUCE``) relies on.
+
+    Used by the OLS R²/corr/resid-std reductions that regress ``y = close`` on a time axis (trend_quality,
+    clean_momentum, residual_analysis). Centering ``y`` on a per-symbol-constant close anchor keeps
+    ``denom_y = b·Σ(y−a)² − (Σ(y−a))²`` and ``cov_n = b·Σ(x·(y−a)) − Σx·Σ(y−a)`` from cancelling large
+    near-equal sums on raw close prices (~$45–$500), so the batch fresh-sum path and the incremental
+    running-sum path round a near-perfect-fit r²/corr identically. OLS is translation-invariant in y, so the
+    centered result is VALUE-IDENTICAL to the raw form in exact arithmetic — only the float conditioning
+    changes (fp unchanged). Unlike the volume anchor (per-MINUTE scale) the close anchor is the daily-bar
+    close, which IS already the per-minute price scale, so no rescaling: round it straight to 2 sig figs.
+    A symbol not in ``daily`` gets 0.0 (no centering — its raw close is then the only conditioning available).
+    """
+    latest = (
+        daily.select(["symbol", "date", "close"])
+        .sort(["symbol", "date"])
+        .group_by("symbol", maintain_order=True)
+        .agg(pl.col("close").last().alias("_close"))
+        .with_columns(sigfig_rounded_anchor(pl.col("_close")).alias(anchor_column("close")))
+        .select(["symbol", anchor_column("close")])
+    )
+    return frame.join(latest, on="symbol", how="left").with_columns(
+        pl.col(anchor_column("close")).fill_null(0.0)
+    )
+
+
 def attach_reduction_anchors(frames: dict[str, pl.DataFrame]) -> dict[str, pl.DataFrame]:
     """Attach every centered-std reduction anchor onto ``frames["minute_agg"]`` in place of the original
     frame, from the per-session snapshots ``frames`` already holds — the SINGLE wiring point shared by
@@ -114,6 +143,16 @@ def attach_reduction_anchors(frames: dict[str, pl.DataFrame]) -> dict[str, pl.Da
         return frames
     daily = frames.get("daily")
     if daily is None:
-        anchored = minute_agg.with_columns(pl.lit(0.0).alias(anchor_column("volume")))
+        anchored = minute_agg.with_columns(
+            pl.lit(0.0).alias(anchor_column("volume")), pl.lit(0.0).alias(anchor_column("close"))
+        )
         return {**frames, "minute_agg": anchored}
-    return {**frames, "minute_agg": attach_volume_anchor(minute_agg, daily)}
+    anchored = attach_volume_anchor(minute_agg, daily)
+    # The close anchor is only sourced when the daily snapshot carries a ``close`` column (the daily-bar
+    # close); a snapshot that predates it falls back to the 0.0 sentinel (uncentered — raw close). Both paths
+    # read this identical column, so the y-side OLS conditioning stays parity-true.
+    if "close" in daily.columns:
+        anchored = attach_close_anchor(anchored, daily)
+    else:
+        anchored = anchored.with_columns(pl.lit(0.0).alias(anchor_column("close")))
+    return {**frames, "minute_agg": anchored}

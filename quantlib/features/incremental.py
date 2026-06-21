@@ -31,7 +31,9 @@ import os
 import numpy as np
 import polars as pl
 
-from quantlib.features.declarative import _TIME_ORIGIN_LAG as declarative_TIME_ORIGIN_LAG
+from quantlib.features.declarative import (
+    _TIME_ORIGIN_LAG as declarative_TIME_ORIGIN_LAG,
+)
 from quantlib.features.declarative import (
     ReductionGroup,
     StatefulRegressor,
@@ -67,6 +69,7 @@ class IncrementInvariantError(Exception):
     fold/expire/trim cycle itself, independent of how the window was filled — checkable at ANY time, not just
     after a seed. Distinct from ``IncrementUnderfilled`` (which is a present-but-not-absorbed INPUT problem,
     not internal corruption)."""
+
 
 # How far (minutes) behind the incoming minute to pin the rolling time-OLS origin each fold. Small and fixed
 # so the time regressor's x stays O(1) for every window — keeping ``b·Σxx − (Σx)²`` well conditioned instead
@@ -125,7 +128,9 @@ class WindowedSumState:
             self._neumaier_add(wi, values)  # the new minute is in every window (epoch == T > T - w)
             cutoff = minute_epoch - w * 60
             oldest = self._oldest[wi]
-            while oldest <= index and self._buf_epoch[oldest] <= cutoff:  # minute at/under T-w left the window
+            while (
+                oldest <= index and self._buf_epoch[oldest] <= cutoff
+            ):  # minute at/under T-w left the window
                 self._neumaier_add(wi, -self._buf_vals[oldest])
                 oldest += 1
             self._oldest[wi] = oldest
@@ -153,7 +158,9 @@ class WindowedSumState:
             self._buf_vals = self._buf_vals[keep_from:]
             self._oldest = [o - keep_from for o in self._oldest]
 
-    def rebase_time_axis(self, delta_minutes: float, time_ols_cols: list[tuple[int, int, int, int, int]]) -> None:
+    def rebase_time_axis(
+        self, delta_minutes: float, time_ols_cols: list[tuple[int, int, int, int, int]]
+    ) -> None:
         """Shift every OLS time regressor's x-axis by ``-delta_minutes`` in place (origin moves forward by
         ``delta_minutes``), so the regression's x stays small and the ``b·Σxx − (Σx)²`` variance term is well
         conditioned instead of a difference of large near-equal sums (the source of the time-OLS incremental-
@@ -265,7 +272,9 @@ class WindowedSumState:
                     if oldest < len(self._buf_vals)
                     else np.zeros((self.n, self.n_cols), dtype=np.float64)
                 )
-                effective = self.running[wi] + self._comp[wi]  # the Neumaier-corrected sum (what consumers read)
+                effective = (
+                    self.running[wi] + self._comp[wi]
+                )  # the Neumaier-corrected sum (what consumers read)
                 if not np.allclose(effective, expected, rtol=1e-9, atol=1e-9, equal_nan=True):
                     raise IncrementInvariantError(
                         f"window {w}: running sum diverged from its buffered in-window minutes"
@@ -319,7 +328,9 @@ class IncrementalEngine:
 
     DERIVE_SLICE = 6  # legacy minute-window depth (>= max_lag); the live slice tails by ROW (see _matrix_at). Used by the rust-vs-polars unit tests and the dense-feed sim slot count.
 
-    def __init__(self, groups: list[ReductionGroup], *, rust_slice: bool = True, assert_ready_on_seed: bool = False) -> None:
+    def __init__(
+        self, groups: list[ReductionGroup], *, rust_slice: bool = True, assert_ready_on_seed: bool = False
+    ) -> None:
         self.rust_slice = rust_slice
         # When True, the FIRST seed runs the UNIVERSAL ``assert_ready`` (three-way FULL / legit-not-yet-full /
         # FAILED) + internal invariants against the seed buffer — catching a present-but-not-absorbed fill
@@ -356,6 +367,13 @@ class IncrementalEngine:
         self.stateful_specs = self._collect_stateful_specs()  # ns -> {slot: StatefulRegressor}
         self.stateful_ns = set(self.stateful_specs)
         self.reg_x_expr, self.reg_y_expr = self._collect_regression_exprs()  # ns -> base x/y expr
+        # ns -> the per-symbol-constant y-centering anchor expr ACTIVE under FP_RUST_REDUCE (empty when off).
+        # The y (close) of an anchored regression is centered on this constant BEFORE the OLS paired columns
+        # are formed, so the running-sum y-side denom is conditioned IDENTICALLY to the batch path (the batch
+        # applies the same centering in ``_ols_derived`` via ``build_plan``). Value-identical (OLS is
+        # translation-invariant in y); the centering is the parity-critical contract — the anchor is the SAME
+        # per-symbol constant both paths read off the input frame.
+        self.reg_y_anchor = self._collect_y_anchor_exprs()  # ns -> anchor pl.Expr
         self.safe_derived = self._slice_safe_derived()
         # value columns that slice-derive produces directly (everything except stateful regressions' paired cols)
         stateful_cols = {f"__rd_{ns}_{key}" for ns in self.stateful_ns for key in _OLS_KEYS}
@@ -366,8 +384,12 @@ class IncrementalEngine:
         # (__inc_<ns>) and the base values of a stateful regression's NON-stateful partner slot (__reg{x,y}_<ns>).
         self.stateful_aux: list[pl.Expr] = []
         self.inc_col: dict[str, str] = {}  # ns -> increment col name
-        self.bcast_col: dict[str, str] = {}  # ns -> broadcast-value col name (the index ticker's per-minute value)
-        self.bcast_symbol: dict[str, str] = {}  # ns -> the index ticker whose row carries the broadcast value
+        self.bcast_col: dict[
+            str, str
+        ] = {}  # ns -> broadcast-value col name (the index ticker's per-minute value)
+        self.bcast_symbol: dict[
+            str, str
+        ] = {}  # ns -> the index ticker whose row carries the broadcast value
         self.regx_col: dict[str, str] = {}  # ns -> non-stateful x base col name
         self.regy_col: dict[str, str] = {}
         for ns, slots in self.stateful_specs.items():
@@ -389,7 +411,9 @@ class IncrementalEngine:
                 self.regx_col[ns] = name
             if "y" not in slots:
                 name = f"__regy_{ns}"
-                self.stateful_aux.append(self.reg_y_expr[ns].alias(name))
+                anchor = self.reg_y_anchor.get(ns)
+                y_expr = self.reg_y_expr[ns] if anchor is None else (self.reg_y_expr[ns] - anchor)
+                self.stateful_aux.append(y_expr.alias(name))
                 self.regy_col[ns] = name
         self.aux_cols = [expr.meta.output_name() for expr in self.stateful_aux]
 
@@ -418,7 +442,9 @@ class IncrementalEngine:
         self.symbols: list[str] | None = None
         self.state: WindowedSumState | None = None
         self.ref_epoch: int | None = None  # rolling origin for "time" regressors (OLS is origin-invariant)
-        self.obv_running: dict[str, np.ndarray] = {}  # ns -> (n_symbols,) running cumulative for "cumulative" slots
+        self.obv_running: dict[
+            str, np.ndarray
+        ] = {}  # ns -> (n_symbols,) running cumulative for "cumulative" slots
 
     def _collect_stateful_specs(self) -> dict[str, dict[str, StatefulRegressor]]:
         specs: dict[str, dict[str, StatefulRegressor]] = {}
@@ -438,6 +464,17 @@ class IncrementalEngine:
                 x_exprs[ns], y_exprs[ns] = x_expr, y_expr
         return x_exprs, y_exprs
 
+    def _collect_y_anchor_exprs(self) -> dict[str, pl.Expr]:
+        """The per-namespace y-centering anchor exprs ACTIVE under ``FP_RUST_REDUCE`` (empty when off — each
+        group's ``_y_anchor_exprs`` already returns {} unless the flag is on). Namespaced by ``<gi>_<reg>`` to
+        match the OLS paired-column namespace, so the incremental fold centers ``y`` on the SAME per-symbol
+        constant the batch ``build_plan`` does."""
+        anchors: dict[str, pl.Expr] = {}
+        for gi, group in enumerate(self.groups):
+            for reg_name, anchor_expr in group._y_anchor_exprs().items():
+                anchors[f"{gi}_{reg_name}"] = anchor_expr
+        return anchors
+
     def _slice_safe_derived(self) -> list[pl.Expr]:
         """The union derive exprs MINUS the OLS paired columns of stateful regressions (those are rebuilt from
         running state). A stateful regression's paired columns are named ``__rd_<ns>_<key>``; everything else
@@ -448,7 +485,8 @@ class IncrementalEngine:
     def _derived_row(self, frame: pl.DataFrame, minute: object) -> pl.DataFrame:
         """ONE lazy slice pass: derive the safe value cols + presence/square + the stateful regressions' aux
         cols (cumulative increments, non-stateful partner-slot bases), then return the single row per symbol at
-        ``minute`` (sorted by symbol). Lazy so polars fuses the 40+ windowed exprs into one optimized plan."""
+        ``minute`` (sorted by symbol). Lazy so polars fuses the 40+ windowed exprs into one optimized plan.
+        """
         return (
             frame.lazy()
             .select(self.input_cols)
@@ -468,9 +506,13 @@ class IncrementalEngine:
         instead of ``shift().over()``, so the result is the SAME single-row-per-symbol derive as
         ``_derived_row`` (guarded cell-for-cell by tests/test_fp_slice_derive_rust.py)."""
         lag_row = rust_slice_derive(frame, self.input_cols, self.lag_columns, minute)
-        return lag_row.with_columns([*self.rust_safe_derived, *self.rust_stateful_aux]).with_columns(self.rust_extra)
+        return lag_row.with_columns([*self.rust_safe_derived, *self.rust_stateful_aux]).with_columns(
+            self.rust_extra
+        )
 
-    def _stateful_matrix(self, row: pl.DataFrame, minute: object, present: np.ndarray) -> dict[int, np.ndarray]:
+    def _stateful_matrix(
+        self, row: pl.DataFrame, minute: object, present: np.ndarray
+    ) -> dict[int, np.ndarray]:
         """Rebuild the 6 OLS paired columns (b, x, y, xy, xx, yy) for every stateful regression at ``minute``
         from running x/y state (sourced from the already-derived ``row``) — pairing under nulls exactly as
         ``_ols_derived`` does. Returns {value_col_index: (n_symbols,) column}. Advances the running cumulatives.
@@ -564,7 +606,9 @@ class IncrementalEngine:
                 .group_by("symbol", maintain_order=True)
                 .tail(self.max_lag + 1)
             )
-        row = self._derived_row_rust(source, minute) if self.rust_slice else self._derived_row(source, minute)
+        row = (
+            self._derived_row_rust(source, minute) if self.rust_slice else self._derived_row(source, minute)
+        )
         n_sym = len(self.symbols or [])
         # Live capture delivers only the minute's ACTIVE symbols — a fluctuating SUBSET of the fixed session
         # index. Align the present rows to the full index: absent symbols contribute 0 to every windowed sum
@@ -585,7 +629,9 @@ class IncrementalEngine:
         fully-present case (every index symbol delivered) to avoid a join. Raises ``SymbolSetExpanded`` if the
         minute carries a symbol outside the index — the caller re-seeds (the parity-safe resync path)."""
         symbols = self.symbols or []
-        if row.height == len(symbols):  # fully-present (the fixed-set case): row is already the index, sorted
+        if row.height == len(
+            symbols
+        ):  # fully-present (the fixed-set case): row is already the index, sorted
             ordered = row.sort("symbol")
             if ordered["symbol"].to_list() == symbols:
                 return ordered, np.ones(len(symbols), dtype=bool)
@@ -626,7 +672,9 @@ class IncrementalEngine:
         self.state.rebase_time_axis(delta_minutes, self.time_ols_cols)
         self.ref_epoch = new_ref
 
-    def seed(self, buffer_frame: pl.DataFrame, symbols: list[str] | None = None, *, slice_derive: bool = True) -> None:
+    def seed(
+        self, buffer_frame: pl.DataFrame, symbols: list[str] | None = None, *, slice_derive: bool = True
+    ) -> None:
         """Establish the symbol index + fixed origins and fold every buffered minute into fresh state (== the
         batch recompute over the buffer; also the daily-resync / crash-recovery entry point). Folds minute by
         minute through the SAME slice-derive + stateful path used live, so the running OBV/time state is built
@@ -637,7 +685,8 @@ class IncrementalEngine:
         instead of forcing a re-seed. When None, the index is the symbols seen in ``buffer_frame`` (the prior
         behaviour). ``slice_derive`` controls whether per-minute value columns are derived over a per-symbol
         last-``max_lag+1``-rows tail (fast, and parity-safe for sparse symbols — positional lags reach each
-        symbol's actual prior bars) or the whole buffer (gap-safe; identical result, just more rows derived)."""
+        symbol's actual prior bars) or the whole buffer (gap-safe; identical result, just more rows derived).
+        """
         index = symbols if symbols is not None else buffer_frame["symbol"].unique().to_list()
         self.symbols = sorted(index)
         self.state = WindowedSumState(self.symbols, self.windows, len(self.value_cols))
@@ -674,7 +723,8 @@ class IncrementalEngine:
         absorbed window raises ``IncrementUnderfilled``, and an internal-bookkeeping contradiction raises
         ``IncrementInvariantError`` (``WindowedSumState.assert_ready`` → ``check_invariants`` + the three-way
         fill check). Source-agnostic and valid at ANY time — at init after a seed, or in steady state against
-        the live trailing frame. No-op (vacuous) when the engine declares no windows or has not been seeded."""
+        the live trailing frame. No-op (vacuous) when the engine declares no windows or has not been seeded.
+        """
         if self.state is None or not self.windows:
             return
         self.state.assert_ready(self.frame_span_minutes(frame))
@@ -690,7 +740,9 @@ class IncrementalEngine:
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=slice_derive)
         long = self._running_long()
-        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
+        latest_frame = resolve_points(
+            self.groups, frame, latest
+        )  # points resolved over the whole buffer (lag-safe)
         return assemble_from_long(
             self.groups, long, latest_frame, latest, self.plan, self.reg_plan, self.centered
         )
@@ -714,11 +766,14 @@ class IncrementalEngine:
         """NUMPY-EMIT alternative to ``step``: fold the new minute, then assemble features DIRECTLY from the
         running-sum numpy array via ``emit_numpy`` (no ``_running_long`` long-frame build, no polars pivot in
         assemble). Parity-true by construction — ``emit_numpy`` uses the IDENTICAL canonical/OLS algebra as the
-        polars ``assemble_from_long``. Guarded against it cell-for-cell by tests/test_fp_incremental_emit.py."""
+        polars ``assemble_from_long``. Guarded against it cell-for-cell by tests/test_fp_incremental_emit.py.
+        """
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=True)
         assert self.state is not None
-        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
+        latest_frame = resolve_points(
+            self.groups, frame, latest
+        )  # points resolved over the whole buffer (lag-safe)
         return emit_numpy(
             self.groups,
             self.state.corrected(),
@@ -741,8 +796,12 @@ class IncrementalEngine:
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=True)
         assert self.state is not None
-        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
-        return emit_rust(self.groups, self.state.corrected(), self.symbols or [], self.asm_plan, latest_frame, latest)
+        latest_frame = resolve_points(
+            self.groups, frame, latest
+        )  # points resolved over the whole buffer (lag-safe)
+        return emit_rust(
+            self.groups, self.state.corrected(), self.symbols or [], self.asm_plan, latest_frame, latest
+        )
 
     def step_rust_unified(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
         """UNIFIED single-pass twin of ``step_rust``: fold the new minute, then assemble EVERY reduction
@@ -753,14 +812,17 @@ class IncrementalEngine:
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=True)
         assert self.state is not None
-        latest_frame = resolve_points(self.groups, frame, latest)  # points resolved over the whole buffer (lag-safe)
+        latest_frame = resolve_points(
+            self.groups, frame, latest
+        )  # points resolved over the whole buffer (lag-safe)
         return emit_rust_unified(
             self.groups, self.state.corrected(), self.symbols or [], self.asm_plan, latest_frame, latest
         )
 
     def _running_long(self) -> pl.DataFrame:
         """The running sums as a LONG (symbol, window, <value-col sum>) frame — the exact shape
-        ``assemble_from_long`` expects, so the SAME assemble code runs as in the batch (NO pivot to build it)."""
+        ``assemble_from_long`` expects, so the SAME assemble code runs as in the batch (NO pivot to build it).
+        """
         assert self.state is not None
         running = self.state.corrected()  # (n_windows, n_symbols, n_cols), Neumaier-corrected
         n_win, n_sym, _ = running.shape

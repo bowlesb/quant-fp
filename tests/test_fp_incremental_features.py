@@ -14,9 +14,24 @@ from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup
 from quantlib.features.incremental import _TIME_ORIGIN_LAG, IncrementalEngine
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
+
+
+def _anchored(frame: pl.DataFrame) -> pl.DataFrame:
+    """Attach the per-symbol volume + close centering anchors (production attaches them via
+    attach_reduction_anchors before either path runs), so the anchor-declaring groups (volume, trend_quality,
+    clean_momentum) are runnable on these streams. Value-additive — the anchors are only consumed under the
+    centered-std / FP_RUST_REDUCE flags; they make the groups selectable, never change a feature value."""
+    daily = (
+        frame.group_by("symbol")
+        .agg(pl.col("volume").sum().alias("volume"), pl.col("close").last().alias("close"))
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_reduction_anchors({"minute_agg": frame, "daily": daily})["minute_agg"]
+
 
 # The deepest declared ReductionGroup window is 180m (momentum/price_returns/trend_quality/volume/...). The
 # incremental==batch parity test MUST stream past it, or the 90/120/180m windows are never fully populated and
@@ -53,7 +68,7 @@ def _stream(n_sym: int = 8, n_min: int = MIN_DEEP_STREAM_M) -> pl.DataFrame:
                     "mean_ask_size": rng.random() * 100,
                 }
             )
-    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    return _anchored(pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))))
 
 
 def _degenerate_stream(n_sym: int = 12, n_min: int = MIN_DEEP_STREAM_M, seed: int = 7) -> pl.DataFrame:
@@ -98,7 +113,7 @@ def _degenerate_stream(n_sym: int = 12, n_min: int = MIN_DEEP_STREAM_M, seed: in
                     "mean_ask_size": rng.random() * 100,
                 }
             )
-    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    return _anchored(pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))))
 
 
 def _assert_close(batch: pl.DataFrame, inc: pl.DataFrame, label: str) -> None:

@@ -12,7 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 import polars as pl
 import pytest
 
-from quantlib.features import BatchContext, REGISTRY, run_group
+from quantlib.features import REGISTRY, BatchContext, run_group
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 
 BASE = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
 # A correct live buffer must exceed the largest feature window (180m across these groups) + lag, or
@@ -21,8 +22,11 @@ LIVE_WINDOW = 210
 
 
 def _ohlc(bars: list[tuple[float, float, float, float, float]]) -> pl.DataFrame:
-    """bars = list of (open, high, low, close, volume) on a contiguous one-minute AAA grid."""
-    return pl.DataFrame(
+    """bars = list of (open, high, low, close, volume) on a contiguous one-minute AAA grid. The reduction
+    centering anchors (volume + close) are attached as production does (attach_reduction_anchors), so the
+    anchor-declaring groups (trend_quality, clean_momentum, volume) select their InputSpec anchor column —
+    value-additive (the close anchor is consumed only under FP_RUST_REDUCE, off here)."""
+    frame = pl.DataFrame(
         {
             "symbol": ["AAA"] * len(bars),
             "minute": [BASE + timedelta(minutes=i) for i in range(len(bars))],
@@ -33,6 +37,12 @@ def _ohlc(bars: list[tuple[float, float, float, float, float]]) -> pl.DataFrame:
             "volume": [b[4] for b in bars],
         }
     )
+    daily = (
+        frame.group_by("symbol")
+        .agg(pl.col("volume").sum().alias("volume"), pl.col("close").last().alias("close"))
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_reduction_anchors({"minute_agg": frame, "daily": daily})["minute_agg"]
 
 
 def _row(out: pl.DataFrame, i: int) -> dict:
@@ -63,9 +73,9 @@ def test_candlestick_single_bar_shapes() -> None:
 def test_candlestick_engulfing_and_harami() -> None:
     frame = _ohlc(
         [
-            (101.0, 101.2, 99.8, 100.0, 1000.0),   # m0 bearish (open>close)
-            (99.9, 101.3, 99.7, 101.1, 1000.0),    # m1 bullish body engulfs m0 body
-            (100.0, 102.0, 99.0, 101.5, 1000.0),   # m2 large bullish
+            (101.0, 101.2, 99.8, 100.0, 1000.0),  # m0 bearish (open>close)
+            (99.9, 101.3, 99.7, 101.1, 1000.0),  # m1 bullish body engulfs m0 body
+            (100.0, 102.0, 99.0, 101.5, 1000.0),  # m2 large bullish
             (101.3, 101.4, 100.6, 100.8, 1000.0),  # m3 small bearish inside m2 body -> harami_bearish
         ]
     )
@@ -152,7 +162,7 @@ def _replay_live(group, full: pl.DataFrame, window: int = LIVE_WINDOW) -> pl.Dat
     minutes = sorted(full["minute"].unique())
     rows = []
     for i, minute in enumerate(minutes):
-        buf_minutes = minutes[max(0, i - window + 1): i + 1]
+        buf_minutes = minutes[max(0, i - window + 1) : i + 1]
         buf = full.filter(pl.col("minute").is_in(buf_minutes))
         out = run_group(group, BatchContext(frames={"minute_agg": buf}), validate=False)
         rows.append(out.filter(pl.col("minute") == minute))
@@ -169,7 +179,12 @@ def test_efficiency_clean_vs_chop() -> None:
     saw = [100.0 + (1.0 if i % 2 else 0.0) for i in range(15)]
     chop = _ohlc([(c, c + 0.1, c - 0.1, c, 1000.0) for c in saw])
     out2 = run_group(REGISTRY.get_group("efficiency"), BatchContext(frames={"minute_agg": chop}))
-    assert out2.filter(pl.col("minute") == BASE + timedelta(minutes=14)).row(0, named=True)["efficiency_ratio_10m"] < 0.3
+    assert (
+        out2.filter(pl.col("minute") == BASE + timedelta(minutes=14)).row(0, named=True)[
+            "efficiency_ratio_10m"
+        ]
+        < 0.3
+    )
 
 
 def test_distribution_semivariance_and_skew() -> None:
@@ -198,16 +213,42 @@ def test_market_beta_exact_relationship() -> None:
     rows = []
     for symbol, closes in (("SPY", spy), ("AAA", aaa)):
         for i, c in enumerate(closes):
-            rows.append({"symbol": symbol, "minute": BASE + timedelta(minutes=i), "open": c, "high": c,
-                         "low": c, "close": c, "volume": 1000.0})
-    out = run_group(REGISTRY.get_group("market_beta"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)}))
-    aaa_late = out.filter((pl.col("symbol") == "AAA") & (pl.col("minute") == BASE + timedelta(minutes=79))).row(0, named=True)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "minute": BASE + timedelta(minutes=i),
+                    "open": c,
+                    "high": c,
+                    "low": c,
+                    "close": c,
+                    "volume": 1000.0,
+                }
+            )
+    out = run_group(
+        REGISTRY.get_group("market_beta"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)})
+    )
+    aaa_late = out.filter(
+        (pl.col("symbol") == "AAA") & (pl.col("minute") == BASE + timedelta(minutes=79))
+    ).row(0, named=True)
     assert aaa_late["market_beta_30m"] == pytest.approx(2.0, rel=1e-4)
     assert aaa_late["market_corr_30m"] == pytest.approx(1.0, rel=1e-4)
     assert aaa_late["idio_vol_30m"] == pytest.approx(0.0, abs=1e-6)  # fully explained by the market
 
 
-@pytest.mark.parametrize("group_name", ["candlestick", "trend_quality", "price_volume", "efficiency", "distribution", "ohlc_vol", "return_dynamics", "calendar_events", "round_levels"])
+@pytest.mark.parametrize(
+    "group_name",
+    [
+        "candlestick",
+        "trend_quality",
+        "price_volume",
+        "efficiency",
+        "distribution",
+        "ohlc_vol",
+        "return_dynamics",
+        "calendar_events",
+        "round_levels",
+    ],
+)
 def test_live_buffer_matches_backfill(group_name: str) -> None:
     group = REGISTRY.get_group(group_name)
     full = _wavy_ohlc(260)  # > LIVE_WINDOW so the trailing buffer genuinely evicts early minutes
@@ -220,7 +261,10 @@ def test_live_buffer_matches_backfill(group_name: str) -> None:
         pairs = joined.select(["minute", feature, f"{feature}_bk"]).drop_nulls()
         assert pairs.height > 0, f"{feature}: no settled cells to compare"
         within = pairs.select(
-            ((pl.col(feature) - pl.col(f"{feature}_bk")).abs() <= 1e-12 + tol * pl.col(f"{feature}_bk").abs()).all()
+            (
+                (pl.col(feature) - pl.col(f"{feature}_bk")).abs()
+                <= 1e-12 + tol * pl.col(f"{feature}_bk").abs()
+            ).all()
         ).item()
         assert within, f"{feature}: live trailing-buffer value diverged from backfill beyond tol={tol}"
 
@@ -234,8 +278,15 @@ def _multi_ohlc(symbols: tuple[str, ...], n: int) -> pl.DataFrame:
         for i in range(n):
             close = 100.0 + 4.0 * math.sin((i + s_idx * 7) / 9.0) + i * (0.02 + 0.01 * s_idx)
             rows.append(
-                {"symbol": symbol, "minute": BASE + timedelta(minutes=i), "open": close - 0.04,
-                 "high": close + 0.09, "low": close - 0.08, "close": close, "volume": 900.0 + (i % 11) * 30.0}
+                {
+                    "symbol": symbol,
+                    "minute": BASE + timedelta(minutes=i),
+                    "open": close - 0.04,
+                    "high": close + 0.09,
+                    "low": close - 0.08,
+                    "close": close,
+                    "volume": 900.0 + (i % 11) * 30.0,
+                }
             )
     return pl.DataFrame(rows)
 
@@ -269,7 +320,10 @@ def test_market_context_live_buffer_matches_backfill(group_name: str) -> None:
         pairs = joined.select([feature, f"{feature}_bk"]).drop_nulls()
         assert pairs.height > 0, f"{feature}: no settled cells"
         within = pairs.select(
-            ((pl.col(feature) - pl.col(f"{feature}_bk")).abs() <= 1e-12 + tol * pl.col(f"{feature}_bk").abs()).all()
+            (
+                (pl.col(feature) - pl.col(f"{feature}_bk")).abs()
+                <= 1e-12 + tol * pl.col(f"{feature}_bk").abs()
+            ).all()
         ).item()
         assert within, f"{feature}: live trailing-buffer diverged from backfill beyond tol={tol}"
 
@@ -308,15 +362,21 @@ def test_calendar_events_triple_witching() -> None:
     out = run_group(REGISTRY.get_group("calendar_events"), BatchContext(frames={"minute_agg": frame}))
     opex = out.filter(pl.col("minute") == minutes[0]).row(0, named=True)
     plain = out.filter(pl.col("minute") == minutes[1]).row(0, named=True)
-    assert opex["is_opex_day"] == 1.0 and opex["is_triple_witching"] == 1.0 and opex["is_quarter_end_month"] == 1.0
+    assert (
+        opex["is_opex_day"] == 1.0
+        and opex["is_triple_witching"] == 1.0
+        and opex["is_quarter_end_month"] == 1.0
+    )
     assert opex["week_of_month"] == 3.0
     assert plain["is_opex_day"] == 0.0 and plain["is_triple_witching"] == 0.0
 
 
 def test_cross_sectional_rank_universe_pin() -> None:
     minute = BASE
-    rows = [{"symbol": s, "minute": minute, "close": 100.0, "volume": v}
-            for s, v in (("AAA", 100.0), ("BBB", 200.0), ("CCC", 300.0), ("DDD", 400.0))]
+    rows = [
+        {"symbol": s, "minute": minute, "close": 100.0, "volume": v}
+        for s, v in (("AAA", 100.0), ("BBB", 200.0), ("CCC", 300.0), ("DDD", 400.0))
+    ]
     universe = pl.DataFrame({"symbol": ["AAA", "BBB", "CCC"]})  # DDD pinned OUT
     out = run_group(
         REGISTRY.get_group("cross_sectional_rank"),
@@ -324,7 +384,9 @@ def test_cross_sectional_rank_universe_pin() -> None:
     )
     assert set(out["symbol"].to_list()) == {"AAA", "BBB", "CCC"}  # ranked only within the pinned universe
     ranks = {r["symbol"]: r["volume_rank_1m"] for r in out.iter_rows(named=True)}
-    assert ranks["AAA"] == pytest.approx(0.0) and ranks["CCC"] == pytest.approx(1.0)  # DDD excluded, CCC is top
+    assert ranks["AAA"] == pytest.approx(0.0) and ranks["CCC"] == pytest.approx(
+        1.0
+    )  # DDD excluded, CCC is top
 
 
 def test_cross_sectional_rank_ordering() -> None:
@@ -334,9 +396,15 @@ def test_cross_sectional_rank_ordering() -> None:
         {"symbol": "BBB", "minute": minute, "close": 100.0, "volume": 200.0},
         {"symbol": "CCC", "minute": minute, "close": 100.0, "volume": 300.0},
     ]
-    out = run_group(REGISTRY.get_group("cross_sectional_rank"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)}))
+    out = run_group(
+        REGISTRY.get_group("cross_sectional_rank"), BatchContext(frames={"minute_agg": pl.DataFrame(rows)})
+    )
     ranks = {r["symbol"]: r["volume_rank_1m"] for r in out.iter_rows(named=True)}
-    assert ranks["AAA"] == pytest.approx(0.0) and ranks["BBB"] == pytest.approx(0.5) and ranks["CCC"] == pytest.approx(1.0)
+    assert (
+        ranks["AAA"] == pytest.approx(0.0)
+        and ranks["BBB"] == pytest.approx(0.5)
+        and ranks["CCC"] == pytest.approx(1.0)
+    )
 
 
 # --- liquidity (Kyle lambda / Amihud / Roll) + round_levels ---
@@ -351,8 +419,13 @@ def _signed_frame(n: int) -> pl.DataFrame:
     for i in range(1, n):
         close.append(close[-1] + 0.001 * sv[i])
     return pl.DataFrame(
-        {"symbol": ["AAA"] * n, "minute": [BASE + timedelta(minutes=i) for i in range(n)],
-         "close": close, "volume": [1000.0] * n, "signed_volume": sv}
+        {
+            "symbol": ["AAA"] * n,
+            "minute": [BASE + timedelta(minutes=i) for i in range(n)],
+            "close": close,
+            "volume": [1000.0] * n,
+            "signed_volume": sv,
+        }
     )
 
 
@@ -373,8 +446,13 @@ def test_liquidity_live_buffer_matches_backfill() -> None:
     sv = [300.0 * math.sin(i / 7.0) + 40.0 * ((i % 5) - 2) for i in range(n)]
     close = [100.0 + 5.0 * math.sin(i / 11.0) + i * 0.02 for i in range(n)]
     full = pl.DataFrame(
-        {"symbol": ["AAA"] * n, "minute": [BASE + timedelta(minutes=i) for i in range(n)],
-         "close": close, "volume": [800.0 + (i % 13) * 40.0 for i in range(n)], "signed_volume": sv}
+        {
+            "symbol": ["AAA"] * n,
+            "minute": [BASE + timedelta(minutes=i) for i in range(n)],
+            "close": close,
+            "volume": [800.0 + (i % 13) * 40.0 for i in range(n)],
+            "signed_volume": sv,
+        }
     )
     backfill = run_group(group, BatchContext(frames={"minute_agg": full}), validate=False)
     live = _replay_live(group, full)
@@ -382,7 +460,10 @@ def test_liquidity_live_buffer_matches_backfill() -> None:
     for spec in group.declare():
         pairs = joined.select([spec.name, f"{spec.name}_bk"]).drop_nulls()
         within = pairs.select(
-            ((pl.col(spec.name) - pl.col(f"{spec.name}_bk")).abs() <= 1e-12 + spec.tolerance * pl.col(f"{spec.name}_bk").abs()).all()
+            (
+                (pl.col(spec.name) - pl.col(f"{spec.name}_bk")).abs()
+                <= 1e-12 + spec.tolerance * pl.col(f"{spec.name}_bk").abs()
+            ).all()
         ).item()
         assert within, f"{spec.name}: live buffer diverged from backfill"
 
@@ -393,7 +474,9 @@ def test_round_levels() -> None:
     near = _row(out, 0)
     half = _row(out, 1)
     assert near["dist_to_round_dollar"] == pytest.approx(0.01) and near["is_at_round_dollar"] == 1.0
-    assert half["dist_to_round_dollar"] == pytest.approx(0.5) and half["dist_to_half_dollar"] == pytest.approx(0.0)
+    assert half["dist_to_round_dollar"] == pytest.approx(0.5) and half[
+        "dist_to_half_dollar"
+    ] == pytest.approx(0.0)
     assert half["is_at_round_dollar"] == 0.0
 
 
@@ -411,8 +494,12 @@ def test_prior_day_pivots_and_gap() -> None:
             "close": [102.0, 104.0],
         }
     )
-    minute = pl.DataFrame({"symbol": ["AAA"], "minute": [datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)], "close": [104.0]})
-    out = run_group(REGISTRY.get_group("prior_day"), BatchContext(frames={"daily": daily, "minute_agg": minute}))
+    minute = pl.DataFrame(
+        {"symbol": ["AAA"], "minute": [datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)], "close": [104.0]}
+    )
+    out = run_group(
+        REGISTRY.get_group("prior_day"), BatchContext(frames={"daily": daily, "minute_agg": minute})
+    )
     row = out.row(0, named=True)
     pivot = (105.0 + 95.0 + 102.0) / 3.0  # from the prior day (2026-06-11) OHLC
     assert row["gap_open"] == pytest.approx(103.0 / 102.0 - 1.0)  # today's open vs prior close
@@ -431,7 +518,9 @@ def test_multi_day_vwap() -> None:
         {"symbol": ["AAA"] * 7, "date": dates, "close": closes, "volume": [1000.0] * 7, "vwap": [100.0] * 7}
     )
     minute = pl.DataFrame({"symbol": ["AAA"], "minute": [datetime(2026, 6, 11, 14, 0, tzinfo=timezone.utc)]})
-    out = run_group(REGISTRY.get_group("multi_day_vwap"), BatchContext(frames={"daily": daily, "minute_agg": minute}))
+    out = run_group(
+        REGISTRY.get_group("multi_day_vwap"), BatchContext(frames={"daily": daily, "minute_agg": minute})
+    )
     row = out.row(0, named=True)
     assert row["dist_from_vwap_5d"] == pytest.approx(0.05)
     assert row["above_vwap_5d"] == 1.0
@@ -442,8 +531,10 @@ def test_multi_day_vwap() -> None:
 
 def _ref_minutes(symbols: tuple[str, ...]) -> pl.DataFrame:
     return pl.DataFrame(
-        {"symbol": [s for s in symbols for _ in range(2)],
-         "minute": [BASE + timedelta(minutes=i) for _ in symbols for i in range(2)]}
+        {
+            "symbol": [s for s in symbols for _ in range(2)],
+            "minute": [BASE + timedelta(minutes=i) for _ in symbols for i in range(2)],
+        }
     )
 
 
@@ -452,7 +543,9 @@ def test_sector_one_hot() -> None:
         {"symbol": ["AAA", "BBB", "CCC"], "sector": ["Technology", None, "Financial Services"]}
     )
     minutes = _ref_minutes(("AAA", "BBB", "CCC"))
-    out = run_group(REGISTRY.get_group("sector"), BatchContext(frames={"minute_agg": minutes, "reference": reference}))
+    out = run_group(
+        REGISTRY.get_group("sector"), BatchContext(frames={"minute_agg": minutes, "reference": reference})
+    )
     aaa = out.filter(pl.col("symbol") == "AAA").row(0, named=True)
     bbb = out.filter(pl.col("symbol") == "BBB").row(0, named=True)
     ccc = out.filter(pl.col("symbol") == "CCC").row(0, named=True)
@@ -467,11 +560,19 @@ def test_sector_one_hot() -> None:
 
 def test_asset_flags_mapping() -> None:
     reference = pl.DataFrame(
-        {"symbol": ["AAA"], "shortable": [True], "easy_to_borrow": [False],
-         "marginable": [True], "fractionable": [False]}
+        {
+            "symbol": ["AAA"],
+            "shortable": [True],
+            "easy_to_borrow": [False],
+            "marginable": [True],
+            "fractionable": [False],
+        }
     )
     minutes = _ref_minutes(("AAA",))
-    out = run_group(REGISTRY.get_group("asset_flags"), BatchContext(frames={"minute_agg": minutes, "reference": reference}))
+    out = run_group(
+        REGISTRY.get_group("asset_flags"),
+        BatchContext(frames={"minute_agg": minutes, "reference": reference}),
+    )
     row = out.row(0, named=True)
     assert row["is_shortable"] == 1.0 and row["is_easy_to_borrow"] == 0.0
     assert row["is_marginable"] == 1.0 and row["is_fractionable"] == 0.0

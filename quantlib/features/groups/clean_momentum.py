@@ -24,6 +24,7 @@ from quantlib.features.base import (
     InputSpec,
 )
 from quantlib.features.declarative import (
+    _USE_RUST_REDUCE,
     ReductionGroup,
     StatefulRegressor,
     mean_,
@@ -32,10 +33,12 @@ from quantlib.features.declarative import (
     std_,
     sum_,
 )
+from quantlib.features.reduction_anchor import anchor_column
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
 CLEAN_TOL = 1e-4
+_ANCHOR_CLOSE = anchor_column("close")  # per-symbol close anchor the y-side OLS conditioning centers on
 
 # Old-codebase blend weights / caps (slope here is a FRACTIONAL move per minute; the old code used percent,
 # so 0.1%/min -> 0.001 and 0.02%/min -> 0.0002 in fractional terms; residual_std stays in percent units).
@@ -66,7 +69,7 @@ class CleanMomentumScoreGroup(ReductionGroup):
     version = "1.1.0"
     owner = "modeller"
     type = FeatureType.TREND_QUALITY
-    inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
+    inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", _ANCHOR_CLOSE)),)
     # The score blends the OLS R² (r2_("cm_clean")) of close on time, so it inherited trend_quality's
     # near-perfect-fit conditioning. Closed AT SOURCE by the time-OLS origin-rebase (PR #132, well-conditioned
     # n>=3) plus the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT) emitting r2=1.0 exactly at the b==2 corner
@@ -82,14 +85,39 @@ class CleanMomentumScoreGroup(ReductionGroup):
         specs: list[FeatureSpec] = []
         for w in WINDOWS:
             specs.append(
-                FeatureSpec(name=f"clean_momentum_score_{w}m", description=f"Composite 0-1 clean-momentum score over {w} minutes: blends slope magnitude, R-squared, and low residuals — high = a steep, straight, tight trend.",
-                            dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="warmup", layer="A", tolerance=CLEAN_TOL)
+                FeatureSpec(
+                    name=f"clean_momentum_score_{w}m",
+                    description=f"Composite 0-1 clean-momentum score over {w} minutes: blends slope magnitude, R-squared, and low residuals — high = a steep, straight, tight trend.",
+                    dtype="Float64",
+                    valid_range=(-0.01, 1.01),
+                    nan_policy="warmup",
+                    layer="A",
+                    tolerance=CLEAN_TOL,
+                )
             )
             specs.append(
-                FeatureSpec(name=f"momentum_quality_flag_{w}m", description=f"1.0 when the {w}-minute trend is a high-quality setup (significant slope AND R-squared over 0.7 AND low residuals), else 0.0.",
-                            dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="warmup", layer="A", tolerance=CLEAN_TOL, storage="UInt8")
+                FeatureSpec(
+                    name=f"momentum_quality_flag_{w}m",
+                    description=f"1.0 when the {w}-minute trend is a high-quality setup (significant slope AND R-squared over 0.7 AND low residuals), else 0.0.",
+                    dtype="Float64",
+                    valid_range=(-0.01, 1.01),
+                    nan_policy="warmup",
+                    layer="A",
+                    tolerance=CLEAN_TOL,
+                    storage="UInt8",
+                )
             )
         return specs
+
+    def centered_std(self) -> dict[str, str]:
+        # cm_close's std is sqrt((Σc²−(Σc)²/n)/(n−1)) on raw close (~$45–$500) — the SAME large-magnitude
+        # cancellation volume's std hit. Under FP_RUST_REDUCE route it through the per-symbol centered power
+        # sums Σ(c−a)/Σ(c−a)² (shift-invariant == raw var, but conditioned), so the residual-std term
+        # (std_close²·(1−r2)) the score reads matches batch and incremental cell-for-cell. Empty when the flag
+        # is off (raw power-sum std, byte-identical to today). Both paths read the SAME anchor column.
+        if not _USE_RUST_REDUCE:
+            return {}
+        return {"cm_close": _ANCHOR_CLOSE}
 
     def reduced(self) -> dict[str, tuple[pl.Expr, tuple[str, ...], tuple[int, ...]]]:
         # Namespaced (cm_) so the canonical columns never collide with another group's close-mean/std in the
@@ -106,6 +134,11 @@ class CleanMomentumScoreGroup(ReductionGroup):
 
     def stateful_regressors(self) -> dict[str, list[StatefulRegressor]]:
         return {"cm_clean": [StatefulRegressor(slot="x", kind="time")]}
+
+    def regression_y_anchor(self) -> dict[str, str]:
+        # Center y=close on the per-symbol close anchor under FP_RUST_REDUCE — conditions the r2/resid-std
+        # y-side cancellation (the 620x score breach) value-identically (OLS translation-invariant in y).
+        return {"cm_clean": _ANCHOR_CLOSE}
 
     def assemble(self) -> dict[str, pl.Expr]:
         feats: dict[str, pl.Expr] = {}
