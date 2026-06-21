@@ -92,9 +92,10 @@ SYSTEM_LOG.
 
 ## Phase 2 — auto-merge (TIER 1 only)
 
-When CI is green AND the PR is TIER 1, the watcher merges it (`gh pr merge --squash`). TIER 2 is never
-auto-merged — it only gets the `tier-2-gated` label for the Lead. Auto-merge requires the PR to carry the
-`auto-ok` posture (default-on for TIER-1; a human can add `no-auto` to hold any PR).
+When CI is green AND the PR is TIER 1, the watcher merges it (`gh pr merge --squash --delete-branch`). TIER 2
+is never auto-merged — it only gets the `tier-2-gated` label for the Lead. Auto-merge is on by default for
+green TIER-1 PRs; a human can add the `no-auto` label to hold any individual PR, and the whole daemon can run
+with `--no-auto-merge` (gate + status only, no merging) during conservative rollout.
 
 ## Phase 3 — auto-deploy (TIER 1 safe containers only)
 
