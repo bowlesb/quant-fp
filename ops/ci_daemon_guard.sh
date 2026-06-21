@@ -26,7 +26,16 @@
 # no fc restart, no fp-dev kill). The guard's only state change is spawning a supervisor if absent.
 set -uo pipefail
 
-REPO_DIR="${CI_REPO_DIR:-/home/ben/quant-fp}"
+# Two DISTINCT trees, decoupled on purpose:
+#   * LIVE_TREE  — the fc bind-mount tree. It is PINNED at a controlled SHA (FF-ing it is the gated
+#                  fc-relaunch DEPLOY step, never a CI convenience). The deploy role reads it (ci_deploy does
+#                  the real `compose up` there). The grade/ci roles must NOT depend on it: it can lag main and
+#                  may not even contain this script (it was added after the pin → the grade cron "not found"s).
+#   * CI_TREE    — a DEDICATED checkout the guard keeps current with origin/main (fetch + reset --hard each
+#                  cycle, self-healing). The grade/ci watcher runs from HERE, so its code + exclude policy are
+#                  always current with main, fully decoupled from the pinned fc tree. NOTHING bind-mounts it.
+LIVE_TREE="${CI_LIVE_TREE:-/home/ben/quant-fp}"
+CI_TREE="${CI_TREE:-/home/ben/.ci-repo}"
 LOG_DIR="${HOME}/.quant-ops"
 mkdir -p "$LOG_DIR"
 
@@ -34,6 +43,34 @@ mkdir -p "$LOG_DIR"
 DEPLOY_DRY_RUN="${CI_DEPLOY_DRY_RUN:-1}"
 
 guard_log() { printf '%s ci-daemon-guard %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG_DIR/ci_daemon_guard.log" >&2; }
+
+# Provision-or-refresh the dedicated CI checkout to origin/main and echo the tree to run the grader from.
+# Self-healing: clones if absent (or if the path exists but isn't a git repo — wipe + re-clone), then
+# `fetch origin main` + `reset --hard origin/main` (idempotent; a divergent/dirty CI tree is forcibly reset —
+# it's a throwaway grading checkout, never hand-edited). On ANY failure it falls back to LIVE_TREE so a
+# provisioning hiccup degrades to the old behavior rather than not grading at all. Echoes the chosen tree.
+ensure_ci_repo() {
+  local origin
+  origin="$(git -C "$LIVE_TREE" remote get-url origin 2>/dev/null || echo https://github.com/bowlesb/quant-fp.git)"
+
+  if [ ! -d "$CI_TREE/.git" ]; then
+    [ -e "$CI_TREE" ] && { guard_log "CI_TREE $CI_TREE exists but is not a git repo — wiping for re-clone"; rm -rf "$CI_TREE"; }
+    guard_log "provisioning dedicated CI checkout at $CI_TREE (clone $origin)"
+    if ! git clone -q "$origin" "$CI_TREE" 2>>"$LOG_DIR/ci_daemon_guard.log"; then
+      guard_log "CI checkout clone FAILED — falling back to LIVE_TREE $LIVE_TREE"
+      printf '%s' "$LIVE_TREE"; return 1
+    fi
+  fi
+
+  if git -C "$CI_TREE" fetch -q origin main 2>>"$LOG_DIR/ci_daemon_guard.log" \
+     && git -C "$CI_TREE" reset -q --hard origin/main 2>>"$LOG_DIR/ci_daemon_guard.log"; then
+    guard_log "CI checkout $CI_TREE reset to origin/main $(git -C "$CI_TREE" rev-parse --short HEAD)"
+    printf '%s' "$CI_TREE"
+  else
+    guard_log "CI checkout refresh FAILED — falling back to LIVE_TREE $LIVE_TREE"
+    printf '%s' "$LIVE_TREE"; return 1
+  fi
+}
 
 # True if a supervisor for ROLE is currently running (matches the exact supervisor command line).
 supervisor_pid() {
@@ -53,15 +90,22 @@ ensure_role() {
     return 0
   fi
 
-  # The deploy role threads its dry-run flag through the wrapper env (CI_DEPLOY_ARGS); grade/ci need no env
-  # (their --no-auto-merge / auto-merge mode is baked into the wrapper's role case).
+  # grade/ci run from the dedicated, always-current CI checkout (so their code + exclude policy match main and
+  # the script is guaranteed present). deploy runs from the fc-mounted LIVE_TREE, because ci_deploy performs
+  # the real `compose up`/FF there (it reads CI_LIVE_TREE). CI_REPO_DIR is set so the watcher's git/gh/worktree
+  # ops happen in the CI tree, never the pinned fc tree.
+  local tree="$LIVE_TREE"
   local -a env_prefix=()
+  if [ "$role" = "grade" ] || [ "$role" = "ci" ]; then
+    tree="$(ensure_ci_repo)"
+    env_prefix+=("CI_REPO_DIR=$tree")
+  fi
   if [ "$role" = "deploy" ] && [ "$DEPLOY_DRY_RUN" = "1" ]; then
     env_prefix+=("CI_DEPLOY_ARGS=--dry-run")
   fi
 
-  guard_log "role=$role NOT running — launching supervisor (env: ${env_prefix[*]:-none})"
-  ( cd "$REPO_DIR" && setsid env "${env_prefix[@]}" nohup "$REPO_DIR/ops/ci_watcher.sh" "$role" \
+  guard_log "role=$role NOT running — launching supervisor from $tree (env: ${env_prefix[*]:-none})"
+  ( cd "$tree" && setsid env "${env_prefix[@]}" nohup "$tree/ops/ci_watcher.sh" "$role" \
       >> "$log" 2>&1 < /dev/null & )
   sleep 1
   pid="$(supervisor_pid "$role")"
