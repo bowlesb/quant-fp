@@ -98,7 +98,26 @@ fail in the `fp` job:
   errors at collection yet is NOT a known other-env category (`DASHBOARD_DEP_TESTS` / `HARNESS_ORPHAN_TESTS`).
   A NEW test that pulls an uninstalled dep or an absent harness module is flagged **loudly and turns the gate
   RED**, so a whole untested class can never hide behind a green badge, and a real env gap forces a conscious
-  triage (add a job or a list entry) rather than a silent false-red.
+  triage (add a job or a list entry) rather than a silent false-red. A candidate blind spot is **re-collected
+  alone** before being flagged, so a load-induced partial `--collect-only` can't false-flag a clean file.
+
+### The policy is read from the CHECKOUT, not the daemon's module
+
+The four env lists (`DASHBOARD_DEP_TESTS` / `TIMING_TESTS` / `HARNESS_ORPHAN_TESTS` / `STORE_TEST_DIR`) are
+loaded **from the PR checkout being graded** (`load_policy`, AST-parsed — no code execution), NOT from the
+daemon's running module. This matters: a long-lived daemon's live tree can lag `origin/main` (it keeps the
+lists it imported at startup). If a PR adds a dashboard-dep test, a daemon on a stale tree wouldn't `--ignore`
+it → `fastapi` collection error → **false-RED a clean PR** (this actually happened when the live tree sat at a
+SHA predating the News tab's `test_news_edgar_route.py`). Reading the policy from the checkout makes each grade
+use that tree's own classification, so the daemon's tree freshness can no longer corrupt a verdict. A checkout
+that can't be parsed (an older PR) falls back to the daemon's own constants.
+
+### Robust to parallel-infra transients (not just per-test flakes)
+
+Beyond the per-test xdist-ordering recovery, an fp parallel run that fails with **no parseable `FAILED` ids**
+(a collection error / xdist worker crash, which can be a transient under heavy box load) gets **one serial
+full re-run** (no `-n`, no workers to crash) before being declared RED. Passes serial → parallel-infra
+transient → GREEN; still fails → real RED (or its now-parseable ids go through the isolated recovery).
 
 The PR is **green only if every GATING job passes AND the audit is empty**. The sticky comment lists each
 job's verdict (with the timing job flagged informational) and any uncovered files. When a new dashboard-dep
