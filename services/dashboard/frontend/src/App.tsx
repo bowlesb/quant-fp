@@ -240,6 +240,10 @@ export function App() {
                 <span className="legend-item">
                   <span className="ramp ramp-raw" /> raw tape layer
                 </span>
+                <span className="legend-item">
+                  hover a cell for <span className="src-stream">live</span>/
+                  <span className="src-backfill">backfill-only</span> source split
+                </span>
                 <span className="legend-uni">
                   darkness = % of the {matrix.universe_size.toLocaleString()}-ticker universe covered
                 </span>

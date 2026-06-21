@@ -24,6 +24,15 @@ export function Tooltip({ hover, matrix, displayCols }: Props) {
     dc.kind === "raw" ? "raw tape layer" : dc.kind === "feature" ? "feature" : "feature group";
   const trustLabel = dc.kind === "raw" ? null : dc.trusted ? "trusted" : "untrusted";
 
+  // Stream-vs-backfill provenance: coverage_source carries, per feature cell, the STREAM fraction of its
+  // covered tickers (-1 = SOURCE_NA: raw layers / absent cells). Split back to a stream / backfill-only
+  // approximate ticker count against this cell's own ticker total — surfaces the FP_TICK_SYMBOLS live gap.
+  const sourceByte = matrix.coverage_source[hover.rowIndex]?.[dc.coverageCol] ?? -1;
+  const hasSource = sourceByte >= 0 && tickers > 0;
+  const streamPct = hasSource ? Math.round((sourceByte / 255) * 100) : 0;
+  const nStream = hasSource ? Math.round((sourceByte / 255) * tickers) : 0;
+  const nBackfillOnly = hasSource ? Math.max(0, tickers - nStream) : 0;
+
   const margin = 14;
   const flipLeft = hover.clientX > window.innerWidth - 250;
   const style: React.CSSProperties = {
@@ -48,6 +57,21 @@ export function Tooltip({ hover, matrix, displayCols }: Props) {
           {coveragePct}% &middot; {tickers.toLocaleString()}/{universe.toLocaleString()} tickers
         </span>
       </div>
+      {hasSource && (
+        <div className="tooltip-row">
+          <span className="tooltip-label">source</span>
+          <span>
+            <span className="src-stream">{nStream.toLocaleString()} live</span>
+            {nBackfillOnly > 0 && (
+              <>
+                {" "}
+                &middot; <span className="src-backfill">{nBackfillOnly.toLocaleString()} backfill-only</span>
+              </>
+            )}{" "}
+            <span className="src-pct">({streamPct}% live)</span>
+          </span>
+        </div>
+      )}
       {trustLabel && (
         <div className="tooltip-row">
           <span className="tooltip-label">trust</span>

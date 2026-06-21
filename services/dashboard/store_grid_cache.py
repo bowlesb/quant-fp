@@ -36,6 +36,7 @@ from pymongo.errors import PyMongoError
 from store_grid import (
     GRID_LOOKBACK_DAYS,
     STORE_ROOT,
+    _ZERO_SOURCE_COUNTS,
     build_cell_drill,
     build_store_grid,
     gather_window,
@@ -199,6 +200,8 @@ def read_drill(
         "coverage_pct": 0.0,
         "limit": 0,
         "tickers": [],
+        "ticker_sources": [],
+        "source_counts": _ZERO_SOURCE_COUNTS.copy(),
     }
 
 
