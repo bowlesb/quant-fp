@@ -33,7 +33,7 @@ Dashboard, docs, tests, ops scripts, and other non-fingerprint code.
 
 ```
 PR opened/updated
-  → CI runs FULL tests/test_fp_*.py (+ opt-in latency e2e) in an fp-dev --rm container
+  → CI runs the whole tests/ dir (fp job + dashboard job) + coverage audit in fp-dev --rm containers
   → posts a commit status (success/failure)
   → IF green AND fp-neutral AND touches only a known-safe container surface:
        AUTO-MERGE  (Phase 2)
