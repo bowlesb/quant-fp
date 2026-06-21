@@ -61,7 +61,7 @@ check-fresh:
 	scripts/assert_image_fresh.sh $(S)
 
 # --- Feature platform (FEATURE_PLATFORM.md) ---
-.PHONY: dev-image feature-catalog introspect parity test-fp fp-bench fp-profile fp-profile-latest fp-profile-sim
+.PHONY: dev-image feature-catalog introspect parity test-fp fp-bench fp-profile fp-profile-latest fp-profile-sim fp-latency-e2e
 
 # Baked dev/test image — deps installed ONCE so we NEVER pip-install per run.
 # ALL feature-platform docker runs use `fp-dev`. Build/refresh it after a dependency change.
@@ -101,3 +101,8 @@ fp-profile-latest:
 fp-profile-sim:
 	$(FP_RUN) --env-file .env fp-dev python -m quantlib.features.profile_sim \
 		$(or $(N),1000) $(or $(SHARDS),16) $(or $(MIN),20)
+# END-TO-END bar->vector latency REGRESSION GATE — drives the real streaming path at a bounded reference
+# scale (docs/latency_e2e_budget.yaml) and asserts p50/p99 stay under the documented current-reality
+# ceiling. Opt-in (heavy multiprocess sim, ~10-15s); FP_LATENCY_E2E=1 un-skips it. See test_fp_latency_e2e.py.
+fp-latency-e2e:
+	$(FP_RUN) --env-file .env -e FP_LATENCY_E2E=1 fp-dev python -m pytest tests/test_fp_latency_e2e.py -q -s

@@ -69,8 +69,9 @@ def _read_dispatch_walls(bench: Path) -> dict[str, float]:
     return walls
 
 
-def end_to_end_latencies_ms(by_minute: dict[str, list[dict]], dispatch_walls: dict[str, float],
-                            warmup: int) -> list[float]:
+def end_to_end_latencies_ms(
+    by_minute: dict[str, list[dict]], dispatch_walls: dict[str, float], warmup: int
+) -> list[float]:
     """Per minute, the universe vector is ready when the SLOWEST shard finished: ``max(ready_wall) -
     dispatch_wall``, in ms, over the steady-state (post-warmup) minutes that have both stamps."""
     minutes_sorted = sorted(by_minute)
@@ -112,18 +113,24 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
     dispatch_walls = _read_dispatch_walls(bench)
 
     end_to_end = end_to_end_latencies_ms(by_minute, dispatch_walls, warmup)
-    print(f"\n=== PRE-FLIGHT PROFILE: {n_symbols} symbols, {n_shards} shards "
-          f"(~{n_symbols // n_shards}/shard), {len(by_minute)} minutes ===\n")
-    print("END-TO-END bar-arrival(last bar) -> universe-vector-ready (slowest shard each minute, "
-          "write excluded):")
+    print(
+        f"\n=== PRE-FLIGHT PROFILE: {n_symbols} symbols, {n_shards} shards "
+        f"(~{n_symbols // n_shards}/shard), {len(by_minute)} minutes ===\n"
+    )
+    print(
+        "END-TO-END bar-arrival(last bar) -> universe-vector-ready (slowest shard each minute, "
+        "write excluded):"
+    )
     if end_to_end:
         p50 = statistics.median(end_to_end)
         p95 = _percentile(end_to_end, 95)
         p99 = _percentile(end_to_end, 99)
         verdict = "PASS" if p99 < BUDGET_MS else "FAIL"
         print(f"    p50={p50:8.1f}ms  p95={p95:8.1f}ms  p99={p99:8.1f}ms  max={max(end_to_end):8.1f}ms")
-        print(f"    => p99 vs {BUDGET_MS:.0f}ms budget: {verdict} "
-              f"({'under' if p99 < BUDGET_MS else f'{p99 / BUDGET_MS:.1f}x over'})")
+        print(
+            f"    => p99 vs {BUDGET_MS:.0f}ms budget: {verdict} "
+            f"({'under' if p99 < BUDGET_MS else f'{p99 / BUDGET_MS:.1f}x over'})"
+        )
     else:
         print("    (no end-to-end stamps — was the sim run via this tool with the profiler flags?)")
 
@@ -140,20 +147,17 @@ def _report(root: str, n_symbols: int, n_shards: int, warmup: int) -> None:
         print(f"\n    TOP-3 slowest groups (p50): {top}")
 
 
-def main() -> None:
-    if len(sys.argv) < 4:
-        raise SystemExit(
-            "usage: python -m quantlib.features.profile_sim <n_symbols> <n_shards> <measure_minutes> "
-            "[warmup] [window]"
-        )
-    n_symbols, n_shards, measure = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-    warmup = int(sys.argv[4]) if len(sys.argv) > 4 else 30
-    window = int(sys.argv[5]) if len(sys.argv) > 5 else DEFAULT_BUFFER_MINUTES
+def run_profile_sim(
+    n_symbols: int, n_shards: int, measure: int, warmup: int, window: int, root: str
+) -> tuple[list[float], list[tuple[str, float, float, float]]]:
+    """Fake-run the REAL streaming path (msgpack mock -> StockDataStream -> shard workers -> incremental
+    fast path) and return ``(end_to_end_latencies_ms, group_ranking)`` for the post-warmup minutes. This
+    is the single entry point both ``main`` (CLI report) and the e2e latency regression gate
+    (``tests/test_fp_latency_e2e.py``) drive, so the gate measures the IDENTICAL compute path the CLI
+    pre-flight does — no mock, no second code path."""
     total_minutes = warmup + measure
-
     symbols = synth_symbols(n_symbols)
     snapshots = {"reference": synth_reference(symbols), "daily": synth_daily(symbols, SESSION_DAY)}
-    root = os.environ.get("BENCH_ROOT", "/tmp/profile_sim_store")
 
     os.environ["FP_BENCH_LOG"] = "1"
     os.environ["FP_SIM_GROUP_TIMINGS"] = "1"  # the per-group attribution this tool exists to give
@@ -167,12 +171,45 @@ def main() -> None:
     os.environ.setdefault("MOCK_QUOTES_PER_MIN", "72")
     os.environ["MOCK_MINUTES"] = str(total_minutes + 2)
 
-    print(f"pre-flight profiling {n_symbols} symbols x {total_minutes} minutes "
-          f"(warmup {warmup}, window {window}); root={root}", flush=True)
     _start_mock(total_minutes + 2)
     time.sleep(1.5)
-    run_streaming_sim(symbols, root, "mock", n_shards=n_shards, window=window, day=SESSION_DAY,
-                      max_minutes=total_minutes, snapshots=snapshots)
+    run_streaming_sim(
+        symbols,
+        root,
+        "mock",
+        n_shards=n_shards,
+        window=window,
+        day=SESSION_DAY,
+        max_minutes=total_minutes,
+        snapshots=snapshots,
+    )
+
+    bench = Path(root) / "_bench"
+    by_minute = _read_shard_records(bench)
+    dispatch_walls = _read_dispatch_walls(bench)
+    return (
+        end_to_end_latencies_ms(by_minute, dispatch_walls, warmup),
+        rank_groups(by_minute, warmup),
+    )
+
+
+def main() -> None:
+    if len(sys.argv) < 4:
+        raise SystemExit(
+            "usage: python -m quantlib.features.profile_sim <n_symbols> <n_shards> <measure_minutes> "
+            "[warmup] [window]"
+        )
+    n_symbols, n_shards, measure = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+    warmup = int(sys.argv[4]) if len(sys.argv) > 4 else 30
+    window = int(sys.argv[5]) if len(sys.argv) > 5 else DEFAULT_BUFFER_MINUTES
+    root = os.environ.get("BENCH_ROOT", "/tmp/profile_sim_store")
+
+    print(
+        f"pre-flight profiling {n_symbols} symbols x {warmup + measure} minutes "
+        f"(warmup {warmup}, window {window}); root={root}",
+        flush=True,
+    )
+    run_profile_sim(n_symbols, n_shards, measure, warmup, window, root)
     _report(root, n_symbols, n_shards, warmup)
 
 
