@@ -1,35 +1,50 @@
-"""Agent-updatable latency EXPECTATIONS — re-measure each feature group's per-bet p50/p99 compute_latest
+"""Agent-updatable latency EXPECTATIONS — re-measure each feature group's per-bet p50/p95/p99 compute_latest
 cost and rewrite ``docs/feature_latency_expectations.json`` deterministically (sorted slowest-first).
 
 This is the LIVING DATA companion to ``docs/FEATURE_LATENCY_EXPECTATIONS.md`` (the stable explanation/design)
 and ``docs/latency_budget.yaml`` (the pytest regression GATE). Ben's ask: the per-group expectations are a
-JSON view — agent-updatable, UI-viewable — with p50 AND p99 per group, ordered by slowness, kept SEPARATE
-from the prose that does not change as we optimize.
+JSON view — agent-updatable, UI-viewable — with p50/p95/p99 per group, ordered by slowness, kept SEPARATE
+from the prose that does not change as we optimize. It is the JSON half of a measurement LOOP: re-measure ->
+write JSON -> the dashboard reads it -> iterate as we optimize.
 
-What it measures: for every runnable FeatureGroup, ``compute_latest`` (the LIVE per-minute path) is timed
-over ``reps`` runs at the reference shard scale (the same ``build_frames`` the per-group budget gate uses),
-and the p50/p99 of that distribution is recorded. Unlike ``profile.py`` (which keeps the MIN over reps for a
-stable regression seed), this keeps the full distribution so a person/UI sees the typical (p50) and tail
-(p99) cost — the two percentiles Ben asked for.
+TWO MEASUREMENTS, both reproducible, no live capture touched:
+  * PER-GROUP (the rankable ``groups`` array): each group's ``compute_latest`` (the LIVE per-minute path)
+    timed in ISOLATION at a reference shard, p50/p95/p99 over a distribution of reps. Distinct per group —
+    the sim splits the shared reduction emit evenly across its groups, so it CANNOT rank reductions against
+    each other; the isolated path gives each its own number. These rows OVER-count the B incremental-sum
+    groups (timed standalone, not as their in-flow shared-emit share) — true + documented; use for ranking.
+  * E2E (the header ``e2e_context.measured_at_sim_scale``): the in-flow bar->vector p50/p95/p99 from driving
+    the REAL streaming path — the #315 sim harness ``run_profile_sim_raw`` (protocol-faithful msgpack mock
+    -> a real StockDataStream -> the same shard workers -> the incremental fast path) at a bounded prod-like
+    scale. The honest number a bet pays (gather + IPC + shared emit together); NOT the sum of the rows.
 
-The curated per-group METADATA (kind / mechanism / incremental-readiness / feature count) is stable design
-context that does not change minute-to-minute; it lives in ``GROUP_METADATA`` here and is the same framing
-the MD documents. The MEASURED p50/p99 is the part that changes as we optimize, so a future agent reruns:
+As a REALISM cross-check we also harvest a recent window of the live ``crypto-capture`` container's
+per-minute ``compute_ms`` (genuine 24/7 capture on the shared compute core) into the JSON header — see
+``harvest_crypto_crosscheck``; a live floor to sanity-check against, NOT a per-group source (tiny universe).
 
-    docker run --rm -v "$PWD":/app -w /app --env-file .env fp-dev \\
+The curated per-group METADATA (kind / mechanism / incremental-readiness) is stable design context that does
+NOT change minute-to-minute; it lives in ``GROUP_METADATA`` here. Feature counts come from the registry. The
+MEASURED p50/p95/p99 is the part that changes as we optimize, so the loop reruns:
+
+    # one-shot re-measure (after an optimization lands) + the scheduled recompute both call this:
+    docker run --rm --cpus=8 -v "$PWD":/app -w /app --env-file .env fp-dev \\
         python -m quantlib.features.latency_expectations --update
 
-``--update`` re-measures and rewrites the JSON in place (deterministic: sorted by p99 desc, stable key
-order, ``generated_at`` taken from ``SOURCE_DATE_EPOCH`` if set else now). Omit ``--update`` to print the
-table without writing. See docs/FEATURE_LATENCY_EXPECTATIONS.md for how to read it.
+``--update`` re-measures and rewrites the JSON in place (deterministic: sorted by p99 desc, stable key order,
+``generated_at`` from ``SOURCE_DATE_EPOCH`` if set else now). ``--no-crypto`` skips the live cross-check
+(e.g. when crypto-capture is down or docker is unreachable). Omit ``--update`` to print the table without
+writing. ``ops/remeasure_latency.sh`` is the cpu-capped wrapper the cron + the post-optimize trigger run.
+See docs/FEATURE_LATENCY_EXPECTATIONS.md for how to read it.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import statistics
+import re
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,24 +52,60 @@ from pathlib import Path
 from quantlib.features.base import BatchContext, FeatureGroup
 from quantlib.features.compare import runnable
 from quantlib.features.profile import build_frames
+from quantlib.features.profile_sim import run_profile_sim_raw
+from quantlib.features.registry import REGISTRY
 
 JSON_PATH = Path("docs/feature_latency_expectations.json")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
+# Authoritative per-group feature counts from the registry (so a group add/remove is reflected without a
+# hand-edit). Built once at import.
+FEATURE_COUNTS: dict[str, int] = {group.name: len(group.feature_names) for group in REGISTRY.groups()}
+
+# Per-group RANKING scale: each group's compute_latest (the LIVE per-minute path) timed in isolation at a
+# single reference shard, over a distribution of reps for real p50/p95/p99. This is the DISTINCT per-group
+# cost (which group is expensive) — the sim's at-T phase timing buckets all shared-emit reductions into one
+# split-evenly number, so it cannot rank reductions against each other; the isolated path can. The numbers
+# OVER-count the B incremental-sum groups (each is timed standalone, not as its in-flow shared-emit share)
+# — true and documented; use for RELATIVE ranking + regression, the e2e block carries the in-flow truth.
 REF_N_TICKERS = 312
 REF_WINDOW_MIN = 245
 REF_DAILY_DAYS = 200
 REF_INCLUDE_TRADES = True
-REFERENCE_SCALE = {
+DEFAULT_REPS = 25
+REFERENCE_SHARD = {
     "n_tickers": REF_N_TICKERS,
     "window_min": REF_WINDOW_MIN,
     "daily_days": REF_DAILY_DAYS,
     "include_trades": REF_INCLUDE_TRADES,
 }
-DEFAULT_REPS = 25
+
+# Reproducible e2e scale for the REAL streaming path (the #315 sim harness) — the in-flow bar->vector truth
+# recorded in the header. Bounded so the whole job runs in ~2-4 min without starving live capture (the cron
+# caps cpus on top). At ~62 syms/shard the fixed overhead amortizes like the production 1000/16 layout.
+SIM_N_SYMBOLS = 992
+SIM_N_SHARDS = 16
+SIM_MEASURE_MINUTES = 15
+SIM_WARMUP_MINUTES = 8
+SIM_WINDOW_MIN = 120
+SIM_SCALE = {
+    "n_symbols": SIM_N_SYMBOLS,
+    "n_shards": SIM_N_SHARDS,
+    "measure_minutes": SIM_MEASURE_MINUTES,
+    "warmup_minutes": SIM_WARMUP_MINUTES,
+    "window_min": SIM_WINDOW_MIN,
+}
+
+# Live crypto-capture is a genuine 24/7 capture running the SAME shared compute core on a real Alpaca
+# feed; its per-minute compute_ms log line is real live latency. We harvest a recent window of it as a
+# REALISM CROSS-CHECK (not the per-group source — crypto is a tiny 2-5 symbol universe with SPY-relative
+# groups excluded, so it is fixed-overhead-dominated and not per-group-attributable for equity).
+CRYPTO_CAPTURE_CONTAINER = "crypto-capture"
+CRYPTO_LOG_TAIL = 400
+_CRYPTO_COMPUTE_RE = re.compile(r"compute_ms=(\d+(?:\.\d+)?)")
 
 # Stable per-group design metadata (Ben's A/B/Rust framing). The KIND/mechanism/incremental-readiness do
-# NOT change minute-to-minute — only the measured p50/p99 does. Mirrors the framing in
+# NOT change minute-to-minute — only the measured p50/p95/p99 does. Mirrors the framing in
 # docs/FEATURE_LATENCY_EXPECTATIONS.md. A group missing here still gets measured; it is reported with
 # kind "unclassified" so a newly-added group is loud, not silently dropped.
 GROUP_METADATA: dict[str, dict[str, str]] = {
@@ -368,9 +419,49 @@ GROUP_METADATA: dict[str, dict[str, str]] = {
 }
 
 
-def measure_group_percentiles(group: FeatureGroup, frames: dict, reps: int) -> tuple[float, float]:
-    """Time ``group.compute_latest`` over ``reps`` runs (after a warmup) and return ``(p50_ms, p99_ms)`` of
-    the distribution. Keeps the full distribution (not the min) so the tail percentile is real."""
+def _pct(sorted_ms: list[float], pct: float) -> float:
+    """Nearest-rank percentile of an already-sorted list (matches the sim harness's ``_percentile``)."""
+    if not sorted_ms:
+        return 0.0
+    idx = min(len(sorted_ms) - 1, int(round((pct / 100.0) * (len(sorted_ms) - 1))))
+    return round(sorted_ms[idx], 2)
+
+
+def _meta_for(name: str) -> dict[str, str]:
+    return GROUP_METADATA.get(
+        name,
+        {"kind": "unclassified", "mechanism": "(no metadata - newly added?)", "incremental_ready": "n-a"},
+    )
+
+
+def measure_group_rows(reps: int) -> list[dict]:
+    """Per-group DISTINCT p50/p95/p99: time each runnable group's ``compute_latest`` (the LIVE per-minute
+    path) in isolation at the reference shard, over ``reps`` runs (after a warmup), keeping the full
+    distribution. Sorted slowest-first by p99. This is the rankable per-group cost — the sim cannot rank
+    shared-emit reductions against each other (it splits the batch emit evenly), the isolated path can."""
+    frames = build_frames(REF_N_TICKERS, REF_WINDOW_MIN, REF_DAILY_DAYS, include_trades=REF_INCLUDE_TRADES)
+    rows: list[dict] = []
+    for group in runnable(frames):
+        ordered = _time_group_distribution(group, frames, reps)
+        meta = _meta_for(group.name)
+        rows.append(
+            {
+                "group": group.name,
+                "feat_count": FEATURE_COUNTS.get(group.name, len(group.feature_names)),
+                "kind": meta["kind"],
+                "mechanism": meta["mechanism"],
+                "incremental_ready": meta["incremental_ready"],
+                "p50_ms": _pct(ordered, 50),
+                "p95_ms": _pct(ordered, 95),
+                "p99_ms": _pct(ordered, 99),
+            }
+        )
+    rows.sort(key=lambda row: (-row["p99_ms"], row["group"]))
+    return rows
+
+
+def _time_group_distribution(group: FeatureGroup, frames: dict, reps: int) -> list[float]:
+    """The sorted ms distribution of ``group.compute_latest`` over ``reps`` runs (warmup excluded)."""
     ctx = BatchContext(frames=frames)
     group.compute_latest(ctx)  # warmup (JIT/import/cache priming excluded from the distribution)
     times_ms: list[float] = []
@@ -378,45 +469,83 @@ def measure_group_percentiles(group: FeatureGroup, frames: dict, reps: int) -> t
         start = time.perf_counter()
         group.compute_latest(ctx)
         times_ms.append((time.perf_counter() - start) * 1000.0)
-    times_ms.sort()
-    p50 = statistics.median(times_ms)
-    p99 = times_ms[min(len(times_ms) - 1, int(round(0.99 * (len(times_ms) - 1))))]
-    return round(p50, 2), round(p99, 2)
+    return sorted(times_ms)
 
 
-def measure_all(reps: int) -> list[dict]:
-    """Measure p50/p99 for every runnable group, returning a list of per-group dicts sorted by p99
-    descending (slowest-first) — the order a UI renders and the canonical on-disk order."""
-    frames = build_frames(REF_N_TICKERS, REF_WINDOW_MIN, REF_DAILY_DAYS, include_trades=REF_INCLUDE_TRADES)
-    groups: list[dict] = []
-    for group in runnable(frames):
-        p50, p99 = measure_group_percentiles(group, frames, reps)
-        meta = GROUP_METADATA.get(
-            group.name,
-            {
-                "kind": "unclassified",
-                "mechanism": "(no metadata — newly added?)",
-                "incremental_ready": "n-a",
-            },
+def measure_e2e() -> list[float]:
+    """The realistic in-flow bar->vector distribution: drive the REAL streaming path (the #315
+    ``run_profile_sim_raw``: msgpack mock -> StockDataStream -> shard workers -> incremental fast path) at
+    the bounded SIM scale and return the per-minute slowest-shard bar->vector ms over the post-warmup
+    minutes. This is the honest number a bet pays (gather + IPC + shared-emit all paid together) — the
+    per-group rows above do NOT sum to it."""
+    with tempfile.TemporaryDirectory(prefix="latency_expect_") as tmp:
+        by_minute, dispatch_walls = run_profile_sim_raw(
+            SIM_N_SYMBOLS, SIM_N_SHARDS, SIM_MEASURE_MINUTES, SIM_WARMUP_MINUTES, SIM_WINDOW_MIN, tmp
         )
-        groups.append(
-            {
-                "group": group.name,
-                "feat_count": len(group.feature_names),
-                "kind": meta["kind"],
-                "mechanism": meta["mechanism"],
-                "incremental_ready": meta["incremental_ready"],
-                "p50_ms": p50,
-                "p99_ms": p99,
-            }
-        )
-    groups.sort(key=lambda row: (-row["p99_ms"], row["group"]))
-    return groups
+    return sorted(
+        (max(r["ready_wall"] for r in recs if "ready_wall" in r) - dispatch_walls[minute]) * 1000.0
+        for minute, recs in by_minute.items()
+        if minute in dispatch_walls and any("ready_wall" in r for r in recs)
+    )[SIM_WARMUP_MINUTES:]
 
 
-def build_document(groups: list[dict], generated_at: str) -> dict:
-    """Assemble the full JSON document: header block (schema/units/e2e context) + the slowest-first groups
-    array. The header carries the stable context a UI needs to render without reading the MD."""
+def _crypto_log_text() -> str:
+    """The crypto-capture log text to scrape. Inside fp-dev (no docker socket) the wrapper pre-harvests on
+    the host and passes the path via ``CRYPTO_COMPUTE_MS_FILE``; otherwise (run on the host) shell out to
+    ``docker logs`` directly. Best-effort — a missing file / unreachable docker yields empty text."""
+    log_file = os.environ.get("CRYPTO_COMPUTE_MS_FILE")
+    if log_file:
+        path = Path(log_file)
+        return path.read_text() if path.exists() else ""
+    result = subprocess.run(
+        ["docker", "logs", "--tail", str(CRYPTO_LOG_TAIL), CRYPTO_CAPTURE_CONTAINER],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result.stdout + result.stderr
+
+
+def harvest_crypto_crosscheck() -> dict:
+    """Harvest a recent window of live crypto-capture ``compute_ms`` (genuine 24/7 capture on the shared
+    compute core) as a REALISM anchor. Best-effort: if the logs are unreachable, return a
+    ``status: unavailable`` stub rather than failing the JSON regen (the sim numbers stand alone)."""
+    samples = sorted(
+        float(match.group(1))
+        for line in _crypto_log_text().splitlines()
+        if (match := _CRYPTO_COMPUTE_RE.search(line))
+    )
+    if not samples:
+        return {
+            "status": "unavailable",
+            "note": "crypto-capture logs had no compute_ms lines at regen time (container down / no window)",
+        }
+    return {
+        "status": "ok",
+        "metric": "live crypto-capture per-minute compute_ms (whole crypto-applicable feature set)",
+        "samples": len(samples),
+        "p50_ms": _pct(samples, 50),
+        "p95_ms": _pct(samples, 95),
+        "p99_ms": _pct(samples, 99),
+        "note": (
+            "Genuine LIVE latency on the shared compute core, but a tiny 2-5 symbol crypto universe with "
+            "SPY-relative groups excluded -> fixed-overhead-dominated, NOT per-group-attributable for "
+            "equity. Use as a realism floor that the reproducible sim per-group numbers must be sane "
+            "against, not as a per-group source."
+        ),
+    }
+
+
+def build_document(groups: list[dict], end_to_end_ms: list[float], crypto: dict, generated_at: str) -> dict:
+    """Assemble the full JSON document: header block (schema/units/e2e context/measurement provenance +
+    the live crypto cross-check) then the slowest-first ``groups`` array. The header carries everything a
+    UI needs to render without reading the MD."""
+    measured_e2e = {
+        "p50_ms": _pct(end_to_end_ms, 50),
+        "p95_ms": _pct(end_to_end_ms, 95),
+        "p99_ms": _pct(end_to_end_ms, 99),
+        "minutes": len(end_to_end_ms),
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -424,33 +553,42 @@ def build_document(groups: list[dict], generated_at: str) -> dict:
         "sorted_by": "p99_ms descending (slowest-first)",
         "measurement": {
             "source": "quantlib.features.latency_expectations --update",
-            "path": "per-group compute_latest (the LIVE per-minute path), full distribution over reps",
-            "reference_shard": REFERENCE_SCALE,
-            "note": (
-                "Single-shard per-group profiling view. It OVER-counts the B incremental-sum groups "
-                "(they share ONE batched incremental emit in flow, so e.g. price_volume's standalone ms "
-                "is not its in-flow share) and excludes the reader gather/IPC. Use for RELATIVE ranking + "
-                "regression detection; the honest bar->vector number is the e2e gate."
+            "per_group_method": (
+                "each group's compute_latest (the LIVE per-minute path) timed in ISOLATION at the "
+                "reference shard, p50/p95/p99 over a distribution of reps. Distinct + rankable per group "
+                "(the sim splits the shared reduction emit evenly, so it cannot rank reductions); these "
+                "rows OVER-count the B incremental-sum groups (each timed standalone, not as its in-flow "
+                "shared-emit share). Use for RELATIVE ranking + regression detection."
             ),
+            "e2e_method": (
+                "the REAL streaming path (run_profile_sim_raw: msgpack mock -> StockDataStream -> shard "
+                "workers -> incremental fast path, the #315 e2e harness) at the sim scale; the in-flow "
+                "bar->vector truth (gather + IPC + shared emit paid together)."
+            ),
+            "reproducible": True,
+            "reference_shard": REFERENCE_SHARD,
+            "sim_scale": SIM_SCALE,
         },
         "e2e_context": {
-            "metric": "per-bet bar->vector (minute's last bar -> that bet's vector ready)",
+            "metric": "per-bet bar->vector (minute's last bar -> that bet's vector ready, slowest shard)",
+            "measured_at_sim_scale": measured_e2e,
             "single_bet_isolated_p50_ms": 289,
             "typical_bet_under_load_p50_ms": 935,
             "target_p99_ms": 100,
             "note": (
-                "The e2e numbers are NOT the sum of the per-group ms below (those over-count reductions + "
-                "exclude gather/IPC). See docs/FEATURE_LATENCY_EXPECTATIONS.md and the e2e gate "
-                "(docs/latency_e2e_budget.yaml)."
+                "measured_at_sim_scale is from THIS regen's sim run at the bounded sim scale; the "
+                "isolated/under-load figures are the documented production anchors. The e2e number is NOT "
+                "the sum of the per-group rows (which over-count reductions + exclude gather/IPC)."
             ),
         },
+        "live_crypto_crosscheck": crypto,
         "group_count": len(groups),
         "feature_count": sum(row["feat_count"] for row in groups),
         "not_measured_groups": [
             {
                 "group": name,
                 "reason": "gather group - runs once in the reader phase, not a per-bet cost, and not "
-                "runnable in the single-shard profiler frames (no measurable compute_latest here)",
+                "runnable in the isolated reference-shard frames (no measurable compute_latest here)",
                 "kind": GROUP_METADATA[name]["kind"],
             }
             for name in sorted(set(GROUP_METADATA) - {row["group"] for row in groups})
@@ -466,42 +604,58 @@ def _now_iso() -> str:
     return when.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def update(reps: int, path: Path) -> dict:
-    """Re-measure and rewrite the JSON deterministically. Returns the document written."""
-    groups = measure_all(reps)
-    document = build_document(groups, _now_iso())
+def measure_and_write(path: Path, reps: int, with_crypto: bool, with_e2e: bool) -> dict:
+    """The one-shot re-measure: per-group isolated p50/p95/p99 + (optionally) the sim e2e block + the
+    crypto cross-check, written deterministically. Returns the document written. The single entry the cron
+    + the post-optimize trigger call."""
+    groups = measure_group_rows(reps)
+    end_to_end = measure_e2e() if with_e2e else []
+    crypto = harvest_crypto_crosscheck() if with_crypto else {"status": "skipped"}
+    document = build_document(groups, end_to_end, crypto, _now_iso())
     path.write_text(json.dumps(document, indent=2) + "\n")
     return document
 
 
 def _print_table(groups: list[dict]) -> None:
-    print(f"{'group':<28}{'feat':>5}{'p50_ms':>10}{'p99_ms':>10}  kind")
+    print(f"{'group':<28}{'feat':>5}{'p50_ms':>9}{'p95_ms':>9}{'p99_ms':>9}  kind")
     for row in groups:
         print(
-            f"{row['group']:<28}{row['feat_count']:>5}{row['p50_ms']:>10.2f}{row['p99_ms']:>10.2f}  {row['kind']}"
+            f"{row['group']:<28}{row['feat_count']:>5}{row['p50_ms']:>9.2f}{row['p95_ms']:>9.2f}"
+            f"{row['p99_ms']:>9.2f}  {row['kind']}"
         )
     print("\nTOP-5 slowest (p99): " + ", ".join(f"{r['group']} ({r['p99_ms']:.0f}ms)" for r in groups[:5]))
 
 
 def main() -> None:
     do_update = "--update" in sys.argv
+    with_crypto = "--no-crypto" not in sys.argv
+    with_e2e = "--no-e2e" not in sys.argv
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     reps = int(args[0]) if args else DEFAULT_REPS
     print(
-        f"measuring per-group compute_latest p50/p99 at {REFERENCE_SCALE['n_tickers']} tickers "
-        f"x {REFERENCE_SCALE['window_min']}m, {reps} reps...",
+        f"measuring per-group compute_latest p50/p95/p99 in isolation at {REF_N_TICKERS} tickers "
+        f"x {REF_WINDOW_MIN}m, {reps} reps"
+        + (f" + e2e via the real streaming sim at {SIM_N_SYMBOLS}/{SIM_N_SHARDS}..." if with_e2e else "..."),
         flush=True,
     )
-    groups = measure_all(reps)
+    groups = measure_group_rows(reps)
     _print_table(groups)
+    end_to_end = measure_e2e() if with_e2e else []
+    if end_to_end:
+        print(
+            f"\ne2e bar->vector @ sim scale: p50={_pct(end_to_end, 50):.0f}ms "
+            f"p95={_pct(end_to_end, 95):.0f}ms p99={_pct(end_to_end, 99):.0f}ms"
+        )
     if do_update:
-        document = build_document(groups, _now_iso())
+        crypto = harvest_crypto_crosscheck() if with_crypto else {"status": "skipped"}
+        document = build_document(groups, end_to_end, crypto, _now_iso())
         JSON_PATH.write_text(json.dumps(document, indent=2) + "\n")
         print(
-            f"\nwrote {JSON_PATH} ({document['group_count']} groups, {document['feature_count']} features)"
+            f"\nwrote {JSON_PATH} ({document['group_count']} groups, {document['feature_count']} features; "
+            f"e2e: {len(end_to_end)} min; crypto cross-check: {crypto['status']})"
         )
     else:
-        print(f"\n(dry run — pass --update to rewrite {JSON_PATH})")
+        print(f"\n(dry run - pass --update to rewrite {JSON_PATH})")
 
 
 if __name__ == "__main__":
