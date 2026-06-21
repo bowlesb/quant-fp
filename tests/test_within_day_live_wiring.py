@@ -19,7 +19,7 @@ import pytest
 import quantlib.features.groups  # noqa: F401  populate REGISTRY
 from quantlib.bus.schema import BusSchema
 from quantlib.features.capture import CaptureState, process_bars
-from quantlib.features.hot_swap import HotSwapError, SwapKind
+from quantlib.features.hot_swap import HotSwapError
 from quantlib.features.registry import REGISTRY
 from quantlib.features.within_day_applier import (ApplyOutcome, DeployJob,
                                                   apply_in_running_loop,
@@ -47,7 +47,7 @@ def _clean_evidence(**overrides: object) -> GateEvidence:
         trusted_features_moved=[],
         unit_tests_passed=True,
         qa_clean=True,
-        swap_kind="direct",
+        hot_swap_safe=True,
     )
     base.update(overrides)
     return GateEvidence(**base)  # type: ignore[arg-type]
@@ -89,23 +89,23 @@ def test_gate_rejects_failing_tests_or_qa() -> None:
     assert not evaluate(_clean_evidence(qa_clean=False)).approved
 
 
-def test_gate_rejects_escalate_kind() -> None:
-    result = evaluate(_clean_evidence(swap_kind="escalate"))
+def test_gate_rejects_not_hot_swap_safe() -> None:
+    result = evaluate(_clean_evidence(hot_swap_safe=False))
     assert not result.approved
-    assert any("ESCALATE" in v for v in result.violations)
+    assert any("hot-swap-safe" in v for v in result.violations)
 
 
-def test_gate_reseed_kind_is_allowed() -> None:
-    assert evaluate(_clean_evidence(swap_kind="reseed")).approved is True
+def test_gate_hot_swap_safe_is_allowed() -> None:
+    assert evaluate(_clean_evidence(hot_swap_safe=True)).approved is True
 
 
 # ---- SERIALIZED APPLIER pipeline ----------------------------------------------------------------
 
 
 class _FakeSwapResult:
-    def __init__(self, kind: SwapKind) -> None:
-        self.kind = kind
-        self.note = f"{kind.value} swap"
+    def __init__(self, reseeded: bool = False) -> None:
+        self.reseeded = reseeded
+        self.note = "reseeded swap" if reseeded else "direct swap"
 
 
 def _job() -> DeployJob:
@@ -117,7 +117,7 @@ def test_applier_applies_on_clean_gate_and_tripwire() -> None:
 
     def _swap(group: str) -> _FakeSwapResult:
         calls.append(f"swap:{group}")
-        return _FakeSwapResult(SwapKind.DIRECT)
+        return _FakeSwapResult()
 
     def _confirm(group: str) -> bool:
         calls.append(f"confirm:{group}")
@@ -140,7 +140,7 @@ def test_applier_escalates_on_scope_violation_without_merge_or_swap() -> None:
 
     def _swap(group: str) -> _FakeSwapResult:
         calls.append(f"swap:{group}")
-        return _FakeSwapResult(SwapKind.DIRECT)
+        return _FakeSwapResult()
 
     outcome = apply_job(
         _job(),
@@ -159,7 +159,7 @@ def test_applier_rolls_back_on_tripwire_failure() -> None:
     outcome = apply_job(
         _job(),
         evidence=_clean_evidence(),
-        do_swap=lambda g: _FakeSwapResult(SwapKind.DIRECT),  # type: ignore[arg-type,return-value]
+        do_swap=lambda g: _FakeSwapResult(),  # type: ignore[arg-type,return-value]
         do_merge=lambda j: calls.append("merge"),
         confirm_tripwire=lambda g: False,  # tripwire FAILS post-swap
         rollback_swap=lambda g: calls.append(f"rollback:{g}"),
@@ -240,7 +240,8 @@ def test_canary_hot_swap_mid_running_capture_loop() -> None:
         # HOT-SWAP momentum mid-run via the live-wired path (against the RUNNING state's engines + buffer).
         result = apply_in_running_loop(state, "momentum", seed_symbols=list(symbols))
         assert result.swapped
-        assert result.kind in (SwapKind.DIRECT, SwapKind.RESEED)  # FP_INCREMENTAL off in mock => DIRECT
+        # FP_INCREMENTAL off in the mock => no bound engine => stateless => up_to_date => no contract reseed.
+        assert result.reseeded is False
         assert result.fingerprint_before == result.fingerprint_after == fp_start
 
         # The registry now holds a FRESH momentum instance (the swap took effect).

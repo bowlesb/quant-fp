@@ -10,7 +10,9 @@ composed here:
   5. VALUE-CHANGE ONLY ON THE UNTRUSTED FEATURE — the assigned feature is NON_TRUSTED (not traded), and no
      trusted feature's values move.
   6. ADEQUATE UNIT TESTS + QA GREEN — the group's tests + parity suite pass (Ben's explicit deploy gate).
-  7. HOT-SWAP-SAFE KIND  — the group is DIRECT-swappable or RESEED with a passing reseed (not ESCALATE).
+  7. HOT-SWAP-SAFE   — the RunningState contract reseeds the swapped group to parity (``up_to_date`` honoured,
+     ``rebuild_from_history`` restored parity). An irreducible swap (``rebuild_from_history`` would raise)
+     is NOT hot-swap-safe → escalate. No DIRECT/RESEED/ESCALATE classification — the contract self-reports.
 
 Any failure -> ScopeViolation -> escalate to the Lead, never auto-merge. Composes ``ops/bus_compat_gate``
 (fingerprint/contract safety) + the WDPC in-sandbox reconfirm. PURE: takes already-computed evidence; it
@@ -39,7 +41,7 @@ class GateEvidence:
     trusted_features_moved: list[str]  # trusted features whose values changed (must be empty)
     unit_tests_passed: bool
     qa_clean: bool
-    swap_kind: str  # 'direct' | 'reseed' | 'escalate'
+    hot_swap_safe: bool  # the RunningState contract reseeds to parity (False = irreducible -> escalate)
 
 
 @dataclass
@@ -82,11 +84,10 @@ def evaluate(evidence: GateEvidence) -> GateResult:
     if not evidence.qa_clean:
         violations.append("QA not clean (ruff/black/isort/mypy)")
 
-    if evidence.swap_kind == "escalate":
+    if not evidence.hot_swap_safe:
         violations.append(
-            "hot-swap kind = ESCALATE (fingerprint-affecting / unseedable) — not auto-deployable"
+            "not hot-swap-safe: the RunningState contract cannot reseed this swap to parity "
+            "(irreducible / fingerprint-affecting) — escalate, not auto-deployable"
         )
-    elif evidence.swap_kind not in ("direct", "reseed"):
-        violations.append(f"unknown swap kind '{evidence.swap_kind}'")
 
     return GateResult(approved=not violations, violations=violations)

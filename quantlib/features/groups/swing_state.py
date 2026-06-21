@@ -256,15 +256,15 @@ class SwingState:
         # up_to_date to detect the session boundary (the per-day reset trigger).
         self._session_day: int | None = None
 
-    def up_to_date(self, buffer: pl.DataFrame) -> bool:
+    def up_to_date(self, buffer: pl.DataFrame | None) -> bool:
         """The RunningState guard: True iff the carried state can fold ``buffer``'s newest minutes directly and
         emit == backfill. False (→ lazy rebuild) on any staleness trigger:
-        - COLD: no carried state yet (first deploy / morning relaunch / hot-swap clears it).
+        - COLD: no carried state yet (first deploy / morning relaunch / hot-swap clears it), or no buffer history.
         - SESSION BOUNDARY: the buffer's latest session differs from the absorbed session (swing resets per day).
         - GAP / REWIND: a present symbol's newest buffered minute is OLDER than what the state absorbed (replay)
           OR the buffer skips minutes the state needs — the carried leg can't be trusted, reseed.
         Cheap: reads only the buffer's min/max minute + symbol set (no per-bar scan)."""
-        if not self._legs or self._session_day is None:
+        if not self._legs or self._session_day is None or buffer is None:
             return False
         if buffer.height == 0:
             return True  # nothing to fold; the standing state is already correct
@@ -279,7 +279,7 @@ class SwingState:
                 return False
         return True
 
-    def rebuild_from_history(self, buffer: pl.DataFrame) -> None:
+    def rebuild_from_history(self, buffer: pl.DataFrame | None) -> None:
         """The RunningState lazy reseed: drop all carried state and re-fold ``buffer`` from scratch so the state
         reflects the buffer's history exactly (== the per-day backfill recompute over the same window). Encodes
         the SESSION-RESET decision implicitly: ``_SymbolLeg.advance`` bootstraps a fresh leg at the buffer's
@@ -287,7 +287,7 @@ class SwingState:
         latest session's leg-state — never carrying a leg across the overnight gap. After this,
         ``up_to_date(buffer)`` is True by construction."""
         self._legs = {}
-        if buffer.height == 0:
+        if buffer is None or buffer.height == 0:
             self._session_day = None
             return
         ordered = (

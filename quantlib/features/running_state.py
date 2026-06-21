@@ -42,14 +42,14 @@ class RunningState(Protocol):
     warm-start wiring, no eager reseed scheduling. ``buffer`` is the trailing-window frame the live path already
     materializes each minute (the historical window); both methods read it."""
 
-    def up_to_date(self, buffer: pl.DataFrame) -> bool:
+    def up_to_date(self, buffer: pl.DataFrame | None) -> bool:
         """True iff the carried state can fold ``buffer``'s newest minute(s) directly and emit a value EQUAL to
         the backfill recompute. False on any staleness trigger (cold / session boundary / gap / hot-swap /
         rewind) — which makes the guard reseed before emitting, so a stale state never emits a wrong value.
         """
         ...
 
-    def rebuild_from_history(self, buffer: pl.DataFrame) -> None:
+    def rebuild_from_history(self, buffer: pl.DataFrame | None) -> None:
         """Reseed the state from the historical window in ``buffer`` (the SAME bars backfill recomputes over), so
         that immediately after, ``up_to_date(buffer)`` is True and the state == the backfill state by
         construction. The one-time-expensive refresh; called lazily by the compute guard, never eagerly."""

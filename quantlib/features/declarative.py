@@ -221,6 +221,33 @@ class ReductionGroup(FeatureGroup):
     # the absolute divergence is ~1e-8 (float floor), so this is a parity-self-check guard, not a value bug.
     incremental_safe: bool = True
 
+    def bind_live_engine(self, engine: object, seed_symbols: list[str] | None = None) -> None:
+        """Bind the LIVE incremental engine (``CaptureState.engines[reduce_input]``) that carries this group's
+        running sums, marking it PENDING-RESEED. Used by the hot-swap applier: when an engine carries a freshly-
+        swapped group's input, the running state must be re-derived for the new compute logic — binding it makes
+        ``up_to_date()`` report False so the single contract guard reseeds it (the old SWAP+RESEED kind, now
+        expressed through the one ``up_to_date()`` / ``rebuild_from_history()`` surface, no kind classifier)."""
+        self.__dict__["_live_engine"] = engine
+        self.__dict__["_live_engine_seed_symbols"] = seed_symbols
+        self.__dict__["_live_engine_pending_reseed"] = True
+
+    def up_to_date(self, buffer: pl.DataFrame | None) -> bool:
+        """RunningState contract: True unless a live incremental engine was just bound for a swap and not yet
+        reseeded. With FP_INCREMENTAL OFF (no bound engine) a reduction recomputes from the shared ring each
+        minute → always up to date (the old DIRECT swap). A bound-but-unseeded engine → False → reseed."""
+        return not self.__dict__.get("_live_engine_pending_reseed", False)
+
+    def rebuild_from_history(self, buffer: pl.DataFrame | None) -> None:
+        """RunningState contract: reseed the bound live engine's running sums from ``buffer`` (the SAME history
+        the batch path recomputes over; ``seed(H);fold(m)==seed(H+m)`` by the engine's parity guarantee), then
+        clear the pending flag so ``up_to_date()`` is True. No bound engine → no-op (stateless reduction)."""
+        engine = self.__dict__.get("_live_engine")
+        if engine is None:
+            return None
+        engine.seed(buffer, self.__dict__.get("_live_engine_seed_symbols"))
+        self.__dict__["_live_engine_pending_reseed"] = False
+        return None
+
     def centered_std(self) -> dict[str, str]:
         """{reduced_column_name: anchor_column} — the reduced columns whose std/variance is computed from a
         per-symbol-CENTERED power sum ``Σ(v−a)²−(Σ(v−a))²/n`` (a the anchor) instead of the raw
