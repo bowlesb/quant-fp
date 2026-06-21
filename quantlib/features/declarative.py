@@ -38,6 +38,24 @@ from quantlib.features.latest import pivot_stat, rust_reductions, rust_windowed_
 # ``emit_numpy`` stays the parity reference (FP_RUST_ASSEMBLE unset, or FP_RUST_ASSEMBLE=0).
 _USE_RUST_ASSEMBLE = bool(os.environ.get("FP_RUST_ASSEMBLE")) and os.environ.get("FP_RUST_ASSEMBLE") != "0"
 
+# FP_CENTERED_TIME conditions the single-anchor BATCH time-axis OLS the SAME way the incremental engine does —
+# it pins the time regressor's x at the anchor minute to the incremental engine's small origin
+# (``latest − _TIME_ORIGIN_LAG·60``) so the operand sums (Σxy, Σxx, Σx) stay
+# small and ``cov_n = b·Σxy − Σx·Σy`` / ``denom_x = b·Σxx − (Σx)²`` are no longer catastrophic-cancellation
+# differences of large near-equal sums. The fix is VALUE-IDENTICAL on well-conditioned cells (OLS is
+# origin-invariant — see ``_pinned_time_x``), it only removes the float ill-conditioning that made
+# the batch fresh-sum path and the small-origin incremental path round a near-perfect fit's r2/corr/slope
+# differently (the time-axis corr-denom breach that gated trend_quality / clean_momentum / residual_analysis /
+# price_volume's obv_slope from FP_INCREMENTAL — docs/INCREMENTAL_READINESS.md §Parked). Default OFF keeps the
+# batch expression graph byte-identical to today (fp unchanged); the prod flip is a Lead/Ben relaunch click.
+_USE_CENTERED_TIME = bool(os.environ.get("FP_CENTERED_TIME")) and os.environ.get("FP_CENTERED_TIME") != "0"
+
+# How far (minutes) behind the anchor minute to pin the latest-row time-OLS origin (compute_latest /
+# compute_reduction_batch). IDENTICAL to the incremental engine's per-fold pin so the conditioned batch axis
+# matches the incremental axis at the anchor minute exactly (incremental.py re-exports this constant). Small
+# and fixed so every in-window x stays O(1).
+_TIME_ORIGIN_LAG = 2
+
 # Statistic codes shared with the Rust ``assemble_canonical`` kernel (kind byte). The OLS codes' order
 # (slope, corr, r2, mean_y) matches the kernel's 3..=6 arm; ``resid_std`` (7) is the OLS residual-std
 # stat the kernel's 7 arm computes.
@@ -188,6 +206,9 @@ class StatefulRegressor:
     broadcast_symbol: str | None = None  # required iff kind == "broadcast" (the index ticker carrying the value)
 
 
+_OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
+
+
 def _ols_derived(name: str, x_expr: pl.Expr, y_expr: pl.Expr) -> list[pl.Expr]:
     """The six paired columns the engine sums for one regression: only rows where BOTH x and y are present
     contribute (partner-null zeroed and dropped from the count), so a warmup/missing value never biases the
@@ -203,6 +224,17 @@ def _ols_derived(name: str, x_expr: pl.Expr, y_expr: pl.Expr) -> list[pl.Expr]:
         (x_paired * x_paired).alias(f"__rd_{name}_xx"),
         (y_paired * y_paired).alias(f"__rd_{name}_yy"),
     ]
+
+
+def _pinned_time_x(latest_epoch_seconds: int) -> pl.Expr:
+    """A time-axis x pinned to the SAME small origin the incremental engine uses at the anchor minute:
+    ``(epoch − (latest − _TIME_ORIGIN_LAG·60))/60``, so the latest minute maps to ``_TIME_ORIGIN_LAG`` and
+    every in-window x is O(1). VALUE-IDENTICAL to the group's whole-frame-relative ``regressions()`` time x
+    (OLS is origin-invariant — any per-symbol-constant origin shift leaves slope/r2/corr/resid_std unchanged),
+    it only keeps ``cov_n``/``denom_x`` from cancelling large near-equal sums. For the single-anchor batch
+    paths (compute_latest / compute_reduction_batch), where one origin conditions the only emitted minute."""
+    ref_epoch = latest_epoch_seconds - _TIME_ORIGIN_LAG * 60
+    return (pl.col("minute").dt.epoch("s").cast(pl.Float64) - float(ref_epoch)) / 60.0
 
 
 class ReductionGroup(FeatureGroup):
@@ -292,6 +324,18 @@ class ReductionGroup(FeatureGroup):
         ``regressions()`` exprs directly and are unaffected. Default none (all regressors are short-lag)."""
         return {}
 
+    def _time_regression_names(self) -> set[str]:
+        """The regressions whose ``x`` slot is a ``kind="time"`` axis — the ones the ``FP_CENTERED_TIME`` batch
+        conditioning applies to (it pins their x to a small per-window origin so the OLS denom/covariance stays
+        well conditioned, matching the incremental engine). Read from ``stateful_regressors()`` so the set is
+        data-driven and stays in lockstep with what the incremental engine sources from a rolled time origin."""
+        return {
+            name
+            for name, regs in self.stateful_regressors().items()
+            for reg in regs
+            if reg.slot == "x" and reg.kind == "time"
+        }
+
     @abstractmethod
     def assemble(self) -> dict[str, pl.Expr]:
         """{feature_name: expr} written with mean_/std_/sum_/pt_ — evaluated identically in both forms."""
@@ -341,7 +385,7 @@ class ReductionGroup(FeatureGroup):
                 size = f"{w}m"
                 sums = {
                     key: pl.col(f"__rd_{name}_{key}").rolling_sum_by("minute", window_size=size).over("symbol")
-                    for key in ("b", "x", "y", "xy", "xx", "yy")
+                    for key in _OLS_KEYS
                 }
                 for stat, expr in _ols_stat_exprs(sums, stats).items():
                     mats.append(expr.alias(f"__{stat}_{name}_{w}"))
@@ -357,11 +401,15 @@ class ReductionGroup(FeatureGroup):
         frame = self.prepare(ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"]))
         reduced, regressions = self.reduced(), self.regressions()
         frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
-        if regressions:
-            frame = frame.with_columns(
-                [col for name, (x, y, _, _) in regressions.items() for col in _ols_derived(name, x, y)]
-            )
         latest = frame["minute"].max()
+        if regressions:
+            time_regs = self._time_regression_names() if _USE_CENTERED_TIME else set()
+            latest_epoch = int(latest.timestamp()) if time_regs else 0  # type: ignore[union-attr]
+            ols_cols: list[pl.Expr] = []
+            for name, (x_expr, y_expr, _, _) in regressions.items():
+                x = _pinned_time_x(latest_epoch) if name in time_regs else x_expr
+                ols_cols += _ols_derived(name, x, y_expr)
+            frame = frame.with_columns(ols_cols)
         wide = resolve_points([self], frame, latest).select(
             ["symbol", *[f"__pt_{name}" for name in self.points()]]
         )
@@ -420,6 +468,8 @@ _PlanEntry = tuple[int, str, tuple[str, ...], tuple[int, ...], str]
 
 def build_plan(
     groups: list[ReductionGroup],
+    *,
+    time_origin_epoch: int | None = None,
 ) -> tuple[
     list[pl.Expr],
     list[pl.Expr],
@@ -435,12 +485,18 @@ def build_plan(
       extra    — exprs for the presence/square cols that mean/std need,
       value_cols — the ordered names to sum (base, base__p, base__sq, OLS b/x/y/xy/xx/yy),
       plan/reg_plan — per-group (gi, name, stats, windows, base|ns) for assemble_from_long,
-      windows  — the sorted union of all windows."""
+      windows  — the sorted union of all windows.
+
+    ``time_origin_epoch`` (set only by the single-anchor batch path under FP_CENTERED_TIME) pins a
+    ``kind="time"`` regression's x to ``(epoch − (origin − _TIME_ORIGIN_LAG·60))/60`` so the batch OLS operand
+    sums stay small and well-conditioned (value-identical, origin-invariant). The incremental engine passes
+    None — it sources the time x from its own rolled origin in ``_build_paired`` and overrides this column."""
     derived: list[pl.Expr] = []
     plan: list[_PlanEntry] = []
     reg_plan: list[_PlanEntry] = []
     all_windows: set[int] = set()
     for gi, group in enumerate(groups):
+        time_regs = group._time_regression_names() if time_origin_epoch is not None else set()
         for name, (expr, stats, windows) in group.reduced().items():
             base = f"__b{gi}_{name}"
             derived.append(expr.alias(base))
@@ -448,7 +504,9 @@ def build_plan(
             all_windows |= set(windows)
         for name, (x_expr, y_expr, stats, windows) in group.regressions().items():
             ns = f"{gi}_{name}"  # namespace the regression's six paired columns per group
-            derived += _ols_derived(ns, x_expr, y_expr)
+            # time_regs is empty unless time_origin_epoch is set, so this only pins under FP_CENTERED_TIME
+            x = _pinned_time_x(time_origin_epoch) if name in time_regs else x_expr  # type: ignore[arg-type]
+            derived += _ols_derived(ns, x, y_expr)
             reg_plan.append((gi, name, stats, tuple(windows), ns))
             all_windows |= set(windows)
     # base -> anchor column, for the reduced columns a group opts into centered std (additive; raw stays).
@@ -506,7 +564,13 @@ def compute_reduction_batch(groups: list[ReductionGroup], ctx: BatchContext) -> 
         frame = group.prepare(frame)
     latest = frame["minute"].max()
 
-    derived, extra, value_cols, plan, reg_plan, windows, centered = build_plan(groups)
+    # FP_CENTERED_TIME: pin kind="time" regressions' x to the incremental engine's small anchor origin so the
+    # batch OLS operand sums stay conditioned (value-identical). This is a single-anchor path (one emitted
+    # minute per symbol), so one origin suffices — matching the incremental axis at the latest minute exactly.
+    time_origin = int(latest.timestamp()) if _USE_CENTERED_TIME else None  # type: ignore[union-attr]
+    derived, extra, value_cols, plan, reg_plan, windows, centered = build_plan(
+        groups, time_origin_epoch=time_origin
+    )
     with _phase.phase("batch.derive(value cols)"):
         frame = frame.with_columns(derived)
     with _phase.phase("batch.derive(sq+presence)"):
