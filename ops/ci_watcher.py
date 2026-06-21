@@ -5,9 +5,12 @@ DB, which a cloud runner can't replicate). On every open PR against ``main`` who
 graded it:
 
   1. checks the head SHA out into a throwaway git worktree;
-  2. runs the FULL ``tests/test_fp_*.py`` suite in an ``fp-dev --rm`` container (env SCRUBBED — never mounts
-     ``.env``, so the paper Alpaca creds cannot leak into a CI log). The opt-in latency e2e is run only when
-     ``CI_RUN_LATENCY=1`` (it needs ``.env``);
+  2. runs every CI job in ``fp-dev --rm`` containers (env SCRUBBED — never mounts ``.env``, so the paper
+     Alpaca creds cannot leak into a CI log): the ``fp`` job runs the WHOLE ``tests/`` dir minus the
+     dashboard-dep files; the ``dashboard`` job runs exactly those after ``pip install -r
+     services/dashboard/requirements.txt`` (they import fastapi/pyyaml/pymongo, absent from base fp-dev). A
+     coverage audit then reports any test file NO job ran (LOUD blind-spot list → RED), so "green" can never
+     hide an untested class — the half-tested pattern Ben is killing;
   3. classifies scope (ci_scope.classify) — fingerprint vs origin/main + changed-path allowlist — into
      TIER-1 (auto) or TIER-2 (gated);
   4. posts a COMMIT STATUS via ``gh api`` (context ``ci/fp-suite``) so the PR's mergeability reflects real
@@ -50,9 +53,21 @@ FP_IMAGE = os.environ.get("CI_FP_IMAGE", "fp-dev")
 STATUS_CONTEXT = "ci/fp-suite"
 GATED_LABEL = "tier-2-gated"
 NO_AUTO_LABEL = "no-auto"
-# The suite the gate runs. Defaults to the FULL fp suite; overridable (CI_SUITE_GLOB) for a focused/smoke
-# gate. Whitespace-split so multiple patterns can be passed.
-SUITE_GLOB = os.environ.get("CI_SUITE_GLOB", "tests/test_fp_*.py")
+# The gate runs the WHOLE tests/ dir (not just test_fp_*) so it never silently skips a class of tests — the
+# half-tested pattern Ben is killing. Overridable (CI_SUITE_GLOB) for a focused/smoke gate; whitespace-split.
+SUITE_GLOB = os.environ.get("CI_SUITE_GLOB", "tests/")
+# These test files import dashboard-only deps (fastapi / pyyaml / pymongo) absent from the base fp-dev image,
+# so they ERROR at collection there. They are NOT skipped silently: the fp job --ignores them and a SECOND
+# dashboard job runs them in fp-dev + `pip install -r services/dashboard/requirements.txt` (the authoritative,
+# drift-proof dep closure). Keep this list in sync if a new dashboard-dep test appears (the gate reports any
+# uncovered file loudly, so drift surfaces).
+DASHBOARD_DEP_TESTS = (
+    "tests/test_group_guide.py",
+    "tests/test_store_grid.py",
+    "tests/test_store_grid_cache.py",
+    "tests/test_latency_expectations_route.py",
+)
+DASHBOARD_REQUIREMENTS = "services/dashboard/requirements.txt"
 # Bound a single suite run so a hung test can't wedge the daemon. The full suite is well under this.
 SUITE_TIMEOUT_S = int(os.environ.get("CI_SUITE_TIMEOUT_S", "1200"))
 
@@ -170,25 +185,87 @@ def changed_paths(worktree: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
-def run_suite(worktree: str) -> tuple[bool, str]:
-    """Run the FULL fp suite in an fp-dev --rm container. Returns (passed, tail_of_output).
+@dataclass
+class JobResult:
+    """One CI job's outcome (a job = one pytest invocation in one container env)."""
 
-    SECURITY: no ``--env-file .env`` and no secret env — the unit suite needs none, and this guarantees the
-    paper Alpaca creds never reach a CI log. The container is --rm and bind-mounts the checkout read-write
-    only at /app (its own throwaway worktree).
+    name: str
+    passed: bool
+    tail: str
+
+
+@dataclass
+class SuiteResult:
+    """The combined outcome of every CI job + the coverage-honesty audit."""
+
+    jobs: list[JobResult]
+    uncovered: list[str]  # test files that NO job ran (the loud blind-spot list; must stay empty)
+
+    @property
+    def passed(self) -> bool:
+        # Green only if EVERY job passes AND nothing is uncovered — never "green" with a class untested.
+        return all(job.passed for job in self.jobs) and not self.uncovered
+
+
+def _run_pytest(worktree: str, pytest_cmd: str, job_name: str) -> JobResult:
+    """Run one pytest invocation in an fp-dev --rm container (env-scrubbed, host-user). sh -c so globs expand.
+
+    SECURITY: no ``--env-file .env`` / no secret env — the suite needs none, so the paper Alpaca creds can
+    never reach a CI log. --rm; bind-mounts only the throwaway checkout at /app.
     """
-    # Run through ``sh -c`` so the container shell expands the ``test_fp_*.py`` glob (pytest itself does not
-    # glob; passed literally it errors "file or directory not found").
-    pytest_cmd = f"python -m pytest {SUITE_GLOB} -q -p no:cacheprovider"
     cmd = [*fp_docker(worktree), "sh", "-c", pytest_cmd]
     try:
         result = run(cmd, timeout=SUITE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return False, f"SUITE TIMED OUT after {SUITE_TIMEOUT_S}s"
+        return JobResult(job_name, False, f"{job_name} TIMED OUT after {SUITE_TIMEOUT_S}s")
     output = (result.stdout + "\n" + result.stderr).strip()
     tail = "\n".join(output.splitlines()[-25:])
-    passed = result.returncode == 0
-    return passed, tail
+    return JobResult(job_name, result.returncode == 0, tail)
+
+
+def run_suite(worktree: str) -> SuiteResult:
+    """Run every CI job over the checkout + audit that no test file went unrun.
+
+    Job 1 (fp): the WHOLE ``tests/`` dir in base fp-dev, ``--ignore``-ing the dashboard-dep files (which can't
+    import there). Job 2 (dashboard): exactly those files, in fp-dev after installing the dashboard's own
+    requirements (the authoritative dep closure). Then a coverage audit: every ``tests/test_*.py`` on disk
+    must be run by some job — anything else is reported LOUDLY (it makes the suite RED), so a new untested
+    class can never hide behind a green badge.
+    """
+    ignores = " ".join(f"--ignore={path}" for path in DASHBOARD_DEP_TESTS)
+    fp_cmd = f"python -m pytest {SUITE_GLOB} {ignores} -q -p no:cacheprovider"
+    fp_job = _run_pytest(worktree, fp_cmd, "fp")
+
+    dash_targets = " ".join(DASHBOARD_DEP_TESTS)
+    dash_cmd = (
+        f"pip install -q --user -r {DASHBOARD_REQUIREMENTS} && "
+        f"python -m pytest {dash_targets} -q -p no:cacheprovider"
+    )
+    dash_job = _run_pytest(worktree, dash_cmd, "dashboard")
+
+    uncovered = _audit_coverage(worktree)
+    return SuiteResult(jobs=[fp_job, dash_job], uncovered=uncovered)
+
+
+def _audit_coverage(worktree: str) -> list[str]:
+    """Detect ``tests/test_*.py`` files the fp job would silently DROP at collection — the real blind spot.
+
+    A new test that imports a dep absent from base fp-dev (the dashboard pattern) ERRORs at collection. With
+    a plain ``tests/`` run that surfaces as a hard failure, but a careless future ``--continue-on-collection``
+    could hide it; this audit makes the blind-spot explicit regardless. We ``--collect-only`` the fp env over
+    ``tests/`` (NOT ignoring the dashboard set) and report any file that errors collection yet is NOT a known
+    dashboard-dep test — i.e. a NEW uncovered class. Known dashboard-dep files are covered by the dashboard
+    job, so they are excluded from the blind-spot list.
+    """
+    collect_cmd = "python -m pytest tests/ --collect-only -q -p no:cacheprovider"
+    result = run([*fp_docker(worktree), "sh", "-c", collect_cmd], timeout=300)
+    errored = {
+        line.split()[1]
+        for line in result.stdout.splitlines()
+        if line.startswith("ERROR ") and len(line.split()) >= 2
+    }
+    # Errored files that the dashboard job DOESN'T cover are genuine blind spots.
+    return sorted(errored - set(DASHBOARD_DEP_TESTS))
 
 
 def post_status(sha: str, state: str, description: str) -> None:
@@ -336,19 +413,21 @@ def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
         try:
             run(["git", "fetch", "origin", "main"], cwd=worktree)
             paths = changed_paths(worktree)
-            passed, tail = run_suite(worktree)
+            suite = run_suite(worktree)
             fp_head = fingerprint_in(worktree)
             fp_base = _origin_main_fingerprint()
             scope = classify(paths, fp_base, fp_head)
         finally:
             run(["git", "worktree", "remove", "--force", worktree], cwd=REPO_DIR)
 
+    passed = suite.passed
     tier_str = "TIER-1 (auto)" if scope.tier is Tier.AUTO else "TIER-2 (gated)"
     state = "success" if passed else "failure"
-    summary = f"fp suite {'GREEN' if passed else 'RED'} — {tier_str}"
+    jobs_str = ", ".join(f"{job.name}={'ok' if job.passed else 'RED'}" for job in suite.jobs)
+    summary = f"suite {'GREEN' if passed else 'RED'} ({jobs_str}) — {tier_str}"
     post_status(pr.head_sha, state, summary)
 
-    body = _comment_body(passed, tail, scope, len(paths))
+    body = _comment_body(suite, scope, len(paths))
     post_comment(pr.number, body)
     ensure_label(pr.number, GATED_LABEL, present=scope.tier is Tier.GATED)
 
@@ -365,30 +444,44 @@ def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
         )
 
 
-def _comment_body(passed: bool, tail: str, scope: ScopeResult, n_paths: int) -> str:
-    """Render the sticky CI comment."""
-    status_line = "✅ **fp suite GREEN**" if passed else "❌ **fp suite RED**"
+def _comment_body(suite: SuiteResult, scope: ScopeResult, n_paths: int) -> str:
+    """Render the sticky CI comment — per-job verdicts + the coverage-honesty audit + scope."""
+    passed = suite.passed
+    status_line = "✅ **suite GREEN**" if passed else "❌ **suite RED**"
     tier = scope.tier.value
     reasons = "\n".join(f"- {reason}" for reason in scope.reasons)
+    job_lines = "\n".join(
+        f"- `{job.name}`: {'✅ passed' if job.passed else '❌ FAILED'}" for job in suite.jobs
+    )
     lines = [
         f"## CI — `{STATUS_CONTEXT}`",
         "",
         status_line,
         f"**Scope:** `{tier}` ({n_paths} changed paths)",
         "",
-        "**Why:**",
-        reasons,
+        "**Jobs** (every job must pass — the dashboard-dep tests run in their own env, not silently skipped):",
+        job_lines,
     ]
-    if not passed:
+    if suite.uncovered:
+        # Coverage honesty: a test file no job ran is a blind spot — make it RED and loud, never hidden.
+        uncovered_md = "\n".join(f"- `{path}`" for path in suite.uncovered)
         lines += [
             "",
-            "<details><summary>suite output (tail)</summary>",
-            "",
-            "```",
-            tail,
-            "```",
-            "</details>",
+            "⚠️ **Uncovered test files (NO job ran these — gate is RED until covered):**",
+            uncovered_md,
         ]
+    lines += ["", "**Scope reasons:**", reasons]
+    for job in suite.jobs:
+        if not job.passed:
+            lines += [
+                "",
+                f"<details><summary>{job.name} job output (tail)</summary>",
+                "",
+                "```",
+                job.tail,
+                "```",
+                "</details>",
+            ]
     if tier == Tier.AUTO.value and passed:
         lines += ["", "_TIER-1 + green → eligible for auto-merge._"]
     elif tier == Tier.GATED.value:

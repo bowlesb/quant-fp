@@ -61,12 +61,32 @@ CI still runs and still gates correctness — only the *merge* and *deploy* are 
 ## Why a self-hosted runner (not cloud GitHub Actions)
 
 The fp test environment is the `fp-dev` Docker image, which carries the compiled `quantlib` + Rust kernels.
-**64 of 66 `tests/test_fp_*.py` files run purely inside `fp-dev` with no DB / store / Redis** — verified by
-grep. The full suite is `docker run --rm -v $PWD:/app -w /app fp-dev python -m pytest tests/test_fp_*.py`.
-A cloud GHA runner would have to rebuild that image (with Rust) on every run and still couldn't reach the
-`/store` volume or Timescale for the 2 infra-touching tests. A **box-local watcher** using the already-built
-`fp-dev` image is faster, reproducible, and has the real environment. So CI is a **watcher daemon on the
-box**, not a `.github/workflows/*.yml`.
+The whole `tests/` dir (1271 tests) collects in `fp-dev` with no DB / store / Redis for the unit subset. A
+cloud GHA runner would have to rebuild that image (with Rust) on every run and still couldn't reach the
+`/store` volume or Timescale. A **box-local watcher** using the already-built `fp-dev` image is faster,
+reproducible, and has the real environment. So CI is a **watcher daemon on the box**, not a
+`.github/workflows/*.yml`.
+
+## Coverage honesty — the gate runs EVERYTHING, and is loud about what it can't
+
+A gate that runs only `test_fp_*.py` would silently skip **90 of 156** test files — exactly the half-tested
+pattern. So the gate runs the **whole `tests/` dir** as two jobs, and audits for blind spots:
+
+- **`fp` job** — the entire `tests/` dir in base `fp-dev`, `--ignore`-ing only the dashboard-dep files below.
+- **`dashboard` job** — `test_group_guide.py`, `test_store_grid.py`, `test_store_grid_cache.py`,
+  `test_latency_expectations_route.py` run in `fp-dev` after `pip install -r
+  services/dashboard/requirements.txt`. These import `fastapi` / `pyyaml` / `pymongo`, which are NOT in the
+  base `fp-dev` image, so they ERROR at collection there (a real, pre-existing CI blind spot). Installing the
+  dashboard's own (authoritative, drift-proof) requirements lets them run. They are **excluded explicitly and
+  visibly**, never silently skipped.
+- **coverage audit** — after the jobs, the gate `--collect-only`s `tests/` and reports any `test_*.py` that
+  errors at collection yet is NOT a known dashboard-dep file. A NEW test that pulls an uninstalled dep (the
+  same failure mode) is flagged **loudly and turns the gate RED**, so a whole untested class can never hide
+  behind a green badge.
+
+The PR is **green only if every job passes AND the audit is empty**. The sticky comment lists each job's
+verdict and any uncovered files. When a new dashboard-dep test appears, add it to `DASHBOARD_DEP_TESTS` in
+`ops/ci_watcher.py` (the audit will have already turned the gate red to force the decision).
 
 ## Phase 1 — the CI gate (SHIPPED FIRST)
 
@@ -74,21 +94,20 @@ box**, not a `.github/workflows/*.yml`.
 
 1. `gh pr list` for open PRs against `main`.
 2. For each PR whose head SHA it hasn't yet graded, checks out that SHA into a throwaway worktree.
-3. Runs the FULL `tests/test_fp_*.py` suite in an `fp-dev --rm` container (env scrubbed — **never** mounts
-   `.env`, so the paper Alpaca creds cannot leak into CI logs). The opt-in latency e2e
-   (`FP_LATENCY_E2E=1`) is run only when `CI_RUN_LATENCY=1`, since it needs `.env`.
+3. Runs the two jobs (`fp` + `dashboard`) + the coverage audit described above, all in `fp-dev --rm`
+   containers (env scrubbed — **never** mounts `.env`, so the paper Alpaca creds cannot leak into CI logs).
 4. Classifies scope: computes the fingerprint in the PR worktree vs `origin/main`; inspects changed paths.
    fp-neutral + safe-surface → TIER 1; else TIER 2.
 5. Posts a **commit status** via `gh api` (context `ci/fp-suite`) so the PR's mergeability reflects real
-   test state, and a sticky summary comment with pass/fail + tier.
+   test state, and a sticky summary comment with per-job pass/fail + any uncovered files + tier.
 6. Applies the `tier-2-gated` label when the change is gated.
 
 Run it: `python -m ops.ci_watcher --once` (grade all open PRs once) or `ops/ci_watcher.sh` (the persistent
 daemon, installed as a systemd/cron-supervised loop). See `ops/ci_watcher.sh` for the supervised form.
 
-The gate is **proven by breaking it on purpose**: a PR with a deliberately-failing `test_fp_*` must go red
-(status = failure, not mergeable); a good PR must go green. Both proofs are recorded in the PR thread and the
-SYSTEM_LOG.
+The gate is **proven by breaking it on purpose**: a PR with a deliberately-failing test must go red
+(status = failure, not mergeable); a good PR must go green; a test importing an uninstalled dep must be
+flagged uncovered (red). Proofs are recorded in the PR thread and the SYSTEM_LOG.
 
 ## Phase 2 — auto-merge (TIER 1 only)
 
