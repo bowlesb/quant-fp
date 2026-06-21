@@ -177,6 +177,14 @@ def build_daily_table(dates: list[str], daily_cache: str | None) -> pl.DataFrame
         reduced = _reduce_one_date(date_iso)
         if reduced is not None:
             rows.append(reduced)
+    if not rows:
+        raise FileNotFoundError(
+            f"no raw bars found under STORE={STORE}/raw/bars for {len(dates)} date(s) in the requested "
+            f"range — got 0 reducible days. Check that the store is mounted (e.g. "
+            f"`-v fp_store_real:/store:ro`), STORE_ROOT points at it, and the date range overlaps the "
+            f"raw-bar coverage. (Reached the uncached build path because daily_cache="
+            f"{daily_cache!r} did not exist.)"
+        )
     daily = pl.concat(rows, how="vertical_relaxed")
     if daily_cache:
         os.makedirs(os.path.dirname(daily_cache), exist_ok=True)
