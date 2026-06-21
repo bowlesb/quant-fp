@@ -1,0 +1,22 @@
+# Battery report
+
+cadence=intraday  range=2026-05-29..2026-06-18  universe_top=200  panel=26344rows x 15feat x 200sym  strategies=9
+panel_load=16.414s  eval=7.294s  **total=23.708s**  (**0.810s/strategy** over the shared matrix)
+
+| strategy | signal | label | H | n_rows | IC | shuffle_IC | edge | NW t | net/period | breakeven_bps | cost_bps | sharpe_net | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| probe_ret_15m_up_h15_b50 | feature | up_move_start | 15 | 21241 | 0.0292 | -0.0021 | 0.0312 | 1.38 | 0.0255 | 88.58 | 4.43 | 2.53 | FAIL |
+| probe_quote_imbalance_15m_up_h15_b50 | feature | up_move_start | 15 | 21241 | 0.0177 | 0.0086 | 0.0091 | 1.93 | 0.1230 | 536.35 | 4.43 | 19.05 | FAIL |
+| probe_realized_vol_30m_up_h15_b50 | feature | up_move_start | 15 | 21241 | -0.0406 | -0.0005 | -0.0401 | -1.33 | -0.0816 | -568.84 | 4.43 | -6.67 | FAIL |
+| probe_spread_bps_15m_up_h15_b50 | feature | up_move_start | 15 | 21241 | -0.0292 | 0.0040 | -0.0333 | -1.48 | -0.0190 | -219.20 | 4.43 | -2.02 | FAIL |
+| probe_max_runup_1m_up_h15_b50 | feature | up_move_start | 15 | 21241 | -0.0051 | -0.0064 | 0.0013 | -0.28 | -0.0159 | -113.27 | 4.43 | -1.61 | FAIL |
+| probe_realized_vol_30m_runup_h15 | feature | fwd_max_runup | 15 | 21241 | 0.2931 | -0.0011 | 0.2942 | 7.40 | 0.0354 | 257.01 | 4.43 | 53.31 | PASS |
+| probe_spread_bps_15m_runup_h15 | feature | fwd_max_runup | 15 | 21241 | 0.1829 | 0.0100 | 0.1729 | 8.36 | 0.0302 | 376.10 | 4.43 | 53.60 | PASS |
+| composite_up_h15_b50 | composite | up_move_start | 15 | 21241 | 0.0064 | -0.0037 | 0.0101 | 0.35 | 0.0585 | 222.35 | 4.43 | 6.49 | FAIL |
+| gbm_up_h15_b50 | gbm | up_move_start | 15 | 21241 | -0.0186 | 0.0043 | -0.0229 | -1.59 | -0.0216 | -68.96 | 4.43 | -2.76 | FAIL |
+
+## Leaderboard (PASS = net-positive + beats shuffle + |NW t|>=2)
+
+1. **probe_spread_bps_15m_runup_h15** — sharpe_net=53.60 IC=0.1829 NW t=8.36 breakeven=376.10bps
+2. **probe_realized_vol_30m_runup_h15** — sharpe_net=53.31 IC=0.2931 NW t=7.40 breakeven=257.01bps
+
