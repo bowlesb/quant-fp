@@ -4,7 +4,7 @@ Working dir: /home/ben/quant-fp. Deployed trunk = deploy/candidate (bind-mounted
 
 LANE DISCIPLINE (a dedicated data-quality AUDIT loop runs concurrently): YOUR lane = the incremental engine, capture, store, infra, and items 1-2-3 (incl. the systemic data-quality fixes in backlog P1.0: points() NaN, restart warm-start, store dedup — these are engine/store, so they are YOURS). The audit loop owns per-feature-group local data-quality fixes. Work on a feature branch off deploy/candidate; if a git merge conflicts, rebase and retry (the audit loop may have moved trunk). NOTE the SEQUENCING RULE in docs/DATA_QUALITY_LEDGER.md: do not redeploy capture for feature fixes until the warm-start fix lands — then one clean restart + recollect.
 
-ORIENT FIRST (you start with fresh context each run): read docs/RESUME_STATE.md, then docs/AUTONOMOUS_BACKLOG.md, docs/DATA_QUALITY_LEDGER.md, and docs/MAINTENANCE_PROTOCOL.md.
+ORIENT FIRST (you start with fresh context each run): read docs/SYSTEM_DESCRIPTION.md, then docs/AUTONOMOUS_BACKLOG.md, docs/DATA_QUALITY_LEDGER.md, and docs/MAINTENANCE_PROTOCOL.md.
 
 Then do BOTH of the following, in order:
 
