@@ -30,6 +30,7 @@ relies on (ci_scope) is pure + unit-tested. Run::
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import os
@@ -91,6 +92,112 @@ STORE_TEST_DIR = "tests/battery/"
 # ANY repo-based CI env. lightgbm IS in fp-dev so their importorskip(lightgbm) does NOT skip them. They are
 # excluded + flagged (the coverage audit lists any NEW such orphan), never allowed to silently red the gate.
 HARNESS_ORPHAN_TESTS = ("tests/test_experimenter_transient.py",)
+
+
+@dataclass(frozen=True)
+class TestEnvPolicy:
+    """The per-env test classification (which tests need dashboard deps / store / are timing / orphans).
+
+    CRITICAL: this is loaded from the PR CHECKOUT being graded, not the daemon's (possibly stale) running
+    module. The daemon's live tree can lag origin/main (a daemon started at SHA X keeps X's lists in memory);
+    if a PR adds a dashboard-dep test the stale daemon wouldn't ``--ignore`` it → fastapi collection error →
+    false-RED a clean PR (or, the other way, false-GREEN). The exclusion policy must match the tree whose
+    tests we run, so we parse it from the checkout. The module constants below are only the fallback default.
+    """
+
+    __test__ = False  # not a pytest test class despite the "Test" prefix
+
+    dashboard_dep_tests: tuple[str, ...]
+    timing_tests: tuple[str, ...]
+    harness_orphan_tests: tuple[str, ...]
+    store_test_dir: str
+
+    @property
+    def fp_excludes(self) -> tuple[str, ...]:
+        """Everything the gating fp job must NOT run (each covered by its own job or an unrunnable orphan)."""
+        return (
+            *self.dashboard_dep_tests,
+            *self.timing_tests,
+            *self.harness_orphan_tests,
+            self.store_test_dir,
+        )
+
+    @property
+    def known_collection_errors(self) -> frozenset[str]:
+        """Files that legitimately ERROR at collection in the bare fp env (other-env / orphan) — NOT blind
+        spots. A collection error outside this set is a genuine new uncovered class."""
+        return frozenset((*self.dashboard_dep_tests, *self.harness_orphan_tests))
+
+
+# The fallback policy = this module's own constants (used when a checkout can't be parsed, e.g. an older PR).
+_DEFAULT_POLICY = TestEnvPolicy(
+    dashboard_dep_tests=DASHBOARD_DEP_TESTS,
+    timing_tests=TIMING_TESTS,
+    harness_orphan_tests=HARNESS_ORPHAN_TESTS,
+    store_test_dir=STORE_TEST_DIR,
+)
+
+# Constants read from the checkout's ops/ci_watcher.py source (tuple-of-str / str literals only).
+_POLICY_TUPLE_NAMES = ("DASHBOARD_DEP_TESTS", "TIMING_TESTS", "HARNESS_ORPHAN_TESTS")
+_POLICY_STR_NAMES = ("STORE_TEST_DIR",)
+
+
+def load_policy(worktree: str) -> TestEnvPolicy:
+    """Parse the env-classification lists from the CHECKOUT's ``ops/ci_watcher.py`` via AST (NO code
+    execution — we never import the checkout's code). Falls back to the daemon's own constants if the file is
+    missing or any constant can't be parsed, so an older PR (predating a list) still grades sanely."""
+    source_path = os.path.join(worktree, "ops", "ci_watcher.py")
+    if not os.path.isfile(source_path):
+        logger.warning("checkout has no ops/ci_watcher.py — using the daemon's default test-env policy")
+        return _DEFAULT_POLICY
+    with open(source_path) as handle:
+        source = handle.read()
+    try:
+        parsed = _parse_policy_constants(source)
+    except (SyntaxError, ValueError) as exc:
+        logger.warning("could not parse test-env policy from checkout (%s) — using default", exc)
+        return _DEFAULT_POLICY
+    return TestEnvPolicy(
+        dashboard_dep_tests=parsed["DASHBOARD_DEP_TESTS"],
+        timing_tests=parsed["TIMING_TESTS"],
+        harness_orphan_tests=parsed["HARNESS_ORPHAN_TESTS"],
+        store_test_dir=parsed["STORE_TEST_DIR"][0],
+    )
+
+
+def _parse_policy_constants(source: str) -> dict[str, tuple[str, ...]]:
+    """Extract the policy constants as tuples of string literals from module source via AST. Raises
+    ValueError if any required name is absent or not a pure str/tuple-of-str literal."""
+    tree = ast.parse(source)
+    found: dict[str, tuple[str, ...]] = {}
+    wanted = set(_POLICY_TUPLE_NAMES) | set(_POLICY_STR_NAMES)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in wanted:
+            continue
+        found[target.id] = _literal_str_tuple(node.value)
+    missing = wanted - set(found)
+    if missing:
+        raise ValueError(f"checkout policy missing constants: {sorted(missing)}")
+    return found
+
+
+def _literal_str_tuple(value: ast.expr) -> tuple[str, ...]:
+    """A str literal -> 1-tuple; a tuple/list of str literals -> that tuple. Anything else raises."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return (value.value,)
+    if isinstance(value, (ast.Tuple, ast.List)):
+        items: list[str] = []
+        for element in value.elts:
+            if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                raise ValueError("non-string element in policy tuple")
+            items.append(element.value)
+        return tuple(items)
+    raise ValueError("policy constant is not a str / tuple-of-str literal")
+
+
 # Parallelism for the big `fp` job (~1200 tests). Serial it took ~30 min — too slow to grade the queue. We
 # pip-install pytest-xdist and run `-n CI_XDIST_WORKERS`. FIXED small worker count, NEVER `-n auto`: this is a
 # 32-core SHARED box (fc / crypto / strategies live-capture), and `auto` spawns ~32 workers and spikes load
@@ -294,11 +401,12 @@ def _parse_failed_ids(output: str) -> list[str]:
     return ids
 
 
-# Every category the fp job must NOT run (each is covered by its own job or is an unrunnable orphan).
-_FP_EXCLUDES = (*DASHBOARD_DEP_TESTS, *TIMING_TESTS, *HARNESS_ORPHAN_TESTS, STORE_TEST_DIR)
+# Back-compat: the default policy's fp-excludes (the daemon's own constants). run_suite uses the per-checkout
+# policy instead; this name is kept for any external reference / tests.
+_FP_EXCLUDES = _DEFAULT_POLICY.fp_excludes
 
 
-def _run_fp_job(worktree: str) -> JobResult:
+def _run_fp_job(worktree: str, policy: TestEnvPolicy) -> JobResult:
     """The gating ``fp`` job: run the whole tests/ dir in BOUNDED PARALLEL (-n), then make the result robust
     to xdist test-ISOLATION flakes.
 
@@ -309,7 +417,7 @@ def _run_fp_job(worktree: str) -> JobResult:
     fail isolated are REAL reds → the job stays RED. Standard xdist mitigation, cost = only the few that
     failed.
     """
-    ignores = " ".join(f"--ignore={path}" for path in _FP_EXCLUDES)
+    ignores = " ".join(f"--ignore={path}" for path in policy.fp_excludes)
     # -rf so the FAILED summary lists test ids we can re-run; -p no:randomly keeps order deterministic.
     parallel_cmd = (
         f"pip install -q --user {PYTEST_XDIST_REQ} && "
@@ -321,8 +429,25 @@ def _run_fp_job(worktree: str) -> JobResult:
 
     failed_ids = _parse_failed_ids(output)
     if not failed_ids:
-        # Failed but we couldn't parse ids (e.g. a collection error / crash) — cannot safely call it a flake.
-        return JobResult("fp", False, "\n".join(output.splitlines()[-25:]), gating=True)
+        # Failed with NO parseable FAILED ids — a collection error / xdist worker crash, which under heavy box
+        # load can be a transient (a dropped worker, an --ignore not applied on a crashed shard). Before
+        # false-redding a clean PR, do ONE SERIAL full re-run (no -n) — no xdist workers to crash. If it
+        # passes, it was a parallel-infra transient → GREEN; if it still fails, it's real → RED.
+        logger.info("fp parallel run RED with no parseable ids (collection/crash) — one serial re-run")
+        serial_cmd = f"python -m pytest {SUITE_GLOB} {ignores} -q -rf -p no:cacheprovider -p no:randomly"
+        serial_passed, serial_output = _exec_pytest(worktree, serial_cmd, "fp-serial", mount_store=False)
+        if serial_passed:
+            logger.info("serial re-run PASSED → parallel-infra transient; fp job GREEN")
+            tail = (
+                "\n".join(output.splitlines()[-10:]) + "\n--- serial re-run: passed (parallel transient) ---"
+            )
+            return JobResult("fp", True, tail, gating=True, flaky_recovered=["<parallel-infra transient>"])
+        # Serial also failed: try to recover any now-parseable ids, else it's a genuine RED.
+        serial_failed_ids = _parse_failed_ids(serial_output)
+        if not serial_failed_ids:
+            logger.info("serial re-run STILL RED with no parseable ids → genuine collection failure; fp RED")
+            return JobResult("fp", False, "\n".join(serial_output.splitlines()[-25:]), gating=True)
+        output, failed_ids = serial_output, serial_failed_ids
 
     logger.info("fp parallel run RED on %d test(s); re-running isolated: %s", len(failed_ids), failed_ids)
     # Re-run exactly the failed ids, SERIALLY, single process (no -n) — the isolation check.
@@ -356,33 +481,38 @@ def run_suite(worktree: str) -> SuiteResult:
 
     The fp job runs in bounded parallel (-n) and is robust to xdist test-isolation flakes via
     ``_run_fp_job`` (failed-in-parallel ids are re-confirmed isolated before declaring RED).
-    """
-    fp_job = _run_fp_job(worktree)
 
-    dash_targets = " ".join(DASHBOARD_DEP_TESTS)
+    The per-env test classification is loaded from the CHECKOUT (``load_policy``), NOT the daemon's possibly
+    stale running module — so a PR that adds a dashboard-dep / store / orphan test is classified by ITS OWN
+    lists, never false-redded by a lagging daemon.
+    """
+    policy = load_policy(worktree)
+
+    fp_job = _run_fp_job(worktree, policy)
+
+    dash_targets = " ".join(policy.dashboard_dep_tests)
     dash_cmd = (
         f"pip install -q --user -r {DASHBOARD_REQUIREMENTS} && "
         f"python -m pytest {dash_targets} -q -p no:cacheprovider"
     )
     dash_job = _run_pytest(worktree, dash_cmd, "dashboard", gating=True)
 
-    store_cmd = f"python -m pytest {STORE_TEST_DIR} -q -p no:cacheprovider"
+    store_cmd = f"python -m pytest {policy.store_test_dir} -q -p no:cacheprovider"
     store_job = _run_pytest(worktree, store_cmd, "store", gating=True, mount_store=True)
 
-    timing_targets = " ".join(TIMING_TESTS)
+    timing_targets = " ".join(policy.timing_tests)
     timing_cmd = f"python -m pytest {timing_targets} -q -p no:cacheprovider"
     timing_job = _run_pytest(worktree, timing_cmd, "timing", gating=False)
 
-    uncovered = _audit_coverage(worktree)
+    uncovered = _audit_coverage(worktree, policy)
     return SuiteResult(jobs=[fp_job, dash_job, store_job, timing_job], uncovered=uncovered)
 
 
-# Test files that legitimately ERROR at collection in the bare fp env because they belong to another job /
-# are unrunnable orphans — so a collection error on THESE is expected, not a blind spot.
-_KNOWN_COLLECTION_ERRORS = frozenset((*DASHBOARD_DEP_TESTS, *HARNESS_ORPHAN_TESTS))
+# Back-compat default (the daemon's own constants); _audit_coverage uses the per-checkout policy instead.
+_KNOWN_COLLECTION_ERRORS = _DEFAULT_POLICY.known_collection_errors
 
 
-def _audit_coverage(worktree: str) -> list[str]:
+def _audit_coverage(worktree: str, policy: TestEnvPolicy) -> list[str]:
     """Detect ``tests/test_*.py`` files the fp job would silently DROP at collection — the real blind spot.
 
     A new test importing a dep absent from base fp-dev (dashboard pattern), needing the store, or importing a
@@ -399,7 +529,27 @@ def _audit_coverage(worktree: str) -> list[str]:
         for line in result.stdout.splitlines()
         if line.startswith("ERROR ") and len(line.split()) >= 2
     }
-    return sorted(errored - _KNOWN_COLLECTION_ERRORS)
+    candidates = sorted(errored - policy.known_collection_errors)
+    if not candidates:
+        return []
+    # A candidate "blind spot" could be a contention artifact (a --collect-only that partially completed
+    # under heavy box load). Re-collect EACH candidate ALONE (serial, no load) to confirm it genuinely errors
+    # before flagging it RED — a transient must not false-red a clean PR.
+    confirmed = [path for path in candidates if _file_errors_at_collection(worktree, path)]
+    if confirmed != candidates:
+        logger.info(
+            "audit: %s errored in the full collect but re-collected clean alone (contention) — not flagged",
+            sorted(set(candidates) - set(confirmed)),
+        )
+    return confirmed
+
+
+def _file_errors_at_collection(worktree: str, test_path: str) -> bool:
+    """True iff this single file ERRORs at collection when collected ALONE in the bare fp env (the isolated
+    re-confirm — strips out load-induced partial-collection artifacts)."""
+    collect_cmd = f"python -m pytest {test_path} --collect-only -q -p no:cacheprovider"
+    result = run([*fp_docker(worktree), "sh", "-c", collect_cmd], timeout=120)
+    return result.returncode != 0 and "ERROR" in result.stdout
 
 
 def post_status(sha: str, state: str, description: str) -> None:
