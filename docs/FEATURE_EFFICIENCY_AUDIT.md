@@ -25,47 +25,63 @@ PR (see §"Swing — the fixed #1 gap"). The remaining gaps are a SECOND tier: h
 groups that re-scan their *bounded* window each minute (correct but O(window), not O(1)); these are small
 absolute costs and only worth migrating opportunistically.
 
-## Held-state migrations MUST clear two design gates (the template, not just an O(1) code change)
+## THE running-state contract — `up_to_date()` + lazy `rebuild_from_history()` (the canonical pattern)
 
-A held-state migration is only safe if it reproduces the BACKFILL source of truth across the two places a carry-
-forward state can silently diverge. Every B-fold candidate below is scored on these; a candidate that can't clear
-both is NOT a clean held-state migration (flag it like the FP_INCREMENTAL corr-straddle parked groups).
+Every held-state (B-fold) object implements ONE contract (`quantlib/features/running_state.py`, the `RunningState`
+protocol). The compute/emit path is always: **GUARD → FOLD → EMIT.**
 
-1. **Morning COLD-START / WARM-START seeding.** fc relaunches pre-market with `FP_WARM_START=1`, which rehydrates
-   the trailing ring from `backfill_bars(day)` — the SAME single-session bars backfill folds. A held feature must
-   SEED its state from that warm window so minute 1 is correct, not cold. For a fold whose first call sees no
-   carried state and folds the whole warm ring (swing's shape), seeding is AUTOMATIC + parity-true (the cold fold
-   over the warm ring == backfill's fold). Warm-up minutes before the state is fully formed are handled the
-   existing way (the same warmup nulls backfill emits, RTH-excluded from trust grading — not published as finite).
-2. **SESSION-BOUNDARY rule — decide + justify, then PROVE parity across it.** Production backfill materializes
-   PER DAY (`load_raw_minute_agg(day)` / `backfill_bars(day)` — one session), so its fold bootstraps fresh each
-   session and never carries state across the overnight gap. **The held state must do the SAME (reset at the
-   session boundary)** or it diverges at the next open. This is the `seed(H); fold(m) == seed(H+m)` invariant, and
-   the one place it silently breaks is THE MORNING SEED — so the parity test must span a morning boundary and
-   compare against PER-DAY backfill (not a multi-day whole-buffer fold, which carries state and is NOT what
-   production produces). Treat with the same rigor as the FP_INCREMENTAL parity gate.
+```
+if not state.up_to_date(buffer):
+    state.rebuild_from_history(buffer)   # lazy, one-time-expensive reseed from the SAME history backfill uses
+# ... now fold the unabsorbed tail of `buffer` and emit (O(1)/minute) ...
+```
 
-**Swing, scored (the worked template):** ✅ clean held-state migration. (1) Seeds automatically from the warm ring
-(cold first-call fold == per-day backfill — `test_swing_stateful_warm_start_seed_equals_backfill`). (2) RESETS the
-leg at the session boundary — MEASURED that per-day backfill diverges from a cross-day carry (swing_dir /
-n_alternations / persistence at the open), so reset is the parity-correct rule AND right on its merits (an
-overnight gap is not a real intraday swing); proven by `test_swing_stateful_morning_boundary_equals_per_day_backfill`.
-The held path matches per-day backfill on the single-day buffers production always uses.
+This SINGLE mechanism resolves the two hard parts (cold-start + backfill parity) by construction — no bespoke
+warm-start wiring per group:
+
+- **Backfill parity for free.** `rebuild_from_history` seeds from the SAME historical window backfill recomputes
+  over, so the instant `up_to_date` flips true the live held-state EQUALS the backfill state. And because the
+  guard precedes EVERY emit, a stale state can NEVER silently emit a wrong value — it reseeds, or it is already
+  correct.
+- **Morning / session boundary = "what window the rebuild seeds from."** `up_to_date` returns False when the
+  buffer's latest SESSION differs from the absorbed session; the rebuild reseeds (encoding the carry-vs-reset
+  decision). Warm-up minutes before the rebuild completes are the usual RTH-excluded warmup nulls, now with an
+  EXPLICIT mechanism (`up_to_date()==False` until seeded).
+- **Hot-swap reseed is subsumed.** After a real-time code swap the new state reports `up_to_date()==False` and
+  lazily reseeds before the next minute — no separate eager-reseed step.
+
+Staleness triggers `up_to_date()==False`: first-ever deploy (cold), morning relaunch (cold), a hot-swap (code
+changed), a stream gap (missed minutes), a rewound/replayed buffer, AND (for a session-reset feature) the session
+boundary. The required parity test walks the held state through each trigger and asserts the lazy rebuild restores
+EXACT backfill parity.
+
+**Swing, on the contract (the worked template):** ✅ clean held-state migration.
+- `SwingState` IS a `RunningState` (`test_swing_state_satisfies_running_state_contract`).
+- SESSION-BOUNDARY decision = **RESET** — encoded in `up_to_date` (stale when the buffer's session ≠ the absorbed
+  session) + `rebuild_from_history` (re-folds the buffer, bootstrapping a fresh leg per session). MEASURED that
+  per-day backfill diverges from a cross-day carry (swing_dir / n_alternations / persistence at the open), so
+  reset is parity-FORCED (production backfill materializes PER DAY — `load_raw_minute_agg(day)` /
+  `backfill_bars(day)`) AND right on its merits (an overnight gap is not a real intraday swing).
+- WARM-START seeding is automatic: the first call of a session has `up_to_date()==False` → rebuilds from the
+  `FP_WARM_START`-rehydrated single-session ring → reaches per-day backfill at the open.
+- Proven by `test_swing_running_state_up_to_date_and_lazy_rebuild_restore_parity` (cold / session-boundary /
+  rewind all flip `up_to_date` False then the rebuild restores exact parity) +
+  `test_swing_stateful_morning_boundary_equals_per_day_backfill` + `test_swing_stateful_warm_start_seed_equals_backfill`.
 
 **Per-candidate readiness (the gap-list classification the migration roadmap is staggered from):**
 
 | candidate | held-state migration readiness | why |
 |---|---|---|
 | `swing` | **CLEAN — shipped** | per-day reset + warm-seed both proven across the morning boundary |
-| Tier-1 window groups (`subminute_gap_fano`, `size_entropy`, `print_hhi`) | **needs careful warm-start/parity work** | a windowed tick-ring fold MUST reseed at the session open from the warm ring AND reset/empty the ring at the boundary; each needs its own morning-boundary parity test before it's safe — same template as swing, not yet done |
-| ReductionGroups (the 20 ready) | **CLEAN (mechanism) — FP_INCREMENTAL flip** | the running-sum fold already reseeds per session via the engine; warm-start + parity are the existing FP_INCREMENTAL gate (Lead-sequenced) |
+| Tier-1 window groups (`subminute_gap_fano`, `size_entropy`, `print_hhi`) | **needs careful work — implement the `RunningState` contract** | a windowed tick-ring fold MUST expose `up_to_date()`/`rebuild_from_history()` (reseed at the session open from the warm ring; the boundary is a stale → rebuild like swing); each needs its own contract parity test — same template as swing, not yet done |
+| ReductionGroups (the 20 ready) | **CLEAN (mechanism) — FP_INCREMENTAL flip** | the running-sum fold already reseeds per session via the engine; warm-start + parity are the existing FP_INCREMENTAL gate (Lead-sequenced). Could be expressed THROUGH the `RunningState` contract for uniformity (its `seed` is the rebuild) |
 | `price_volume`, `market_beta`, `residual_analysis` | **irreducible (parked)** | corr-denom-straddle — stay on the batch fresh-sum path (no correctness loss) |
 | `momentum_run` | **irreducible (assessed)** | OLS skew/streak; Rust kernel measured marginal |
 | Class-A cached / gather / latest-only | **N/A** | no cross-minute carry to seed (recompute-once or at-T) |
 
-The DELTA-PASSING follow-on (the full O(1)) inherits these same two gates: the per-minute delta path must STILL
-seed from the warm ring at the open and reset at the boundary — the design above is a precondition for it, already
-satisfied for swing.
+The DELTA-PASSING follow-on (the full O(1)) inherits the SAME contract: the per-minute delta path still goes
+through `up_to_date()` → lazy `rebuild_from_history()` at the open / on staleness, then folds the delta — the
+contract is a precondition for it, already satisfied for swing.
 
 ## How each group was classified
 
@@ -185,14 +201,15 @@ group is on its optimal design. Proposal (spec — operationalize at the Lead's 
    the gate in #2), so the UI surfaces "N groups off their optimal design" and a regression is visible, not
    buried. (Done conceptually by THIS doc's gap list; the JSON enrichment is the durable machine-readable form.)
 
-4. **The MORNING-BOUNDARY parity gate for any held-state group** (the one Ben mandated). Any group that carries
-   state across minutes MUST ship a test that walks the held state across a SESSION boundary and asserts it equals
-   PER-DAY backfill cell-for-cell at the new session's minutes (the `seed(H); fold(m) == seed(H+m)` invariant at
-   its one silent-divergence point — the morning seed), plus a warm-start-seed test that the cold first-call over
-   the warm ring equals backfill at the open. swing ships both (`test_swing_stateful_morning_boundary_*` /
-   `*_warm_start_seed_*`); they are the required template for the Tier-1 window-group migrations. A held-state PR
-   without them is incomplete by definition.
+4. **The `RunningState` contract gate for any held-state group** (Ben's canonical cold-start pattern). Any group
+   that carries state across minutes MUST implement `RunningState` (`up_to_date()` + lazy `rebuild_from_history()`)
+   and route its emit through the GUARD → FOLD → EMIT guard, AND ship the contract parity test: walk the held
+   state through each staleness trigger (cold / session boundary / rewind / hot-swap) and assert `up_to_date()`
+   reports False then the lazy rebuild restores EXACT backfill parity (cell-for-cell vs PER-DAY backfill across a
+   morning boundary). swing ships it (`test_swing_running_state_up_to_date_and_lazy_rebuild_restore_parity` +
+   `test_swing_stateful_morning_boundary_*` + `*_warm_start_seed_*`) — the required template for the Tier-1 window-
+   group migrations. A held-state PR without the contract + its parity test is incomplete by definition.
 
 The combination makes "fast and cheap by construction" *checkable* AND morning-safe: a new feature declares its
-kind, the gate refuses an unbounded whole-buffer re-scan, held state must prove morning-boundary parity, and the
-JSON shows the fleet's on-optimal status at a glance.
+kind, the gate refuses an unbounded whole-buffer re-scan, held state implements the `RunningState` contract and
+proves its rebuild restores parity, and the JSON shows the fleet's on-optimal status at a glance.

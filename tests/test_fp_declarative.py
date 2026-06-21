@@ -13,9 +13,22 @@ import polars as pl
 
 from quantlib.features.base import BatchContext
 from quantlib.features.declarative import compute_reduction_batch
+from quantlib.features.reduction_anchor import _RTH_MINUTES_PER_DAY, attach_volume_anchor
 from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
+
+
+def _with_volume_anchor(frame: pl.DataFrame) -> pl.DataFrame:
+    """Attach volume's per-symbol centering anchor, as production capture/backfill does where minute_agg is
+    built. Synthesize a daily snapshot at DAILY-TOTAL scale (per-minute level x session minutes) so
+    ``attach_volume_anchor`` re-derives the per-minute anchor exactly as in prod."""
+    daily = (
+        frame.group_by("symbol", maintain_order=True)
+        .agg((pl.col("volume").last() * _RTH_MINUTES_PER_DAY).alias("volume"))
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_volume_anchor(frame, daily)
 
 
 def _minute_agg(n_sym: int = 5, n_min: int = 90) -> pl.DataFrame:
@@ -27,7 +40,9 @@ def _minute_agg(n_sym: int = 5, n_min: int = 90) -> pl.DataFrame:
                 {"symbol": f"S{s}", "minute": BASE + dt.timedelta(minutes=i), "high": close + 0.3,
                  "low": close - 0.3, "close": close, "volume": 1000.0 + (i * 7 + s) % 50}
             )
-    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    return _with_volume_anchor(
+        pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    )
 
 
 def _assert_close(per: pl.DataFrame, bat: pl.DataFrame, label: str) -> None:

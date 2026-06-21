@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from collections import deque
 
+import polars as pl
+
 THETA: float = 0.005
 RING_K: int = 8
 DAY_SECS: int = 86_400
@@ -229,16 +231,82 @@ class _SymbolLeg:
 
 
 class SwingState:
-    """The live carried state for the whole shard: one ``_SymbolLeg`` per symbol. Each ``step`` folds only the
-    bars a symbol has NOT yet absorbed and returns the latest row for the symbols present at the buffer's latest
-    minute — O(symbols × new-bars) per minute, not O(symbols × window).
+    """The live carried state for the whole shard: one ``_SymbolLeg`` per symbol — a ``RunningState`` (see
+    quantlib/features/running_state.py). Implements Ben's canonical cold-start contract: ``up_to_date(buffer)``
+    is checked before every fold; when False, ``rebuild_from_history(buffer)`` lazily reseeds from the buffer
+    (the SAME history backfill recomputes over) so the held state == backfill state by construction, then the
+    fold proceeds O(symbols × new-bars)/minute.
 
-    A bar is folded AT MOST once (``_SymbolLeg.last_min`` guards re-delivered minutes from the live ring's
-    keep-last de-dup). A symbol seen for the first time is folded from the start of whatever buffer it appears
-    in — identical to the Rust kernel, whose per-symbol block likewise starts at the first bar it sees."""
+    The contract makes the two hard parts fall out for free:
+    - COLD-START / MORNING / HOT-SWAP / GAP / REWIND all become a single ``up_to_date == False`` → lazy rebuild;
+      a stale state can never silently emit a wrong value because the guard precedes every emit.
+    - SESSION BOUNDARY is encoded as "what window the rebuild seeds from": swing RESETS per session (the
+      production backfill materializes PER DAY, so its fold bootstraps a fresh leg each session and never carries
+      the leg across the overnight gap — measured to diverge otherwise). So ``up_to_date`` goes False when the
+      buffer's latest SESSION differs from the absorbed session, and the rebuild reseeds the leg fresh from that
+      session's bars. (``_SymbolLeg.advance`` also resets at an internal day boundary, so a buffer that itself
+      straddles the gap is handled too.)
+
+    A bar is folded AT MOST once (``_SymbolLeg.last_min`` guards re-delivered minutes from the ring's keep-last
+    de-dup)."""
 
     def __init__(self) -> None:
         self._legs: dict[str, _SymbolLeg] = {}
+        # The session-day (epoch // DAY_SECS) the carried state currently reflects; None when cold. Used by
+        # up_to_date to detect the session boundary (the per-day reset trigger).
+        self._session_day: int | None = None
+
+    def up_to_date(self, buffer: pl.DataFrame) -> bool:
+        """The RunningState guard: True iff the carried state can fold ``buffer``'s newest minutes directly and
+        emit == backfill. False (→ lazy rebuild) on any staleness trigger:
+        - COLD: no carried state yet (first deploy / morning relaunch / hot-swap clears it).
+        - SESSION BOUNDARY: the buffer's latest session differs from the absorbed session (swing resets per day).
+        - GAP / REWIND: a present symbol's newest buffered minute is OLDER than what the state absorbed (replay)
+          OR the buffer skips minutes the state needs — the carried leg can't be trusted, reseed.
+        Cheap: reads only the buffer's min/max minute + symbol set (no per-bar scan)."""
+        if not self._legs or self._session_day is None:
+            return False
+        if buffer.height == 0:
+            return True  # nothing to fold; the standing state is already correct
+        buffer_max = int(buffer.select(pl.col("minute").dt.epoch("s"))["minute"].max())  # type: ignore[arg-type]
+        latest_session = buffer_max // DAY_SECS
+        if latest_session != self._session_day:
+            return False  # crossed into a new session -> reset+reseed (per-day backfill parity)
+        # REWIND: any present symbol whose buffer newest minute is behind what we absorbed -> stale.
+        for symbol in buffer["symbol"].unique().to_list():
+            leg = self._legs.get(symbol)
+            if leg is not None and buffer_max < leg.last_min:
+                return False
+        return True
+
+    def rebuild_from_history(self, buffer: pl.DataFrame) -> None:
+        """The RunningState lazy reseed: drop all carried state and re-fold ``buffer`` from scratch so the state
+        reflects the buffer's history exactly (== the per-day backfill recompute over the same window). Encodes
+        the SESSION-RESET decision implicitly: ``_SymbolLeg.advance`` bootstraps a fresh leg at the buffer's
+        first bar of each session and resets at any internal day boundary, so re-folding the buffer lands in the
+        latest session's leg-state — never carrying a leg across the overnight gap. After this,
+        ``up_to_date(buffer)`` is True by construction."""
+        self._legs = {}
+        if buffer.height == 0:
+            self._session_day = None
+            return
+        ordered = (
+            buffer.select(["symbol", "minute", "close"])
+            .with_columns(pl.col("minute").dt.epoch("s").alias("_mi"))
+            .sort(["symbol", "_mi"])
+        )
+        for symbol, sub in ordered.group_by("symbol", maintain_order=True):
+            symbol_name = symbol[0] if isinstance(symbol, tuple) else symbol
+            leg = _SymbolLeg()
+            self._legs[symbol_name] = leg
+            for close, minute in zip(sub["close"].to_list(), sub["_mi"].to_list()):
+                leg.advance(close, minute)
+        self._session_day = int(ordered["_mi"].max()) // DAY_SECS  # type: ignore[arg-type]
+
+    def note_absorbed_session(self, latest_epoch: int) -> None:
+        """Record the session the carried state now reflects (called after an incremental fold advances it). Lets
+        ``up_to_date`` detect the NEXT session boundary."""
+        self._session_day = latest_epoch // DAY_SECS
 
     def min_absorbed(self, symbols: list[str]) -> int | None:
         """The smallest ``last_min`` across ``symbols`` that already have carried state, or None if ANY of them
