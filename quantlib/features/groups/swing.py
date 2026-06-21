@@ -188,6 +188,22 @@ class SwingGroup(FeatureGroup):
             self.__dict__["_swing_state"] = state
         return state
 
+    def up_to_date(self, buffer: pl.DataFrame) -> bool:
+        """Held-state override of the group-level RunningState contract: delegate to the carried ``SwingState``
+        (False when cold / after a hot-swap / across the session boundary / on a gap → caller rebuilds). When the
+        stateful flag is OFF the live path recomputes from the buffer each minute, so it is always up to date."""
+        if os.environ.get("FP_SWING_STATEFUL") != "1":
+            return True
+        return self._live_state.up_to_date(buffer)
+
+    def rebuild_from_history(self, buffer: pl.DataFrame) -> None:
+        """Held-state override: reseed the carried ``SwingState`` from ``buffer`` (the SAME history backfill
+        recomputes over) so the live state == backfill state by construction. No-op when the flag is OFF."""
+        if os.environ.get("FP_SWING_STATEFUL") != "1":
+            return None
+        self._live_state.rebuild_from_history(buffer)
+        return None
+
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
         """LIVE: emit the latest minute's row per symbol. Default (``FP_SWING_STATEFUL`` unset) keeps the
         certified whole-buffer fold (``compute().filter(last)``) — the source of truth. With the flag set, carry
@@ -230,9 +246,10 @@ class SwingGroup(FeatureGroup):
         if frame.height == 0:
             return swing_fold_frame(frame)
         state = self._live_state
-        # 1. GUARD: lazily reseed a stale state from the buffer history before folding/emitting anything.
-        if not state.up_to_date(frame):
-            state.rebuild_from_history(frame)
+        # 1. GUARD: the group-level RunningState contract (the SAME surface the hot-swap applier calls) — lazily
+        # reseed a stale state from the buffer history before folding/emitting anything.
+        if not self.up_to_date(frame):
+            self.rebuild_from_history(frame)
         # ONE pass adds the epoch-minute column; everything below reads it (no repeated whole-buffer scans).
         keyed = frame.with_columns(pl.col("minute").dt.epoch("s").alias("_mi"))
         latest_epoch = int(keyed["_mi"].max())  # type: ignore[arg-type]

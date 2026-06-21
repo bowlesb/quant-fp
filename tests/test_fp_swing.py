@@ -23,6 +23,7 @@ import numpy as np
 import polars as pl
 
 from quantlib.features.base import BatchContext
+from quantlib.features.groups.calendar import CalendarGroup
 from quantlib.features.groups.swing import (
     DAY_SECS,
     FIB_MAX_ABS,
@@ -451,6 +452,29 @@ def test_swing_stateful_warm_start_seed_equals_backfill(monkeypatch) -> None:
 def test_swing_state_satisfies_running_state_contract() -> None:
     """SwingState IS a RunningState (the canonical up_to_date()/rebuild_from_history() cold-start contract)."""
     assert isinstance(SwingState(), RunningState)
+
+
+def test_group_level_running_state_contract_default_and_override(monkeypatch) -> None:
+    """The GROUP-level contract is the SINGLE surface the hot-swap applier calls (no DIRECT/RESEED/ESCALATE
+    classification). DEFAULT (stateless group) = always up_to_date / no-op rebuild = the DIRECT-swap case. The
+    held-state swing group OVERRIDES it (stale when cold -> rebuild = the RESEED case), but only under the flag;
+    with the flag off it recomputes from the buffer so it is always up to date (DIRECT, like every other group)."""
+    stream = _stream(n_sym=3, n_min=40, seed=2)
+    # A stateless group: the contract default — always up to date, rebuild is a no-op (applier swaps directly).
+    cal = CalendarGroup()
+    assert cal.up_to_date(stream) is True
+    assert cal.rebuild_from_history(stream) is None  # no-op, never raises
+
+    swing = SwingGroup()
+    # Flag OFF: swing also recomputes each minute -> always up to date (DIRECT swap, no reseed).
+    monkeypatch.setenv("FP_SWING_STATEFUL", "0")
+    assert swing.up_to_date(stream) is True
+    # Flag ON: a cold held-state swing reports NOT up to date -> the applier/compute guard rebuilds it.
+    monkeypatch.setenv("FP_SWING_STATEFUL", "1")
+    fresh = SwingGroup()
+    assert fresh.up_to_date(stream) is False
+    fresh.rebuild_from_history(stream)
+    assert fresh.up_to_date(stream) is True
 
 
 def test_swing_running_state_up_to_date_and_lazy_rebuild_restore_parity() -> None:
