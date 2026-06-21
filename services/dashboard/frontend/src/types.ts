@@ -58,6 +58,10 @@ export interface StoreGridMatrix {
   columns: GridColumn[];
   group_info: Record<string, GroupInfo>;
   coverage: number[][];
+  // Parallel to `coverage`: per feature cell the STREAM fraction byte (0..255) of its covered tickers
+  // (0 = entirely backfill-only, 255 = every covered ticker is live-stream-present). -1 (SOURCE_NA) for raw
+  // tape layers and absent cells. Makes the live-vs-backfill provenance of a cell legible on hover.
+  coverage_source: number[][];
   column_coverage_pct: number[];
   summary: GridSummary;
 }
@@ -78,7 +82,21 @@ export interface GridMeta {
   build_seconds: number;
 }
 
+// A ticker's source provenance within a cell: `both` (live + backfill), `stream_only` (live, not yet
+// backfilled), `backfill_only` (in history but NOT captured live = the FP_TICK_SYMBOLS live-coverage gap).
+export type TickerSource = "both" | "stream_only" | "backfill_only";
+
+// The per-cell stream/backfill rollup counts.
+export interface SourceCounts {
+  stream: number;
+  backfill: number;
+  both: number;
+  stream_only: number;
+  backfill_only: number;
+}
+
 // One (date x group) cell's per-ticker breakdown (the secondary drill, still available on a group cell click).
+// `ticker_sources` is parallel to `tickers`; `source_counts` is the stream-vs-backfill rollup for the cell.
 export interface CellDrill {
   generated_at: string | null;
   group: string;
@@ -89,6 +107,8 @@ export interface CellDrill {
   coverage_pct: number;
   limit: number;
   tickers: string[];
+  ticker_sources: TickerSource[];
+  source_counts: SourceCounts;
 }
 
 export interface BootingResponse {

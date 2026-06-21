@@ -85,6 +85,14 @@ DRILL_MAX_LIMIT = 2000
 KIND_RAW = "raw"
 KIND_GROUP = "group"
 
+# The two write sources a feature partition can have: ``stream`` (live capture) and ``backfill`` (T+1 / deep
+# history). A cell's tickers may come from either or both; keeping them split surfaces the live-coverage gap.
+SOURCES = ("stream", "backfill")
+
+# coverage_source sentinel for a cell with no stream/backfill split (raw tape layers, or an absent feature
+# cell). The grid carries a per-cell stream-fraction byte 0..255 for feature cells; this marks "not applicable".
+SOURCE_NA = -1
+
 
 _UNIVERSE_SIZE_SQL = """
 SELECT count(*) FROM universe_membership
@@ -145,17 +153,52 @@ def _window_dates(anchor: dt.date, lookback_days: int) -> list[str]:
     return dates
 
 
-def _group_symbols_in_window(root: str, group: str, version: str, window: set[str]) -> dict[str, set[str]]:
-    """{date_iso: set(tickers)} for a group over the window dates only, unioned across stream + backfill."""
-    by_date: dict[str, set[str]] = {}
-    for source in ("stream", "backfill"):
+def _group_symbols_by_source_in_window(
+    root: str, group: str, version: str, window: set[str]
+) -> dict[str, dict[str, set[str]]]:
+    """{date_iso: {source: set(tickers)}} for a group over the window dates, kept SPLIT by source so the
+    stream-vs-backfill provenance per (group, date) is preserved (the matrix's union is derived from this).
+    One read per (source, date) partition — the same reads the union path did, just not collapsed."""
+    by_date: dict[str, dict[str, set[str]]] = {}
+    for source in SOURCES:
         for date_iso in _partition_dates(root, group, version, source):
             if date_iso not in window:
                 continue
             symbols = _read_symbols(root, group, version, source, date_iso)
             if symbols:
-                by_date.setdefault(date_iso, set()).update(symbols)
+                by_date.setdefault(date_iso, {})[source] = symbols
     return by_date
+
+
+def _union_over_sources(by_source: dict[str, set[str]]) -> set[str]:
+    """The distinct tickers across all sources for one (group, date) — the matrix's coverage denominator."""
+    union: set[str] = set()
+    for symbols in by_source.values():
+        union |= symbols
+    return union
+
+
+# The drill's source rollup for an empty / raw cell (no per-ticker provenance).
+_ZERO_SOURCE_COUNTS: dict[str, int] = {
+    "stream": 0,
+    "backfill": 0,
+    "both": 0,
+    "stream_only": 0,
+    "backfill_only": 0,
+}
+
+
+def _ticker_source(ticker: str, stream: set[str], backfill: set[str]) -> str:
+    """One ticker's provenance tag for the drill list: ``both`` (live + backfill), ``stream_only`` (live but
+    not yet backfilled), or ``backfill_only`` (in history but NOT captured live — the FP_TICK_SYMBOLS gap).
+    """
+    in_stream = ticker in stream
+    in_backfill = ticker in backfill
+    if in_stream and in_backfill:
+        return "both"
+    if in_stream:
+        return "stream_only"
+    return "backfill_only"
 
 
 def _fully_trusted_groups(
@@ -189,7 +232,9 @@ def _raw_layer_counts(root: str, window: set[str]) -> dict[str, dict[str, int]]:
 class WindowData:
     """One full-store read pass over the grid window — gathered ONCE, reused for the matrix AND every drill.
 
-    ``group_symbols`` is {group: {date_iso: set(tickers)}}; ``raw_counts`` is {tier: {date_iso: n_symbols}};
+    ``group_symbols`` is {group: {date_iso: set(tickers)}} (the union over sources, the matrix denominator);
+    ``group_source_symbols`` is {group: {date_iso: {source: set(tickers)}}} (the SAME tickers kept split by
+    stream/backfill so per-cell provenance is recoverable); ``raw_counts`` is {tier: {date_iso: n_symbols}};
     ``group_features`` is {group: [feature names]} for the per-feature expand; ``universe`` the fixed denom.
     """
 
@@ -197,6 +242,7 @@ class WindowData:
     dates: list[str]
     group_versions: dict[str, str]
     group_symbols: dict[str, dict[str, set[str]]]
+    group_source_symbols: dict[str, dict[str, dict[str, set[str]]]]
     fully_trusted_groups: set[str]
     raw_counts: dict[str, dict[str, int]]
     group_features: dict[str, list[str]]
@@ -227,14 +273,20 @@ def gather_window(root: str = STORE_ROOT, lookback_days: int = GRID_LOOKBACK_DAY
     dates = _window_dates(anchor, lookback_days)
     window = set(dates)
     group_symbols: dict[str, dict[str, set[str]]] = {}
+    group_source_symbols: dict[str, dict[str, dict[str, set[str]]]] = {}
     for group, version in versions.items():
-        group_symbols[group] = _group_symbols_in_window(root, group, version, window)
+        by_source = _group_symbols_by_source_in_window(root, group, version, window)
+        group_source_symbols[group] = by_source
+        group_symbols[group] = {
+            date_iso: _union_over_sources(sources) for date_iso, sources in by_source.items()
+        }
 
     return WindowData(
         anchor=anchor,
         dates=dates,
         group_versions=versions,
         group_symbols=group_symbols,
+        group_source_symbols=group_source_symbols,
         fully_trusted_groups=fully_trusted_groups,
         raw_counts=_raw_layer_counts(root, window),
         group_features=group_features,
@@ -249,6 +301,18 @@ def _coverage_byte(n_present: int, universe: int) -> int:
     return min(COVERAGE_MAX_BYTE, round(COVERAGE_MAX_BYTE * min(1.0, n_present / universe)))
 
 
+def _stream_fraction_byte(by_source: dict[str, set[str]]) -> int:
+    """The fraction of a cell's covered tickers that the LIVE stream has, quantized 0..255 (0 = entirely
+    backfill-only, 255 = every covered ticker is stream-present). The denominator is the cell's own union
+    (NOT the universe), so this reads as "of what we have here, how much is live". ``SOURCE_NA`` if the cell
+    has no tickers at all (an absent feature cell carries no provenance)."""
+    union = _union_over_sources(by_source)
+    if not union:
+        return SOURCE_NA
+    stream = by_source.get("stream", set())
+    return min(COVERAGE_MAX_BYTE, round(COVERAGE_MAX_BYTE * len(stream) / len(union)))
+
+
 def build_store_grid(
     root: str = STORE_ROOT,
     lookback_days: int = GRID_LOOKBACK_DAYS,
@@ -261,10 +325,13 @@ def build_store_grid(
        dates:   ["2026-06-20", ...],                       # rows, newest first
        columns: [{key, label, kind, trusted, features}],  # raw layers first, then trusted-first feature groups
        coverage: [[byte, ...], ...],                       # rows ⟂ dates, cols ⟂ columns (0..255)
+       coverage_source: [[byte, ...], ...],               # parallel: per feature cell the STREAM fraction
        column_coverage_pct: [...],                         # per-column mean coverage over its present dates
        summary: {n_dates, n_columns, n_groups, n_trusted_groups, n_raw, mean_coverage_pct, universe_size}}
 
     coverage byte = round(255 * n_tickers_present / universe_size). A column absent on a date is byte 0.
+    coverage_source byte = round(255 * n_stream_tickers / n_cell_tickers) for a feature cell (0 = entirely
+    backfill-only, 255 = every covered ticker is live-stream-present); ``SOURCE_NA`` (-1) for raw / absent cells.
     """
     data = window_data if window_data is not None else gather_window(root, lookback_days)
     if data is None:
@@ -301,19 +368,31 @@ def build_store_grid(
         symbols = data.group_symbols.get(str(column["key"]), {}).get(date_iso)
         return len(symbols) if symbols else 0
 
+    # Per (group, date) stream fraction, parallel to the coverage byte. Raw-layer cells (no per-source split)
+    # and absent cells carry SOURCE_NA. The reader uses this to colour the live-vs-backfill provenance of a cell.
+    def _source_byte(column: dict[str, object], date_iso: str) -> int:
+        if column["kind"] == KIND_RAW:
+            return SOURCE_NA
+        by_source = data.group_source_symbols.get(str(column["key"]), {}).get(date_iso)
+        return _stream_fraction_byte(by_source) if by_source else SOURCE_NA
+
     coverage: list[list[int]] = []
+    coverage_source: list[list[int]] = []
     col_cov_sum = [0.0] * n_columns
     col_present_dates = [0] * n_columns
     for date_iso in dates:
         cov_row = [0] * n_columns
+        src_row = [SOURCE_NA] * n_columns
         for idx, column in enumerate(columns):
             n_present = _count(column, date_iso)
             if n_present <= 0:
                 continue
             cov_row[idx] = _coverage_byte(n_present, universe)
+            src_row[idx] = _source_byte(column, date_iso)
             col_cov_sum[idx] += min(1.0, n_present / universe) if universe else 0.0
             col_present_dates[idx] += 1
         coverage.append(cov_row)
+        coverage_source.append(src_row)
 
     column_coverage_pct = [
         round(100.0 * col_cov_sum[idx] / col_present_dates[idx], 1) if col_present_dates[idx] else 0.0
@@ -350,6 +429,7 @@ def build_store_grid(
         "columns": columns,
         "group_info": group_info,
         "coverage": coverage,
+        "coverage_source": coverage_source,
         "column_coverage_pct": column_coverage_pct,
         "summary": {
             "n_dates": len(dates),
@@ -377,6 +457,7 @@ def _empty_grid(root: str, lookback_days: int) -> dict[str, object]:
         "columns": [],
         "group_info": {},
         "coverage": [],
+        "coverage_source": [],
         "column_coverage_pct": [],
         "summary": {
             "n_dates": 0,
@@ -400,7 +481,10 @@ def build_cell_drill(
 ) -> dict[str, object]:
     """Drill for one (date × group) CELL: the per-TICKER breakdown — which tickers have that group's features
     on that date (sorted, capped at ``limit``), plus the full count, the fixed universe size, and coverage %.
-    Raw-layer cells have no per-ticker store partition, so a raw key returns an empty (count-only) drill."""
+    Each ticker is tagged with its SOURCE provenance — ``stream`` (live + backfill or live-only), ``backfill``
+    (backfill-only = present in history but NOT captured live = the FP_TICK_SYMBOLS gap), via the parallel
+    ``ticker_sources`` list and the ``source_counts`` rollup. Raw-layer cells have no per-ticker store
+    partition, so a raw key returns an empty (count-only) drill with a zeroed source rollup."""
     data = window_data if window_data is not None else gather_window(root, lookback_days)
     capped_limit = max(1, min(limit, DRILL_MAX_LIMIT))
     universe = data.universe if data is not None else DEFAULT_UNIVERSE_SIZE
@@ -418,11 +502,24 @@ def build_cell_drill(
             "coverage_pct": round(100.0 * n_present / universe, 1) if universe else 0.0,
             "limit": capped_limit,
             "tickers": [],
+            "ticker_sources": [],
+            "source_counts": _ZERO_SOURCE_COUNTS.copy(),
         }
 
+    by_source = data.group_source_symbols.get(group, {}).get(date, {})
+    stream = by_source.get("stream", set())
+    backfill = by_source.get("backfill", set())
     symbols = data.group_symbols[group].get(date, set())
     tickers = sorted(symbols)
     coverage_pct = round(100.0 * len(tickers) / universe, 1) if universe else 0.0
+    source_counts = {
+        "stream": len(stream),
+        "backfill": len(backfill),
+        "both": len(stream & backfill),
+        "stream_only": len(stream - backfill),
+        "backfill_only": len(backfill - stream),
+    }
+    ticker_sources = [_ticker_source(ticker, stream, backfill) for ticker in tickers[:capped_limit]]
 
     return {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -434,4 +531,6 @@ def build_cell_drill(
         "coverage_pct": coverage_pct,
         "limit": capped_limit,
         "tickers": tickers[:capped_limit],
+        "ticker_sources": ticker_sources,
+        "source_counts": source_counts,
     }

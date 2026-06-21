@@ -405,6 +405,17 @@ body {
   color: var(--untrusted);
   font-weight: 650;
 }
+.src-stream {
+  color: var(--accent);
+  font-weight: 650;
+}
+.src-backfill {
+  color: #b26a00;
+  font-weight: 650;
+}
+.src-pct {
+  color: var(--muted);
+}
 
 /* ---------- group detail panel (hover → "more detail") ---------- */
 .detail-panel {

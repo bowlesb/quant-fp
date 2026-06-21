@@ -191,3 +191,64 @@ def test_build_cell_drill_empty_store(monkeypatch: pytest.MonkeyPatch, fake_env:
     drill = sg.build_cell_drill("groupX", "2026-06-16", "/nonexistent/store", lookback_days=3)
     assert drill["n_tickers"] == 0
     assert drill["tickers"] == []
+    # The source rollup is present and zeroed even with no data (stable shape for the reader).
+    assert drill["source_counts"] == sg._ZERO_SOURCE_COUNTS
+    assert drill["ticker_sources"] == []
+
+
+def test_coverage_source_stream_fraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_env: None
+) -> None:
+    root = tmp_path / "store"
+    # groupX: 3 names live (stream) + a 4th present only in backfill -> union of 4, 3/4 stream-present.
+    _write_partition(root, "groupX", "stream", "2026-06-16", ["A", "B", "C"])
+    _write_partition(root, "groupX", "backfill", "2026-06-16", ["A", "B", "C", "D"])
+    # groupY: backfill-only (in history, never captured live) -> stream fraction 0.
+    _write_partition(root, "groupY", "backfill", "2026-06-16", ["A", "B"])
+    monkeypatch.setattr(sg, "trusted_feature_names", lambda: set())
+
+    grid = sg.build_store_grid(str(root), lookback_days=1)
+    src = grid["coverage_source"][0]
+    # groupX: union 4 tickers, 3 stream-present -> round(255 * 3/4).
+    assert src[_col_index(grid, "groupX")] == round(255 * 3 / 4)
+    # groupY: backfill-only -> 0 (zero of its covered tickers are live).
+    assert src[_col_index(grid, "groupY")] == 0
+    # The union coverage byte is unchanged by the split (groupX 4/4 of the universe-4 denom).
+    assert grid["coverage"][0][_col_index(grid, "groupX")] == 255
+
+
+def test_coverage_source_raw_layers_are_na(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_env: None
+) -> None:
+    root = tmp_path / "store"
+    _write_partition(root, "groupX", "stream", "2026-06-16", ["A", "B"])
+    monkeypatch.setattr(sg, "trusted_feature_names", lambda: set())
+    monkeypatch.setattr(sg, "RAW_TIERS", [("bars", "minute bars")])
+    monkeypatch.setattr(sg, "_raw_layer_counts", lambda root, window: {"bars": {"2026-06-16": 2}})
+
+    grid = sg.build_store_grid(str(root), lookback_days=1)
+    src = grid["coverage_source"][0]
+    # Raw tape layers have no stream/backfill split -> SOURCE_NA sentinel.
+    assert src[_col_index(grid, "bars")] == sg.SOURCE_NA
+    # groupX is stream-only -> fully live (255).
+    assert src[_col_index(grid, "groupX")] == 255
+
+
+def test_build_cell_drill_source_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_env: None
+) -> None:
+    root = tmp_path / "store"
+    # AAA + BBB are live AND backfilled (both); CCC is live-only; DDD is backfill-only (the live gap).
+    _write_partition(root, "groupX", "stream", "2026-06-16", ["AAA", "BBB", "CCC"])
+    _write_partition(root, "groupX", "backfill", "2026-06-16", ["AAA", "BBB", "DDD"])
+    monkeypatch.setattr(sg, "trusted_feature_names", lambda: set())
+
+    drill = sg.build_cell_drill("groupX", "2026-06-16", str(root), lookback_days=5)
+    assert drill["tickers"] == ["AAA", "BBB", "CCC", "DDD"]  # sorted union
+    assert drill["ticker_sources"] == ["both", "both", "stream_only", "backfill_only"]
+    counts = drill["source_counts"]
+    assert counts["stream"] == 3
+    assert counts["backfill"] == 3
+    assert counts["both"] == 2
+    assert counts["stream_only"] == 1
+    assert counts["backfill_only"] == 1
