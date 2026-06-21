@@ -208,7 +208,9 @@ def _stub_split_validation(monkeypatch, compare_calls: list[dict]) -> None:
         scope = list(symbols) if symbols is not None else []
         return scope, pl.DataFrame({"symbol": scope})
 
-    def _compare(feature_root, day, scope_symbols, tiers, groups=None, tolerance_of=None):  # noqa: ANN001,ANN202
+    def _compare(
+        feature_root, day, scope_symbols, tiers, groups=None, tolerance_of=None
+    ):  # noqa: ANN001,ANN202
         compare_calls.append({"scope": list(scope_symbols), "groups": groups})
         return validation_sweep.validate_mod.CompareResult(pl.DataFrame(), pl.DataFrame(), pl.DataFrame())
 
@@ -246,6 +248,11 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
+    monkeypatch.setattr(
+        validation_sweep,
+        "tail_settle_status",
+        lambda *a, **k: validation_sweep.TailSettleStatus(True, True, 200, 200, 1.0, []),
+    )
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
 
@@ -271,7 +278,9 @@ def test_sweep_pins_market_tickers_into_every_chunk(monkeypatch) -> None:
     _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(
+        validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame()
+    )
     # All three discovered names are clean -> a gradable day that runs PASS 2 + the split validate.
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(discovered))
     monkeypatch.setattr(validation_sweep, "day_gather_coherence", lambda *a, **k: _coherent())
@@ -324,25 +333,35 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
+    monkeypatch.setattr(
+        validation_sweep,
+        "tail_settle_status",
+        lambda *a, **k: validation_sweep.TailSettleStatus(True, True, 200, 200, 1.0, []),
+    )
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(
-        validation_sweep, "materialize_from_raw",
+        validation_sweep,
+        "materialize_from_raw",
         lambda fr, rr, day, symbols, shard=None: bar_seen.update(symbols),
     )
     monkeypatch.setattr(
-        validation_sweep, "materialize_from_raw_full",
+        validation_sweep,
+        "materialize_from_raw_full",
         lambda fr, rr, day, symbols, shard=None: full_seen.update(symbols),
     )
     monkeypatch.setattr(
-        validation_sweep, "materialize_from_raw_bar_groups",
+        validation_sweep,
+        "materialize_from_raw_bar_groups",
         lambda fr, rr, day, symbols, only_groups: None,
     )
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
     _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(
+        validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame()
+    )
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(clean))
     monkeypatch.setattr(validation_sweep, "day_gather_coherence", lambda *a, **k: _coherent())
     monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
@@ -379,6 +398,11 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
+    monkeypatch.setattr(
+        validation_sweep,
+        "tail_settle_status",
+        lambda *a, **k: validation_sweep.TailSettleStatus(True, True, 200, 200, 1.0, []),
+    )
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
@@ -389,7 +413,8 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
     monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _full)
     _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(
-        validation_sweep.validate_mod, "persist_validation",
+        validation_sweep.validate_mod,
+        "persist_validation",
         lambda *a, **k: persist_called.__setitem__("n", persist_called["n"] + 1) or pl.DataFrame(),
     )
     # only one clean symbol -> below the floor (MIN_CLEAN_SYMBOLS=20)
@@ -420,12 +445,18 @@ def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> 
     monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
     monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
     monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
+    monkeypatch.setattr(
+        validation_sweep,
+        "tail_settle_status",
+        lambda *a, **k: validation_sweep.TailSettleStatus(True, True, 200, 200, 1.0, []),
+    )
     monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
     monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
     monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
     monkeypatch.setattr(
-        validation_sweep, "materialize_from_raw_full",
+        validation_sweep,
+        "materialize_from_raw_full",
         lambda fr, rr, day, symbols, shard=None: full_seen.update(symbols),
     )
 
@@ -436,12 +467,20 @@ def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> 
     _stub_split_validation(monkeypatch, compare_calls)
     monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(
+        validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame()
+    )
     monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(clean))
     # FRAGMENTED gather: the cross-sectional grade must be skipped.
     monkeypatch.setattr(
-        validation_sweep, "day_gather_coherence",
-        lambda *a, **k: {"rth_minutes": 364, "incoherent_minutes": 322, "incoherent_frac": 0.885, "is_coherent": False},
+        validation_sweep,
+        "day_gather_coherence",
+        lambda *a, **k: {
+            "rth_minutes": 364,
+            "incoherent_minutes": 322,
+            "incoherent_frac": 0.885,
+            "is_coherent": False,
+        },
     )
     monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
     monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
@@ -450,7 +489,9 @@ def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> 
     monkeypatch.setattr(validation_sweep, "_build_clean_history", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
 
-    summary = validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", chunk=10, allow_today=True)
+    summary = validation_sweep.sweep_day(
+        "/feat", "/val", "2026-06-12", raw_root="/raw", chunk=10, allow_today=True
+    )
 
     xsec_groups = set(validation_sweep.cross_sectional_groups())
     assert xsec_materialized["n"] == 0  # the cross-sectional backfill was NOT re-materialized
@@ -460,6 +501,80 @@ def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> 
     assert summary["gather_coherent"] is False
     assert summary["cross_sectional_graded"] is False
     # PASS 2 still graded the per-symbol features over the clean gradable set.
+    assert full_seen - set(MARKET_TICKERS) == set(clean)
+
+
+def test_sweep_grades_settled_subset_and_skips_xsec_on_unsettled_tail(monkeypatch) -> None:
+    """The settled-subset UNBLOCK: a coherent-gather day whose illiquid TAIL has not fully landed must NOT
+    abort the whole sweep (the old all-or-nothing RawNotSettledError). Instead it grades the per-symbol PASS 2
+    over the settled clean subset (per-symbol features advance trust) and SKIPs ONLY the full-universe
+    cross-sectional grade (a partial backfill universe would mis-match its reduction). So exactly ONE compare
+    (per-symbol) runs, the xsec backfill is NOT re-materialized, and the summary flags tail_settled False."""
+    discovered = [f"SYM{i}" for i in range(6)]
+    clean = discovered[:4]
+    full_seen: set[str] = set()
+    xsec_materialized = {"n": 0}
+    compare_calls: list[dict] = []
+
+    monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
+    # TAIL only partially settled (coherent gather, but the universe backfill is incomplete).
+    monkeypatch.setattr(
+        validation_sweep,
+        "tail_settle_status",
+        lambda *a, **k: validation_sweep.TailSettleStatus(False, True, 200, 120, 0.60, ["ABR.PRE", "ACGC"]),
+    )
+    monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_groups_day", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
+    monkeypatch.setattr(
+        validation_sweep,
+        "materialize_from_raw_full",
+        lambda fr, rr, day, symbols, shard=None: full_seen.update(symbols),
+    )
+
+    def _xsec(*a, **k):  # noqa: ANN002,ANN003,ANN202
+        xsec_materialized["n"] += 1
+
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw_bar_groups", _xsec)
+    _stub_split_validation(monkeypatch, compare_calls)
+    monkeypatch.setattr(validation_sweep.validation_store, "read_cell", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.validation_store, "read_exceptions", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(
+        validation_sweep.validation_store, "read_feature_day", lambda *a, **k: pl.DataFrame()
+    )
+    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(clean))
+    # Gather IS coherent — only the unsettled tail gates the xsec grade here.
+    monkeypatch.setattr(
+        validation_sweep,
+        "day_gather_coherence",
+        lambda *a, **k: {
+            "rth_minutes": 364,
+            "incoherent_minutes": 0,
+            "incoherent_frac": 0.0,
+            "is_coherent": True,
+        },
+    )
+    monkeypatch.setattr(validation_sweep, "MIN_CLEAN_SYMBOLS", 1)
+    monkeypatch.setattr(validation_sweep, "retired_features", lambda *a, **k: set())
+    monkeypatch.setattr(validation_sweep, "lifecycle_state", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep, "defect_rows", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "_build_clean_history", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(validation_sweep.trust_lifecycle, "write_lifecycle", lambda *a, **k: None)
+
+    summary = validation_sweep.sweep_day(
+        "/feat", "/val", "2026-06-12", raw_root="/raw", chunk=10, allow_today=True
+    )
+
+    xsec_groups = set(validation_sweep.cross_sectional_groups())
+    assert xsec_materialized["n"] == 0  # xsec backfill NOT re-materialized (skipped on unsettled tail)
+    assert len(compare_calls) == 1  # only the per-symbol compare ran
+    assert not (set(compare_calls[0]["groups"]) & xsec_groups)
+    assert summary["gather_coherent"] is True  # the gate that fired was the tail, not the gather
+    assert summary["tail_settled"] is False
+    assert summary["cross_sectional_graded"] is False
+    # the UNBLOCK: PASS 2 still graded the per-symbol features over the settled clean subset.
     assert full_seen - set(MARKET_TICKERS) == set(clean)
 
 
@@ -481,7 +596,9 @@ def test_clean_feature_day_scopes_to_clean_symbols() -> None:
     cell = pl.DataFrame(
         [
             _cell("feat", "CLEAN", n_match=390, n_mismatch=0),  # clean symbol: perfect parity
-            _cell("feat", "DIRTY", n_match=100, n_mismatch=290),  # contaminated symbol: would fail if counted
+            _cell(
+                "feat", "DIRTY", n_match=100, n_mismatch=290
+            ),  # contaminated symbol: would fail if counted
         ]
     )
     rolled = clean_feature_day(cell, clean_symbols=["CLEAN"], day="2026-06-12")
@@ -509,7 +626,9 @@ def _clean_day_row(feature: str, day: str, passed: bool) -> dict:
 
 
 def test_pending_below_min_clean_days() -> None:
-    history = pl.DataFrame([_clean_day_row("feat", "2026-06-10", passed=True)])  # 1 clean day < MIN_CLEAN_DAYS
+    history = pl.DataFrame(
+        [_clean_day_row("feat", "2026-06-10", passed=True)]
+    )  # 1 clean day < MIN_CLEAN_DAYS
     states = lifecycle_state(history, retired=set())
     assert states.row(0, named=True)["lifecycle_state"] == STATE_PENDING
 
@@ -623,7 +742,9 @@ def test_no_defect_when_no_divergent() -> None:
         [_clean_day_row("feat", f"2026-06-{10 + i:02d}", passed=True) for i in range(MIN_CLEAN_DAYS)]
     )
     states = lifecycle_state(history, retired=set())
-    assert defect_rows(states, history, pl.DataFrame(), group_of={"feat": "g"}, version_of={"feat": "1"}) == []
+    assert (
+        defect_rows(states, history, pl.DataFrame(), group_of={"feat": "g"}, version_of={"feat": "1"}) == []
+    )
 
 
 def _broadcast_breadth(n_symbols: int, per_minute_values: list[list[float]]) -> pl.DataFrame:
@@ -654,7 +775,9 @@ def test_gather_coherence_fragmented_day_flagged() -> None:
     """A capture-restart / contention day: most RTH minutes carry SEVERAL distinct breadth values (the
     concurrent partial-universe gathers) -> incoherent_frac high -> flagged NOT coherent. This is the
     2026-06-15 signature (322/364 minutes multi-valued) the per-symbol coverage check cannot see."""
-    per_minute = [[0.4, 0.5, 0.6, 0.7] for _ in range(110)] + [[0.5] for _ in range(10)]  # 110/120 fragmented
+    per_minute = [[0.4, 0.5, 0.6, 0.7] for _ in range(110)] + [
+        [0.5] for _ in range(10)
+    ]  # 110/120 fragmented
     frame = _broadcast_breadth(50, per_minute)
     verdict = gather_coherence(frame, "breadth_up_5m")
     assert verdict["incoherent_minutes"] == 110
@@ -691,14 +814,17 @@ def test_gather_coherence_excludes_extended_hours() -> None:
 
 def test_gather_coherence_empty_is_vacuously_coherent() -> None:
     """No breadth captured -> nothing to certify here (the per-symbol checks still gate grading)."""
-    verdict = gather_coherence(pl.DataFrame({"symbol": [], "minute": [], "breadth_up_5m": []}), "breadth_up_5m")
+    verdict = gather_coherence(
+        pl.DataFrame({"symbol": [], "minute": [], "breadth_up_5m": []}), "breadth_up_5m"
+    )
     assert verdict["rth_minutes"] == 0
     assert verdict["is_coherent"] is True
 
 
 def _write_raw_bar(raw_root: str, symbol: str, day: str, rows: int = 200) -> None:
     """A settled raw BARS partition (the loader-relevant columns) for the presence probe. ``rows`` defaults
-    to a real-session count (above MIN_MARKET_TICKER_BARS); pass a small value to emulate a pre-session stub."""
+    to a real-session count (above MIN_MARKET_TICKER_BARS); pass a small value to emulate a pre-session stub.
+    """
     target = dt.date.fromisoformat(day)
     out = partition_dir(raw_root, "bars", symbol, target)
     os.makedirs(out, exist_ok=True)
@@ -806,7 +932,8 @@ def _settled_tail(raw_root: str, symbols: list[str], day: str, rate: float) -> N
 def test_assert_tail_settled_refuses_partially_settled_universe(tmp_path) -> None:
     """The 2026-06-18 mis-grade: SPY/QQQ settled (assert_raw_present passed) but the illiquid TAIL had not —
     streamed thin names had NO backfill bars, so the sweep filed ~450 false stream>0/backfill=0 defects. The
-    tail probe samples the discovered universe and refuses when the backfill present-rate is below the floor."""
+    tail probe samples the discovered universe and refuses when the backfill present-rate is below the floor.
+    """
     discovered = [f"T{i:04d}" for i in range(400)]
     _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.50)  # half the tail not landed yet
     with pytest.raises(ValueError, match="ILLIQUID TAIL has not settled"):
@@ -815,7 +942,8 @@ def test_assert_tail_settled_refuses_partially_settled_universe(tmp_path) -> Non
 
 def test_assert_tail_settled_passes_when_tail_landed(tmp_path) -> None:
     """A fully settled day has landed raw bars for essentially every streamed symbol — the sample present-rate
-    clears the floor and the probe passes (tolerating the few percent of delisted/halted names with no raw)."""
+    clears the floor and the probe passes (tolerating the few percent of delisted/halted names with no raw).
+    """
     discovered = [f"T{i:04d}" for i in range(400)]
     _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.97)  # 97% landed (a couple no-raw names)
     validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), discovered)
@@ -837,12 +965,57 @@ def test_assert_tail_settled_noops_on_tiny_universe(tmp_path) -> None:
     validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), list(MARKET_TICKERS))
 
 
+def test_tail_settle_status_reports_partial_split_without_raising(tmp_path) -> None:
+    """The settled-subset unblock: a partially-settled tail must NOT abort the day — tail_settle_status returns
+    is_settled=False with the rate + a few unsettled examples, so the caller grades the settled subset and skips
+    ONLY the full-universe cross-sectional grade (vs the old all-or-nothing RawNotSettledError abort)."""
+    discovered = [f"T{i:04d}" for i in range(400)]
+    _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.50)  # half the tail not landed yet
+    status = validation_sweep.tail_settle_status("2026-06-18", str(tmp_path), discovered)
+    assert status.is_settled is False
+    assert status.probed is True
+    assert status.settle_rate < validation_sweep.MIN_TAIL_SETTLE_RATE
+    assert status.settled_count < status.sampled
+    assert status.unsettled_examples  # a few names for the operator log
+
+
+def test_tail_settle_status_is_settled_when_tail_landed(tmp_path) -> None:
+    """A fully settled day clears the floor — is_settled True, no unsettled examples — so the cross-sectional
+    grade proceeds exactly as before (no behavior change on the happy path)."""
+    discovered = [f"T{i:04d}" for i in range(400)]
+    _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.97)  # 97% landed
+    status = validation_sweep.tail_settle_status("2026-06-18", str(tmp_path), discovered)
+    assert status.is_settled is True
+    assert status.settle_rate >= validation_sweep.MIN_TAIL_SETTLE_RATE
+
+
+def test_tail_settle_status_tiny_universe_is_vacuously_settled(tmp_path) -> None:
+    """A sandbox universe of just the market tickers has nothing beyond them to probe — probed False, settled
+    True (assert_raw_present already certified the pinned tickers); the xsec grade is not gated off here."""
+    status = validation_sweep.tail_settle_status("2026-06-18", str(tmp_path), list(MARKET_TICKERS))
+    assert status.is_settled is True
+    assert status.probed is False
+
+
+def test_assert_tail_settled_still_raises_on_partial_tail(tmp_path) -> None:
+    """The strict assert_ wrapper is retained (back-compat for callers wanting all-or-nothing); it delegates to
+    tail_settle_status and raises RawNotSettledError when the tail is not fully settled."""
+    discovered = [f"T{i:04d}" for i in range(400)]
+    _settled_tail(str(tmp_path), discovered, "2026-06-18", rate=0.50)
+    with pytest.raises(validation_sweep.RawNotSettledError, match="ILLIQUID TAIL has not settled"):
+        validation_sweep.assert_tail_settled("2026-06-18", str(tmp_path), discovered)
+
+
 def test_tail_settle_sample_is_deterministic_and_excludes_market_tickers() -> None:
     """The probe sample is day-seeded (idempotent across re-runs of the same day) and never includes the
     pinned market tickers (they settle first and would bias the tail present-rate upward)."""
     discovered = list(MARKET_TICKERS) + [f"T{i:04d}" for i in range(500)]
-    sample_a = validation_sweep._sample_universe(discovered, "2026-06-18", validation_sweep.TAIL_SETTLE_SAMPLE)
-    sample_b = validation_sweep._sample_universe(discovered, "2026-06-18", validation_sweep.TAIL_SETTLE_SAMPLE)
+    sample_a = validation_sweep._sample_universe(
+        discovered, "2026-06-18", validation_sweep.TAIL_SETTLE_SAMPLE
+    )
+    sample_b = validation_sweep._sample_universe(
+        discovered, "2026-06-18", validation_sweep.TAIL_SETTLE_SAMPLE
+    )
     assert sample_a == sample_b
     assert len(sample_a) == validation_sweep.TAIL_SETTLE_SAMPLE
     assert not (set(sample_a) & set(MARKET_TICKERS))

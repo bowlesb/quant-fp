@@ -32,6 +32,7 @@ import logging
 import os
 import random
 import sys
+from dataclasses import dataclass
 from typing import Callable
 
 import polars as pl
@@ -205,33 +206,70 @@ def _sample_universe(symbols: list[str], day: str, sample_size: int) -> list[str
     return rng.sample(candidates, sample_size)
 
 
-def assert_tail_settled(day: str, raw_root: str, discovered: list[str]) -> None:
-    """Refuse to grade a day whose ILLIQUID TAIL has not finished landing in ``/store/raw`` yet.
+@dataclass(frozen=True)
+class TailSettleStatus:
+    """The result of probing how completely the day's raw backfill TAIL has landed.
+
+    ``is_settled`` is the full-universe verdict (sample present-rate >= ``MIN_TAIL_SETTLE_RATE``) — the gate
+    the universe-reduce CROSS-SECTIONAL grade needs (it reduces over the whole present universe, so a partial
+    backfill universe mis-grades it). ``sampled``/``settled_count`` give the rate; ``unsettled_examples`` are a
+    few sample symbols whose backfill bars have not landed (for the operator log). ``probed`` is False on the
+    tiny-sandbox case (nothing beyond the market tickers to sample) — vacuously settled."""
+
+    is_settled: bool
+    probed: bool
+    sampled: int
+    settled_count: int
+    settle_rate: float
+    unsettled_examples: list[str]
+
+
+def tail_settle_status(day: str, raw_root: str, discovered: list[str]) -> TailSettleStatus:
+    """Probe how completely the day's ILLIQUID TAIL has landed in ``/store/raw`` — WITHOUT aborting the sweep.
 
     ``assert_raw_present`` only probes the pinned market tickers (SPY/QQQ), which settle FIRST in Alpaca's
     symbol-by-symbol historical fetch — they pass while the thin tail of the universe is still arriving hours
-    later. On such a partially-settled day the streamed thin names have rows live but NO backfill side yet, so
-    the sweep grades them stream>0/backfill=0 and manufactures a wall of false DIVERGENT defects (the 2026-06-18
-    ~450-defect mis-grade). This guard samples the discovered stream universe and requires nearly all sampled
-    symbols to have landed real backfill bars (>= the stub floor); a present-rate below ``MIN_TAIL_SETTLE_RATE``
-    means the universe is only PARTIALLY settled and the day must not be graded until its raw backfill completes.
-    """
+    later. We sample the discovered stream universe and measure what fraction has landed real backfill bars
+    (>= the stub floor). A present-rate below ``MIN_TAIL_SETTLE_RATE`` means the universe is only PARTIALLY
+    settled — the SETTLED SUBSET is still gradable (the unsettled tail simply has no backfill minutes, so the
+    cleanliness path already excludes it from the per-symbol grade), but the full-universe CROSS-SECTIONAL
+    grade must wait (a partial backfill universe makes its reduction mis-match the full live gather). Returns
+    the split rather than raising, so the caller grades the settled subset and SKIPs only what genuinely can't
+    be graded yet (mirrors the gather-coherence xsec-only skip)."""
     sample = _sample_universe(discovered, day, TAIL_SETTLE_SAMPLE)
     if not sample:
-        return  # nothing beyond the market tickers to probe (tiny sandbox universe) — assert_raw_present suffices
+        # nothing beyond the market tickers to probe (tiny sandbox universe) — assert_raw_present suffices.
+        return TailSettleStatus(True, False, 0, 0, 1.0, [])
     bar_counts = _per_ticker_counts(load_raw_minute_agg(raw_root, day, sample), sample)
     settled = [symbol for symbol, count in bar_counts.items() if count >= MIN_TAIL_SYMBOL_BARS]
     settle_rate = len(settled) / len(sample)
-    if settle_rate < MIN_TAIL_SETTLE_RATE:
-        missing = sorted(symbol for symbol, count in bar_counts.items() if count < MIN_TAIL_SYMBOL_BARS)
+    unsettled = sorted(symbol for symbol, count in bar_counts.items() if count < MIN_TAIL_SYMBOL_BARS)
+    return TailSettleStatus(
+        is_settled=settle_rate >= MIN_TAIL_SETTLE_RATE,
+        probed=True,
+        sampled=len(sample),
+        settled_count=len(settled),
+        settle_rate=settle_rate,
+        unsettled_examples=unsettled[:10],
+    )
+
+
+def assert_tail_settled(day: str, raw_root: str, discovered: list[str]) -> None:
+    """Strict full-universe gate: raise ``RawNotSettledError`` unless the tail is fully settled.
+
+    Retained for callers that want the all-or-nothing semantics (and for the bar-only/legacy paths). The
+    nightly sweep no longer calls this — it uses ``tail_settle_status`` to grade the settled subset and gate
+    only the cross-sectional grade on full-universe settledness (see ``sweep_day``)."""
+    status = tail_settle_status(day, raw_root, discovered)
+    if not status.is_settled:
         raise RawNotSettledError(
-            f"refusing to sweep {day}: only {len(settled)}/{len(sample)} sampled stream symbols "
-            f"({settle_rate:.1%}) have landed raw BARS (need >= {MIN_TAIL_SETTLE_RATE:.0%}) under "
+            f"refusing to sweep {day}: only {status.settled_count}/{status.sampled} sampled stream symbols "
+            f"({status.settle_rate:.1%}) have landed raw BARS (need >= {MIN_TAIL_SETTLE_RATE:.0%}) under "
             f"{raw_root}/raw/bars — the ILLIQUID TAIL has not settled (Alpaca historical lands symbol-by-symbol, "
             f"the thin names hours after the liquid ones; grading now would file false DIVERGENT defects for "
             f"streamed names whose backfill side has not arrived). Acquire the full universe "
             f"(`ops/raw_backfill.sh daily` or DAY={day}) and re-sweep once settled. "
-            f"Unsettled examples: {missing[:10]}"
+            f"Unsettled examples: {status.unsettled_examples}"
         )
 
 
@@ -396,10 +434,28 @@ def sweep_day(
     discovered = store.stream_symbols_on(feature_root, day)
     # The pinned-ticker probe (assert_raw_present) only certifies SPY/QQQ, which settle first; the illiquid
     # tail of the FULL discovered universe may still be landing. Probe it on the full set (before the sandbox
-    # cap) so a partially-settled day can't file false stream>0/backfill=0 defects. A max_symbols evidence run
-    # deliberately scopes down to a subset, so its tail-settle rate is not the universe's — skip the probe there.
-    if max_symbols is None:
-        assert_tail_settled(day, raw_root, discovered)
+    # cap) to learn HOW settled the day is — but no longer abort the whole day on a partial tail. The settled
+    # SUBSET is graded (the per-symbol path is already settled-subset-safe: cleanliness needs backfill-present
+    # minutes, so an unsettled tail symbol is contaminated/no-raw and never enters the per-symbol grade). Only
+    # the full-universe CROSS-SECTIONAL grade is gated on full settledness below (a partial backfill universe
+    # would mis-match its reduction). A max_symbols evidence run deliberately scopes to a subset, so its
+    # tail-settle rate is not the universe's — treat it as vacuously settled there.
+    tail_status = (
+        tail_settle_status(day, raw_root, discovered)
+        if max_symbols is None
+        else TailSettleStatus(True, False, 0, 0, 1.0, [])
+    )
+    if not tail_status.is_settled:
+        logger.info(
+            "tail PARTIALLY settled for %s: %d/%d sampled symbols landed raw bars (%.1f%%, floor %.0f%%) — "
+            "grading the SETTLED SUBSET; cross-sectional grade SKIPPED until the tail lands. Unsettled e.g. %s",
+            day,
+            tail_status.settled_count,
+            tail_status.sampled,
+            tail_status.settle_rate * 100,
+            MIN_TAIL_SETTLE_RATE * 100,
+            tail_status.unsettled_examples,
+        )
     if max_symbols is not None:
         discovered = discovered[:max_symbols]
     if not discovered:
@@ -447,9 +503,15 @@ def sweep_day(
     # When fragmented we SKIP the cross-sectional grade entirely: those features stay PENDING for the day
     # (no clean comparison) rather than being condemned. The per-symbol / tick PASS 2 still runs — the
     # well-behaved per-symbol features (daily_return, sector flags) earn their clean-day grade regardless.
+    # The cross-sectional grade ALSO requires the full backfill universe to have landed (tail_status): a
+    # partial backfill universe reduces over fewer names than the full live gather, so its breadth/rank/
+    # dispersion can never match — the same partial-universe mismatch as a fragmented gather. So gate the xsec
+    # grade on BOTH a coherent live gather AND a settled tail; either failing skips it (those features stay
+    # PENDING for the day, ungraded, never condemned). The per-symbol PASS 2 runs regardless on the settled
+    # clean subset — that is the unblock: per-symbol features advance trust even while the tail is still landing.
     coherence = day_gather_coherence(feature_root, day, discovered)
     xsec_groups = cross_sectional_groups()
-    if coherence["is_coherent"]:
+    if coherence["is_coherent"] and tail_status.is_settled:
         # CROSS-SECTIONAL grade — graded against a FULL-UNIVERSE, SINGLE-COMPUTE backfill, BEFORE pass 2 clears
         # the day. Universe-reduce features (breadth_* / *_rank / dispersion / peer) value a symbol by a
         # reduction over the whole present universe, so the backfill compute MUST see EVERY symbol at once —
@@ -514,8 +576,12 @@ def sweep_day(
     # (contaminated / skipped / fragmented-xsec) is absent here -> its streak is untouched. Run AFTER
     # write_lifecycle so recurrences have already reset their streak + re-opened.
     has_grade = "passed" in clean_history_today.columns and clean_history_today.height > 0
-    graded_clean = set(clean_history_today.filter(pl.col("passed"))["feature"].to_list()) if has_grade else set()
-    recurred = set(clean_history_today.filter(~pl.col("passed"))["feature"].to_list()) if has_grade else set()
+    graded_clean = (
+        set(clean_history_today.filter(pl.col("passed"))["feature"].to_list()) if has_grade else set()
+    )
+    recurred = (
+        set(clean_history_today.filter(~pl.col("passed"))["feature"].to_list()) if has_grade else set()
+    )
     auto_close_summary = trust_lifecycle.apply_auto_close(graded_clean, recurred, day)
     if auto_close_summary["advanced"]:
         logger.info(
@@ -560,7 +626,10 @@ def sweep_day(
         "contaminated_symbols": contaminated,
         "gather_coherent": bool(coherence["is_coherent"]),
         "gather_incoherent_frac": round(float(coherence["incoherent_frac"]), 3),
-        "cross_sectional_graded": bool(coherence["is_coherent"]),
+        "tail_settled": tail_status.is_settled,
+        "tail_settle_rate": round(tail_status.settle_rate, 3),
+        "tail_unsettled_examples": tail_status.unsettled_examples,
+        "cross_sectional_graded": bool(coherence["is_coherent"]) and tail_status.is_settled,
         "features_graded": states.height,
         "newly_trusted": grant_counts["earned_trusted"],
         "supersede_purge_applied": purge_apply,
