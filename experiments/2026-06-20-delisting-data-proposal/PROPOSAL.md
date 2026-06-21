@@ -1,7 +1,17 @@
 # Costed proposal — survivorship-clean data for the weekly-reversal signal (DECISION-READY, for Ben)
 
-**Date:** 2026-06-20  **Author:** Modeller  **Status:** PROPOSAL — no purchase made, no spend. Ben approves
-$X for source Y, or declines.
+**Date:** 2026-06-20  **Author:** Modeller  **Status:** SUPERSEDED by the Alpaca-first finding — NO SPEND
+recommended.
+
+> ## ⚠️ UPDATE (2026-06-20) — Ben was right; do NOT buy. See `ALPACA_FIRST_FINDING.md`.
+> The survivorship bias is **self-inflicted** (our `AssetStatus.ACTIVE` filter at raw_backfill.py:198), not an
+> Alpaca limit. Measured live: Alpaca has **19,253 INACTIVE US-equity assets** (2,843 exchange-listed delisted
+> names), **serves full-life historical daily bars** for them to their last trade (2016+; verified CELG/XLNX/
+> MXIM/WORK/WCG), and we infer the delisting date from the last bar. The ONLY gap is the *exact* delisting
+> RETURN — handled $0 by a last-traded-close proxy + a two-bound (acquisition vs bankruptcy-haircut) band.
+> **Recommendation flips: build the survivorship-clean panel from Alpaca for $0; a paid source (below) is
+> justified ONLY if the $0 result lands unresolvably inside the band.** The paid-source comparison below is
+> retained as the fallback option if that happens.
 
 ## TL;DR (the decision)
 - **Problem:** weekly-reversal is our ONE genuinely-real signal (rank-IC +0.025, 11σ over shuffle,
