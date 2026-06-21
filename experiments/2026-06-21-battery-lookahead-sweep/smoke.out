@@ -1,0 +1,13 @@
+# Battery report
+
+cadence=intraday  range=2026-06-15..2026-06-18  universe_top=200  panel=3061398rows x 12feat x 200sym  strategies=3
+panel_load=3.922s  eval=49.797s  **total=53.72s**  (**16.599s/strategy** over the shared matrix)
+
+| strategy | signal | label | H | n_rows | IC | shuffle_IC | edge | NW t | net/period | breakeven_bps | cost_bps | sharpe_net | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ret15_upmove_h3 | feature | up_move_start | 3 | 1883887 | 0.0034 | -0.0010 | 0.0044 | 1.60 | 0.0000 | 1.33 | 1.17 | 2.18 | FAIL |
+| composite_upmove_h3 | composite | up_move_start | 3 | 1883887 | -0.0050 | -0.0006 | -0.0045 | -2.71 | -0.0006 | -1.53 | 1.17 | -57.25 | FAIL |
+| gbm_runup_h3 | gbm | fwd_max_runup | 3 | 1883887 | 0.2493 | 0.0227 | 0.2266 | 0.71 | 0.4587 | 6080.82 | 1.17 | 9.46 | FAIL |
+
+## Leaderboard — EMPTY (honest null). The expected, healthy outcome given the edge hunt's track record; a lone surviving cell warrants suspicion, not celebration.
+
