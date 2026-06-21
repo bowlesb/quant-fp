@@ -47,6 +47,11 @@ logger = logging.getLogger("ci_deploy")
 # The LIVE tree the running containers build from. Deploys FF this tree then restart the safe container.
 LIVE_TREE = os.environ.get("CI_LIVE_TREE", "/home/ben/quant-fp")
 FP_IMAGE = os.environ.get("CI_FP_IMAGE", "fp-dev")
+# Stable base for throwaway fingerprint worktrees — NEVER /tmp (the agent harness GCs /tmp mid-run). See
+# ci_watcher.WORKDIR_BASE for the rationale. Defaults next to the live tree.
+WORKDIR_BASE = os.environ.get("CI_WORKDIR") or os.path.join(
+    os.path.dirname(os.path.abspath(LIVE_TREE)), ".ci-work"
+)
 READINESS = os.path.expanduser("~/.quant-ops/READINESS.md")
 SYSTEM_LOG = os.path.expanduser("~/.quant-ops/SYSTEM_LOG.md")
 # Containers we will NEVER touch here, belt-and-suspenders on top of ci_scope's path denylist.
@@ -71,7 +76,8 @@ def run(cmd: list[str], cwd: str | None = None, timeout: int | None = None) -> s
 
 def fingerprint_at(tree: str, ref: str) -> int:
     """Fingerprint of a ref, computed in a throwaway worktree of ``tree`` in the fp-dev image."""
-    with tempfile.TemporaryDirectory(prefix="ci-dep-") as worktree:
+    os.makedirs(WORKDIR_BASE, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ci-dep-", dir=WORKDIR_BASE) as worktree:
         run(["git", "worktree", "add", "--detach", "--force", worktree, ref], cwd=tree)
         try:
             result = run(

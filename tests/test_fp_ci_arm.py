@@ -30,3 +30,27 @@ def test_tier2_never_auto_merges() -> None:
 
 def test_red_never_merges() -> None:
     assert _should_auto_merge(False, Tier.AUTO, auto_merge_enabled=True, labels=[]) is False
+
+
+def test_workdir_base_is_not_tmp() -> None:
+    # The watcher's throwaway worktrees must NOT default under /tmp (the agent harness GCs /tmp mid-grade).
+    from ops.ci_watcher import WORKDIR_BASE
+
+    assert not WORKDIR_BASE.startswith("/tmp/"), f"WORKDIR_BASE under /tmp: {WORKDIR_BASE}"
+
+
+def test_workdir_creates_dir_under_base(tmp_path: object) -> None:
+    # workdir() roots the temp dir at WORKDIR_BASE, not the OS default /tmp.
+    import os
+
+    import ops.ci_watcher as cw
+
+    saved = cw.WORKDIR_BASE
+    cw.WORKDIR_BASE = os.path.join(str(tmp_path), "ci-work")
+    try:
+        with cw.workdir(prefix="ci-wt-") as path:
+            assert path.startswith(cw.WORKDIR_BASE)
+            assert os.path.isdir(path)
+        assert not os.path.exists(path)  # cleaned up on context exit
+    finally:
+        cw.WORKDIR_BASE = saved
