@@ -48,11 +48,12 @@ from alpaca.data.live import CryptoDataStream
 
 from quantlib.aggregates import TickState, TradeTick, bucket_minute
 from quantlib.bus.publisher import BusPublisher
-from quantlib.features import metrics
+from quantlib.features import crypto_input_store, metrics
 from quantlib.features.bus_hook import BusHook, bus_publish_enabled
 from quantlib.features.capture import (
     DEFAULT_BUFFER_MINUTES,
     CaptureState,
+    _bars_to_frame,
     process_bars,
 )
 from quantlib.features.tick_capture import enrich_bars_with_ticks, trades_frame
@@ -154,6 +155,16 @@ def run_crypto_capture(
         minute_epoch = bucket_minute(minute.timestamp())
         enriched, trades_df = aggregate_crypto_ticks(bars, pending["trades"], minute_epoch, tick_states)
         extra_frames = {"trades": trades_df} if trades_df.height else None
+        # Persist THIS minute's compute INPUTS (opt-in) so the crypto parity sweep can recompute the
+        # source=backfill side from the exact same minute_agg/trades the live path consumed (docs/CRYPTO_E2E.md
+        # §3). Off by default — the live container starts persisting only on a sanctioned relaunch with
+        # FP_CRYPTO_PERSIST_INPUTS=1. Persisting BEFORE process_bars (which mutates nothing here) keeps the
+        # stored input byte-identical to the live compute input.
+        if crypto_input_store.persist_inputs_enabled():
+            day_str = str(minute.date())
+            crypto_input_store.write_input(root, "minute_agg", day_str, _bars_to_frame(enriched), minute)
+            if trades_df.height:
+                crypto_input_store.write_input(root, "trades", day_str, trades_df, minute)
         # The SAME shared compute core as the equity path. snapshots=None + excluding the SPY-relative
         # groups => exactly the universal crypto-applicable feature set. mode="real" so the bus hook fires;
         # the crypto store source marker keeps the partitions isolated from equity (see store.source_for_mode).
