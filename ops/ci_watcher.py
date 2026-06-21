@@ -52,6 +52,13 @@ logger = logging.getLogger("ci_watcher")
 
 REPO_DIR = os.environ.get("CI_REPO_DIR", "/home/ben/quant-fp")
 FP_IMAGE = os.environ.get("CI_FP_IMAGE", "fp-dev")
+# Base dir for the watcher's throwaway PR-checkout worktrees. MUST be a STABLE path, NOT /tmp: the agent
+# harness garbage-collects /tmp and would delete an in-flight grade's worktree out from under it (killing the
+# grade + leaving a stuck `pending` status). Defaults to ``<CI_REPO_DIR>/../.ci-work`` (next to the repo, same
+# filesystem so ``git worktree add`` is cheap). Override with CI_WORKDIR.
+WORKDIR_BASE = os.environ.get("CI_WORKDIR") or os.path.join(
+    os.path.dirname(os.path.abspath(REPO_DIR)), ".ci-work"
+)
 STATUS_CONTEXT = "ci/fp-suite"
 GATED_LABEL = "tier-2-gated"
 NO_AUTO_LABEL = "no-auto"
@@ -221,6 +228,26 @@ def run(cmd: list[str], cwd: str | None = None, timeout: int | None = None) -> s
         text=True,
         check=False,
     )
+
+
+def workdir(prefix: str) -> tempfile.TemporaryDirectory:
+    """A throwaway temp dir for a PR-checkout worktree, rooted at the STABLE ``WORKDIR_BASE`` (never /tmp, which
+    the agent harness GCs out from under an in-flight grade). Creates the base on first use."""
+    os.makedirs(WORKDIR_BASE, exist_ok=True)
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=WORKDIR_BASE)
+
+
+def _warn_if_unstable_workdir() -> None:
+    """Loudly warn at startup if the repo or the work base sits under /tmp — those get garbage-collected by
+    the harness and will kill in-flight grades. Warn, don't abort (an operator may have a non-/tmp tmpfs)."""
+    for label, path in (("CI_REPO_DIR", REPO_DIR), ("CI_WORKDIR base", WORKDIR_BASE)):
+        if os.path.abspath(path).startswith("/tmp/"):
+            logger.warning(
+                "%s is under /tmp (%s) — the agent harness GCs /tmp and will kill in-flight grades. "
+                "Point it at a stable path (e.g. /home/ben/...).",
+                label,
+                path,
+            )
 
 
 STORE_VOLUME = os.environ.get("CI_STORE_VOLUME", "fp_store_real")
@@ -694,7 +721,7 @@ def grade_pr(pr: OpenPR, auto_merge_enabled: bool) -> None:
     # Make sure the PR head SHA is present locally before we try to check it out (the branch may be new).
     run(["git", "fetch", "origin", pr.head_ref], cwd=REPO_DIR)
 
-    with tempfile.TemporaryDirectory(prefix="ci-wt-") as worktree:
+    with workdir(prefix="ci-wt-") as worktree:
         # A detached worktree at exactly the PR head SHA. --force so a leftover dir can't block us.
         add = run(["git", "worktree", "add", "--detach", "--force", worktree, pr.head_sha], cwd=REPO_DIR)
         if add.returncode != 0:
@@ -805,7 +832,7 @@ def _origin_main_fingerprint() -> int:
     main_sha = run(["git", "rev-parse", "origin/main"], cwd=REPO_DIR).stdout.strip()
     if _BASE_FP_CACHE is not None and _BASE_FP_CACHE[0] == main_sha:
         return _BASE_FP_CACHE[1]
-    with tempfile.TemporaryDirectory(prefix="ci-base-") as worktree:
+    with workdir(prefix="ci-base-") as worktree:
         run(["git", "worktree", "add", "--detach", "--force", worktree, main_sha], cwd=REPO_DIR)
         try:
             fingerprint = fingerprint_in(worktree)
@@ -828,6 +855,7 @@ def main() -> int:
     args = parser.parse_args()
     auto_merge_enabled = not args.no_auto_merge
 
+    _warn_if_unstable_workdir()
     run(["git", "fetch", "origin", "main"], cwd=REPO_DIR)
 
     if args.once or args.pr is not None:
