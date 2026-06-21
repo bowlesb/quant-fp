@@ -10,7 +10,7 @@
 # not something this script does unilaterally.
 #
 # Managed entries:
-#   - trust_random_check : weekly RANDOM trust re-check (docs/TRUST_REDESIGN.md), Sat 14:45 PT.
+#   - trust_random_check : DAILY RANDOM trust re-check (docs/TRUST_REDESIGN.md), 14:45 PT (skips unsettled days).
 #   - collect_jobs_status: refresh the /jobs dashboard's jobs_status.json every 5 min (off-:00), READ-ONLY.
 #   - compact_stream     : nightly fold of SETTLED stream partitions' per-minute files, 22:33 PT weekdays.
 #   - late re-sweep      : 23:30 PT weekday re-acquire + re-sweep once Alpaca's illiquid tail has settled
@@ -31,10 +31,11 @@ GLIMPSE_LOG=/home/ben/.quant-ops/collect_store_glimpse.log
 # Times are SYSTEM LOCAL TIME (America/Los_Angeles / PT); the crontab has no TZ override.
 declare -a MATCHES COMMENTS LINES
 
-# Sat 14:45 PT — off the weekday capture/sweep windows. Matches the registry row in docs/OPERATIONS.md.
+# 14:45 PT DAILY — post-close, off the capture/sweep windows. Matches the registry row in docs/OPERATIONS.md.
+# Daily (not weekly) so trust regressions are caught fast during active development; the script skips unsettled days.
 MATCHES+=("ops/trust_random_check.sh")
-COMMENTS+=("# Sat 14:45 PT weekly RANDOM trust re-check (docs/TRUST_REDESIGN.md) — conservative; only un-trusts a clean-day failure")
-LINES+=("45 14 * * 6 cd $REPO && ops/trust_random_check.sh >> $TRUST_LOG 2>&1")
+COMMENTS+=("# 14:45 PT DAILY RANDOM trust re-check (docs/TRUST_REDESIGN.md) — conservative; only un-trusts a clean-day failure; skips unsettled days")
+LINES+=("45 14 * * * cd $REPO && ops/trust_random_check.sh >> $TRUST_LOG 2>&1")
 
 # Every 5 min on the :03/:08/... cadence (off-:00, staggered from the other crons). READ-ONLY: parses
 # crontab -l + each cron's verify-log + docker ps and writes ~/.quant-ops/jobs_status.json for the /jobs page.
