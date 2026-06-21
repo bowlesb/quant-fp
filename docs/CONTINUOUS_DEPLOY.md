@@ -72,19 +72,33 @@ reproducible, and has the real environment. So CI is a **watcher daemon on the b
 A gate that runs only `test_fp_*.py` would silently skip **90 of 156** test files — exactly the half-tested
 pattern. So the gate runs the **whole `tests/` dir** across jobs, and audits for blind spots:
 
-- **`fp` job** (GATING) — the entire `tests/` dir in base `fp-dev`, `--ignore`-ing only the dashboard-dep
-  files and the timing files below.
+Tests fall into **environment categories**, each with the env it needs. The base `fp-dev` image has the
+compiled `quantlib` + Rust but NO dashboard deps, NO `/store` volume, and NO research-harness path — so three
+classes of test can't run bare. Each gets its own job (or an explicit, flagged exclusion), never a silent
+fail in the `fp` job:
+
+- **`fp` job** (GATING) — the entire `tests/` dir in base `fp-dev`, `--ignore`-ing every other-env category
+  below.
 - **`dashboard` job** (GATING) — `test_group_guide.py`, `test_store_grid.py`, `test_store_grid_cache.py`,
   `test_latency_expectations_route.py` run in `fp-dev` after `pip install -r
-  services/dashboard/requirements.txt`. These import `fastapi` / `pyyaml` / `pymongo`, which are NOT in the
-  base `fp-dev` image, so they ERROR at collection there (a real, pre-existing CI blind spot). Installing the
-  dashboard's own (authoritative, drift-proof) requirements lets them run. They are **excluded explicitly and
-  visibly**, never silently skipped.
+  services/dashboard/requirements.txt`. These import `fastapi` / `pyyaml` / `pymongo`, NOT in base `fp-dev`,
+  so they ERROR at collection there. The dashboard's own (authoritative, drift-proof) requirements let them
+  run.
+- **`store` job** (GATING) — the panel-building `tests/battery/` dir run WITH the feature store mounted
+  read-only (`-v fp_store_real:/store:ro`). Bare `fp-dev` has no `/store`, so `build_daily_panel`'s glob is
+  empty → `ValueError: cannot concat empty list`. Mounting the store RO gives **real coverage** (the heavy
+  `test_run_battery_shares_panel_and_times` passes only with the store). RO so CI can never write the store.
+- **harness-orphan exclusion** — `test_experimenter_transient.py` `import main`s the experimenter research
+  harness (`services/experimenter`), which **does not exist in this repo** (it lives only in the experimenter
+  image), so it ERRORs at collection in ANY repo-based env. `lightgbm` IS in `fp-dev`, so its
+  `importorskip(lightgbm)` does NOT skip it. It is excluded + listed in `HARNESS_ORPHAN_TESTS`; the audit
+  knows it's a known orphan, not a blind spot.
 - **`timing` job** (NON-GATING / informational) — see the next section.
 - **coverage audit** — after the jobs, the gate `--collect-only`s `tests/` and reports any `test_*.py` that
-  errors at collection yet is NOT a known dashboard-dep file. A NEW test that pulls an uninstalled dep (the
-  same failure mode) is flagged **loudly and turns the gate RED**, so a whole untested class can never hide
-  behind a green badge.
+  errors at collection yet is NOT a known other-env category (`DASHBOARD_DEP_TESTS` / `HARNESS_ORPHAN_TESTS`).
+  A NEW test that pulls an uninstalled dep or an absent harness module is flagged **loudly and turns the gate
+  RED**, so a whole untested class can never hide behind a green badge, and a real env gap forces a conscious
+  triage (add a job or a list entry) rather than a silent false-red.
 
 The PR is **green only if every GATING job passes AND the audit is empty**. The sticky comment lists each
 job's verdict (with the timing job flagged informational) and any uncovered files. When a new dashboard-dep
