@@ -133,7 +133,6 @@ export function LatencyView() {
     [data],
   );
   const maxP50 = useMemo(() => sorted.reduce((acc, group) => Math.max(acc, group.p50_ms), 0), [sorted]);
-  const hasP95 = useMemo(() => sorted.some((group) => group.p95_ms !== undefined), [sorted]);
 
   if (error) return <div className="banner-error">{error}</div>;
   if (booting && !data) {
@@ -168,11 +167,6 @@ export function LatencyView() {
         <div className="lat-submeta">
           {data.group_count} groups · {data.feature_count} features · units: {data.units} ·{" "}
           {data.sorted_by} · generated {data.generated_at}
-        </div>
-        <div className="lat-note">
-          Bar length = per-group p50 (the live per-minute compute_latest cost), slowest-first. Hover a bar for
-          the tail{hasP95 ? " (p95 + p99)" : " (p99; p95 pending in the artifact)"} and the group's kind,
-          mechanism, incremental-readiness, and feature count. {ctx.note}
         </div>
       </div>
 
