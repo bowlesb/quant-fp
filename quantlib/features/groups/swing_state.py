@@ -106,15 +106,45 @@ class _SymbolLeg:
         while len(self.leg_steeps) > RING_K:
             self.leg_steeps.popleft()
 
+    def _reset_for_new_session(self) -> None:
+        """Drop the entire leg-state so the next bar bootstraps a FRESH leg — the session-boundary rule.
+
+        WHY RESET (not carry across the overnight gap): the production BACKFILL source of truth materializes
+        swing PER DAY (``load_raw_minute_agg(day)`` — one session's bars), so its fold bootstraps a fresh leg at
+        each session's first bar and NEVER carries the leg across the overnight gap. The held live state must do
+        the SAME or it diverges from backfill the moment a live run spans two sessions (a continuous capture, or
+        a buffer that straddles the boundary). Measured: per-day backfill vs a whole-buffer cross-day carry
+        disagree on swing_dir / n_alternations / persistence at the new session's open. The overnight gap also
+        distorts the leg geometry (a 30% gap is not a real intraday swing), so the reset is correct on its own
+        merits. Only ``cur_day`` is preserved (set by the caller) — everything else returns to the cold state.
+        """
+        self.direction = 0
+        self.leg_start_price = float("nan")
+        self.leg_start_min = 0
+        self.extreme = float("nan")
+        self.extreme_min = 0
+        self.hi = float("nan")
+        self.hi_min = 0
+        self.lo = float("nan")
+        self.lo_min = 0
+        self.prev_leg_start = float("nan")
+        self.prev_leg_end = float("nan")
+        self.have_prev_leg = False
+        self.n_pivots_today = 0.0
+        self.leg_returns.clear()
+        self.leg_steeps.clear()
+        self.n_alternations = 0.0
+
     def advance(self, close: float, minute: int) -> tuple[float, ...]:
         """Fold ONE bar into the state and return its point-in-time row (the 9 features in ``_FEATURE_COLS``
-        order). Mirrors the Rust kernel's per-bar branch + emit exactly."""
+        order). Mirrors the per-bar branch + emit of the per-day backfill fold exactly."""
         day = minute // DAY_SECS
-        if day != self.cur_day:
-            self.cur_day = day
-            self.n_pivots_today = 0.0
+        if self.cur_day is not None and day != self.cur_day:
+            # SESSION BOUNDARY: reset the whole leg (match per-day backfill — see ``_reset_for_new_session``).
+            self._reset_for_new_session()
+        self.cur_day = day
 
-        if self.leg_start_price != self.leg_start_price:  # nan -> first bar of the block
+        if self.leg_start_price != self.leg_start_price:  # nan -> first bar of the (re)started session block
             self.leg_start_price = close
             self.leg_start_min = minute
             self.extreme = close

@@ -193,6 +193,19 @@ class SwingGroup(FeatureGroup):
         certified whole-buffer fold (``compute().filter(last)``) — the source of truth. With the flag set, carry
         the per-symbol leg-state and fold ONLY the minutes not yet absorbed (O(symbols × new-bars), not
         O(symbols × window)); guarded == the whole-buffer fold by tests/test_fp_swing.py + tests/test_fp_latest.py.
+
+        WARM-START + SESSION BOUNDARY (the parity-across-the-morning-seed design):
+        - SEEDING is automatic + parity-true: the FIRST call on a session has no carried state, so it COLD-folds
+          the whole (warm-started) ring — reaching the identical state the per-day backfill reaches. fc rehydrates
+          the ring from ``backfill_bars(day)`` (single session) under FP_WARM_START, so the warm window == what
+          backfill folds; tested by test_swing_stateful_warm_start_seed_equals_backfill.
+        - SESSION-BOUNDARY RULE = RESET. Production backfill materializes swing PER DAY, so it bootstraps a fresh
+          leg each session and never carries the leg across the overnight gap. The held state RESETS at the
+          session-date boundary to match (``_SymbolLeg`` reset); carrying the leg would silently diverge at the
+          next open. Tested by test_swing_stateful_morning_boundary_equals_per_day_backfill.
+        - The held path therefore matches the PER-DAY backfill on the single-day buffers production always uses;
+          warm-up minutes before the first pivot are the SAME warmup nulls backfill emits (RTH-excluded from
+          trust grading), not published as finite.
         """
         if os.environ.get("FP_SWING_STATEFUL") != "1":
             return super().compute_latest(ctx)
