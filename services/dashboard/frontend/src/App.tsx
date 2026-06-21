@@ -4,10 +4,14 @@ import type { GridColumn, GridMeta, StoreGridMatrix } from "./types";
 import { CanvasHeatmap, type HoverCell, type DisplayColumn } from "./CanvasHeatmap";
 import { Tooltip } from "./Tooltip";
 import { GroupDetailPanel } from "./GroupDetailPanel";
+import { LatencyView } from "./LatencyView";
 
 // The worker rebuilds every 10 min; a 60s meta poll is plenty. The matrix blob is only re-fetched when its
 // generated_at advances.
 const META_POLL_MS = 60_000;
+
+// The two top-level views. The coverage grid stays the default; "latency" is the additive #321 read-side page.
+type View = "grid" | "latency";
 
 function formatAsOf(generatedAt: string): string {
   const then = new Date(generatedAt);
@@ -27,6 +31,7 @@ export function App() {
   const [hover, setHover] = useState<HoverCell | null>(null);
   const [detailKey, setDetailKey] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [view, setView] = useState<View>("grid");
   const matrixGeneratedAt = useRef<string | null>(null);
 
   const loadMatrix = useCallback(async () => {
@@ -169,7 +174,9 @@ export function App() {
   const detailColumn: GridColumn | null =
     matrix && detailKey ? matrix.columns.find((c) => c.key === detailKey) ?? null : null;
 
-  if (booting && !matrix) {
+  // The first-boot screen is grid-only: it must never block the latency view, which serves a static artifact
+  // independent of the always-warm grid cache.
+  if (view === "grid" && booting && !matrix) {
     return (
       <div className="boot-screen">
         <div className="boot-card">
@@ -189,10 +196,24 @@ export function App() {
       <header className="topbar">
         <div className="topbar-left">
           <span className="brand-mark" />
-          <h1>Feature-store coverage</h1>
+          <h1>{view === "grid" ? "Feature-store coverage" : "Feature latency expectations"}</h1>
+          <nav className="view-tabs">
+            <button
+              className={`view-tab${view === "grid" ? " active" : ""}`}
+              onClick={() => setView("grid")}
+            >
+              Coverage grid
+            </button>
+            <button
+              className={`view-tab${view === "latency" ? " active" : ""}`}
+              onClick={() => setView("latency")}
+            >
+              Latency
+            </button>
+          </nav>
         </div>
         <div className="topbar-right">
-          {meta && (
+          {view === "grid" && meta && (
             <span className="asof" title={`generated ${meta.generated_at}`}>
               {formatAsOf(meta.generated_at)}
             </span>
@@ -200,51 +221,57 @@ export function App() {
         </div>
       </header>
 
-      <div className="controls">
-        {matrix && (
-          <div className="legend">
-            <span className="legend-item">
-              <span className="sw sw-empty" /> none
-            </span>
-            <span className="legend-item">
-              <span className="ramp ramp-trusted" /> trusted feature
-            </span>
-            <span className="legend-item">
-              <span className="ramp ramp-untrusted" /> untrusted feature
-            </span>
-            <span className="legend-item">
-              <span className="ramp ramp-raw" /> raw tape layer
-            </span>
-            <span className="legend-uni">
-              darkness = % of the {matrix.universe_size.toLocaleString()}-ticker universe covered
-            </span>
+      {view === "latency" ? (
+        <LatencyView />
+      ) : (
+        <>
+          <div className="controls">
+            {matrix && (
+              <div className="legend">
+                <span className="legend-item">
+                  <span className="sw sw-empty" /> none
+                </span>
+                <span className="legend-item">
+                  <span className="ramp ramp-trusted" /> trusted feature
+                </span>
+                <span className="legend-item">
+                  <span className="ramp ramp-untrusted" /> untrusted feature
+                </span>
+                <span className="legend-item">
+                  <span className="ramp ramp-raw" /> raw tape layer
+                </span>
+                <span className="legend-uni">
+                  darkness = % of the {matrix.universe_size.toLocaleString()}-ticker universe covered
+                </span>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {error && <div className="banner-error">{error}</div>}
+          {error && <div className="banner-error">{error}</div>}
 
-      <div className="grid-region">
-        {matrix && (
-          <CanvasHeatmap
-            matrix={matrix}
-            expandedGroups={expandedGroups}
-            highlightCol={detailKey}
-            onHoverChange={setHover}
-            onToggleExpand={toggleExpand}
-            onOpenDetail={openDetail}
-          />
-        )}
-      </div>
+          <div className="grid-region">
+            {matrix && (
+              <CanvasHeatmap
+                matrix={matrix}
+                expandedGroups={expandedGroups}
+                highlightCol={detailKey}
+                onHoverChange={setHover}
+                onToggleExpand={toggleExpand}
+                onOpenDetail={openDetail}
+              />
+            )}
+          </div>
 
-      {matrix && <Tooltip hover={hover} matrix={matrix} displayCols={displayCols} />}
+          {matrix && <Tooltip hover={hover} matrix={matrix} displayCols={displayCols} />}
 
-      {detailColumn && (
-        <GroupDetailPanel
-          column={detailColumn}
-          info={matrix?.group_info[detailColumn.key]}
-          onClose={() => setDetailKey(null)}
-        />
+          {detailColumn && (
+            <GroupDetailPanel
+              column={detailColumn}
+              info={matrix?.group_info[detailColumn.key]}
+              onClose={() => setDetailKey(null)}
+            />
+          )}
+        </>
       )}
     </div>
   );

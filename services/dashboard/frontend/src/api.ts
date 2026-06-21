@@ -1,4 +1,4 @@
-import type { CellDrill, GridMeta, StoreGridMatrix } from "./types";
+import type { CellDrill, GridMeta, LatencyExpectations, StoreGridMatrix } from "./types";
 
 // Thin client for the dashboard's /api/store-grid/* endpoints. The grid IS the dashboard (served at "/"), so
 // the app is same-origin with the API — absolute /api/... paths hit the dashboard FastAPI directly (the Vite
@@ -36,4 +36,8 @@ export function fetchMeta(): Promise<GridMeta> {
 export function fetchCellDrill(group: string, date: string): Promise<CellDrill> {
   const params = new URLSearchParams({ group, date });
   return getJson<CellDrill>(`/api/store-grid/cell?${params.toString()}`);
+}
+
+export function fetchLatencyExpectations(): Promise<LatencyExpectations> {
+  return getJson<LatencyExpectations>("/api/latency-expectations");
 }
