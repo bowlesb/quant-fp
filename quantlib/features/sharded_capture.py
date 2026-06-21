@@ -32,6 +32,12 @@ import polars as pl
 
 from quantlib.aggregates import QuoteTick, TickState, TradeTick, bucket_minute
 from quantlib.features import latency_drilldown, metrics
+from quantlib.features.speculative import (
+    SpeculativeMinuteState,
+    prepass_aggregate,
+    speculative_enabled,
+    tail_fold_aggregate,
+)
 from quantlib.features.capture import (
     CaptureState,
     StoreWriter,
@@ -54,7 +60,13 @@ WORKER_METRICS_BASE_PORT = 9201
 # over every symbol in it. Run per-shard they would see only ~1/8 of the universe and produce 8 different
 # "market/sector-wide" values per minute, breaking live↔backfill parity — so they MUST run once in the
 # reader's gather phase over every symbol.
-REDUCE_GROUPS: tuple[str, ...] = ("cross_sectional_rank", "breadth", "market_turbulence", "sector_return", "sector_beta")
+REDUCE_GROUPS: tuple[str, ...] = (
+    "cross_sectional_rank",
+    "breadth",
+    "market_turbulence",
+    "sector_return",
+    "sector_beta",
+)
 # Slack minutes on top of the reduce groups' deepest declared window — leaves the leading-edge lookback
 # the reduce path needs (e.g. the bar exactly ``window`` ago) defined, exactly as the full buffer did.
 REDUCE_WINDOW_SLACK = 30
@@ -78,7 +90,8 @@ def reduce_buffer_columns() -> tuple[str, ...]:
 def reduce_buffer_minutes(full_window: int) -> int:
     """The trailing depth the reduce groups need — the max DECLARED window across the reduce groups plus
     ``REDUCE_WINDOW_SLACK``, capped at ``full_window``. Derived from the groups (NOT hardcoded); falls back
-    to the full window for any reduce group that doesn't declare its depth (``reduce_buffer_minutes`` None)."""
+    to the full window for any reduce group that doesn't declare its depth (``reduce_buffer_minutes`` None).
+    """
     declared: list[int] = []
     for name in REDUCE_GROUPS:
         minutes = REGISTRY.get_group(name).reduce_buffer_minutes()
@@ -102,7 +115,8 @@ def _bench_log_path(root: str, shard_id: int) -> Path | None:
 @lru_cache(maxsize=None)
 def shard_of(symbol: str, n_shards: int) -> int:
     """Stable shard assignment, identical across processes (Python's hash() is per-process salted). Cached:
-    the symbol set is fixed, so after the first minute this is a dict lookup, not an md5 per bar per minute."""
+    the symbol set is fixed, so after the first minute this is a dict lookup, not an md5 per bar per minute.
+    """
     return int(hashlib.md5(symbol.encode()).hexdigest(), 16) % n_shards
 
 
@@ -143,10 +157,20 @@ def unowned_index_symbols(shard_id: int, n_shards: int) -> frozenset[str]:
     return frozenset(symbol for symbol in INDEX_SYMBOLS if shard_of(symbol, n_shards) != shard_id)
 
 
-def process_shard(state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
-                  window: int, snapshots: dict | None = None, write: bool = True, shard: int | None = None,
-                  accumulate: bool = False, extra_frames: dict | None = None,
-                  drop_output_symbols: frozenset[str] = frozenset()) -> None:
+def process_shard(
+    state: CaptureState,
+    bars: list[dict],
+    root: str,
+    mode: str,
+    day: str | None,
+    window: int,
+    snapshots: dict | None = None,
+    write: bool = True,
+    shard: int | None = None,
+    accumulate: bool = False,
+    extra_frames: dict | None = None,
+    drop_output_symbols: frozenset[str] = frozenset(),
+) -> None:
     """One shard's map step: the shared core, minus the universe-wide reduce groups. Each minute appends
     its OWN per-minute file inside the partition (atomic, no clobber) so all shards write concurrently.
 
@@ -156,13 +180,28 @@ def process_shard(state: CaptureState, bars: list[dict], root: str, mode: str, d
     ``drop_output_symbols`` are the replicated index ETFs this shard does NOT own — computed here (required
     market-context inputs) but PERSISTED only by their owning shard, so each broadcast (symbol, minute) is
     written once. Pass ``unowned_index_symbols(shard, n_shards)``."""
-    process_bars(state, bars, root, mode, day, window, snapshots, exclude_groups=REDUCE_GROUPS,
-                 write=write, shard=shard, accumulate=accumulate, extra_frames=extra_frames,
-                 drop_output_symbols=drop_output_symbols)
+    process_bars(
+        state,
+        bars,
+        root,
+        mode,
+        day,
+        window,
+        snapshots,
+        exclude_groups=REDUCE_GROUPS,
+        write=write,
+        shard=shard,
+        accumulate=accumulate,
+        extra_frames=extra_frames,
+        drop_output_symbols=drop_output_symbols,
+    )
 
 
 def aggregate_shard_ticks(
-    bars: list[dict], trades: list[dict], quotes: list[dict], minute_epoch: int,
+    bars: list[dict],
+    trades: list[dict],
+    quotes: list[dict],
+    minute_epoch: int,
     tick_states: dict[str, TickState],
 ) -> tuple[list[dict], pl.DataFrame]:
     """One shard's per-minute tick aggregation — moved OFF the single reader onto the worker that owns the
@@ -190,16 +229,29 @@ def aggregate_shard_ticks(
     for quote in quotes:
         if bucket_minute(quote["ts_epoch"]) == minute_epoch:
             quotes_by_symbol[quote["S"]].append(
-                QuoteTick(ts_epoch=quote["ts_epoch"], bid=quote["bp"], ask=quote["ap"],
-                          bid_size=quote["bs"], ask_size=quote["as"])
+                QuoteTick(
+                    ts_epoch=quote["ts_epoch"],
+                    bid=quote["bp"],
+                    ask=quote["ap"],
+                    bid_size=quote["bs"],
+                    ask_size=quote["as"],
+                )
             )
     enriched = enrich_bars_with_ticks(bars, dict(trades_by_symbol), dict(quotes_by_symbol), tick_states)
     return enriched, trades_frame(dict(trades_by_symbol))
 
 
-def process_reduce(reduce_state: CaptureState, bars: list[dict], root: str, mode: str, day: str | None,
-                   window: int, snapshots: dict | None = None, write: bool = True,
-                   accumulate: bool = False) -> None:
+def process_reduce(
+    reduce_state: CaptureState,
+    bars: list[dict],
+    root: str,
+    mode: str,
+    day: str | None,
+    window: int,
+    snapshots: dict | None = None,
+    write: bool = True,
+    accumulate: bool = False,
+) -> None:
     """The gather step: compute the universe-wide reduce groups over ALL symbols once. The reader holds a
     MINIMAL full-universe buffer — projected to the columns the reduce groups read (close+volume + keys)
     and capped at the reduce groups' deepest declared window + slack, NOT the full 300m — and runs ONLY
@@ -211,14 +263,86 @@ def process_reduce(reduce_state: CaptureState, bars: list[dict], root: str, mode
     WHOLE-UNIVERSE ``reference`` (sector) and ``daily`` (close) frames to self-select (``runnable``) and to
     bucket sectors / compute its 1d/5d horizons. The reader passes its full (un-sharded) snapshots so the
     gather sees every symbol, exactly as the single-process path does."""
-    process_bars(reduce_state, bars, root, mode, day, window, snapshots=snapshots,
-                 only_groups=REDUCE_GROUPS, write=write, accumulate=accumulate,
-                 project_columns=reduce_buffer_columns(), buffer_minutes=reduce_buffer_minutes(window))
+    process_bars(
+        reduce_state,
+        bars,
+        root,
+        mode,
+        day,
+        window,
+        snapshots=snapshots,
+        only_groups=REDUCE_GROUPS,
+        write=write,
+        accumulate=accumulate,
+        project_columns=reduce_buffer_columns(),
+        buffer_minutes=reduce_buffer_minutes(window),
+    )
 
 
-def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, window: int,
-                day: str | None, snapshots: dict | None,
-                symbols: list[str] | None = None) -> None:  # pragma: no cover (process entry)
+# The tail window (seconds before the minute close T+60) the at-bar tail-fold re-reads; the pre-pass owns
+# everything before it. ``FP_SPECULATIVE_TAIL_S`` overrides (default 1s, matching the #378 prototype). The
+# split is by EXCHANGE ts, so it is parity-neutral regardless of value — any cut reconstructs the same
+# combined ordered tape (see ``speculative.tail_fold_aggregate``); the value only governs how much partition
+# work lands off-path vs on-path.
+SPECULATIVE_TAIL_SECONDS: float = float(os.environ.get("FP_SPECULATIVE_TAIL_S", "1"))
+
+
+def _split_partial_tail(
+    ticks: list[dict], minute_epoch: int, tail_seconds: float
+) -> tuple[list[dict], list[dict]]:
+    """Split a minute's reader tick dicts into (partial, tail) at ``T+60 − tail_seconds`` by EXCHANGE ts.
+    ``partial`` = the early ticks the pre-pass partitions off the critical path; ``tail`` = the last-ε ticks
+    the at-bar tail-fold re-reads. Off-minute ticks stay in ``partial`` (the pre-pass drops them by bucket,
+    exactly as the non-speculative path does) so the union ``partial + tail`` is the whole received set."""
+    cutoff = minute_epoch + 60.0 - tail_seconds
+    partial: list[dict] = []
+    tail: list[dict] = []
+    for tick in ticks:
+        if bucket_minute(tick["ts_epoch"]) == minute_epoch and tick["ts_epoch"] >= cutoff:
+            tail.append(tick)
+        else:
+            partial.append(tick)
+    return partial, tail
+
+
+def speculative_aggregate_shard_ticks(
+    bars: list[dict],
+    trades: list[dict],
+    quotes: list[dict],
+    minute_epoch: int,
+    tick_states: dict[str, TickState],
+    tail_seconds: float = SPECULATIVE_TAIL_SECONDS,
+    prepass_out: list[SpeculativeMinuteState] | None = None,
+) -> tuple[list[dict], pl.DataFrame]:
+    """The two-phase (pre-pass + tail-fold) equivalent of ``aggregate_shard_ticks`` — value-identical, with
+    the bulk per-symbol partition moved OFF the critical path. Splits the minute's ticks at the ε boundary,
+    runs the pre-pass over the partial set (the off-path installment) and the tail-fold over the last-ε
+    (the on-path installment), and returns the IDENTICAL ``(enriched_bars, trades_frame)`` tuple.
+
+    In the live worker the pre-pass would be triggered at wall-clock ~T−ε from reader-forwarded partial ticks
+    (the activation step documented for the Lead in ``docs/SPECULATIVE_PRECOMPUTE.md``); here both installments
+    run in-line at the bar so the mechanism is exercised value-identically on the real worker path (and so the
+    flag is byte-identical-when-off, value-identical-when-on). ``prepass_out``, when given, captures the
+    pre-pass state for the latency split-measurement — production passes ``None``."""
+    partial_trades, tail_trades = _split_partial_tail(trades, minute_epoch, tail_seconds)
+    partial_quotes, tail_quotes = _split_partial_tail(quotes, minute_epoch, tail_seconds)
+    spec_state = prepass_aggregate(partial_trades, partial_quotes, minute_epoch)
+    if prepass_out is not None:
+        prepass_out.append(spec_state)
+    return tail_fold_aggregate(spec_state, bars, tail_trades, tail_quotes, tick_states)
+
+
+def worker_main(
+    shard_id: int,
+    n_shards: int,
+    queue,
+    root: str,
+    mode: str,
+    window: int,
+    day: str | None,
+    snapshots: dict | None,
+    symbols: list[str] | None = None,
+) -> None:  # pragma: no cover (process entry)
     """Persistent worker process entry: own ``shard_id``, drain the queue of minute bar-batches (already
     routed to this shard), and run the map step. A ``None`` batch is the shutdown sentinel.
 
@@ -239,8 +363,11 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         # Alpaca historical RAW = the same unadjusted SIP bars this shard will stream — a parity-true seed.
         bars = backfill_bars(day, symbols)
         seeded = warm_start_ring(state, bars, depth=window)
-        print(f"[worker {shard_id}] warm-started ring: {seeded} minutes from {bars.height} bars",
-              file=sys.stderr, flush=True)
+        print(
+            f"[worker {shard_id}] warm-started ring: {seeded} minutes from {bars.height} bars",
+            file=sys.stderr,
+            flush=True,
+        )
     metrics.start_metrics_server(WORKER_METRICS_BASE_PORT + shard_id)  # /metrics for Prometheus/Grafana
     bench_log = _bench_log_path(root, shard_id)  # set FP_BENCH_LOG=1 to record per-minute shard latency
     if bench_log is not None:
@@ -272,12 +399,30 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         # subscribed ticks -> empty trades/quotes -> bars pass through unenriched, trades frame empty.
         if trades or quotes:
             minute_epoch = bucket_minute(minute.timestamp())
-            batch, trades_df = aggregate_shard_ticks(batch, trades, quotes, minute_epoch, tick_states)
+            # FP_SPECULATIVE flips the per-minute tick aggregation onto the two-phase pre-pass + tail-fold
+            # schedule (value-identical, partition work moved off the critical path). DEFAULT OFF -> the
+            # unchanged one-installment path. The output buffer is byte-identical either way.
+            if speculative_enabled():
+                batch, trades_df = speculative_aggregate_shard_ticks(
+                    batch, trades, quotes, minute_epoch, tick_states
+                )
+            else:
+                batch, trades_df = aggregate_shard_ticks(batch, trades, quotes, minute_epoch, tick_states)
             extra_frames = {"trades": trades_df} if trades_df.height else None
         else:
             extra_frames = None
-        process_shard(state, batch, root, mode, day, window, snapshots, shard=shard_id,
-                      extra_frames=extra_frames, drop_output_symbols=drop_output_symbols)
+        process_shard(
+            state,
+            batch,
+            root,
+            mode,
+            day,
+            window,
+            snapshots,
+            shard=shard_id,
+            extra_frames=extra_frames,
+            drop_output_symbols=drop_output_symbols,
+        )
         ready_wallclock = time.time()
         # Two complementary latencies, both ending at the assemble (the bet point) with the post-bet
         # parquet write subtracted (process_bars records last_write_ms separately; subtract it whether the
@@ -296,14 +441,20 @@ def worker_main(shard_id: int, n_shards: int, queue, root: str, mode: str, windo
         metrics.record_shard_compute(shard_id, max(0.0, (time.perf_counter() - start) - write_seconds))
         # Drill-down (best-effort, fault-isolated, off the hot path): top-K slowest symbols this minute ->
         # latency_slow_symbols. A DB error logs a warning and continues — it must never stall capture.
-        slow_rows = latency_drilldown.top_k_slow_symbols(symbol_arrivals, ready_wallclock, minute_boundary_epoch)
+        slow_rows = latency_drilldown.top_k_slow_symbols(
+            symbol_arrivals, ready_wallclock, minute_boundary_epoch
+        )
         latency_drilldown.write_slow_symbols(minute, shard_id, slow_rows)
         if bench_log is not None:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             # The bet-relevant latency is COMPUTE only; the write happens after the decision, so report it
             # separately and subtract it from the critical-path "ms".
-            record = {"shard": shard_id, "minute": max(bar["t"] for bar in batch),
-                      "ms": elapsed_ms - state.last_write_ms, "write_ms": state.last_write_ms,
-                      "groups": dict(state.group_timings)}
+            record = {
+                "shard": shard_id,
+                "minute": max(bar["t"] for bar in batch),
+                "ms": elapsed_ms - state.last_write_ms,
+                "write_ms": state.last_write_ms,
+                "groups": dict(state.group_timings),
+            }
             with bench_log.open("a") as handle:
                 handle.write(json.dumps(record) + "\n")
