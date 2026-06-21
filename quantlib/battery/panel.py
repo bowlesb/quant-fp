@@ -367,7 +367,15 @@ def _load_features_for_date(date_iso: str, groups: dict[str, list[str]]) -> pl.D
         if not files:
             return None
         cols = ["symbol", "minute"] + feats
-        frame = pl.concat([pl.read_parquet(path, columns=cols) for path in files])
+        # A group's data for a date may be sharded across several parquet files, and a (symbol, minute)
+        # can recur ACROSS those shard files (measured: 2026-06-18 = 7 files, ~11k cross-file dup keys per
+        # group). Without dedup here, the per-group concat carries duplicate keys, and the inner-join below
+        # MULTIPLIES them across groups (k files per group -> up to k^n_groups rows per key) — a cartesian
+        # fan-out (3.06M rows, one symbol with 1.5M). Dedup each group to one row per (symbol, minute) so
+        # the join is one-to-one.
+        frame = pl.concat([pl.read_parquet(path, columns=cols) for path in files]).unique(
+            subset=["symbol", "minute"], keep="first"
+        )
         panel = frame if panel is None else panel.join(frame, on=["symbol", "minute"], how="inner")
     return panel
 
@@ -388,6 +396,7 @@ def _load_bars_for_date(date_iso: str) -> pl.DataFrame:
     return (
         pl.scan_parquet(pattern, hive_partitioning=True)
         .select(["symbol", "ts", "high", "low", "close", "volume"])
+        .unique(subset=["symbol", "ts"], keep="first")
         .collect()
     )
 
@@ -402,7 +411,8 @@ def _load_spread_for_date(date_iso: str, spread_col: str) -> pl.DataFrame | None
     if not files:
         return None
     frames = [pl.read_parquet(path, columns=["symbol", "minute", spread_col]) for path in files]
-    return pl.concat(frames)
+    # same cross-file shard dedup as _load_features_for_date (this frame is left-joined onto feats).
+    return pl.concat(frames).unique(subset=["symbol", "minute"], keep="first")
 
 
 def build_intraday_panel(
@@ -464,7 +474,7 @@ def _attach_realized_half_spread(feats: pl.DataFrame, date_iso: str) -> pl.DataF
             )
     if not measured:
         return feats.with_columns(pl.lit(None, dtype=pl.Float64).alias("half_spread_bps"))
-    table = pl.concat(measured, how="vertical")
+    table = pl.concat(measured, how="vertical").unique(subset=["symbol", "minute"], keep="first")
     return feats.join(table, on=["symbol", "minute"], how="left")
 
 
