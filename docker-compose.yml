@@ -140,21 +140,13 @@ services:
       STORE_ROOT: /store
       # The cache Mongo the store-grid-worker writes; the dashboard READS the precomputed grid from here.
       STORE_GRID_MONGO_URL: "mongodb://quant-mongo:27017"
-      # The ops-introspection read routes' backing stores (still written by the host Lead loop + crons).
-      STATUS_STORE_PATH: /quant-ops/status_dashboard.json
-      SCORECARD_STORE_PATH: /quant-ops/scorecard_snapshots.json
     ports:
       - "0.0.0.0:8088:8000"     # LAN-accessible: http://192.168.1.32:8088
     volumes:
-      # Documented end-to-end latency baseline — the /api/scorecard axis D parses its re-measure table.
-      - ./docs/SIM_LATENCY_AUDIT.md:/docs/SIM_LATENCY_AUDIT.md:ro
-      # Feature store (read-only): feature_grid introspection (reused by the scorecard route) reads partition
-      # dates + per-date symbol counts. RO so the dashboard can never write. The GRID itself is served from
-      # Mongo (the worker's precompute), not built here.
+      # Feature store (read-only): feature_grid introspection reads partition dates + per-date symbol counts.
+      # RO so the dashboard can never write. The GRID itself is served from Mongo (the worker's precompute),
+      # not built here.
       - fp_store_real:/store:ro
-      # The ops JSON stores the kept read routes serve (status_dashboard.json / scorecard_snapshots.json /
-      # jobs_status.json) — written by the host Lead loop + crons into this same ~/.quant-ops mount.
-      - ${HOME}/.quant-ops:/quant-ops
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -200,8 +192,6 @@ services:
       # Feature store, READ-ONLY: the worker reads partition dates + per-date symbol sets to build the
       # coverage matrix. RO so it can never write the store the feature pipeline owns.
       - fp_store_real:/store:ro
-      # Shared ~/.quant-ops mount (parity with the dashboard service; not written by the worker).
-      - ${HOME}/.quant-ops:/quant-ops
     depends_on:
       timescaledb:
         condition: service_healthy

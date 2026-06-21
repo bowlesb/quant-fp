@@ -10,7 +10,10 @@ since #211, fixed reactively in #231) and ``alpaca-py`` (pulled by
 ``quantlib.features.seed_universe`` via the #227 universe-coverage panel, fixed in #232).
 The alpaca pull was later removed at the root by decoupling the panel from the trading SDK
 (KEEP_EXCHANGES moved to the pure ``quantlib.universe`` module), so ``alpaca-py`` is no longer
-in the dashboard requirements; the redis pull remains and anchors the non-vacuousness check.
+in the dashboard requirements. The redis pull is also gone now: it came only through the old
+``scorecard`` ops route's ``quantlib.bus`` import, which was deleted when the dashboard was pared
+to the grid-only surface. The non-vacuousness check therefore anchors on ``pymongo`` — the grid's
+real, still-present MongoDB-client dependency (imported directly by ``store_grid_cache``).
 
 This test reproduces what the dashboard image actually carries WITHOUT a docker build: it walks
 the static import closure of every ``services/dashboard/*.py`` module (following first-party
@@ -214,25 +217,27 @@ def test_dashboard_import_closure_is_satisfied_by_requirements() -> None:
     )
 
 
-def test_guard_is_non_vacuous_on_redis() -> None:
-    """Regression evidence: the guard actually reaches a real transitive dep and enforces it.
+def test_guard_is_non_vacuous_on_pymongo() -> None:
+    """Regression evidence: the guard actually reaches a real third-party dep and enforces it.
 
-    ``redis`` is pulled by ``quantlib.bus`` (scorecard -> quantlib.bus.schema -> registry) since the
-    bus-decouple (#211/#231); it MUST be in the closure and declared, and a requirements set lacking
-    it MUST fail the main guard — proving the test is not vacuously green.
+    ``pymongo`` is imported directly by ``store_grid_cache`` — the dashboard reads the always-warm coverage
+    grid out of the dedicated MongoDB service, so the client is a hard requirement of every grid route. It MUST
+    be in the closure and declared, and a requirements set lacking it MUST fail the main guard — proving the
+    test is not vacuously green.
+
+    (This anchor used to be ``redis``, pulled only by the old ``scorecard`` ops route via ``quantlib.bus``;
+    once the dashboard was pared to the grid-only surface that import vanished and ``redis`` was dropped from
+    requirements, so the non-vacuity anchor moved to ``pymongo``, which the grid genuinely needs.)
     """
     closure = _build_closure()
     third_party = _third_party_top_level(closure)
-    assert "redis" in third_party, "closure should reach redis via quantlib.bus (#211/#231)"
+    assert "pymongo" in third_party, "closure should reach pymongo via store_grid_cache"
 
     declared = _requirement_distributions()
-    assert _normalize("redis") in declared, (
-        "redis must be declared in requirements.txt; the reactive fix #231 added it and this "
-        "test locks that in"
-    )
+    assert _normalize("pymongo") in declared, "pymongo must be declared in requirements.txt"
     # Prove the guard is non-vacuous: a requirements set lacking this entry is rejected.
-    without = declared - {_normalize("redis")}
-    assert _normalize("redis") not in without
+    without = declared - {_normalize("pymongo")}
+    assert _normalize("pymongo") not in without
 
 
 def test_universe_coverage_panel_does_not_pull_alpaca() -> None:

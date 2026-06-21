@@ -7,9 +7,6 @@ uvicorn[standard]==0.34.0
 psycopg[binary]==3.2.3
 polars
 numpy
-# quantlib.bus import chain (scorecard -> quantlib.bus.schema -> registry) imports redis at module
-# level since the bus-decouple (#211); the dashboard image must carry it even though it never connects.
-redis>=5,<6
 # The always-warm store-grid cache lives in a dedicated MongoDB service: the worker writes the precomputed
 # 18-month coverage grid (+ drills + meta) there and the dashboard reads it, so a refresh is one indexed doc
 # fetch off the request path. pymongo is the client for both the worker and the dashboard read routes.

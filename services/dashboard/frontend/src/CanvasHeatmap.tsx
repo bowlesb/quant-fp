@@ -288,9 +288,12 @@ export function CanvasHeatmap({
               style={{ left: c * CELL.w, width: CELL.w }}
               title={
                 dc.kind === "feature"
-                  ? `${dc.label} — click for ${dc.groupKey} detail`
+                  ? `${dc.label} — click (or press K) for ${dc.groupKey} detail`
                   : dc.label +
-                    (dc.expandable ? " — click header for detail (click a cell to expand features)" : "")
+                    (dc.kind === "group"
+                      ? " — click header or press K for detail" +
+                        (dc.expandable ? " (click a cell to expand features)" : "")
+                      : "")
               }
               onClick={() => onOpenDetail(dc.kind === "feature" ? (dc.groupKey as string) : dc.key)}
             >
