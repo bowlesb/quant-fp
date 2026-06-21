@@ -50,6 +50,21 @@ _USE_RUST_ASSEMBLE = bool(os.environ.get("FP_RUST_ASSEMBLE")) and os.environ.get
 # batch expression graph byte-identical to today (fp unchanged); the prod flip is a Lead/Ben relaunch click.
 _USE_CENTERED_TIME = bool(os.environ.get("FP_CENTERED_TIME")) and os.environ.get("FP_CENTERED_TIME") != "0"
 
+# FP_RUST_REDUCE conditions the OLS R²/corr/resid-std Y-SIDE the way #386 conditioned the time-axis X: it
+# CENTERS a regression's ``y`` on a per-symbol-constant anchor (the daily-bar close, attached by
+# ``attach_close_anchor``) BEFORE the six paired sums are accumulated, so the y-variance / covariance terms
+# ``denom_y = b·Σ(y−a)² − (Σ(y−a))²`` and ``cov_n = b·Σ(x·(y−a)) − Σx·Σ(y−a)`` stay conditioned on small
+# centered close (~±$2) instead of raw close (~$45–$500). The near-perfect-fit r²/corr cancellation that
+# #386's x-conditioning could NOT reach (the y-side SSR/SST straddle that gated trend_quality / clean_momentum
+# / residual_analysis from FP_INCREMENTAL — docs/INCREMENTAL_READINESS.md §"REAL-TAPE PROMOTION GATE") then
+# rounds IDENTICALLY in the batch fresh-sum path and the incremental running-sum path. OLS is
+# translation-invariant in y, so slope/r²/corr/resid_std are value-identical to the raw form in exact
+# arithmetic — only the float conditioning changes (fp unchanged). Because the centering is applied UPSTREAM
+# of the windowed sum (on the paired columns), all three emit twins (polars / numpy / Rust assemble_canonical)
+# consume the conditioned sums with NO twin-specific change. Default OFF keeps the paired-column expression
+# graph byte-identical to today (fp unchanged); the prod flip is a Lead/Ben relaunch click.
+_USE_RUST_REDUCE = bool(os.environ.get("FP_RUST_REDUCE")) and os.environ.get("FP_RUST_REDUCE") != "0"
+
 # How far (minutes) behind the anchor minute to pin the latest-row time-OLS origin (compute_latest /
 # compute_reduction_batch). IDENTICAL to the incremental engine's per-fold pin so the conditioned batch axis
 # matches the incremental axis at the anchor minute exactly (incremental.py re-exports this constant). Small
@@ -58,8 +73,13 @@ _TIME_ORIGIN_LAG = 2
 
 # Statistic codes shared with the Rust ``assemble_canonical`` kernel (kind byte). The OLS codes' order
 # (slope, corr, r2, mean_y) matches the kernel's 3..=6 arm; ``resid_std`` (7) is the OLS residual-std
-# stat the kernel's 7 arm computes.
+# stat the kernel's 7 arm computes. Codes 8/9 are the FP_RUST_REDUCE y-centered (anchored) corr/r2 twins —
+# IDENTICAL arithmetic to 4/5 but with the centered-variance denom_y guard (``eps·b·syy`` not ``eps·sy²``),
+# so the Rust assemble matches the polars/numpy anchored stat. The Python ``build_assemble_plan`` emits 8/9
+# (instead of 4/5) for a regression whose ``ns`` is in the anchored set.
 _STAT_CODE = {"sum": 0, "mean": 1, "std": 2, "slope": 3, "corr": 4, "r2": 5, "mean_y": 6, "resid_std": 7}
+# Per-stat kind override for an anchored (y-centered) regression: corr/r2 use the centered-variance guard.
+_STAT_CODE_ANCHORED = {"corr": 8, "r2": 9}
 
 # OLS residual-std (``resid_std``) degenerate guards — the residual_analysis group's two thresholds, baked
 # into the shared stat so backfill/live-batch/incremental compute them identically (the §7 Lever-2 move that
@@ -83,6 +103,18 @@ _RESID_REL_FLOOR = 1e-6
 # well-conditioned windows are untouched.
 _OLS_DENOM_X_REL_EPS = 1e-12
 _OLS_DENOM_Y_REL_EPS = 1e-12
+
+# Centered-y (FP_RUST_REDUCE anchored regression) denom_y guard eps, relative to the variance scale ``b·syy``.
+# When y is centered on the per-symbol anchor the RAW ``eps·sy²`` scale collapses (sy → small), so the guard
+# is re-based on the translation-invariant variance scale ``b·syy``. A LARGER eps than the raw 1e-12 is
+# required because the centered ``denom_y = b·syy − sy²`` at the b==2 / near-flat corner carries the
+# incremental running-sum accumulation noise (~1e-12 RELATIVE to ``b·syy``, well above machine eps — measured
+# 4.2e-15 on a KO flat 5m cell where ``b·syy`` ≈ 3.6e-3), so a 1e-12 floor sits AT that noise and a genuinely
+# flat window straddles it (batch denom_y == 0 → null, incremental denom_y == 4e-15 → r2 = 1.0). 1e-9 clears
+# the running-sum noise by ~1000× while staying far below any real fit's ratio (denom_y/(b·syy) ≈ 1 − the
+# mean-fraction, O(1) for a centered window), so a genuinely-flat window is NULL on BOTH paths and a real fit
+# is accepted on both — the straddle band is negligibly thin. Only consulted for an anchored regression.
+_OLS_DENOM_Y_CENTERED_REL_EPS = 1e-9
 
 # n==2 perfect-fit corner. Two distinct (x, y) points define a line EXACTLY, so the OLS fit through them is
 # perfect: r2 == 1.0, corr == sign(slope) == sign(cov). Computed from the sums, ``r2 = cov²/(denom_x·denom_y)``
@@ -139,16 +171,28 @@ def resid_std_(name: str, w: int) -> pl.Expr:
     return pl.col(f"__resid_std_{name}_{w}")
 
 
-def _ols_stat_exprs(sums: dict[str, pl.Expr], stats: tuple[str, ...]) -> dict[str, pl.Expr]:
+def _ols_stat_exprs(
+    sums: dict[str, pl.Expr], stats: tuple[str, ...], *, anchored: bool = False
+) -> dict[str, pl.Expr]:
     """OLS slope/corr/r2/mean_y of y-on-x from the six paired windowed sums (b=paired count, x, y, xy, xx,
     yy). Identical algebra to ols.py — pairing handled by the caller (partner-null rows zeroed, excluded
-    from b). Undefined cells (n<2 or zero x-variance) are null."""
+    from b). Undefined cells (n<2 or zero x-variance) are null.
+
+    ``anchored`` (set under ``FP_RUST_REDUCE`` for a y-centered regression): the regressand ``y`` was centered
+    on a per-symbol anchor, so ``sy = Σ(y−a)`` is small and the raw ``denom_y > eps·sy²`` guard's scale
+    collapses (a near-flat window would spuriously straddle). Use the TRANSLATION-INVARIANT variance scale
+    ``eps·b·syy`` instead — both the batch fresh-sum path and the incremental running-sum path compute
+    ``denom_y``/``b·syy`` from the SAME bit-identical centered sums, so they NEVER straddle, and a genuinely
+    flat window (denom_y ≈ 0) is rejected on both. On a well-conditioned cell denom_y ≈ b·syy ≫ eps·b·syy, so
+    the null decision is unchanged from the raw guard — value-identical."""
     b, sx, sy, sxy, sxx, syy = (sums[key] for key in ("b", "x", "y", "xy", "xx", "yy"))
     denom_x = b * sxx - sx * sx
     denom_y = b * syy - sy * sy
     cov_n = b * sxy - sx * sy
+    denom_y_scale = (b * syy) if anchored else (sy * sy)
+    denom_y_eps = _OLS_DENOM_Y_CENTERED_REL_EPS if anchored else _OLS_DENOM_Y_REL_EPS
     defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
-    defined_corr = defined & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
+    defined_corr = defined & (denom_y > denom_y_eps * denom_y_scale)
     perfect = defined_corr & (b == _OLS_PERFECT_FIT_COUNT)  # line through 2 points: r2==1, corr==sign(cov)
     out: dict[str, pl.Expr] = {}
     if "slope" in stats:
@@ -203,19 +247,31 @@ class StatefulRegressor:
     slot: str  # "x" or "y"
     kind: str  # "time" | "cumulative" | "broadcast"
     increment: pl.Expr | None = None  # required iff kind in {"cumulative", "broadcast"}
-    broadcast_symbol: str | None = None  # required iff kind == "broadcast" (the index ticker carrying the value)
+    broadcast_symbol: str | None = (
+        None  # required iff kind == "broadcast" (the index ticker carrying the value)
+    )
 
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
 
 
-def _ols_derived(name: str, x_expr: pl.Expr, y_expr: pl.Expr) -> list[pl.Expr]:
+def _ols_derived(
+    name: str, x_expr: pl.Expr, y_expr: pl.Expr, y_anchor: pl.Expr | None = None
+) -> list[pl.Expr]:
     """The six paired columns the engine sums for one regression: only rows where BOTH x and y are present
     contribute (partner-null zeroed and dropped from the count), so a warmup/missing value never biases the
-    fit. Column names ``__rd_<name>_{b,x,y,xy,xx,yy}``."""
-    both = x_expr.is_not_null() & y_expr.is_not_null()
+    fit. Column names ``__rd_<name>_{b,x,y,xy,xx,yy}``.
+
+    ``y_anchor`` (set only under ``FP_RUST_REDUCE`` for an anchored regression) is a per-symbol-constant
+    column that ``y`` is CENTERED on (``y → y − a``) before the paired y/xy/yy products are formed, so the
+    R²/corr y-side denom stays conditioned on small centered close instead of raw close. OLS is
+    translation-invariant in y, so this is VALUE-IDENTICAL (only the float conditioning changes); the null
+    mask is preserved (centering a present y stays present, a null y stays null), so the paired count ``b``
+    and every other path is unchanged. None → the raw ``y`` (byte-identical to today)."""
+    y_centered = y_expr if y_anchor is None else (y_expr - y_anchor)
+    both = x_expr.is_not_null() & y_centered.is_not_null()
     x_paired = pl.when(both).then(x_expr).otherwise(0.0)
-    y_paired = pl.when(both).then(y_expr).otherwise(0.0)
+    y_paired = pl.when(both).then(y_centered).otherwise(0.0)
     return [
         both.cast(pl.Float64).alias(f"__rd_{name}_b"),
         x_paired.alias(f"__rd_{name}_x"),
@@ -258,7 +314,8 @@ class ReductionGroup(FeatureGroup):
         running sums, marking it PENDING-RESEED. Used by the hot-swap applier: when an engine carries a freshly-
         swapped group's input, the running state must be re-derived for the new compute logic — binding it makes
         ``up_to_date()`` report False so the single contract guard reseeds it (the old SWAP+RESEED kind, now
-        expressed through the one ``up_to_date()`` / ``rebuild_from_history()`` surface, no kind classifier)."""
+        expressed through the one ``up_to_date()`` / ``rebuild_from_history()`` surface, no kind classifier).
+        """
         self.__dict__["_live_engine"] = engine
         self.__dict__["_live_engine_seed_symbols"] = seed_symbols
         self.__dict__["_live_engine_pending_reseed"] = True
@@ -324,11 +381,32 @@ class ReductionGroup(FeatureGroup):
         ``regressions()`` exprs directly and are unaffected. Default none (all regressors are short-lag)."""
         return {}
 
+    def regression_y_anchor(self) -> dict[str, str]:
+        """{regression_name: anchor_column} — under ``FP_RUST_REDUCE``, the regressions whose ``y`` is centered
+        on a per-symbol-constant anchor column (``reduction_anchor.anchor_column(...)``, attached to the input
+        frame, read identically by both paths) so the R²/corr/resid-std y-side denom stays conditioned on a
+        large-magnitude regressand (raw close ~$45–$500). Value-identical (OLS is translation-invariant in y);
+        only the float conditioning changes (the parity-critical invariant the close anchor guarantees by
+        being a per-symbol constant read identically by batch + incremental). Default empty — a regression not
+        listed keeps its raw ``y`` byte-for-byte. The flag default-OFF makes this a no-op regardless of what a
+        group declares, so a group can opt in safely ahead of the prod relaunch flip."""
+        return {}
+
+    def _y_anchor_exprs(self) -> dict[str, pl.Expr]:
+        """The per-regression y-centering anchor exprs ACTIVE for this group — empty unless ``FP_RUST_REDUCE``
+        is on AND the regression is declared in ``regression_y_anchor``. Used by every batch/live path that
+        builds the OLS paired columns so the centering is applied identically (and is a no-op when the flag is
+        off, keeping the expression graph byte-identical to today)."""
+        if not _USE_RUST_REDUCE:
+            return {}
+        return {name: pl.col(anchor) for name, anchor in self.regression_y_anchor().items()}
+
     def _time_regression_names(self) -> set[str]:
         """The regressions whose ``x`` slot is a ``kind="time"`` axis — the ones the ``FP_CENTERED_TIME`` batch
         conditioning applies to (it pins their x to a small per-window origin so the OLS denom/covariance stays
         well conditioned, matching the incremental engine). Read from ``stateful_regressors()`` so the set is
-        data-driven and stays in lockstep with what the incremental engine sources from a rolled time origin."""
+        data-driven and stays in lockstep with what the incremental engine sources from a rolled time origin.
+        """
         return {
             name
             for name, regs in self.stateful_regressors().items()
@@ -362,12 +440,19 @@ class ReductionGroup(FeatureGroup):
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         """Generated BACKFILL form: rolling_*_by over every minute (source of truth)."""
-        frame = self.prepare(ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"]))
+        frame = self.prepare(
+            ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
+        )
         reduced, regressions = self.reduced(), self.regressions()
         frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
         if regressions:
+            y_anchors = self._y_anchor_exprs()
             frame = frame.with_columns(
-                [col for name, (x, y, _, _) in regressions.items() for col in _ols_derived(name, x, y)]
+                [
+                    col
+                    for name, (x, y, _, _) in regressions.items()
+                    for col in _ols_derived(name, x, y, y_anchors.get(name))
+                ]
             )
         mats: list[pl.Expr] = []
         for name, (_, stats, windows) in reduced.items():
@@ -375,40 +460,58 @@ class ReductionGroup(FeatureGroup):
             for w in windows:
                 size = f"{w}m"
                 if "mean" in stats:
-                    mats.append(source.rolling_mean_by("minute", window_size=size).over("symbol").alias(f"__mean_{name}_{w}"))
+                    mats.append(
+                        source.rolling_mean_by("minute", window_size=size)
+                        .over("symbol")
+                        .alias(f"__mean_{name}_{w}")
+                    )
                 if "std" in stats:
-                    mats.append(source.rolling_std_by("minute", window_size=size).over("symbol").alias(f"__std_{name}_{w}"))
+                    mats.append(
+                        source.rolling_std_by("minute", window_size=size)
+                        .over("symbol")
+                        .alias(f"__std_{name}_{w}")
+                    )
                 if "sum" in stats:
-                    mats.append(source.rolling_sum_by("minute", window_size=size).over("symbol").alias(f"__sum_{name}_{w}"))
+                    mats.append(
+                        source.rolling_sum_by("minute", window_size=size)
+                        .over("symbol")
+                        .alias(f"__sum_{name}_{w}")
+                    )
+        y_anchored = self._y_anchor_exprs()
         for name, (_, _, stats, windows) in regressions.items():
             for w in windows:
                 size = f"{w}m"
                 sums = {
-                    key: pl.col(f"__rd_{name}_{key}").rolling_sum_by("minute", window_size=size).over("symbol")
+                    key: pl.col(f"__rd_{name}_{key}")
+                    .rolling_sum_by("minute", window_size=size)
+                    .over("symbol")
                     for key in _OLS_KEYS
                 }
-                for stat, expr in _ols_stat_exprs(sums, stats).items():
+                for stat, expr in _ols_stat_exprs(sums, stats, anchored=name in y_anchored).items():
                     mats.append(expr.alias(f"__{stat}_{name}_{w}"))
         frame = frame.with_columns([expr.alias(f"__pt_{name}") for name, expr in self.points().items()])
         frame = frame.with_columns(mats)
         feats = self.assemble()
-        return frame.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()]).select(
-            ["symbol", "minute", *self._feature_names()]
-        )
+        return frame.with_columns(
+            [expr.cast(pl.Float64).alias(name) for name, expr in feats.items()]
+        ).select(["symbol", "minute", *self._feature_names()])
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
         """Generated LIVE form: aggregate-at-T via the Rust reduction kernel, one row per symbol."""
-        frame = self.prepare(ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"]))
+        frame = self.prepare(
+            ctx.frame(self.reduce_input).select(self._input_columns()).sort(["symbol", "minute"])
+        )
         reduced, regressions = self.reduced(), self.regressions()
         frame = frame.with_columns([expr.alias(f"__d_{name}") for name, (expr, _, _) in reduced.items()])
         latest = frame["minute"].max()
         if regressions:
             time_regs = self._time_regression_names() if _USE_CENTERED_TIME else set()
             latest_epoch = int(latest.timestamp()) if time_regs else 0  # type: ignore[union-attr]
+            y_anchors = self._y_anchor_exprs()
             ols_cols: list[pl.Expr] = []
             for name, (x_expr, y_expr, _, _) in regressions.items():
                 x = _pinned_time_x(latest_epoch) if name in time_regs else x_expr
-                ols_cols += _ols_derived(name, x, y_expr)
+                ols_cols += _ols_derived(name, x, y_expr, y_anchors.get(name))
             frame = frame.with_columns(ols_cols)
         wide = resolve_points([self], frame, latest).select(
             ["symbol", *[f"__pt_{name}" for name in self.points()]]
@@ -416,15 +519,24 @@ class ReductionGroup(FeatureGroup):
         for name, (_, stats, windows) in reduced.items():
             long = rust_reductions(frame, f"__d_{name}", windows)
             for stat in stats:
-                wide = wide.join(pivot_stat(long, stat, f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left")
+                wide = wide.join(
+                    pivot_stat(long, stat, f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
+                )
         for name, (_, _, stats, windows) in regressions.items():
             value_cols = [f"__rd_{name}_{key}" for key in ("b", "x", "y", "xy", "xx", "yy")]
             long = rust_windowed_sums(frame, value_cols, windows)
             sums = {key: pl.col(f"__rd_{name}_{key}") for key in ("b", "x", "y", "xy", "xx", "yy")}
-            glong = long.with_columns([expr.alias(f"__c_{stat}_{name}") for stat, expr in _ols_stat_exprs(sums, stats).items()])
+            glong = long.with_columns(
+                [
+                    expr.alias(f"__c_{stat}_{name}")
+                    for stat, expr in _ols_stat_exprs(sums, stats, anchored=name in y_anchors).items()
+                ]
+            )
             for stat in stats:
                 wide = wide.join(
-                    pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows), on="symbol", how="left"
+                    pivot_stat(glong, f"__c_{stat}_{name}", f"__{stat}_{name}_{{w}}", windows),
+                    on="symbol",
+                    how="left",
                 )
         feats = self.assemble()
         return (
@@ -434,14 +546,17 @@ class ReductionGroup(FeatureGroup):
         )
 
 
-def _canonical(name: str, stats: tuple[str, ...], base: str, *, centered_base: bool = False) -> list[pl.Expr]:
+def _canonical(
+    name: str, stats: tuple[str, ...], base: str, *, centered_base: bool = False
+) -> list[pl.Expr]:
     """Per-window canonical stat columns for one reduced column, derived from its batched windowed sums in
     the long frame: mean = sum/count, std(ddof=1) = sqrt((sumsq - sum^2/count)/(count-1)). ``base`` is the
     sum-of-value column, ``base__p`` the sum-of-presence (non-null count), ``base__sq`` the sum-of-squares.
 
     ``centered_base``: compute the std/variance from the PER-SYMBOL-CENTERED power sums ``{base}__c`` =
     Σ(v−a) and ``{base}__csq`` = Σ(v−a)² (a = the anchor) — value-identical (variance is shift-invariant) but
-    float-stable on large-magnitude values. mean/sum still use the RAW ``base`` (so mean/ratio are unchanged)."""
+    float-stable on large-magnitude values. mean/sum still use the RAW ``base`` (so mean/ratio are unchanged).
+    """
     out = []
     if "sum" in stats:
         out.append(pl.col(base).alias(f"__c_sum_{name}"))
@@ -464,6 +579,19 @@ def _canonical(name: str, stats: tuple[str, ...], base: str, *, centered_base: b
 
 
 _PlanEntry = tuple[int, str, tuple[str, ...], tuple[int, ...], str]
+
+
+def _anchored_namespaces(groups: list[ReductionGroup]) -> set[str]:
+    """The ``<gi>_<reg>`` namespaces whose regression ``y`` is centered under ``FP_RUST_REDUCE`` (empty when
+    the flag is off — ``_y_anchor_exprs`` already returns {} then). The OLS stat uses the centered-variance
+    guard scale (``eps·b·syy`` not ``eps·sy²``) for these, since centering shrinks ``sy``. Derived the SAME
+    way every batch/live path namespaces the paired columns, so the guard choice is consistent across paths.
+    """
+    anchored: set[str] = set()
+    for gi, group in enumerate(groups):
+        for reg_name in group._y_anchor_exprs():
+            anchored.add(f"{gi}_{reg_name}")
+    return anchored
 
 
 def build_plan(
@@ -490,13 +618,15 @@ def build_plan(
     ``time_origin_epoch`` (set only by the single-anchor batch path under FP_CENTERED_TIME) pins a
     ``kind="time"`` regression's x to ``(epoch − (origin − _TIME_ORIGIN_LAG·60))/60`` so the batch OLS operand
     sums stay small and well-conditioned (value-identical, origin-invariant). The incremental engine passes
-    None — it sources the time x from its own rolled origin in ``_build_paired`` and overrides this column."""
+    None — it sources the time x from its own rolled origin in ``_build_paired`` and overrides this column.
+    """
     derived: list[pl.Expr] = []
     plan: list[_PlanEntry] = []
     reg_plan: list[_PlanEntry] = []
     all_windows: set[int] = set()
     for gi, group in enumerate(groups):
         time_regs = group._time_regression_names() if time_origin_epoch is not None else set()
+        y_anchors = group._y_anchor_exprs()
         for name, (expr, stats, windows) in group.reduced().items():
             base = f"__b{gi}_{name}"
             derived.append(expr.alias(base))
@@ -506,7 +636,7 @@ def build_plan(
             ns = f"{gi}_{name}"  # namespace the regression's six paired columns per group
             # time_regs is empty unless time_origin_epoch is set, so this only pins under FP_CENTERED_TIME
             x = _pinned_time_x(time_origin_epoch) if name in time_regs else x_expr  # type: ignore[arg-type]
-            derived += _ols_derived(ns, x, y_expr)
+            derived += _ols_derived(ns, x, y_expr, y_anchors.get(name))
             reg_plan.append((gi, name, stats, tuple(windows), ns))
             all_windows |= set(windows)
     # base -> anchor column, for the reduced columns a group opts into centered std (additive; raw stays).
@@ -623,6 +753,7 @@ def assemble_from_long(
     canonical algebra and ``assemble()`` are the SAME code in both; only the source of the sums differs.
     ``latest`` is the minute stamped on output."""
     centered = centered or {}
+    anchored_ns = _anchored_namespaces(groups)
     results: dict[str, pl.DataFrame] = {}
     for gi, group in enumerate(groups):
         canon: list[pl.Expr] = []
@@ -632,7 +763,10 @@ def assemble_from_long(
         for pgi, name, stats, _, ns in reg_plan:
             if pgi == gi:
                 sums = {key: pl.col(f"__rd_{ns}_{key}") for key in ("b", "x", "y", "xy", "xx", "yy")}
-                canon += [expr.alias(f"__c_{stat}_{name}") for stat, expr in _ols_stat_exprs(sums, stats).items()]
+                canon += [
+                    expr.alias(f"__c_{stat}_{name}")
+                    for stat, expr in _ols_stat_exprs(sums, stats, anchored=ns in anchored_ns).items()
+                ]
         # ONE pivot for ALL of this group's canonical columns (vs one pivot+join per stat) — the pivot
         # names columns `<value>_<window>`, so `__c_<stat>_<name>` over window w -> `__c_<stat>_<name>_<w>`,
         # which we rename to the `__<stat>_<name>_<w>` the accessors expect. Extra union-windows are dropped
@@ -641,10 +775,12 @@ def assemble_from_long(
         # single value it would drop the value name to just `<window>`).
         glong = long.select(["symbol", "window", *canon, pl.lit(0.0).alias("__c_z")])
         piv = glong.pivot(on="window", index="symbol")
-        piv = piv.rename({c: "__" + c[4:] for c in piv.columns if c.startswith("__c_") and not c.startswith("__c_z")})
-        wide = latest_frame.select(
-            ["symbol", *[f"__pt_{name}" for name in group.points()]]
-        ).join(piv, on="symbol", how="left")
+        piv = piv.rename(
+            {c: "__" + c[4:] for c in piv.columns if c.startswith("__c_") and not c.startswith("__c_z")}
+        )
+        wide = latest_frame.select(["symbol", *[f"__pt_{name}" for name in group.points()]]).join(
+            piv, on="symbol", how="left"
+        )
         feats = group.assemble()
         results[group.name] = (
             wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
@@ -660,7 +796,8 @@ class _AssemblePlan:
     engine (it is pure metadata over plan/reg_plan/col_index/windows). One row per OUTPUT canonical column:
     the window index into ``running``, the statistic kind byte, and up to six value-col indices. ``col_names``
     is the per-column accessor name (``__<stat>_<name>_<w>``) and ``group_slices`` maps each group index to its
-    contiguous half-open column range in the kernel output, so a group's wide columns are sliced with no copy."""
+    contiguous half-open column range in the kernel output, so a group's wide columns are sliced with no copy.
+    """
 
     win: list[int]
     kind: list[int]
@@ -684,6 +821,7 @@ def build_assemble_plan(
     (idx0/idx2) so the Rust ``assemble_canonical`` std matches the centered ``assemble_from_long`` live truth —
     without this the Rust/numpy emit re-introduce the cancellation centering exists to fix (e.g. volume)."""
     centered = centered or {}
+    anchored_ns = _anchored_namespaces(groups)
     win_index = {int(w): wi for wi, w in enumerate(windows)}
     win: list[int] = []
     kind: list[int] = []
@@ -691,9 +829,11 @@ def build_assemble_plan(
     col_names: list[str] = []
     group_slices: dict[int, tuple[int, int]] = {}
 
-    def push(window: int, stat: str, indices: list[int], col_name: str) -> None:
+    def push(
+        window: int, stat: str, indices: list[int], col_name: str, *, kind_code: int | None = None
+    ) -> None:
         win.append(win_index[int(window)])
-        kind.append(_STAT_CODE[stat])
+        kind.append(_STAT_CODE[stat] if kind_code is None else kind_code)
         padded = (indices + [0, 0, 0, 0, 0, 0])[:6]
         for axis in range(6):
             idx_lists[axis].append(padded[axis])
@@ -711,7 +851,11 @@ def build_assemble_plan(
                     elif stat == "mean":
                         indices = [col_index[base], col_index[f"{base}__p"]]
                     elif base in centered:  # centered std: read Σ(v−a)/Σ(v−a)² (idx0/idx2), count unchanged
-                        indices = [col_index[f"{base}__c"], col_index[f"{base}__p"], col_index[f"{base}__csq"]]
+                        indices = [
+                            col_index[f"{base}__c"],
+                            col_index[f"{base}__p"],
+                            col_index[f"{base}__csq"],
+                        ]
                     else:  # raw std
                         indices = [col_index[base], col_index[f"{base}__p"], col_index[f"{base}__sq"]]
                     push(window, stat, indices, f"__{stat}_{name}_{window}")
@@ -719,9 +863,15 @@ def build_assemble_plan(
             if pgi != gi:
                 continue
             ols_indices = [col_index[f"__rd_{ns}_{key}"] for key in ("b", "x", "y", "xy", "xx", "yy")]
+            anchored = ns in anchored_ns
             for window in group_windows:
                 for stat in stats:
-                    push(window, stat, ols_indices, f"__{stat}_{name}_{window}")
+                    # An anchored (y-centered) regression's corr/r2 use the centered-variance denom_y guard —
+                    # the Rust kind 8/9 twins (slope/mean_y/resid_std are unaffected by y-centering).
+                    kind_code = (
+                        _STAT_CODE_ANCHORED[stat] if anchored and stat in _STAT_CODE_ANCHORED else None
+                    )
+                    push(window, stat, ols_indices, f"__{stat}_{name}_{window}", kind_code=kind_code)
         group_slices[gi] = (start, len(col_names))
     return _AssemblePlan(win, kind, idx_lists, col_names, group_slices)
 
@@ -750,9 +900,7 @@ def emit_rust(
         # Ingest the group's contiguous canonical block in ONE polars allocation (vs a per-column pl.Series
         # copy): pl.from_numpy over the C-contiguous (n_symbols, n_group_cols) slice. NaN stays NaN (not null),
         # exactly as the numpy emit's per-column Series — so assemble()'s null/NaN handling is unchanged.
-        points_select = latest_frame.select(
-            ["symbol", *[f"__pt_{name}" for name in group.points()]]
-        )
+        points_select = latest_frame.select(["symbol", *[f"__pt_{name}" for name in group.points()]])
         if stop > start:
             block = np.ascontiguousarray(canon[:, start:stop])
             piv = pl.from_numpy(block, schema=asm_plan.col_names[start:stop]).with_columns(symbol_series)
@@ -793,7 +941,8 @@ def emit_rust_unified(
     Byte-identical to per-group ``emit_rust`` by construction: the SAME kernel output, the SAME point exprs,
     feeding the SAME ``assemble()`` expressions — only the polars pass/join count changes (1 ingest + 1
     points-select + 1 join + 1 with_columns, vs N of each). Feature names are unique across groups, so the
-    per-group slice is exact. Returns the SAME ``{group_name: feature_frame}`` shape ``emit_rust`` returns."""
+    per-group slice is exact. Returns the SAME ``{group_name: feature_frame}`` shape ``emit_rust`` returns.
+    """
     canon = quant_tick.assemble_canonical(
         np.ascontiguousarray(running), asm_plan.win, asm_plan.kind, *asm_plan.idx
     )  # (n_symbols, n_out), NaN where null
@@ -865,7 +1014,8 @@ def _canonical_numpy(
     ``{base}__c`` = Σ(v−a) and ``{base}__csq`` = Σ(v−a)² (a = the anchor) — value-identical (shift-invariant)
     but float-stable on large-magnitude values. mean/sum still read the RAW ``base``. Required so this numpy
     emit (and the Rust ``assemble_canonical`` twin) match the polars ``assemble_from_long`` live truth for a
-    centered group (e.g. volume); without it they re-introduce the very cancellation centering exists to fix."""
+    centered group (e.g. volume); without it they re-introduce the very cancellation centering exists to fix.
+    """
     total = sums[:, col_index[base]]
     out: dict[str, np.ndarray] = {}
     name = base  # key the returned dict by ``base`` (the caller looks up ``__c_<stat>_<base>`` directly)
@@ -873,7 +1023,9 @@ def _canonical_numpy(
         out[f"__c_sum_{name}"] = total
     if "mean" in stats:
         count = sums[:, col_index[f"{base}__p"]]
-        mean = np.where(count > 0, np.divide(total, count, out=np.zeros_like(total), where=count > 0), np.nan)
+        mean = np.where(
+            count > 0, np.divide(total, count, out=np.zeros_like(total), where=count > 0), np.nan
+        )
         out[f"__c_mean_{name}"] = mean
     if "std" in stats:
         count = sums[:, col_index[f"{base}__p"]]
@@ -895,19 +1047,23 @@ def _canonical_numpy(
 
 
 def _ols_stat_numpy(
-    sums: np.ndarray, stats: tuple[str, ...], col_index: dict[str, int], ns: str
+    sums: np.ndarray, stats: tuple[str, ...], col_index: dict[str, int], ns: str, *, anchored: bool = False
 ) -> dict[str, np.ndarray]:
     """Numpy twin of ``_ols_stat_exprs`` for ONE regression over ONE window — IDENTICAL algebra to
     ``_ols_derived``/``ols.py``, with ``np.nan`` for polars ``null`` and the SAME defined guards (b>=2 &
     denom_x>relative-floor for slope; additionally denom_y>relative-floor for corr/r2). The six paired sums
-    are columns ``__rd_<ns>_{b,x,y,xy,xx,yy}`` in the running-sum row."""
+    are columns ``__rd_<ns>_{b,x,y,xy,xx,yy}`` in the running-sum row. ``anchored`` (FP_RUST_REDUCE y-centered
+    regression): use the centered-variance guard scale ``eps·b·syy`` not ``eps·sy²`` — see ``_ols_stat_exprs``.
+    """
     base_sums = {key: sums[:, col_index[f"__rd_{ns}_{key}"]] for key in ("b", "x", "y", "xy", "xx", "yy")}
     b, sx, sy, sxy, sxx, syy = (base_sums[key] for key in ("b", "x", "y", "xy", "xx", "yy"))
     denom_x = b * sxx - sx * sx
     denom_y = b * syy - sy * sy
     cov_n = b * sxy - sx * sy
+    denom_y_scale = (b * syy) if anchored else (sy * sy)
+    denom_y_eps = _OLS_DENOM_Y_CENTERED_REL_EPS if anchored else _OLS_DENOM_Y_REL_EPS
     defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
-    defined_corr = defined & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
+    defined_corr = defined & (denom_y > denom_y_eps * denom_y_scale)
     perfect = defined_corr & (b == _OLS_PERFECT_FIT_COUNT)  # line through 2 points: r2==1, corr==sign(cov)
     out: dict[str, np.ndarray] = {}
     if "slope" in stats:
@@ -915,11 +1071,17 @@ def _ols_stat_numpy(
         out["slope"] = slope
     if "corr" in stats:
         denom = np.sqrt(denom_x * denom_y)
-        corr = np.where(defined_corr, np.divide(cov_n, denom, out=np.zeros_like(cov_n), where=defined_corr), np.nan)
+        corr = np.where(
+            defined_corr, np.divide(cov_n, denom, out=np.zeros_like(cov_n), where=defined_corr), np.nan
+        )
         out["corr"] = np.where(perfect, np.sign(cov_n), corr)
     if "r2" in stats:
         prod = denom_x * denom_y
-        r2 = np.where(defined_corr, np.divide(cov_n * cov_n, prod, out=np.zeros_like(cov_n), where=defined_corr), np.nan)
+        r2 = np.where(
+            defined_corr,
+            np.divide(cov_n * cov_n, prod, out=np.zeros_like(cov_n), where=defined_corr),
+            np.nan,
+        )
         out["r2"] = np.where(perfect, 1.0, r2)
     if "mean_y" in stats:
         out["mean_y"] = np.where(b > 0, np.divide(sy, b, out=np.zeros_like(sy), where=b > 0), np.nan)
@@ -936,9 +1098,9 @@ def _ols_stat_numpy(
         resid_var = ssr / safe_b
         resid_floor = (_RESID_REL_FLOOR * mean_y) ** 2
         resid_defined = (b >= _RESID_MIN_POINTS) & nonflat & (resid_var > resid_floor)
-        std_pct = np.divide(
-            np.sqrt(resid_var), mean_y, out=np.zeros_like(resid_var), where=resid_defined
-        ) * 100.0
+        std_pct = (
+            np.divide(np.sqrt(resid_var), mean_y, out=np.zeros_like(resid_var), where=resid_defined) * 100.0
+        )
         out["resid_std"] = np.where(resid_defined, std_pct, np.nan)
     return out
 
@@ -964,6 +1126,7 @@ def emit_numpy(
     ``build_plan`` centered-std map (base -> anchor col); a base in it computes std from the centered power
     sums, matching ``assemble_from_long``. Returns the SAME {group_name: feature_frame} shape."""
     centered = centered or {}
+    anchored_ns = _anchored_namespaces(groups)
     win_index = {int(w): wi for wi, w in enumerate(windows)}
     results: dict[str, pl.DataFrame] = {}
     for gi, group in enumerate(groups):
@@ -982,13 +1145,13 @@ def emit_numpy(
                 continue
             for w in group_windows:
                 row_sums = running[win_index[int(w)]]
-                ols = _ols_stat_numpy(row_sums, stats, col_index, ns)
+                ols = _ols_stat_numpy(row_sums, stats, col_index, ns, anchored=ns in anchored_ns)
                 for stat in stats:
                     wide_cols[f"__{stat}_{name}_{w}"] = pl.Series(ols[stat], dtype=pl.Float64)
         piv = pl.DataFrame({"symbol": symbols, **wide_cols})
-        wide = latest_frame.select(
-            ["symbol", *[f"__pt_{name}" for name in group.points()]]
-        ).join(piv, on="symbol", how="left")
+        wide = latest_frame.select(["symbol", *[f"__pt_{name}" for name in group.points()]]).join(
+            piv, on="symbol", how="left"
+        )
         feats = group.assemble()
         results[group.name] = (
             wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])

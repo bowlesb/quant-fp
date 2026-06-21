@@ -588,8 +588,11 @@ fn assemble_canonical<'py>(
                     };
                 }
             }
-            3..=7 => {
-                // OLS: the six paired sums b, x, y, xy, xx, yy -> slope/corr/r2/mean_y/resid_std
+            3..=9 => {
+                // OLS: the six paired sums b, x, y, xy, xx, yy -> slope/corr/r2/mean_y/resid_std.
+                // Kinds 8/9 are the FP_RUST_REDUCE y-centered (anchored) corr/r2 twins of 4/5: IDENTICAL
+                // arithmetic but the denom_y defined-guard uses the centered-variance scale eps·b·syy (not
+                // eps·sy², which collapses when y is centered) — mirrors declarative.py's anchored stat.
                 let (cb, cx, cy, cxy, cxx, cyy) =
                     (idx0[j], idx1[j], idx2[j], idx3[j], idx4[j], idx5[j]);
                 for s in 0..n_sym {
@@ -612,9 +615,14 @@ fn assemble_canonical<'py>(
                     // Relative variance floors (mirror _OLS_DENOM_X/Y_REL_EPS in declarative.py): on a
                     // near-flat regressor (or regressand) denom_x/denom_y is a cancellation difference whose
                     // sign is float-noise, so a bare `> 0.0` would diverge from the polars/numpy paths. Gate
-                    // each on a fraction of its own scale ((Σx)² / (Σy)²).
+                    // each on a fraction of its own scale ((Σx)² / (Σy)²). For an anchored (y-centered)
+                    // regression sy collapses, so denom_y is gated on the translation-invariant variance scale
+                    // eps·b·syy with a larger eps (running-sum noise) — see _OLS_DENOM_Y_CENTERED_REL_EPS.
+                    let anchored = k == 8 || k == 9;
+                    let denom_y_scale = if anchored { b * syy } else { sy * sy };
+                    let denom_y_eps: f64 = if anchored { 1e-9 } else { 1e-12 };
                     let defined = b >= 2.0 && denom_x > 1e-12 * (sx * sx);
-                    let defined_corr = defined && denom_y > 1e-12 * (sy * sy);
+                    let defined_corr = defined && denom_y > denom_y_eps * denom_y_scale;
                     // n==2 perfect-fit corner (mirror _OLS_PERFECT_FIT_COUNT in declarative.py): a line through
                     // two distinct points is an EXACT fit, so r2==1.0 and corr==sign(cov). From the sums the
                     // cov²/(denom_x·denom_y) ratio is noise/noise landing at 1.0±ε; emit the exact value so the
@@ -628,7 +636,8 @@ fn assemble_canonical<'py>(
                                 f64::NAN
                             }
                         }
-                        4 => {
+                        4 | 8 => {
+                            // corr (4) / anchored corr (8)
                             if perfect {
                                 cov_n.signum()
                             } else if defined_corr {
@@ -637,7 +646,8 @@ fn assemble_canonical<'py>(
                                 f64::NAN
                             }
                         }
-                        5 => {
+                        5 | 9 => {
+                            // r2 (5) / anchored r2 (9)
                             if perfect {
                                 1.0
                             } else if defined_corr {

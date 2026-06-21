@@ -83,5 +83,12 @@ class ResidualAnalysisGroup(ReductionGroup):
     def stateful_regressors(self) -> dict[str, list[StatefulRegressor]]:
         return {"resid": [StatefulRegressor(slot="x", kind="time")]}
 
+    # NOTE: residual_analysis does NOT declare a regression_y_anchor. Its resid_std stat divides the SSR by
+    # mean_y (= sy/b, the mean CLOSE, for percent-of-price), and centering y would shift that denominator
+    # (mean(close−a) != mean(close)) — NOT translation-invariant for resid_std. The real-tape gate already
+    # measures residual_analysis CLEAN (worst 0.59x) both ON and OFF the time-axis flag, so its SSR
+    # cancellation does not breach in practice; it needs no y-centering. It can ride the FP_INCREMENTAL flip
+    # on its own clean record.
+
     def assemble(self) -> dict[str, pl.Expr]:
         return {f"residual_std_{w}m": resid_std_("resid", w) for w in WINDOWS}

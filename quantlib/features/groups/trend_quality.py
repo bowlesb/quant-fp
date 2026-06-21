@@ -18,11 +18,19 @@ from quantlib.features.base import (
     FeatureType,
     InputSpec,
 )
-from quantlib.features.declarative import ReductionGroup, StatefulRegressor, mean_, r2_, slope_
+from quantlib.features.declarative import (
+    ReductionGroup,
+    StatefulRegressor,
+    mean_,
+    r2_,
+    slope_,
+)
+from quantlib.features.reduction_anchor import anchor_column
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
 TREND_TOL = 1e-4
+_ANCHOR_CLOSE = anchor_column("close")  # per-symbol close anchor the y-side OLS conditioning centers on
 
 
 @register
@@ -32,7 +40,7 @@ class TrendQualityGroup(ReductionGroup):
     version = "1.1.0"
     owner = "modeller"
     type = FeatureType.TREND_QUALITY
-    inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
+    inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", _ANCHOR_CLOSE)),)
     # price_r2 is the OLS R² = cov²/(var_x·var_y) of close on time. The two former incremental-vs-batch breaches
     # are now closed AT SOURCE: (1) the rolling time-OLS origin-rebase (PR #132) keeps x small so the variance
     # term is well conditioned for every n>=3 cell, and (2) the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT)
@@ -49,16 +57,37 @@ class TrendQualityGroup(ReductionGroup):
         specs = []
         for w in WINDOWS:
             specs.append(
-                FeatureSpec(name=f"price_slope_{w}m", description=f"OLS slope of close on time over the trailing {w} minutes, normalized as a fractional price move per minute.",
-                            dtype="Float64", valid_range=(-1.0, 1.0), nan_policy="warmup", layer="A", tolerance=TREND_TOL)
+                FeatureSpec(
+                    name=f"price_slope_{w}m",
+                    description=f"OLS slope of close on time over the trailing {w} minutes, normalized as a fractional price move per minute.",
+                    dtype="Float64",
+                    valid_range=(-1.0, 1.0),
+                    nan_policy="warmup",
+                    layer="A",
+                    tolerance=TREND_TOL,
+                )
             )
             specs.append(
-                FeatureSpec(name=f"price_r2_{w}m", description=f"R-squared of the trailing {w}-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy.",
-                            dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="warmup", layer="A", tolerance=TREND_TOL)
+                FeatureSpec(
+                    name=f"price_r2_{w}m",
+                    description=f"R-squared of the trailing {w}-minute close-vs-time OLS fit: 1.0 is a perfectly straight move, 0.0 is choppy.",
+                    dtype="Float64",
+                    valid_range=(-0.01, 1.01),
+                    nan_policy="warmup",
+                    layer="A",
+                    tolerance=TREND_TOL,
+                )
             )
             specs.append(
-                FeatureSpec(name=f"trend_strength_{w}m", description=f"Signed quality-weighted trend over {w} minutes: normalized slope times R-squared (steep AND clean moves score highest).",
-                            dtype="Float64", valid_range=(-1.0, 1.0), nan_policy="warmup", layer="A", tolerance=TREND_TOL)
+                FeatureSpec(
+                    name=f"trend_strength_{w}m",
+                    description=f"Signed quality-weighted trend over {w} minutes: normalized slope times R-squared (steep AND clean moves score highest).",
+                    dtype="Float64",
+                    valid_range=(-1.0, 1.0),
+                    nan_policy="warmup",
+                    layer="A",
+                    tolerance=TREND_TOL,
+                )
             )
         return specs
 
@@ -72,6 +101,12 @@ class TrendQualityGroup(ReductionGroup):
 
     def stateful_regressors(self) -> dict[str, list[StatefulRegressor]]:
         return {"trend": [StatefulRegressor(slot="x", kind="time")]}
+
+    def regression_y_anchor(self) -> dict[str, str]:
+        # Center y=close on the per-symbol close anchor under FP_RUST_REDUCE so the price_r2 / corr y-side
+        # denom (b·Σ(y−a)² − (Σ(y−a))²) is conditioned on small centered close — the cancellation-free fix
+        # that closes the 1683x batch-vs-incremental breach value-identically (OLS is translation-invariant).
+        return {"trend": _ANCHOR_CLOSE}
 
     def assemble(self) -> dict[str, pl.Expr]:
         feats: dict[str, pl.Expr] = {}

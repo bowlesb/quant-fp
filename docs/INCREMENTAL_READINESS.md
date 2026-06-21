@@ -64,7 +64,7 @@
 
 | group | feat | running state today | remaining lever |
 |---|---|---|---|
-| `clean_momentum` | 12 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
+| `clean_momentum` | 12 | shared running-sum (WindowedSumState) | UN-PARKED by FP_RUST_REDUCE (y-centered OLS, value-identical: 620×→0.2× real-tape) — relaunch flip (Lead) |
 | `count_fano` | 1 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `distribution` | 20 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `efficiency` | 18 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
@@ -82,7 +82,7 @@
 | `signed_trade_ratio` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_flow` | 23 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_freq_z` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `trend_quality` | 30 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
+| `trend_quality` | 30 | shared running-sum (WindowedSumState) | UN-PARKED by FP_RUST_REDUCE (y-centered OLS, value-identical: 1683×→0.4× real-tape) — relaunch flip (Lead) |
 | `volatility` | 15 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `volume` | 23 | shared running-sum (WindowedSumState) + centered-std (#307) | READY — un-gated by the centered-power-sum std; incremental==batch parity-green |
 | `volume_exhaustion` | 10 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
@@ -341,4 +341,62 @@ path forms a large-near-equal subtraction), NOT a centering anchor. `range_expan
 no cancellation) and `residual_analysis` (time-axis class, handled by #386) remain NOT centering problems.
 This update CLOSES the "return-anchor sibling" backlog item as measured-refuted; fp UNCHANGED (no code path
 changed — the probe is an offline script).
+
+**✅ UPDATE 2026-06-21 — the CANCELLATION-FREE y-side OLS reduction BUILT behind `FP_RUST_REDUCE` (default
+OFF, fp UNCHANGED) UN-PARKS the time-axis R²/corr breach groups VALUE-IDENTICALLY.** The §"REAL-TAPE PROMOTION
+GATE" above located the breach precisely: it is the OLS R²/corr **y-side** (`denom_y = b·Σyy − (Σy)²`,
+`cov_n = b·Σxy − Σx·Σy`) formed from LARGE-magnitude `y = close` (~$45–$500). On a near-perfect-fit window
+these are catastrophic cancellations of large near-equal sums; the batch fresh-window sums and the incremental
+running add/subtract sums round them into materially different r²/corr (1683× trend_quality.price_r2_5m, 620×
+clean_momentum_score_5m). #386 conditioned the time-axis **x** (slope value-identical, 1.1e-13) but never
+reached the y-side; the Dekker/Kahan-on-the-subtraction candidate was measured-REFUTED (#389, can't reconcile
+two differently-conditioned operand sets).
+
+**THE FIX (the doc's named "cancellation-free R²/residual kernel" — centered SSR accumulation computed
+identically in both paths).** Center the OLS `y` on a STABLE per-symbol close anchor (the SAME daily-snapshot
+mechanism `volume` uses for its #307 centered-std anchor — `reduction_anchor.attach_close_anchor`, attached to
+the minute frame BEFORE either path consumes it, read IDENTICALLY by batch + incremental), and accumulate the
+centered paired y-products `Σ(y−a)`, `Σ(x·(y−a))`, `Σ(y−a)²` DIRECTLY, so neither path forms a large-near-equal
+subtraction. OLS slope/r²/corr are translation-invariant in y → value-identical in exact arithmetic, only the
+float conditioning changes (fp UNCHANGED). Because the centering is UPSTREAM of the windowed sum (on the
+paired columns), all three emit twins (polars `assemble_from_long`, numpy `_ols_stat_numpy`, Rust
+`assemble_canonical` kinds 8/9) consume the conditioned sums. One guard adjustment: with `y` centered `Σy`
+collapses, so the `denom_y > eps·sy²` defined-guard is re-based on the translation-invariant variance scale
+`eps·b·syy` with a larger eps (`_OLS_DENOM_Y_CENTERED_REL_EPS = 1e-9`, clearing the incremental running-sum
+noise floor ~1e-12 so a near-flat b==2 window does NOT straddle null↔r2=1).
+
+REAL-TAPE PROOF (the EXACT production self-check `compute_reduction_batch` vs `IncrementalEngine.step`,
+`/store/raw/bars/2026-06-17`, 30 syms, 779 graded post-warmup minutes, force-`incremental_safe` PROBE only —
+no prod flag flipped; reproduce via `scripts/incremental_realdata_soak.py` with the 3 groups force-promoted):
+
+| group | worst ON (=1) | worst OFF (=0) | flag effect | verdict |
+|---|---|---|---|---|
+| `trend_quality` | **0.4×** (price_r2_5m, NKE) | **1682.8×** (identical to #389) | breach → CLEAN | **PROMOTABLE** (value-identical) |
+| `clean_momentum` | **0.2×** (clean_momentum_score_5m, NKE) | **619.8×** | breach → CLEAN | **PROMOTABLE** (value-identical) |
+| `residual_analysis` | 0.6× (clean) | 0.6× (clean) | none — clean both | GO, but NOT a FP_RUST_REDUCE win (see below) |
+
+VALUE-IDENTITY (vs exact-rational `Fraction` truth at the NKE worst price_r2_5m cell): raw batch r2 = 0.9422320
+(err vs exact **7.6e-5** — the ill-conditioned outlier), centered batch r2 = 0.9423077 (err vs exact **3.6e-8**
+— the CORRECT value). On well-conditioned cells `|centered − raw|` ≤ **9.9e-10** (value-identical). So centering
+is value-identical on good cells and value-CORRECTING on the breach cells (within the 1e-4 feature tolerance →
+fp preserved). The schema fingerprint is byte-identical ON vs OFF (`2328254235086533487`, 737 features both).
+
+**WHY residual_analysis is NOT y-centered (honest scope).** Its `resid_std` divides the SSR by `mean_y = sy/b`
+(the mean CLOSE, for percent-of-price); centering y shifts that denominator (`mean(close−a) ≠ mean(close)`) —
+NOT translation-invariant for resid_std. The gate already measures it CLEAN both ON and OFF, so it needs no
+y-centering and can ride a FP_INCREMENTAL flip on its own clean record. **The non-time corr-denom groups
+(`market_beta`, `return_dynamics.autocorr`, `distribution.ret_kurt`, `price_volume.pv_correlation`) are NOT in
+this PR's scope** — they regress on RETURN/SPY-return (no stable static anchor) and hit the guard-perturbation
+wall (the #387 obstacles A/C, measured-refuted above); they remain parked for the future return-anchored
+cancellation-free kernel. `range_expansion` (mean of non-negatives) has no cancellation.
+
+NET PROMOTABLE FROM THIS PR (`FP_RUST_REDUCE=1`): **2 of the time-axis NO-GO groups un-parked value-identically
+(trend_quality, clean_momentum)**, residual_analysis already clean. Speedup on promotion: these move from the
+batch fresh-sum recompute to the incremental running-sum fold (the shared `WindowedSumState` add/expire), the
+same P2-enablement win the 15 GO groups get. `incremental_safe` stays `False` in prod code — the relaunch flip
+(`FP_RUST_REDUCE=1`, then revoke the gate) is the Lead/Ben click. Gate tests: `tests/test_fp_rust_reduce.py`
+(byte-identity OFF, value-identity on good cells, breach→clean direction + ON-path-clean/no-flip). BUILD/ROLL
+for the Lead: `cargo build` + rebuild the fp-dev image with the new `quant_tick` wheel (kinds 8/9 — only needed
+if `FP_RUST_ASSEMBLE` is also on; the polars `step` path needs no wheel change) → `FP_RUST_REDUCE=1` →
+relaunch.
 

@@ -37,10 +37,32 @@ from quantlib.features.capture import (
 )
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 from quantlib.features.incremental import IncrementalEngine
-from quantlib.features.reduction_anchor import _RTH_MINUTES_PER_DAY, attach_volume_anchor
+from quantlib.features.reduction_anchor import (
+    _RTH_MINUTES_PER_DAY,
+    attach_reduction_anchors,
+    attach_volume_anchor,
+)
 from quantlib.features.registry import REGISTRY
 
 BASE = dt.datetime(2026, 6, 16, 14, 0, tzinfo=dt.timezone.utc)
+
+
+def _with_anchors(frame: pl.DataFrame) -> pl.DataFrame:
+    """Attach BOTH the volume and close per-symbol centering anchors (production attaches them via
+    attach_reduction_anchors before either path runs), so the anchor-declaring OLS-y-centered groups
+    (trend_quality, clean_momentum) are runnable / select their anchor column on a synthetic minute frame.
+    Value-additive — the close anchor is consumed only under FP_RUST_REDUCE; it never changes a feature value
+    with the flag off, it only makes the group selectable."""
+    daily = (
+        frame.group_by("symbol", maintain_order=True)
+        .agg(
+            (pl.col("volume").last() * _RTH_MINUTES_PER_DAY).alias("volume"),
+            pl.col("close").last().alias("close"),
+        )
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_reduction_anchors({"minute_agg": frame, "daily": daily})["minute_agg"]
+
 
 # The conditioning-sensitive groups gated to the batch fresh-sum recompute, each DEMONSTRATED to breach the
 # engine-vs-batch parity self-check on a gappy/near-flat walk by test_gappy_denom_group_breaches_raw_so_gate_is_
@@ -90,7 +112,9 @@ INCREMENTAL_REGATED = {
 }
 
 
-def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float = 0.02) -> list[list[dict]]:
+def _stream_minutes(
+    n_sym: int, n_min: int, present_p: float, seed: int, vol: float = 0.02
+) -> list[list[dict]]:
     """A normalized-bar stream (list of per-minute bar batches) where minute 0 carries every symbol (clean
     warmup) and each later minute carries a random ~``present_p`` subset — the live membership-churn shape.
     ``vol`` sets the per-minute return noise; the default 0.02 keeps regressions well-conditioned (r2 well
@@ -107,8 +131,17 @@ def _stream_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: fl
             if not present:
                 continue
             c = price[s]
-            bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
-                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+            bars.append(
+                {
+                    "S": f"S{s}",
+                    "o": c * 0.999,
+                    "c": c,
+                    "h": c * 1.002,
+                    "l": c * 0.998,
+                    "v": 1000.0 + rng.random() * 4000,
+                    "t": minute_iso,
+                }
+            )
         out.append(bars)
     return out
 
@@ -142,8 +175,17 @@ def _flat_volume_minutes(
             # near-constant huge volume with a RELATIVE (not additive-±1) jitter — the regime that exposes the
             # batch-vs-canonical std cancellation (additive ±1 noise on 5e6 is below the breach threshold).
             v = max(base_vol[s] * (1.0 + rng.standard_normal() * vol_noise), 1.0)
-            bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
-                         "v": v, "t": minute_iso})
+            bars.append(
+                {
+                    "S": f"S{s}",
+                    "o": c * 0.999,
+                    "c": c,
+                    "h": c * 1.002,
+                    "l": c * 0.998,
+                    "v": v,
+                    "t": minute_iso,
+                }
+            )
         out.append(bars)
     return out
 
@@ -174,7 +216,8 @@ def _run_all_batch(stream: list[list[dict]], root: str, monkeypatch: pytest.Monk
 
 def _worst_tol_ratio(batch: dict, inc: dict, *, cols_drop: tuple[str, ...] = ()) -> float:
     """Worst divergence between two accumulated per-group dicts, as a multiple of the parity tolerance,
-    joined on (symbol, minute). ``cols_drop`` excludes named feature columns (used to isolate the r2 family)."""
+    joined on (symbol, minute). ``cols_drop`` excludes named feature columns (used to isolate the r2 family).
+    """
     assert set(batch) == set(inc), "group set differs"
     worst = 0.0
     for name, bframe in batch.items():
@@ -237,18 +280,18 @@ def test_parity_selfcheck_records_clean(monkeypatch: pytest.MonkeyPatch, tmp_pat
     _run(stream, str(tmp_path / "selfcheck"))
 
     assert seen, "self-check should record a parity sample each minute"
-    assert not any(breached for _, _, breached in seen), \
-        f"no minute should breach on well-conditioned data; worst {max(r for _, r, _ in seen)}x tolerance"
+    assert not any(
+        breached for _, _, breached in seen
+    ), f"no minute should breach on well-conditioned data; worst {max(r for _, r, _ in seen)}x tolerance"
 
 
 def test_regated_groups_are_incremental_unsafe() -> None:
     """The 5 real-data-soak NO-GO groups carry ``incremental_safe = False`` (re-gated to batch by #332), so
     they ride the batch path under FP_INCREMENTAL — proven byte-identical to batch by
-    ``test_unsafe_group_stays_on_batch_under_incremental`` (which iterates the whole INCREMENTAL_UNSAFE set)."""
+    ``test_unsafe_group_stays_on_batch_under_incremental`` (which iterates the whole INCREMENTAL_UNSAFE set).
+    """
     regated = {
-        g.name
-        for g in REGISTRY.groups()
-        if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED
+        g.name for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED
     }
     assert regated == INCREMENTAL_REGATED, "re-gated soak groups missing from registry"
     assert INCREMENTAL_REGATED <= INCREMENTAL_UNSAFE, "re-gated groups must be in the unsafe set"
@@ -265,9 +308,14 @@ def test_ols_near_perfect_fit_engine_matches_batch(slice_derive: bool) -> None:
     (_OLS_PERFECT_FIT_COUNT: r2=1.0 / corr=sign(cov) at b==2), the IncrementalEngine agrees with the batch on
     the time-axis-OLS groups on BOTH the live slice-derive and the whole-buffer paths. These groups are
     PROD-GATED to batch by the real-data soak (rare gappy-tape straddles this smooth walk does not hit), but
-    the kernel itself stays well-conditioned on the smooth regime — the regression guard for the OLS rebase."""
-    smooth = _stream_minutes(n_sym=8, n_min=20, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
-    groups = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED]
+    the kernel itself stays well-conditioned on the smooth regime — the regression guard for the OLS rebase.
+    """
+    smooth = _stream_minutes(
+        n_sym=8, n_min=20, present_p=0.7, seed=3, vol=0.002
+    )  # near-linear -> near-perfect fit
+    groups = [
+        g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED
+    ]
     assert {g.name for g in groups} == INCREMENTAL_REGATED, "re-gated OLS groups missing from registry"
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
@@ -276,14 +324,16 @@ def test_ols_near_perfect_fit_engine_matches_batch(slice_derive: bool) -> None:
         if not bars:
             continue
         ring.push(_bars_to_frame(bars))
-        frame = ring.materialize()
+        frame = _with_anchors(ring.materialize())
         ctx = BatchContext(frames={"minute_agg": frame})
         batch = compute_reduction_batch(groups, ctx)
         if engine is None:
             engine = IncrementalEngine(groups)
         inc = engine.step(frame, slice_derive=slice_derive)
         worst = max(worst, _worst_tol_ratio(batch, inc))
-    assert worst < _PARITY_BREACH_RATIO, f"re-gated OLS engine must match batch on perfect-fit walk: {worst}x"
+    assert (
+        worst < _PARITY_BREACH_RATIO
+    ), f"re-gated OLS engine must match batch on perfect-fit walk: {worst}x"
 
 
 @pytest.mark.parametrize(
@@ -305,7 +355,9 @@ def test_regated_ols_groups_engine_matches_batch_on_degenerate_walks(
     real-data soak for the GAPPIER regimes these synthetic walks do not reproduce — so this is the kernel
     regression guard, not a flip claim."""
     walk = _stream_minutes(n_sym=10, n_min=18, present_p=present_p, seed=seed, vol=vol)
-    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED]
+    flipped = [
+        g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED
+    ]
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
     worst = 0.0
@@ -313,7 +365,7 @@ def test_regated_ols_groups_engine_matches_batch_on_degenerate_walks(
         if not bars:
             continue
         ring.push(_bars_to_frame(bars))
-        frame = ring.materialize()
+        frame = _with_anchors(ring.materialize())
         ctx = BatchContext(frames={"minute_agg": frame})
         batch = compute_reduction_batch(flipped, ctx)
         if engine is None:
@@ -323,7 +375,9 @@ def test_regated_ols_groups_engine_matches_batch_on_degenerate_walks(
     assert worst < _PARITY_BREACH_RATIO, f"flipped OLS breached on degenerate walk (seed={seed}): {worst}x"
 
 
-def _late_appearance_minutes(n_sym: int, n_min: int, present_p: float, seed: int, vol: float) -> list[list[dict]]:
+def _late_appearance_minutes(
+    n_sym: int, n_min: int, present_p: float, seed: int, vol: float
+) -> list[list[dict]]:
     """A sparse stream where NO minute carries every symbol — symbols FIRST appear at random later minutes (NOT
     a clean minute-0 warmup). This drives the ``SymbolSetExpanded`` re-seed (a genuinely-new ticker each time a
     fresh symbol appears), folding the whole multi-minute buffer through ``_matrix_at`` for HISTORICAL minutes —
@@ -341,13 +395,31 @@ def _late_appearance_minutes(n_sym: int, n_min: int, present_p: float, seed: int
             if rng.random() >= present_p:  # no minute-0 force: symbols appear (and reappear) sparsely
                 continue
             c = price[s]
-            bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
-                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+            bars.append(
+                {
+                    "S": f"S{s}",
+                    "o": c * 0.999,
+                    "c": c,
+                    "h": c * 1.002,
+                    "l": c * 0.998,
+                    "v": 1000.0 + rng.random() * 4000,
+                    "t": minute_iso,
+                }
+            )
         if not bars:  # a real feed always carries >=1 symbol per minute
             s = int(rng.integers(n_sym))
             c = price[s]
-            bars.append({"S": f"S{s}", "o": c * 0.999, "c": c, "h": c * 1.002, "l": c * 0.998,
-                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+            bars.append(
+                {
+                    "S": f"S{s}",
+                    "o": c * 0.999,
+                    "c": c,
+                    "h": c * 1.002,
+                    "l": c * 0.998,
+                    "v": 1000.0 + rng.random() * 4000,
+                    "t": minute_iso,
+                }
+            )
         out.append(bars)
     return out
 
@@ -373,7 +445,9 @@ def test_regated_ols_engine_matches_batch_on_late_appearance_reseed(
     (These groups are prod-gated to batch by the real-data soak; this test exercises the engine kernel
     directly so the slice-derive correctness stays guarded regardless of the gating decision.)"""
     walk = _late_appearance_minutes(n_sym=20, n_min=40, present_p=present_p, seed=seed, vol=vol)
-    flipped = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED]
+    flipped = [
+        g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED
+    ]
     ring = MinuteRing(maxlen=120)
     engine: IncrementalEngine | None = None
     worst = 0.0
@@ -381,7 +455,7 @@ def test_regated_ols_engine_matches_batch_on_late_appearance_reseed(
         if not bars:
             continue
         ring.push(_bars_to_frame(bars))
-        frame = ring.materialize()
+        frame = _with_anchors(ring.materialize())
         ctx = BatchContext(frames={"minute_agg": frame})
         batch = compute_reduction_batch(flipped, ctx)
         if engine is None:
@@ -447,7 +521,8 @@ def _gappy_corr_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -> 
     against its own lag / against lagged volume) collapse to ~constant over the sparse window, so the corr
     denominator √(var_x·var_y) is a difference of near-equal running sums — the incremental running sums round
     it across the corr defined-guard differently from the batch fresh sum, so incremental emits a value where
-    batch emits NULL (or disagrees past the breach ratio). Re-paired counts under sparse presence amplify it."""
+    batch emits NULL (or disagrees past the breach ratio). Re-paired counts under sparse presence amplify it.
+    """
     rng = np.random.default_rng(seed)
     price = {s: 100.0 + s for s in range(n_sym)}
     out: list[list[dict]] = []
@@ -460,8 +535,17 @@ def _gappy_corr_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -> 
             if not present:
                 continue
             c = price[s]
-            bars.append({"S": f"S{s}", "o": c, "c": c, "h": c * 1.0001, "l": c * 0.9999,
-                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+            bars.append(
+                {
+                    "S": f"S{s}",
+                    "o": c,
+                    "c": c,
+                    "h": c * 1.0001,
+                    "l": c * 0.9999,
+                    "v": 1000.0 + rng.random() * 4000,
+                    "t": minute_iso,
+                }
+            )
         if not bars:  # a real feed always carries >=1 symbol per minute
             c = price[0]
             bars.append({"S": "S0", "o": c, "c": c, "h": c, "l": c, "v": 1000.0, "t": minute_iso})
@@ -542,15 +626,33 @@ def _gappy_market_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -
     for mi in range(n_min):
         minute_iso = (BASE + dt.timedelta(minutes=mi)).isoformat()
         spy *= 1.0 + 1e-3 + rng.standard_normal() * 1e-9  # ~constant SPY return -> the broadcast x collapses
-        bars: list[dict] = [{"S": "SPY", "o": spy, "c": spy, "h": spy * 1.0001, "l": spy * 0.9999,
-                             "v": 1_000_000.0, "t": minute_iso}]
+        bars: list[dict] = [
+            {
+                "S": "SPY",
+                "o": spy,
+                "c": spy,
+                "h": spy * 1.0001,
+                "l": spy * 0.9999,
+                "v": 1_000_000.0,
+                "t": minute_iso,
+            }
+        ]
         for s in range(n_sym):
             if not (mi == 0 or rng.random() < present_p):
                 continue
             price[s] *= 1.0 + 1e-3 + rng.standard_normal() * 1e-9
             c = price[s]
-            bars.append({"S": f"S{s}", "o": c, "c": c, "h": c * 1.0001, "l": c * 0.9999,
-                         "v": 1000.0 + rng.random() * 4000, "t": minute_iso})
+            bars.append(
+                {
+                    "S": f"S{s}",
+                    "o": c,
+                    "c": c,
+                    "h": c * 1.0001,
+                    "l": c * 0.9999,
+                    "v": 1000.0 + rng.random() * 4000,
+                    "t": minute_iso,
+                }
+            )
         out.append(bars)
     return out
 
@@ -593,7 +695,9 @@ def test_market_beta_breaches_on_real_gappy_spy_regressor() -> None:
     )
 
 
-def test_gappy_denom_groups_stay_on_batch_under_incremental(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_gappy_denom_groups_stay_on_batch_under_incremental(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     """On the gappy near-constant-return walk the unsafe groups stay on the batch path under FP_INCREMENTAL, so
     their output is BYTE-IDENTICAL to the no-flag batch output (frame_equal, not merely within tolerance) — the
     routing the ``incremental_safe = False`` gate produces. (This is the integration counterpart to the raw
@@ -642,7 +746,9 @@ def test_unsafe_group_stays_on_batch_under_incremental(monkeypatch: pytest.Monke
     FP_INCREMENTAL, so their output is BYTE-IDENTICAL to the no-flag batch output (not merely within tolerance).
     Meanwhile the safe groups still ride the incremental path. This proves the split protects the sensitive
     features from the conditioning corner while still serving everything else fast."""
-    smooth = _stream_minutes(n_sym=8, n_min=25, present_p=0.7, seed=3, vol=0.002)  # near-linear -> near-perfect fit
+    smooth = _stream_minutes(
+        n_sym=8, n_min=25, present_p=0.7, seed=3, vol=0.002
+    )  # near-linear -> near-perfect fit
 
     monkeypatch.delenv("FP_INCREMENTAL_PARITY", raising=False)
     with monkeypatch.context() as forced_batch:
