@@ -108,6 +108,31 @@ useful certification (it is the bulk of what equity parity tests), and it is wha
 rehearsal meaningful. A future "genuine off-hours trust surface" (Alpaca `CryptoHistorical` → an independent
 crypto raw tape) is the stronger version and is tracked as a later phase, owned by DataIntegrity.
 
+### The fingerprint-currency requirement (crypto-capture must run CURRENT code)
+
+The crypto bus fingerprint is NOT a universal-subset fingerprint computed separately — `crypto_capture` uses
+`BusPublisher(prefix="fv:crypto")` with the DEFAULT schema (`default_schema()` = the FULL registry
+`BusSchema.from_registry`), so crypto stamps the SAME registry-authoritative fingerprint equity does, frozen
+at the crypto-capture PROCESS START (Python imports the registry once). The bind-mount (`/home/ben/quant-fp` →
+`/app`, like fc) is `rw` to the live tree, but a running process does NOT pick up tree changes — only a
+relaunch reloads the registry.
+
+**Finding (2026-06-21, investigated read-only at the Lead's flag):** crypto-capture started 06-19 23:30Z,
+which is `858162d` (#175) — BEFORE the 728 deploy (#213 + the #254/#270 swing_dc re-land/de-stage + the
+registry-affecting group commits landed AFTER). Verified by computing `default_schema().fingerprint` at both
+commits in fp-dev: at `858162d` it is `0xae849d400c909972 / 694` (exactly what CryptoStrategy decoded off the
+crypto bus); at current HEAD it is `0x873f2fceb8f00c92 / 728`. So **crypto-capture is STALE** — running the
+old 694 registry because it was never relaunched since 728 landed. NOT 694-by-design.
+
+**Consequence for this rehearsal:** the crypto parity sweep must certify a CURRENT feature set, not a stale
+one. The OFFLINE slice (this PR) is unaffected — it recomputes the backfill side from the SAME stored inputs
+through whatever registry the SWEEP runs (current tree in the sandbox), so emit==recompute holds regardless of
+the live container's age. But to make the LIVE crypto stream a faithful current-fingerprint surface (and
+before Phase 2's live crypto WDPC), crypto-capture needs a **controlled relaunch on the current tree** so it
+computes 728. This is a Lead-gated click (golden rule: relaunch only via the sanctioned path, never
+`docker restart`); tracked in the READINESS ledger as "crypto-capture CODE CURRENCY". The fingerprint must be
+well-defined AND current, else the rehearsal certifies a stale set.
+
 ---
 
 ## 4. The phased plan
