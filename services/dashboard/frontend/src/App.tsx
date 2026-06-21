@@ -27,7 +27,20 @@ export function App() {
   const [hover, setHover] = useState<HoverCell | null>(null);
   const [detailKey, setDetailKey] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  // The group column under the pointer right now (header or body cell); the "press K for detail" shortcut and
+  // the toolbar detail button target it.
+  const [hoveredGroup, setHoveredGroup] = useState<string | null>(null);
+  // The detail sidebar is OPTIONAL. `sidebarHidden` force-hides it (toolbar toggle + Esc), and the preference
+  // persists for the session so a user who dismisses it keeps the full-width grid across reloads.
+  const [sidebarHidden, setSidebarHidden] = useState<boolean>(
+    () => sessionStorage.getItem("sidebarHidden") === "1",
+  );
   const matrixGeneratedAt = useRef<string | null>(null);
+  // Latest hovered/expanded group, read by the keydown handler without re-binding it every hover.
+  const hoveredGroupRef = useRef<string | null>(null);
+  hoveredGroupRef.current = hoveredGroup;
+  const expandedGroupsRef = useRef<Set<string>>(expandedGroups);
+  expandedGroupsRef.current = expandedGroups;
 
   const loadMatrix = useCallback(async () => {
     try {
@@ -73,7 +86,23 @@ export function App() {
     return () => window.clearInterval(id);
   }, []);
 
-  const openDetail = useCallback((columnKey: string) => setDetailKey(columnKey), []);
+  // Opening detail (via K or a header click) is an explicit request to SEE detail, so it reveals the sidebar
+  // even if previously hidden — Hide/Esc/the toolbar toggle are the way to keep it away.
+  const openDetail = useCallback((columnKey: string) => {
+    setSidebarHidden(false);
+    sessionStorage.setItem("sidebarHidden", "0");
+    setDetailKey(columnKey);
+  }, []);
+
+  const closeDetail = useCallback(() => setDetailKey(null), []);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarHidden((prev) => {
+      const next = !prev;
+      sessionStorage.setItem("sidebarHidden", next ? "1" : "0");
+      return next;
+    });
+  }, []);
 
   const toggleExpand = useCallback((groupKey: string) => {
     setExpandedGroups((prev) => {
@@ -83,6 +112,32 @@ export function App() {
       return next;
     });
   }, []);
+
+  // Keyboard: "K" opens the detail sidebar for the group currently under the pointer (falling back to the sole
+  // expanded group), so detail never requires chasing a hover menu; Esc closes/hides the sidebar. Ignored while
+  // typing in an input/textarea/contenteditable.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      if (event.key === "k" || event.key === "K") {
+        const expanded = expandedGroupsRef.current;
+        const group = hoveredGroupRef.current ?? (expanded.size === 1 ? [...expanded][0] : null);
+        if (group) {
+          event.preventDefault();
+          openDetail(group);
+        }
+      } else if (event.key === "Escape") {
+        setDetailKey(null);
+        setSidebarHidden(true);
+        sessionStorage.setItem("sidebarHidden", "1");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [openDetail]);
 
   // The display columns the tooltip needs (mirrors the heatmap's expansion); cheap to recompute.
   const displayCols = useMemo<DisplayColumn[]>(() => {
@@ -162,6 +217,14 @@ export function App() {
               {formatAsOf(meta.generated_at)}
             </span>
           )}
+          <button
+            className={"sidebar-toggle" + (sidebarHidden ? "" : " on")}
+            onClick={toggleSidebar}
+            title={sidebarHidden ? "Show the detail sidebar" : "Hide the detail sidebar"}
+            aria-pressed={!sidebarHidden}
+          >
+            {sidebarHidden ? "Show detail ›" : "Hide detail ‹"}
+          </button>
         </div>
       </header>
 
@@ -194,21 +257,23 @@ export function App() {
           <CanvasHeatmap
             matrix={matrix}
             expandedGroups={expandedGroups}
-            highlightCol={detailKey}
+            highlightCol={sidebarHidden ? null : detailKey}
             onHoverChange={setHover}
             onToggleExpand={toggleExpand}
             onOpenDetail={openDetail}
+            onHoverGroupChange={setHoveredGroup}
           />
         )}
       </div>
 
       {matrix && <Tooltip hover={hover} matrix={matrix} displayCols={displayCols} />}
 
-      {detailColumn && (
+      {detailColumn && !sidebarHidden && (
         <GroupDetailPanel
           column={detailColumn}
           info={matrix?.group_info[detailColumn.key]}
-          onClose={() => setDetailKey(null)}
+          onClose={closeDetail}
+          onHide={toggleSidebar}
         />
       )}
     </div>

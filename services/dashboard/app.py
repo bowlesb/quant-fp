@@ -21,8 +21,8 @@ from pathlib import Path
 
 import scorecard_store
 import status_store
-from fastapi import FastAPI, Response
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jobs_page import load_status as load_jobs_status
 from scorecard import CACHE as SCORECARD_CACHE
@@ -32,6 +32,26 @@ from store_grid_cache import read_grid_gzip
 from store_grid_cache import read_meta as read_grid_meta
 
 app = FastAPI(title="Quant Coverage Grid")
+
+# index.html is served with NO-CACHE so it always revalidates. The Vite bundle is content-hashed (its filename
+# changes every rebuild), so a browser holding a CACHED index.html would keep requesting the OLD hash after we
+# rebuild the image → 404 on the dead /assets/*.js → blank/stalled page. Forcing the HTML to revalidate (while
+# the hashed /assets/* keep their long immutable cache) breaks that stall: the browser always re-fetches the
+# current index.html, which points at the live hashes.
+INDEX_NO_CACHE = "no-cache, max-age=0, must-revalidate"
+# The hashed /assets/* are content-addressed (the filename changes when the content changes), so a cached copy
+# is never stale — cache them hard for a year as immutable.
+ASSET_IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+
+
+class ImmutableStaticFiles(StaticFiles):
+    """StaticFiles that stamps a long immutable Cache-Control on every hit. Safe because Vite emits
+    content-hashed asset filenames, so the bytes behind a given URL never change."""
+
+    def file_response(self, *args: object, **kwargs: object) -> Response:
+        response = super().file_response(*args, **kwargs)  # type: ignore[arg-type]
+        response.headers["Cache-Control"] = ASSET_IMMUTABLE_CACHE
+        return response
 
 
 @app.get("/api/store-grid/matrix")
@@ -129,11 +149,49 @@ def jobs_json() -> JSONResponse:
 
 
 # The React coverage-grid SPA (services/dashboard/frontend), built to static assets by the Dockerfile's node
-# stage into /app/frontend/store-grid. Mounted LAST (after every /api/* route is declared) at the ROOT ``/``
-# with html=True so the grid IS the dashboard: index.html serves at /, deep links fall back to it, and the
-# client-side asset paths resolve. The /api/* routes above are matched first (more specific). STATICFILES_DIR
-# is overridable; if the build is absent (a non-Docker dev run that skipped ``npm run build``), the mount is
-# skipped so the API still boots.
+# stage into /app/frontend/store-grid. STATICFILES_DIR is overridable; if the build is absent (a non-Docker dev
+# run that skipped ``npm run build``), the mounts/routes are skipped so the API still boots.
+#
+# Serving is split so the HTML revalidates but the hashed assets cache hard:
+#   * ``/assets/*`` (Vite's content-hashed JS/CSS) → StaticFiles with a LONG immutable cache; the filename
+#     changes every rebuild, so a stale copy is never wrong.
+#   * ``/`` and any SPA deep link → ``index.html`` with NO-CACHE, so the browser always re-fetches the HTML and
+#     picks up the live asset hashes (the rebuild-stall fix).
 STATICFILES_DIR = Path(os.environ.get("STORE_GRID_STATIC_DIR", "/app/frontend/store-grid"))
+INDEX_HTML = STATICFILES_DIR / "index.html"
+ASSETS_DIR = STATICFILES_DIR / "assets"
+
+
+def _index_response() -> FileResponse:
+    """index.html with the no-cache header — the SPA entry + deep-link fallback."""
+    return FileResponse(INDEX_HTML, headers={"Cache-Control": INDEX_NO_CACHE})
+
+
 if STATICFILES_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=STATICFILES_DIR, html=True), name="grid-spa")
+    if ASSETS_DIR.is_dir():
+        # Content-hashed bundles: immutable, cache for a year. New builds emit new filenames.
+        app.mount(
+            "/assets",
+            ImmutableStaticFiles(directory=ASSETS_DIR),
+            name="grid-assets",
+        )
+
+    @app.get("/")
+    def spa_root() -> FileResponse:
+        """The grid IS the dashboard — index.html at the root, always revalidated (no-cache)."""
+        return _index_response()
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str) -> FileResponse:
+        """SPA deep-link fallback: any non-API, non-asset path returns the no-cache index.html so client-side
+        routing resolves. Declared LAST so every explicit ``/api/*`` route and the ``/assets`` mount win. A
+        request for a missing real file (e.g. ``/favicon.ico`` when none is shipped) 404s rather than returning
+        HTML with a 200."""
+        candidate = STATICFILES_DIR / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        if "." in Path(full_path).name:
+            # Looks like a static file request (has an extension) but no such file exists — a real 404, not an
+            # SPA route. Returning index.html here would mask missing assets as 200s.
+            raise HTTPException(status_code=404)
+        return _index_response()

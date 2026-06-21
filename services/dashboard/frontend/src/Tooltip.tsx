@@ -55,11 +55,13 @@ export function Tooltip({ hover, matrix, displayCols }: Props) {
         </div>
       )}
       {dc.kind === "group" && dc.expandable && (
-        <div className="tooltip-hint">click a cell to expand its features</div>
+        <div className="tooltip-hint">click the header to expand its features</div>
       )}
-      <div className="tooltip-more">
-        click the column header for <strong>more detail ▸</strong>
-      </div>
+      {dc.kind !== "raw" && (
+        <div className="tooltip-more">
+          press <strong>K</strong> for more detail
+        </div>
+      )}
     </div>
   );
 }

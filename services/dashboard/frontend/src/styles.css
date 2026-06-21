@@ -63,10 +63,35 @@ body {
   font-weight: 650;
   letter-spacing: 0.2px;
 }
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
 .asof {
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+.sidebar-toggle {
+  background: #fff;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--font);
+}
+.sidebar-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.sidebar-toggle.on {
+  background: rgba(31, 111, 235, 0.08);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* ---------- controls + legend ---------- */
@@ -201,9 +226,28 @@ body {
   height: 130px;
   cursor: pointer;
 }
+/* A comfortable full-height hover/active band so the header is an easy click target despite the narrow column,
+   and so expand/collapse reads clearly. */
+.col-label.expandable:hover {
+  background: rgba(31, 111, 235, 0.1);
+}
+.col-label.expandable.expanded {
+  background: rgba(31, 111, 235, 0.06);
+}
 .col-label:hover span {
   text-decoration: underline;
   text-decoration-color: var(--accent);
+}
+/* Expand/collapse chevron: ▸ collapsed, rotates to ▾ when expanded. Rendered inside the rotated label span, so
+   it inherits the -60deg label rotation; the extra 90deg here is the open-state turn relative to that. */
+.col-chevron {
+  display: inline-block;
+  color: var(--accent);
+  font-weight: 700;
+  transition: transform 0.12s ease;
+}
+.col-chevron.open {
+  transform: rotate(90deg);
 }
 /* A bracket + group name spanning an expanded group's columns (header region). */
 .col-span-bracket {
@@ -296,7 +340,7 @@ body {
   position: absolute;
   inset: 0;
   overflow: auto;
-  cursor: pointer;
+  cursor: default;
 }
 .heatmap-scroll::-webkit-scrollbar {
   width: 11px;
@@ -463,8 +507,25 @@ body {
   color: var(--raw);
   background: rgba(58, 69, 84, 0.08);
 }
-.detail-close {
+.detail-hide {
   margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  font-family: var(--font);
+}
+.detail-hide:hover {
+  background: var(--border);
+  color: var(--accent);
+}
+.detail-close {
   background: none;
   border: 1px solid var(--border);
   color: var(--text-dim);

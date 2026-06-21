@@ -4,13 +4,15 @@ interface Props {
   column: GridColumn;
   info: GroupInfo | undefined;
   onClose: () => void;
+  // Hide the sidebar entirely (persisted for the session), giving the grid the full width.
+  onHide: () => void;
 }
 
 // The "more detail" panel for one column (feature group or raw layer). Shows, from the matrix's baked-in
 // group_info: WHAT it is (the group docstring / curated purpose), HOW its features differ (the per-feature
 // description list, authored for every feature), and WHY we compute it (the curated guide value — or an honest
 // "not yet written" stub when the guide has no entry, rather than fabricating a rationale).
-export function GroupDetailPanel({ column, info, onClose }: Props) {
+export function GroupDetailPanel({ column, info, onClose, onHide }: Props) {
   const isRaw = column.kind === "raw";
   const trustLabel = isRaw ? "raw tape layer" : column.trusted ? "trusted" : "untrusted";
   const guide = info?.guide ?? null;
@@ -25,7 +27,10 @@ export function GroupDetailPanel({ column, info, onClose }: Props) {
           <span className="detail-chip-name">{column.label}</span>
         </span>
         <span className={"detail-trust " + (isRaw ? "raw" : column.trusted ? "yes" : "no")}>{trustLabel}</span>
-        <button className="detail-close" onClick={onClose} aria-label="close detail">
+        <button className="detail-hide" onClick={onHide} aria-label="hide sidebar" title="Hide sidebar (Esc)">
+          Hide ‹
+        </button>
+        <button className="detail-close" onClick={onClose} aria-label="close detail" title="Close">
           ×
         </button>
       </div>

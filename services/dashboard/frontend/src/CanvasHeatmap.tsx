@@ -30,6 +30,9 @@ interface Props {
   onHoverChange: (cell: HoverCell | null) => void;
   onToggleExpand: (groupKey: string) => void;
   onOpenDetail: (columnKey: string) => void;
+  // The group key currently under the pointer (header OR a body cell), so a "press K for detail" shortcut can
+  // target it without the mouse chasing a hover menu. null when the pointer is off any group column.
+  onHoverGroupChange: (groupKey: string | null) => void;
 }
 
 // The contiguous display-column span [start, end) covered by each EXPANDED group (its own column + its
@@ -102,6 +105,7 @@ export function CanvasHeatmap({
   onHoverChange,
   onToggleExpand,
   onOpenDetail,
+  onHoverGroupChange,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -218,6 +222,7 @@ export function CanvasHeatmap({
       const hit = colAt(event.clientX, event.clientY);
       if (!hit) {
         onHoverChange(null);
+        onHoverGroupChange(null);
         return;
       }
       onHoverChange({
@@ -226,20 +231,15 @@ export function CanvasHeatmap({
         clientX: event.clientX,
         clientY: event.clientY,
       });
+      onHoverGroupChange(displayCols[hit.col]?.groupKey ?? null);
     },
-    [colAt, onHoverChange],
+    [colAt, displayCols, onHoverChange, onHoverGroupChange],
   );
 
-  // Clicking anywhere in an expandable GROUP column toggles its horizontal feature expand.
-  const onClick = useCallback(
-    (event: React.MouseEvent) => {
-      const hit = colAt(event.clientX, event.clientY);
-      if (!hit) return;
-      const dc = displayCols[hit.col];
-      if (dc.kind === "group" && dc.expandable && dc.groupKey) onToggleExpand(dc.groupKey);
-    },
-    [colAt, displayCols, onToggleExpand],
-  );
+  const onBodyLeave = useCallback(() => {
+    onHoverChange(null);
+    onHoverGroupChange(null);
+  }, [onHoverChange, onHoverGroupChange]);
 
   const dateLabels = useMemo(() => {
     const { firstRow, lastRow } = visibleRows;
@@ -276,30 +276,48 @@ export function CanvasHeatmap({
               <span className="col-span-name">{span.groupKey}</span>
             </div>
           ))}
-          {displayCols.map((dc, c) => (
-            <div
-              key={dc.key}
-              className={
-                "col-label" +
-                ` k-${dc.kind}` +
-                (dc.trusted ? " trusted" : dc.kind === "group" ? " untrusted" : "") +
-                (highlightCol === dc.groupKey && dc.kind === "group" ? " active" : "")
-              }
-              style={{ left: c * CELL.w, width: CELL.w }}
-              title={
-                dc.kind === "feature"
-                  ? `${dc.label} — click for ${dc.groupKey} detail`
-                  : dc.label +
-                    (dc.expandable ? " — click header for detail (click a cell to expand features)" : "")
-              }
-              onClick={() => onOpenDetail(dc.kind === "feature" ? (dc.groupKey as string) : dc.key)}
-            >
-              <span>
-                {dc.kind === "group" && dc.expandable ? (dc.expanded ? "▾ " : "▸ ") : ""}
-                {dc.label}
-              </span>
-            </div>
-          ))}
+          {displayCols.map((dc, c) => {
+            const isGroup = dc.kind === "group";
+            const isExpandable = isGroup && dc.expandable;
+            // Clicking a group header TOGGLES its feature expand (the primary interaction); a feature sub-column
+            // header opens its parent group's detail. K (handled in App) opens detail for the hovered group, so
+            // detail is never gated on clicking the header.
+            const onLabelClick = () => {
+              if (isExpandable && dc.groupKey) onToggleExpand(dc.groupKey);
+              else if (dc.kind === "feature" && dc.groupKey) onOpenDetail(dc.groupKey);
+              else if (isGroup) onOpenDetail(dc.key);
+            };
+            const title = isExpandable
+              ? `${dc.label} — click to ${dc.expanded ? "collapse" : "expand"} features · press K for detail`
+              : dc.kind === "feature"
+                ? `${dc.label} — click for ${dc.groupKey} detail`
+                : dc.label;
+            return (
+              <div
+                key={dc.key}
+                className={
+                  "col-label" +
+                  ` k-${dc.kind}` +
+                  (dc.trusted ? " trusted" : isGroup ? " untrusted" : "") +
+                  (isExpandable ? " expandable" : "") +
+                  (dc.expanded ? " expanded" : "") +
+                  (highlightCol === dc.groupKey && isGroup ? " active" : "")
+                }
+                style={{ left: c * CELL.w, width: CELL.w }}
+                title={title}
+                onClick={onLabelClick}
+                onMouseEnter={() => onHoverGroupChange(dc.groupKey)}
+                onMouseLeave={() => onHoverGroupChange(null)}
+              >
+                <span>
+                  {isExpandable ? (
+                    <span className={"col-chevron" + (dc.expanded ? " open" : "")}>▸</span>
+                  ) : null}
+                  {dc.label}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -316,8 +334,7 @@ export function CanvasHeatmap({
             ref={scrollRef}
             className="heatmap-scroll"
             onMouseMove={onMouseMove}
-            onMouseLeave={() => onHoverChange(null)}
-            onClick={onClick}
+            onMouseLeave={onBodyLeave}
           >
             <div style={{ width: contentWidth, height: contentHeight }} />
           </div>
