@@ -218,3 +218,36 @@ cancellation-free-denom candidate (2) is CLOSED (measured-refuted); candidate (1
 anchor) is moot for the material breaches (they are time-axis, not return-regressor). NO code shipped this
 pass (the investigation was measure-first and the approach did not clear the bar); fp UNCHANGED.
 
+**UPDATE 2026-06-21 — the time-axis batch conditioning BUILT behind `FP_CENTERED_TIME` (default OFF, fp
+unchanged).** `compute_latest` / `compute_reduction_batch` / `build_plan` now pin a `kind="time"` regression's
+x to the incremental engine's exact anchor origin (`latest − _TIME_ORIGIN_LAG·60`, the shared constant now
+defined in `declarative.py`) so the live-batch OLS operand sums coincide with the incremental axis at the
+anchor minute. MEASURED value-identical: the OLS operands shrink ~70× (Σxx 4.38e6→6.34e4 on a deep
+trend_quality window) while `denom_x`/`cov_n` (origin-invariant) are bit-identical, and a 1298-cell ON-vs-OFF
+sweep over the 4 time-axis groups diverges ≤ 2.3e-10 relative with ZERO null-flips. The full
+declarative/incremental/latest/parity suite passes ON and OFF (`tests/test_fp_centered_time.py` locks scope +
+value-identity + the operand-shrink-with-denom-identical proof). This is exactly the live self-check the
+`incremental_safe` gate runs (`capture.py` `_incremental_parity` compares `compute_reduction_batch` vs
+`IncrementalEngine` — both now conditioned identically), so it is the value-identical mechanism that lets the
+time-axis groups be promoted once the gate is re-measured CLEAN on real tape.
+
+TWO honest residuals (NOT shipped here, surfaced for the picker-upper):
+1. **Backfill `compute()` is NOT conditioned by this PR** (kept on its `epoch.min()` rolling form). A single
+   rolling pass CANNOT give a per-window-local small x: `rolling_sum_by((epoch − rolling_min_by(epoch))²)` sums
+   terms built from each row's OWN window-min, not the window-end row's — MEASURED WRONG (it produced null-flips
+   + garbage r2 0.04 vs 0.9999). And the recenter-after-roll (`Σxx − (Σx)²/b` from raw rolled sums) re-cancels
+   the same way. Backfill is already accurate to ~3.4e-12 vs an exact (Fraction) reference at x≤day-span, so it
+   is NOT the breach source; the gate compares `compute_reduction_batch` (now conditioned) vs incremental, so
+   the latest-path conditioning is what the gate needs. A correct backfill conditioning needs a per-window
+   group-by (bounded follow-up), only if grading shows backfill-vs-incremental drift on real near-perfect cells.
+2. **The non-time corr-denom groups are genuine VALUE breaches, NOT sub-tolerance** (revises the §Parked claim
+   above): an independent real-harness re-measure found `distribution.ret_kurt` (31–86×), `market_beta`
+   (inf null-flip + 568×, beta≈0.048), `return_dynamics.autocorr` (37×, corr≈0.76) ALL show genuine
+   normal-magnitude value divergences — class (c) corr-denom / higher-moment cancellation that CENTERING the
+   value column (translation-invariant central moments) closes to ~1e-16 in microbench. The obstacle is the
+   same as volume #307: a REPRODUCIBLE per-symbol return / SPY-return anchor wired into both paths (no natural
+   daily source). `range_expansion` (mean of non-negatives — no cancellation) and `residual_analysis`
+   (already mean-centered; its lever is the time axis above) are NOT centering problems. So the return-anchor
+   sibling fix (not this PR) would un-park distribution + return_dynamics + market_beta; this PR un-parks the
+   time-axis class (trend_quality / clean_momentum / residual_analysis / price_volume.obv) value-identically.
+

@@ -31,6 +31,7 @@ import os
 import numpy as np
 import polars as pl
 
+from quantlib.features.declarative import _TIME_ORIGIN_LAG as declarative_TIME_ORIGIN_LAG
 from quantlib.features.declarative import (
     ReductionGroup,
     StatefulRegressor,
@@ -70,7 +71,8 @@ class IncrementInvariantError(Exception):
 # How far (minutes) behind the incoming minute to pin the rolling time-OLS origin each fold. Small and fixed
 # so the time regressor's x stays O(1) for every window — keeping ``b·Σxx − (Σx)²`` well conditioned instead
 # of a difference of large near-equal sums (the source of the near-perfect-fit time-OLS incremental breach).
-_TIME_ORIGIN_LAG = 2
+# Defined in declarative.py (the shared origin constant) so the batch latest-pin cannot drift from this fold pin.
+_TIME_ORIGIN_LAG = declarative_TIME_ORIGIN_LAG
 
 
 class SymbolSetExpanded(Exception):
