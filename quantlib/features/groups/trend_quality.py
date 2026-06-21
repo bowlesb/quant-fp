@@ -39,7 +39,11 @@ class TrendQualityGroup(ReductionGroup):
     # emits the EXACT r2=1.0 at the b==2 corner where cov²/(var_x·var_y) was noise/noise. With both, batch and
     # incremental agree cell-for-cell on smooth/degenerate/n==2 walks, so the fast path is parity-true here. The
     # n==2 guard changes the degenerate-cell value (0.9998->1.0) -> the version bump above.
-    incremental_safe = True
+    # NO-GO for FP_INCREMENTAL (real-data soak, scripts/incremental_realdata_soak.py, 2026-06-17): breaches the
+    # incremental==batch parity self-check on ~2.7% of minutes (worst ~1683x) at price_r2_5m — the OLS R²
+    # cov²/(var_x·var_y) corr-denom straddle on near-flat real regressors (the parked corr-denom class), which
+    # the smooth/n==2 synthetic walks don't hit. Stays on the batch path until the cancellation-free fix lands.
+    incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

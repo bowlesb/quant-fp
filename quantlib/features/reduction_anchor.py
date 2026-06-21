@@ -38,6 +38,17 @@ _ANCHOR_SIG_FIGS = 2  # round the anchor to 2 significant figures: |v−a|/v <= 
 # ten anchor was too coarse (up to 5x off -> the cancellation persisted, measured); 2 sig figs is the sweet
 # spot — close enough to condition the squared sums, coarse enough to be reproducible.
 
+# Regular-session minutes per day. The ``daily`` snapshot carries each symbol's DAILY-BAR total volume, but
+# the volume reduction centers PER-MINUTE volume (~390x smaller). Centering on the daily total leaves the
+# anchor ~2 orders of magnitude ABOVE the per-minute value it conditions, so |v−a|/v is ~390 and the
+# cancellation only PARTIALLY closes (measured: volume still breaches the incremental parity self-check on
+# ~0.4% of real minutes, worst ~13.7x). Dividing the daily total by this count puts the anchor on the
+# per-minute scale the std actually centers -> |v−a|/v small -> the cancellation closes fully (measured:
+# 0/779 breaches, worst 0.0). The anchor stays a reproducible per-symbol constant (same daily snapshot, same
+# divisor, both paths), and the centered variance is shift-invariant, so the feature VALUE is unchanged (fp
+# unchanged) — only the float conditioning.
+_RTH_MINUTES_PER_DAY = 390
+
 
 def sigfig_rounded_anchor(value: pl.Expr) -> pl.Expr:
     """A magnitude-tracking, reproducible per-symbol anchor: ``value`` rounded to ``_ANCHOR_SIG_FIGS``
@@ -55,19 +66,23 @@ def sigfig_rounded_anchor(value: pl.Expr) -> pl.Expr:
 
 def attach_volume_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFrame:
     """Attach the per-symbol volume centering anchor to ``frame`` (keyed on symbol), from the ``daily``
-    snapshot's most-recent per-symbol volume (log10-rounded). The SAME join both the backfill batch path and
-    the live seed path apply, so the anchor column is identical in both — the parity-critical invariant.
+    snapshot's most-recent per-symbol volume. The SAME join both the backfill batch path and the live seed
+    path apply, so the anchor column is identical in both — the parity-critical invariant.
 
     ``daily`` is the per-session-fixed snapshot (symbol, date, volume); the anchor uses each symbol's LATEST
-    daily volume (the prior completed day in production), rounded to 2 sig figs. A symbol not in ``daily``
-    gets 0.0.
+    daily volume — the DAILY-BAR total — converted to the PER-MINUTE scale (``/ _RTH_MINUTES_PER_DAY``) the
+    volume reduction actually centers, then rounded to 2 sig figs. Centering on the un-scaled daily total left
+    the anchor ~390x above the per-minute value and only partially closed the cancellation; the per-minute
+    scaling closes it fully. A symbol not in ``daily`` gets 0.0.
     """
     latest = (
         daily.select(["symbol", "date", "volume"])
         .sort(["symbol", "date"])
         .group_by("symbol", maintain_order=True)
         .agg(pl.col("volume").last().alias("_vol"))
-        .with_columns(sigfig_rounded_anchor(pl.col("_vol")).alias(anchor_column("volume")))
+        .with_columns(
+            sigfig_rounded_anchor(pl.col("_vol") / _RTH_MINUTES_PER_DAY).alias(anchor_column("volume"))
+        )
         .select(["symbol", anchor_column("volume")])
     )
     return frame.join(latest, on="symbol", how="left").with_columns(
