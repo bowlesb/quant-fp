@@ -172,7 +172,12 @@ export function LatencyView() {
         <div className="lat-note">
           Bar length = per-group p50 (the live per-minute compute_latest cost), slowest-first. Hover a bar for
           the tail{hasP95 ? " (p95 + p99)" : " (p99; p95 pending in the artifact)"} and the group's kind,
-          mechanism, incremental-readiness, and feature count. {ctx.note}
+          mechanism, incremental-readiness, and feature count.
+        </div>
+        <div className="lat-caveat">
+          These per-group bars are timed in isolation and OVER-count the shared incremental-sum groups — they
+          do NOT sum to the per-bet bar&rarr;vector latency (which is the e2e number above, not the bar total).{" "}
+          {ctx.note}
         </div>
       </div>
 

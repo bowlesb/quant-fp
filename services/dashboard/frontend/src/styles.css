@@ -687,6 +687,14 @@ body {
   line-height: 1.5;
   max-width: 920px;
 }
+.lat-caveat {
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-style: italic;
+  line-height: 1.5;
+  max-width: 920px;
+}
 /* horizontal bar chart — one row per group, sorted slowest-first, bar length = p50 */
 .lat-chart {
   border: 1px solid var(--border);
