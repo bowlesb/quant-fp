@@ -20,7 +20,12 @@ from quantlib.features.backfill_bars import (
 from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
-from quantlib.features.loaders import load_filings, load_minute_agg, load_reference
+from quantlib.features.loaders import (
+    load_filings,
+    load_minute_agg,
+    load_news_features,
+    load_reference,
+)
 from quantlib.features.raw_loaders import (
     load_raw_minute_agg,
     load_raw_tick_enriched_minute_agg,
@@ -70,6 +75,7 @@ def materialize_alpaca_bars(root: str, day: str, symbols: list[str]) -> int:
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
         "filings": load_filings(day),
+        "news": load_news_features(day),
     }
     return _write_all(root, day, "backfill", frames)
 
@@ -88,6 +94,7 @@ def materialize_from_raw(
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
         "filings": load_filings(day),
+        "news": load_news_features(day),
     }
     return _write_all(root, day, "backfill", frames, shard=shard)
 
@@ -110,6 +117,7 @@ def materialize_from_raw_full(
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
         "filings": load_filings(day),
+        "news": load_news_features(day),
     }
     return _write_all(root, day, "backfill", frames, shard=shard)
 
@@ -129,6 +137,7 @@ def materialize_from_raw_bar_groups(
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
         "filings": load_filings(day),
+        "news": load_news_features(day),
     }
     return _write_all(root, day, "backfill", frames, only_groups=only_groups)
 
@@ -160,6 +169,7 @@ def materialize_from_raw_groups(
         "daily": backfill_daily(day, symbols),
         "reference": load_reference(),
         "filings": load_filings(day),
+        "news": load_news_features(day),
     }
     return _write_all(root, day, "backfill", frames, only_groups=only_groups, shard=shard)
 
@@ -176,6 +186,7 @@ def materialize_minute(
         "minute_agg": load_minute_agg(day, source),
         "reference": load_reference(),
         "filings": load_filings(day),
+        "news": load_news_features(day),
     }
     ctx = BatchContext(frames=frames)
     groups = [

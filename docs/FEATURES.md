@@ -1,6 +1,6 @@
 # Feature Catalog (generated — do not edit by hand; run `make feature-catalog`)
 
-728 features across 63 group(s).
+737 features across 64 group(s).
 
 | feature | group | type | layer | parity | dtype | nan_policy | valid_range | description |
 |---|---|---|---|---|---|---|---|---|
@@ -323,6 +323,15 @@
 | `dist_from_vwap_20d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 20-day volume-weighted average price (close/vwap_20d - 1), point-in-time. |
 | `dist_from_vwap_5d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 5-day volume-weighted average price (close/vwap_5d - 1), point-in-time. |
 | `dist_from_vwap_60d` | multi_day_vwap | multi_day | A | tolerance | Float64 | warmup | (-1.0, 5.0) | Prior close relative to the 60-day volume-weighted average price (close/vwap_60d - 1), point-in-time. |
+| `news_count_1d` | news_sentiment | reference | A | tolerance | Float64 | none | (0.0, 100000.0) | Count of this symbol's news articles available in the trailing 1d (available_at in (minute - 1d, minute]). |
+| `news_count_60m` | news_sentiment | reference | A | tolerance | Float64 | none | (0.0, 100000.0) | Count of this symbol's news articles available in the trailing 60m (available_at in (minute - 60m, minute]). |
+| `news_minutes_since_last` | news_sentiment | reference | A | tolerance | Float64 | sparse | (0.0, None) | Minutes since this symbol's most recent article became available (available_at <= minute); null when the symbol has no article on record. |
+| `news_sentiment_last` | news_sentiment | reference | A | tolerance | Float64 | sparse | (-1.0, 1.0) | Baseline sentiment of this symbol's MOST RECENT article available as of the minute (available_at <= minute); null when the symbol has no article on record. |
+| `news_sentiment_mean_1d` | news_sentiment | reference | A | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean baseline lexicon sentiment of this symbol's news articles that became available in the trailing 1d (available_at in (minute - 1d, minute]); null when no article in the window (undefined mean). |
+| `news_sentiment_mean_60m` | news_sentiment | reference | A | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean baseline lexicon sentiment of this symbol's news articles that became available in the trailing 60m (available_at in (minute - 60m, minute]); null when no article in the window (undefined mean). |
+| `news_sentiment_mean_7d` | news_sentiment | reference | A | tolerance | Float64 | sparse | (-1.0, 1.0) | Mean baseline lexicon sentiment of this symbol's news articles that became available in the trailing 7d (available_at in (minute - 7d, minute]); null when no article in the window (undefined mean). |
+| `news_sentiment_sum_1d` | news_sentiment | reference | A | tolerance | Float64 | none | (None, None) | Net sentiment intensity = sum of this symbol's article sentiments available in the trailing 1d (count x polarity; 0.0 when no article — neutral net signal). |
+| `news_sentiment_sum_60m` | news_sentiment | reference | A | tolerance | Float64 | none | (None, None) | Net sentiment intensity = sum of this symbol's article sentiments available in the trailing 60m (count x polarity; 0.0 when no article — neutral net signal). |
 | `garman_klass_vol_10m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 10 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
 | `garman_klass_vol_120m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 120 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |
 | `garman_klass_vol_15m` | ohlc_vol | volatility | A | tolerance | Float64 | warmup | (0.0, 5.0) | Garman-Klass volatility over 15 minutes: OHLC-efficient per-bar variance (0.5*ln(H/L)^2 - (2ln2-1)*ln(C/O)^2) averaged then rooted. |

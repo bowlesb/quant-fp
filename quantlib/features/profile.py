@@ -59,11 +59,20 @@ def build_frames(
         pl.col("_off").map_elements(lambda i: filing_forms[i % len(filing_forms)], return_dtype=pl.String).alias("form_type"),
         (BASE - pl.duration(days=pl.col("_off") * 45) + pl.duration(minutes=pl.col("_off"))).alias("available_at"),
     ).select("symbol", "form_type", "available_at")
+    # Synthetic news snapshot: a few sentiment-scored articles per symbol over the trailing week (one inside
+    # the session window so the same-session look-ahead gate is exercised) so the news_sentiment group is
+    # runnable in the profiler + the generic latest-parity test.
+    news = symbols.join(
+        pl.DataFrame({"_off": list(range(6))}), how="cross"
+    ).with_columns(
+        (BASE - pl.duration(days=pl.col("_off")) + pl.duration(minutes=pl.col("_off"))).alias("available_at"),
+        (((pl.int_range(pl.len()) % 5) - 2) / 2.0).cast(pl.Float64).alias("sentiment"),
+    ).select("symbol", "available_at", "sentiment")
     # Attach the per-symbol volume centering anchor (from the daily snapshot) to minute_agg — the same
     # attachment production capture / backfill apply where minute_agg is built, so the centered-std groups
     # (volume) are runnable and center identically here.
     intraday = attach_volume_anchor(intraday, daily)
-    frames = {"minute_agg": intraday, "daily": daily, "reference": reference, "filings": filings}
+    frames = {"minute_agg": intraday, "daily": daily, "reference": reference, "filings": filings, "news": news}
     if include_trades:
         frames["trades"] = _build_trades(symbols, window_min)
     return frames

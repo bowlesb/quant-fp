@@ -23,6 +23,7 @@ from quantlib.features.compare import coverage, diff, vectors
 from quantlib.features.loaders import (
     load_filings,
     load_minute_agg,
+    load_news_features,
     load_reference,
     load_tiers,
     load_trades_live,
@@ -63,7 +64,17 @@ def parity_test(day: str, source_live: str = "stream", source_backfill: str = "b
     # sight), so edgar_filing_frequency is covered by the sweep and — being identical — must score 100%,
     # the standing check that the point-in-time DB join is deterministic.
     filings = load_filings(day)
-    shared = {"reference": reference, "daily": daily, "universe": universe, "filings": filings}
+    # The news snapshot is fed to BOTH sides (sentiment + available_at fixed at first sight), so the
+    # news_sentiment group is covered by the sweep and — being identical — must score 100%, the standing
+    # check that the point-in-time news join + the deterministic sentiment are reproducible.
+    news = load_news_features(day)
+    shared = {
+        "reference": reference,
+        "daily": daily,
+        "universe": universe,
+        "filings": filings,
+        "news": news,
+    }
     live = vectors({"minute_agg": live_minute, **shared})
     backfill = vectors({"minute_agg": backfill_minute, **shared})
     return diff(live, backfill, tiers)

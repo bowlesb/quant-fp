@@ -47,6 +47,13 @@ logger = logging.getLogger("news_store")
 # One row per article. ``symbols`` is a LIST so a multi-symbol article is stored once; hotness features
 # explode it at read time. ``available_at`` is the point-in-time gate; ``published_at`` is Alpaca's
 # created_at (article publish instant) kept as honest metadata; ``available_at_source`` flags provenance.
+#
+# ``sentiment`` + ``sentiment_model_version`` are a BASELINE deterministic finance-sentiment of the article's
+# headline+summary (quantlib.data.news_sentiment), stamped at first sight alongside ``available_at``. The
+# score is a pure function of the Alpaca-supplied text + the frozen lexicon, so it is IDENTICAL live vs
+# backfill (the text is identical on both sides; only our arrival-time provenance differs) — fixed-at-first-
+# sight and parity-stable, the same contract ``available_at`` holds. ``sentiment_model_version`` distinguishes
+# a future lexicon/FinBERT re-score from this baseline.
 NEWS_SCHEMA: dict[str, pl.DataType] = {
     "id": pl.Int64,
     "symbols": pl.List(pl.String),
@@ -60,6 +67,8 @@ NEWS_SCHEMA: dict[str, pl.DataType] = {
     "author": pl.String,
     "url": pl.String,
     "ingested_at": pl.Datetime("us", "UTC"),
+    "sentiment": pl.Float64,
+    "sentiment_model_version": pl.String,
 }
 
 # "live" = available_at is the websocket arrival instant WE observed (never look-ahead).
@@ -115,11 +124,27 @@ def backfilled_dates(store: str) -> set[str]:
     return set(done["published_date"].to_list())
 
 
+def _conform_to_schema(frame: pl.DataFrame) -> pl.DataFrame:
+    """Add any ``NEWS_SCHEMA`` column missing from ``frame`` as a typed all-null column (in schema order).
+
+    A partition written before a schema column existed (e.g. the ``sentiment`` columns added to an already-
+    populated store) lacks that column on disk; inserting it as null lets a fresh upsert vertically concat the
+    new full-schema rows onto the legacy partition without a ShapeError, and the rewritten partition then
+    carries the full schema. Already-present columns are untouched (an upsert NEVER rewrites a value an id
+    already has — first-sight wins — so this only fills genuinely-absent columns, never overwrites a score)."""
+    missing = [name for name in NEWS_SCHEMA if name not in frame.columns]
+    if missing:
+        frame = frame.with_columns(
+            [pl.lit(None, dtype=NEWS_SCHEMA[name]).alias(name) for name in missing]
+        )
+    return frame.select(list(NEWS_SCHEMA.keys()))
+
+
 def _read_partition(store: str, published_date: dt.date) -> pl.DataFrame:
     path = partition_path(store, published_date)
     if not os.path.exists(path):
         return pl.DataFrame(schema=NEWS_SCHEMA)
-    return pl.read_parquet(path)
+    return _conform_to_schema(pl.read_parquet(path))
 
 
 def _write_partition_atomic(store: str, published_date: dt.date, frame: pl.DataFrame) -> int:
@@ -202,6 +227,8 @@ _NEWS_READ_COLUMNS = [
     "summary",
     "source",
     "url",
+    "sentiment",
+    "sentiment_model_version",
 ]
 
 
@@ -210,6 +237,10 @@ def load_news(start_date_iso: str, end_date_iso: str, store: str = "/store") -> 
     dates) — the shared research/feature loader. One hive-glob scan; empty schema'd frame when no
     partitions match. The READER applies the ``available_at <= minute`` point-in-time gate (and the
     hunt's frozen availability-lag offset); this loader just returns the raw article tape for the window.
+
+    Partitions written before a column existed (e.g. the ``sentiment`` columns added to an already-populated
+    store) are conformed to the full schema on read (absent columns filled null), so the select never trips a
+    ColumnNotFoundError on the legacy tape — the same robustness ``_read_partition`` applies on the write path.
     """
     pattern = os.path.join(store, "news", "published_date=*", "data.parquet")
     paths = sorted(glob.glob(pattern))
@@ -223,7 +254,9 @@ def load_news(start_date_iso: str, end_date_iso: str, store: str = "/store") -> 
             keep.append(path)
     if not keep:
         return pl.DataFrame(schema={key: NEWS_SCHEMA[key] for key in _NEWS_READ_COLUMNS})
-    return pl.read_parquet(keep).select(_NEWS_READ_COLUMNS).sort("available_at")
+    frames = [_conform_to_schema(pl.read_parquet(path)) for path in keep]
+    combined = pl.concat(frames, how="vertical") if len(frames) > 1 else frames[0]
+    return combined.select(_NEWS_READ_COLUMNS).sort("available_at")
 
 
 def free_bytes(store: str) -> int:
