@@ -11,6 +11,7 @@ the in-band candidates ordered by quoted headroom.
 from __future__ import annotations
 
 import datetime as dt
+import zlib
 
 import polars as pl
 import pytest
@@ -19,6 +20,19 @@ from quantlib.data import next_quote_tranche
 from quantlib.data.raw_store import write_manifest_part, write_partition
 
 DAY = dt.date(2026, 6, 12)
+
+
+def _part_seq(tier: str, symbol: str) -> int:
+    """A deterministic, per-(tier, symbol) manifest part_seq.
+
+    Manifest part files are named ``part-{pid}-{part_seq}.parquet`` (raw_store.write_manifest_part), so two
+    writes in the SAME process with the SAME part_seq collide and the second silently overwrites the first —
+    dropping a symbol from the manifest. ``hash()`` is salted per-process by PYTHONHASHSEED, so a hash-derived
+    seq makes that collision (and thus the drop) depend on the random seed of the worker process — flaky under
+    ``pytest -n`` where each worker gets a fresh seed. crc32 is process-stable and 32-bit, so the handful of
+    test symbols never collide and the seeding is identical on every run.
+    """
+    return zlib.crc32(f"{tier}:{symbol}".encode())
 
 
 def _bars_frame(close: float, volume: int) -> pl.DataFrame:
@@ -40,7 +54,7 @@ def _seed_bars(store: str, symbol: str, dollar_volume_rank_value: float) -> None
                 "fetched_at": dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc),
             }
         ],
-        part_seq=abs(hash(("bars", symbol))) % 1000,
+        part_seq=_part_seq("bars", symbol),
     )
 
 
@@ -76,7 +90,7 @@ def _seed_quotes(
                 "fetched_at": dt.datetime(2026, 6, 12, tzinfo=dt.timezone.utc),
             }
         ],
-        part_seq=abs(hash(("quotes", symbol))) % 1000,
+        part_seq=_part_seq("quotes", symbol),
     )
 
 
