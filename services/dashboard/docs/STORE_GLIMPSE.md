@@ -43,8 +43,8 @@ The page **auto-refreshes every 30s** so it always reflects the current store, a
 **instant (sub-200ms) and always warm** because the heavy build runs OFF the request path.
 
 Even windowed, a cold grid build is ~38–50s (and the per-group drills add ~55s) — far too slow for an
-interactive refresh. So the build is a **scheduled background job**, exactly mirroring the `/jobs` collector
-pattern (`ops/collect_jobs_status.py` precomputes on a cron → the page just reads):
+interactive refresh. So the build is a **scheduled background job** following the precompute-on-a-cron
+pattern (a collector precomputes the payload on a schedule → the page just reads the cached result):
 
   * **Worker** — `ops/collect_store_glimpse.py` runs on a cron every 3 min. The build needs quantlib/polars +
     the `/store` mount, none of which the host carries, so the wrapper execs `python -m store_glimpse_cache`

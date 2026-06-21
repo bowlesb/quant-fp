@@ -130,10 +130,10 @@ This PR strips the dashboard to ONLY the grid. **Deleted** (UI-only page modules
 old `/`, `/status`, `/jobs`, `/scorecard`, `/progress`, `/raw-coverage`, `/sector-coverage`,
 `/universe-coverage`, `/liquidity-bands` HTML routes + the page-only `/api/*` routes for them. **Kept** (still
 written by the host Lead loop + crons — ops continuity, not UI): `status_store.py`, `scorecard.py` +
-`scorecard_store.py`, `raw_coverage.py` (a `scorecard` dependency), `feature_grid.py` (the store introspection
-the worker + scorecard reuse), and `jobs_page.load_status`. The **remaining API** is the grid routes
-(`/api/store-grid/*`), `/healthz`, and three ops-introspection READ routes (`/api/status/rows`,
-`/api/scorecard[/history]`, `/api/jobs`) backed by the live JSON stores.
+`scorecard_store.py`, `raw_coverage.py` (a `scorecard` dependency), and `feature_grid.py` (the store
+introspection the worker + scorecard reuse). The **remaining API** is the grid routes
+(`/api/store-grid/*`), `/healthz`, and the ops-introspection READ routes (`/api/status/rows`,
+`/api/scorecard[/history]`) backed by the live JSON stores.
 
 ## Deployment
 

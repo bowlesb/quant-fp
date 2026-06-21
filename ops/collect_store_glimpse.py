@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Host-side cron wrapper that precomputes the /store-glimpse grid into the persistent (Redis) cache.
 
-Mirrors ``ops/collect_jobs_status.py`` (a scheduled collector that precomputes a dashboard payload off the
-request path) — but the glimpse build needs ``quantlib`` + ``polars`` + the ``/store`` mount, none of which
+A scheduled collector that precomputes a dashboard payload off the request path — but the glimpse build
+needs ``quantlib`` + ``polars`` + the ``/store`` mount, none of which
 the HOST python carries. So, exactly like ``ops/healthcheck.sh`` execs ``python -m quantlib.ops.healthcheck``
 inside the ``feature-computer`` container, this wrapper execs ``python -m store_glimpse_cache`` inside the
 ``quant-dashboard-1`` container (which has those deps + a read-only ``/store`` + a route to ``quant-redis``).
