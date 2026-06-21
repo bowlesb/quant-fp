@@ -116,14 +116,32 @@ reverse) → a null/non-null parity breach. There is no large-magnitude regresso
 | `market_beta` (market_corr/idio_vol) | gappy satellite vs a dense SPY whose return is near-constant over the few paired bars → corr `denom` straddle (real 06-18 MO/SLB: corr=±1 / idio_vol=0 where batch NULLs) | BOTH regressors are small returns (~1e-3) — nothing large to center; the straddle is the guard threshold, not a magnitude term. |
 | `residual_analysis` (resid_std) | near-perfect intraday fit → SSR = `noise/noise` (r²≈1) where the centered power sums round past the breach ratio | already MEAN-centered in the formula (`sxx_c = sxx − sx²/b`); the residue is the perfect-fit cancellation, not a per-symbol-anchor magnitude. |
 
-**CANDIDATE FIXES (the two identified, ready to evaluate).**
-1. **Consistent guard-threshold rounding** — make the `denom > eps·(Σz)²` defined-guard evaluate IDENTICALLY
-   on both paths so a degenerate cell is classified the same (null on both, or defined on both). E.g. snap
-   the guard input to a shared rounded form, or widen `eps` to swallow the running-vs-fresh-sum residue at
-   the threshold (the #131-class relative-floor approach, applied to the corr/OLS denom on these 3).
-2. **n==2-style exact-degenerate treatment** — generalize the existing `_OLS_PERFECT_FIT_COUNT` (b==2 → emit
-   the EXACT sign(cov)/r²==1 in all three twins) to the broader near-degenerate-corr cells, so both paths
-   emit the same exact degenerate value rather than racing the guard threshold.
+**THE BREACH, CHARACTERIZED (2026-06-20 measurement).** It is NOT a null/non-null flip — it is a VALUE
+divergence on a NORMAL corr: at the worst price_volume cell, `pv_correlation_5m` = batch −0.23502 vs
+incremental −0.23497 (~5e-5 absolute, ratio ~40× the 1e-6 tolerance). At that cell (b=5) the RETURN regressor
+is near-constant, so `denom_x = b·Σx² − (Σx)²` is a catastrophic cancellation (~3.23e-17). The raw OLS sums
+(`sxx`, `sx`) are bit-identical or differ ~1 ULP between paths — the cancellation AMPLIFIES that ~1-ULP
+difference into ~0.04% of `denom_x` → ~5e-5 in the corr. Inherent to subtracting large near-equal sums.
+
+**BOTH CANDIDATES EVALUATED — NEITHER cleanly shippable (re-parked 2026-06-20):**
+1. **Consistent guard-threshold / floor-widening** — FAILS THE BAR. Measured across 12 seeds × all windows:
+   the conditioning ratio `denom_x/sx²` does NOT separate divergent from good cells — BREACH cells reach
+   3.21e-12 and OVERLAP good cells (min 1.00e-12). No floor nulls all breach cells without ALSO nulling good
+   cells → it perturbs GOOD cells (disqualified).
+2. **Center the regressor (shift-invariant)** — does NOT perturb good cells (PROVEN: centering the X=RETURN
+   regressor on a per-symbol return anchor conditions `denom_x` to machine precision, 6e-5 → 1.8e-16), BUT
+   there is NO reproducible per-symbol RETURN anchor. Unlike volume (a stable daily-volume anchor), returns
+   center on a per-symbol drift with no daily/static source; centering on the in-window first/mean is not
+   reproducible as the window slides (the engine expires it, backfill recomputes a new one → they diverge).
+   The `rebase_time_axis` precedent only applies to `kind="time"` x-slots (origin-invariant + identically
+   applied); a plain return regressor has no clean origin backfill ALSO uses. NOT path-consistent.
+
+**WHAT A REAL FIX WOULD NEED (for whoever picks this up):** either (1) a reproducible per-symbol RETURN
+anchor wired into BOTH paths — a NEW designed reference (no natural daily source), or (2) a fundamentally
+cancellation-free corr-denom — compensated/Kahan on the SUBTRACTION `b·Σx²−(Σx)²` itself (not just the sums),
+computed identically in the batch + the numpy twin + the Rust `assemble_canonical` kernel. Both are real
+engine work, not a quick value-identical fix. market_beta is the SAME class (SPY-return regressor near-constant
+on gappy windows); residual_analysis is the perfect-fit-SSR variant.
 
 VALIDATION when picked up: the gate tests `test_gappy_denom_group_still_breaches_gate_load_bearing[price_volume]`
 + `test_market_beta_breaches_on_real_gappy_spy_regressor` FLIP from breach→clean; full-set byte-eq; fp unchanged.
