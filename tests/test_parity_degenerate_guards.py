@@ -14,15 +14,18 @@ import math
 import random
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import polars as pl
 
 import pytest
 
 from quantlib.features import BatchContext, REGISTRY, run_group
 from quantlib.features.compare import runnable
+from quantlib.features.groups.technical import TechnicalGroup
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.profile import build_frames
 from quantlib.features.reduction_anchor import anchor_column
+from quantlib.features.stateful import StatefulEngine, coded_buffer, emit_stateful
 
 BASE = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
 
@@ -237,6 +240,84 @@ def test_technical_bb_position_parity_on_near_flat_window() -> None:
         _assert_finite_or_null(group.compute_latest(ctx), col)
         assert last_backfill[col] is None, f"backfill {col} should be NULL on near-flat window"
         assert live[col] is None, f"live {col} should be NULL on near-flat window (was NaN)"
+
+
+def _mixed_degeneracy_stream(n_min: int = 60) -> pl.DataFrame:
+    """A multi-symbol stream that mixes the two degenerate bb cases with well-conditioned names so the
+    folded LIVE std (power-sum) and the backfill std (``rolling_std_by`` Welford) are exercised side by side:
+      FLAT   (perfectly constant close)  -> live power-sum std == 0.0,         backfill std ~0 finite
+      JITTER (sub-epsilon constant + 1e-9 toggle) -> live std == NaN/tiny,     backfill std tiny finite
+      VARY   (random walk)               -> both well-conditioned (the guard must NOT over-null these).
+    The flat/jitter names are exactly where ``(close - sma) / (2 * std)`` overflows or splits null-ness if the
+    ``std20`` guard is not robust; VARY pins that the guard leaves real windows untouched.
+    """
+    rng = np.random.default_rng(7)
+    base = {sym_idx: 1.0 + sym_idx for sym_idx in range(9)}
+    walk = dict(base)
+    rows = []
+    for minute_idx in range(n_min):
+        minute = BASE + timedelta(minutes=minute_idx)
+        for sym_idx in range(9):
+            if sym_idx % 3 == 1:
+                close = base[sym_idx]
+            elif sym_idx % 3 == 2:
+                close = base[sym_idx] + (1e-9 if minute_idx % 2 else 0.0)
+            else:
+                walk[sym_idx] *= 1.0 + rng.standard_normal() * 0.002
+                close = walk[sym_idx]
+            rows.append(
+                {
+                    "symbol": f"S{sym_idx}",
+                    "minute": minute,
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                    "volume": 100.0,
+                }
+            )
+    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+
+
+def test_technical_bb_position_parity_stateful_emit_on_degenerate_stream() -> None:
+    """bb_position's LIVE path is the StatefulEngine fold (``emit_stateful`` over the coded buffer), NOT the
+    IncrementalEngine — technical is a StatefulGroup, so the existing IncrementalEngine three-path nets
+    (amihud/volume_zscore) never reach it. The folded ``_std20`` comes from the power-sum reduction while
+    backfill's comes from ``rolling_std_by``; on flat/near-flat windows those straddle the std null-floor (the
+    #122 NaN>threshold / +/-inf class). Hold the consolidated emit == backfill ``compute().last`` on bb: no
+    non-finite emit, null-ness agrees, and the well-conditioned (VARY) names stay non-null and value-equal."""
+    stream = _mixed_degeneracy_stream()
+    latest = stream["minute"].max()
+    ctx = BatchContext(frames={"minute_agg": stream})
+    group = TechnicalGroup()
+    coded = coded_buffer(stream, latest)
+    emit = (
+        emit_stateful([StatefulEngine(group)], stream, ctx, coded=coded)[group.name]
+        .sort("symbol")
+    )
+    back = (
+        group.compute(ctx).filter(pl.col("minute") == latest).sort("symbol")
+    )
+    for col in ("bb_position_20m", "bb_width_20m"):
+        _assert_finite_or_null(emit, col)
+        for symbol in back["symbol"].to_list():
+            back_val = back.filter(pl.col("symbol") == symbol)[col].to_list()[0]
+            emit_val = emit.filter(pl.col("symbol") == symbol)[col].to_list()[0]
+            assert (back_val is None) == (
+                emit_val is None
+            ), f"{symbol} {col}: null-ness disagrees back={back_val} emit={emit_val}"
+            if back_val is not None:
+                assert math.isclose(
+                    back_val, emit_val, rel_tol=1e-6, abs_tol=1e-9
+                ), f"{symbol} {col}: back={back_val} emit={emit_val} diverge"
+    # the flat (S1/S4/S7) and near-flat (S2/S5/S8) names must be NULL on bb_position; the VARY names non-null.
+    bb = dict(zip(emit["symbol"].to_list(), emit["bb_position_20m"].to_list()))
+    for degenerate in ("S1", "S4", "S7", "S2", "S5", "S8"):
+        assert bb[degenerate] is None, f"{degenerate}: degenerate bb_position should be NULL, got {bb[degenerate]}"
+    for varying in ("S0", "S3", "S6"):
+        assert (
+            bb[varying] is not None and math.isfinite(bb[varying])
+        ), f"{varying}: well-conditioned bb_position over-nulled or non-finite ({bb[varying]})"
 
 
 def _frames_with_near_flat_symbol(symbol: str, base_price: float) -> dict[str, pl.DataFrame]:
