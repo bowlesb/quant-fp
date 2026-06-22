@@ -33,6 +33,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import psycopg
 
 from quantlib.data.raw_backfill import trading_client, trading_days, universe_symbols
+from quantlib.data.source_dependency import ensure_inputs_for_groups
 from quantlib.features import store
 from quantlib.features.loaders import DB_KWARGS
 from quantlib.features.materialize import materialize_from_raw_groups
@@ -290,6 +291,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="recompute even if the partition already exists",
     )
+    parser.add_argument(
+        "--ensure-inputs",
+        action="store_true",
+        help=(
+            "STEP 1 (default off): before computing, ENSURE the raw layers the target groups declare "
+            "(bars/trades/quotes) are in the store over this horizon — patch only manifest holes, then read "
+            "source from the store only (docs/SOURCE_DATA_DEPENDENCY.md). Use --ensure-inputs-live to actually "
+            "fetch + take the ingest lock; without it this only REPORTS the holes it would fetch (dry-run)."
+        ),
+    )
+    parser.add_argument(
+        "--ensure-inputs-live",
+        action="store_true",
+        help="with --ensure-inputs, run the real fetch + take the per-layer ingest lock (NOT dry-run).",
+    )
     return parser.parse_args(argv)
 
 
@@ -313,6 +329,28 @@ def main() -> None:
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     else:
         symbols = universe_symbols(trading_client())
+
+    if args.ensure_inputs:
+        report = ensure_inputs_for_groups(
+            args.raw_root,
+            sorted(group_versions),
+            symbols,
+            days,
+            agent_id="selective_backfill",
+            dry_run=not args.ensure_inputs_live,
+        )
+        logger.info(
+            "ensure_inputs (%s): holes_before=%s fetched=%s skipped_locked=%s",
+            "LIVE" if args.ensure_inputs_live else "DRY-RUN",
+            {layer.value: n for layer, n in report.holes_before.items()},
+            {layer.value: n for layer, n in report.fetched_units.items()},
+            [layer.value for layer in report.skipped_locked],
+        )
+        if args.ensure_inputs_live and not report.all_present:
+            raise SystemExit(
+                "ensure_inputs could not secure every layer (an ingest lock was held by another job): "
+                f"{[layer.value for layer in report.skipped_locked]}. Retry once it releases."
+            )
 
     run(
         args.root,

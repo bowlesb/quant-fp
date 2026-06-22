@@ -130,16 +130,47 @@ identical to `within_day_assignment`.
 
 ### (d) The contract a feature-backfill job follows
 
-```python
-from quantlib.data.source_dependency import (
-    required_layers_for_groups, ensure_inputs, default_fetcher)
+The library form, and the one-call wrapper the CLIs use:
 
-layers = required_layers_for_groups(groups_to_compute)      # union of declared layers
-report = ensure_inputs(store, layers, symbols, days,        # patch holes FIRST
-                        agent_id=job_id, fetcher=default_fetcher(store), dry_run=False)
-assert report.all_present                                    # source is now in the store
+```python
+from quantlib.data.source_dependency import ensure_inputs_for_groups
+
+report = ensure_inputs_for_groups(             # resolve declared layers + patch holes FIRST
+    raw_store, groups_to_compute, symbols, days, agent_id=job_id, dry_run=False)
+assert report.all_present                       # source is now in the store
 # ... now materialize_from_raw* reads source EXCLUSIVELY from /store/raw — no Alpaca re-download ...
 ```
+
+**Wired into the backfill CLIs** (flag default OFF — existing behavior unchanged):
+
+```bash
+# selective_backfill (the findings->features loop): ensure the target groups' declared layers first
+python -m quantlib.features.selective_backfill --groups trade_flow --start 2026-06-16 --end 2026-06-17 \
+    --ensure-inputs            # DRY-RUN: report the holes it WOULD patch, then compute
+python -m quantlib.features.selective_backfill --groups trade_flow --start 2026-06-16 --end 2026-06-17 \
+    --ensure-inputs --ensure-inputs-live   # LIVE: take the per-layer ingest lock + fetch only the holes
+
+# materialize raw (bar-only path): ensure the bars layer first
+python -m quantlib.features.materialize raw /store 2026-06-16 50 /store --ensure-inputs[-live]
+```
+
+`--ensure-inputs` alone is dry-run (reports holes, no fetch, no DB lock); add `--ensure-inputs-live` to
+actually fetch and hold the lock. A live run that cannot secure a layer (lock held by another job) aborts
+with `SystemExit` rather than compute over a tape still being written.
+
+**Capped operator run (the `quant-backfill`-named container so `live_monitor` can pause it):**
+
+```bash
+docker run --rm --name quant-backfill --network quant_default --env-file .env \
+    --memory 8g -v /store:/store -v "$PWD":/app -w /app fp-dev \
+    python -m quantlib.features.selective_backfill --groups price_returns \
+        --symbols AAPL,MSFT --start 2026-06-16 --end 2026-06-17 \
+        --ensure-inputs --ensure-inputs-live
+```
+
+The `quant-backfill` name is what `ops/live_monitor.sh` matches to pause the job under mem/disk pressure
+(yielding to `feature-computer`); keep any real ingest run under that name and memory-capped. Use a TINY
+horizon (a few symbols, a couple days) to validate — never a multi-GB fetch from a script.
 
 ### (e) Parity strengthening (benefit C, concretely)
 
@@ -150,9 +181,9 @@ are computed over one shared source. A divergence is then attributable to *compu
 certification is testing), never to two different downloads of the same minute — removing a whole class of
 false-divergent noise from the within-day certifier.
 
-## What's built in this PR vs. follow-up
+## What's built
 
-**Built + unit-tested** (`tests/test_source_dependency.py`, 14 tests):
+**Core abstraction** (PR #400, merged — `tests/test_source_dependency.py`, 14 tests):
 
 - `RawLayer` enum + `FeatureGroup.required_raw_layers()` (default-by-type + override).
 - `required_layers_for_groups()` (the backfill resolves its layer union).
@@ -163,10 +194,16 @@ false-divergent noise from the within-day certifier.
 - `SourceIngestLock` (claim/heartbeat/release/reclaim) + `db/init/16_source_ingest_lock.sql`.
 - `default_fetcher()` wiring to the real acquire engines (`fetch_bars_tier` / `run_tier_fast`).
 
-**Follow-up (clearly marked):**
+**CLI wiring** (this PR — `tests/test_ensure_inputs_wiring.py`, 5 tests):
 
-- Wire `ensure_inputs` as the first step of `selective_backfill` / `materialize` CLI entry points (the
-  call site), behind a flag, so feature backfills route through it.
-- Run the `default_fetcher` end-to-end against Alpaca on a small horizon under a `quant-backfill`-named,
-  memory-capped container (no multi-GB fetch in this PR).
-- Lead-gated: flip `SourceIngestLock` to `dry_run=False` (live DB writes) once the schema is applied.
+- `ensure_inputs_for_groups()` — the one-call wrapper (resolve layers → `ensure_inputs` with
+  `default_fetcher`).
+- `selective_backfill --ensure-inputs[-live]` — step-1 before the compute, over the resolved
+  groups/symbols/days; live mode aborts if a layer is locked.
+- `materialize raw … --ensure-inputs[-live]` — ensures the bars layer for the bar-only path.
+- Flag defaults OFF (existing behavior unchanged); dry-run unless `--ensure-inputs-live`.
+- The capped `quant-backfill`-named operator run is documented in §(d) — a tiny-horizon validation, not a
+  large fetch.
+
+**Follow-up (Lead-gated):** flip `SourceIngestLock` to `dry_run=False` (live DB writes) now the schema is
+applied — turning on the real per-layer lock for live `--ensure-inputs-live` runs.
