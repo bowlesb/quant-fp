@@ -18,6 +18,22 @@ KEY_COLUMNS: tuple[str, ...] = ("symbol", "minute")
 MIN_DESCRIPTION_CHARS = 40
 
 
+class RawLayer(str, Enum):
+    """A raw-tape layer in ``/store/raw`` — the source-data substrate a feature group reads from.
+
+    These are exactly the three raw tiers the acquire stage writes (``quantlib.data.raw_store``):
+    ``bars`` (minute OHLCV), ``trades`` (per-trade tape), ``quotes`` (NBBO tape). A feature group
+    DECLARES which of these its inputs ultimately derive from (``FeatureGroup.required_raw_layers``),
+    so a backfill can ENSURE those raw inputs are in the store before computing the feature
+    (docs/SOURCE_DATA_DEPENDENCY.md). The string values match the on-disk tier names verbatim, so a
+    layer drops straight into ``partition_dir(store, layer.value, ...)`` and the manifest ``tier``.
+    """
+
+    BARS = "bars"
+    TRADES = "trades"
+    QUOTES = "quotes"
+
+
 class FeatureType(str, Enum):
     """Family taxonomy (FEATURE_PLATFORM.md §11). Used for catalog organization + breadth checks."""
 
@@ -109,6 +125,21 @@ class BatchContext:
         if name not in self.frames:
             raise KeyError(f"input frame '{name}' was not provided to BatchContext")
         return self.frames[name]
+
+
+# Default raw-layer requirement DERIVED from a group's family type, so the existing groups need no edit.
+# A bar-derived group needs only the ``bars`` tape. A trade-flow group's per-minute tick columns
+# (n_trades, signed_volume) are aggregated from the ``trades`` tape on top of the bar grid, so it needs
+# ``bars`` + ``trades``. A quote/spread/microstructure group additionally reads the ``quotes`` tape (the
+# tick-enriched minute_agg joins all three). The set is INCLUSIVE — a group always needs ``bars`` for its
+# minute grid; richer layers add to that set. Mirrors the layer routing in ``settle_lag_for_group`` but
+# returns the FULL set of layers (not just the deepest), because ``ensure_inputs`` must fetch ALL of them.
+_TYPE_RAW_LAYERS: dict[FeatureType, frozenset[RawLayer]] = {
+    FeatureType.TRADE_FLOW: frozenset({RawLayer.BARS, RawLayer.TRADES}),
+    FeatureType.QUOTE_SPREAD: frozenset({RawLayer.BARS, RawLayer.TRADES, RawLayer.QUOTES}),
+    FeatureType.MICROSTRUCTURE: frozenset({RawLayer.BARS, RawLayer.TRADES, RawLayer.QUOTES}),
+}
+_DEFAULT_RAW_LAYERS: frozenset[RawLayer] = frozenset({RawLayer.BARS})
 
 
 class FeatureGroup(ABC):
@@ -211,6 +242,21 @@ class FeatureGroup(ABC):
     @property
     def feature_names(self) -> list[str]:
         return [spec.name for spec in self.declare()]
+
+    def required_raw_layers(self) -> frozenset[RawLayer]:
+        """The raw ``/store/raw`` layers (bars/trades/quotes) this group's inputs ultimately derive from.
+
+        This is the SOURCE-DATA DEPENDENCY a backfill DECLARES (docs/SOURCE_DATA_DEPENDENCY.md): before
+        computing this group over a [date_range]×symbols horizon, ``ensure_inputs`` guarantees these raw
+        layers are present in the store (patching any holes ONCE) so the feature backfill reads source
+        EXCLUSIVELY from the store and never re-downloads from Alpaca.
+
+        DEFAULT derives from ``self.type`` (``_TYPE_RAW_LAYERS``), so the existing groups need no change:
+        a bar-derived group needs ``{bars}``; a trade_flow group ``{bars, trades}``; a quote_spread /
+        microstructure group ``{bars, trades, quotes}``. A group whose true requirement differs from its
+        family default OVERRIDES this (the same self-declaration pattern as ``reduce_buffer_minutes`` /
+        ``up_to_date``) — the declaration lives with the group, not in a backfill-side lookup table."""
+        return _TYPE_RAW_LAYERS.get(self.type, _DEFAULT_RAW_LAYERS)
 
     def reduce_buffer_minutes(self) -> int | None:
         """The deepest trailing-window (in minutes) this group needs to compute its latest minute
