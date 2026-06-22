@@ -621,7 +621,14 @@ fn assemble_canonical<'py>(
                     let anchored = k == 8 || k == 9;
                     let denom_y_scale = if anchored { b * syy } else { sy * sy };
                     let denom_y_eps: f64 = if anchored { 1e-9 } else { 1e-12 };
-                    let defined = b >= 2.0 && denom_x > 1e-12 * (sx * sx);
+                    // X-side: the raw (Σx)² floor PLUS the translation-invariant variance floor 1e-9·(b·sxx)
+                    // (mirror _OLS_DENOM_X_CENTERED_REL_EPS) — a near-CONSTANT-but-nonzero regressor (a return
+                    // ticking the same tiny amount each minute) has CoV² ≈ denom_x/(b·sxx) ~ 1e-12, which the
+                    // raw (Σx)² floor sits AT, so the batch and incremental Σx² straddle it (null/non-null flip)
+                    // and the surviving corr is float noise. Rejecting denom_x ≤ 1e-9·(b·sxx) nulls it on BOTH
+                    // paths; well-conditioned x (returns oscillate, centered time) is untouched.
+                    let defined =
+                        b >= 2.0 && denom_x > 1e-12 * (sx * sx) && denom_x > 1e-9 * (b * sxx);
                     let defined_corr = defined && denom_y > denom_y_eps * denom_y_scale;
                     // n==2 perfect-fit corner (mirror _OLS_PERFECT_FIT_COUNT in declarative.py): a line through
                     // two distinct points is an EXACT fit, so r2==1.0 and corr==sign(cov). From the sums the

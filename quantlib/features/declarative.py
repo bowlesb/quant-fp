@@ -104,6 +104,24 @@ _RESID_REL_FLOOR = 1e-6
 _OLS_DENOM_X_REL_EPS = 1e-12
 _OLS_DENOM_Y_REL_EPS = 1e-12
 
+# Centered-variance floor on the X numerator, relative to the translation-invariant variance scale ``b·sxx``.
+# The raw ``denom_x > eps·(Σx)²`` guard above is rebased on the SECOND MOMENT ``(Σx)²``; when the regressor x is
+# near-CONSTANT but NONZERO (a return that ticks by the same tiny amount each minute — a flat/illiquid name
+# grinding one direction), ``(Σx)² ≈ b·Σx²`` so that floor sits at the raw-moment scale, NOT the variance
+# scale, and the true relative variance ``denom_x/(b·sxx) = CoV²`` can be ~1e-12 (return constant to ~6 sig
+# figs) — right AT the ``eps·(Σx)²`` floor. There the batch fresh-sum ``Σx²`` and the incremental running-sum
+# ``Σx²`` round ``b·Σx² − (Σx)²`` onto OPPOSITE sides of the floor → a null/non-null parity FLIP (and even when
+# both keep it, the surviving corr is the correlation of float noise). This is the RETURN x-side analogue of
+# the y-side ``denom_y`` cancellation #402 closed for raw volume — but a return has NO stable per-symbol anchor
+# to center on (unlike volume/close) and NO rolling origin (unlike the time axis), so the fix is the SAME
+# translation-invariant relative-variance guard the anchored y-side already uses: reject when
+# ``denom_x ≤ 1e-9·(b·sxx)`` (CoV² < 1e-9, i.e. the return is constant to ~4.5 sig figs). 1e-9 clears the
+# running-sum noise (~1e-12 relative) by ~1000× while sitting far below any real return's CoV² (returns
+# oscillate → CoV² ≳ O(1)), so a genuinely-flat-return window is NULL on BOTH paths and every well-conditioned
+# cell is untouched (value-identical). Applied IN ADDITION to the raw ``(Σx)²`` floor (can only null MORE cells,
+# never resurrect one). This is the x-side gate that lets ``price_volume`` flip ``incremental_safe`` safely.
+_OLS_DENOM_X_CENTERED_REL_EPS = 1e-9
+
 # Centered-y (FP_RUST_REDUCE anchored regression) denom_y guard eps, relative to the variance scale ``b·syy``.
 # When y is centered on the per-symbol anchor the RAW ``eps·sy²`` scale collapses (sy → small), so the guard
 # is re-based on the translation-invariant variance scale ``b·syy``. A LARGER eps than the raw 1e-12 is
@@ -191,7 +209,11 @@ def _ols_stat_exprs(
     cov_n = b * sxy - sx * sy
     denom_y_scale = (b * syy) if anchored else (sy * sy)
     denom_y_eps = _OLS_DENOM_Y_CENTERED_REL_EPS if anchored else _OLS_DENOM_Y_REL_EPS
-    defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
+    defined = (
+        (b >= 2.0)
+        & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
+        & (denom_x > _OLS_DENOM_X_CENTERED_REL_EPS * (b * sxx))
+    )
     defined_corr = defined & (denom_y > denom_y_eps * denom_y_scale)
     perfect = defined_corr & (b == _OLS_PERFECT_FIT_COUNT)  # line through 2 points: r2==1, corr==sign(cov)
     out: dict[str, pl.Expr] = {}
@@ -1062,7 +1084,11 @@ def _ols_stat_numpy(
     cov_n = b * sxy - sx * sy
     denom_y_scale = (b * syy) if anchored else (sy * sy)
     denom_y_eps = _OLS_DENOM_Y_CENTERED_REL_EPS if anchored else _OLS_DENOM_Y_REL_EPS
-    defined = (b >= 2.0) & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
+    defined = (
+        (b >= 2.0)
+        & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
+        & (denom_x > _OLS_DENOM_X_CENTERED_REL_EPS * (b * sxx))
+    )
     defined_corr = defined & (denom_y > denom_y_eps * denom_y_scale)
     perfect = defined_corr & (b == _OLS_PERFECT_FIT_COUNT)  # line through 2 points: r2==1, corr==sign(cov)
     out: dict[str, np.ndarray] = {}

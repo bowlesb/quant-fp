@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import polars as pl
 
+from quantlib.features import declarative
 from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
@@ -55,14 +56,30 @@ class PriceVolumeGroup(ReductionGroup):
         cumulative on a centered TIME axis (well-conditioned) and is NOT centered — only ``pv`` is declared."""
         return {"pv": anchor_column("volume")}
 
-    # PARKED on the batch fresh-sum recompute, byte-identical to batch under FP_INCREMENTAL — same posture as the
-    # close-y anchored groups (trend_quality / clean_momentum): the conditioning MECHANISM (regression_y_anchor)
-    # ships here, but the flip to incremental_safe=True is the LEAD's enablement call after a real-data soak
-    # proves the volume-y-centered denom rounds identically on both paths in production (synthetic proof:
-    # tests/test_fp_price_volume_comoment.py — worst self-check tol-ratio 670x→<1x with FP_RUST_REDUCE on). Until
-    # then it stays gated in the INCREMENTAL_UNSAFE set. NOTE: the fast path requires FP_RUST_REDUCE on (the
-    # volume y-anchor active); arming incremental_safe=True without it would re-expose the raw-volume cancellation.
-    incremental_safe = False
+    @property
+    def incremental_safe(self) -> bool:  # type: ignore[override]
+        """SAFE to ride the incremental running sums ONLY when ``FP_RUST_REDUCE`` is on — pv_correlation's corr
+        denom cancels on BOTH sides on degenerate cells, and both are now conditioned:
+
+          * Y-SIDE (raw share VOLUME ~1e6): ``regression_y_anchor`` centers the volume regressand on the
+            per-symbol ``__anchor_volume`` constant under FP_RUST_REDUCE → ``denom_y = b·Σ(y−a)² − (Σ(y−a))²``
+            rounds identically on the batch fresh-sum and incremental running-sum paths (#402; synthetic proof
+            tests/test_fp_price_volume_comoment.py — worst self-check tol-ratio 670x→<1x).
+          * X-SIDE (one-minute RETURN ~1e-4): a near-CONSTANT-but-nonzero return (a flat/illiquid name grinding
+            one direction) makes ``denom_x = b·Σr² − (Σr)²`` cancel at the ~1e-12 relative level — the batch and
+            incremental Σr² straddle the old ``(Σx)²`` guard floor → a null/non-null parity FLIP (measured worst
+            tol-ratio up to +Inf on a near-constant-return stream). A return has NO stable per-symbol anchor and
+            NO rolling origin to center on, so the fix is the translation-invariant variance guard
+            ``_OLS_DENOM_X_CENTERED_REL_EPS`` (declarative.py) — reject ``denom_x ≤ 1e-9·(b·Σx²)`` so a
+            constant-return window is NULL on BOTH paths; it ships unconditionally in the shared OLS stat (all
+            three twins) and is value-identical on well-conditioned cells.
+
+        With FP_RUST_REDUCE OFF the y-side is uncentered (raw-volume cancellation re-exposed), so the group stays
+        PARKED on the batch fresh-sum recompute (byte-identical under FP_INCREMENTAL). The flag default-OFF keeps
+        today's behavior; the prod flip is the Lead's FP_RUST_REDUCE relaunch (the y-anchor + this property arm
+        together). Mirrors how ``_y_anchor_exprs`` reads the live flag, so tests toggling
+        ``declarative._USE_RUST_REDUCE`` drive both states in lockstep."""
+        return declarative._USE_RUST_REDUCE
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
