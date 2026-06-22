@@ -181,16 +181,99 @@ class MarketTurbulenceGroup(FeatureGroup):
         exprs = [pl.col(name).cast(pl.Float64).alias(name) for name in names]
         return out.with_columns(exprs).select(["symbol", "minute", *names])
 
+    def _abs_returns_latest(self, frame: pl.DataFrame, latest: pl.Series | object) -> pl.DataFrame:
+        """Per-symbol ``|trailing-W return|`` at the SINGLE minute ``latest``: ``|close[T]/close[T-W]-1|``
+        for each horizon, keyed off the symbols that have a close at ``T``. The rolling ``_abs_returns``
+        builds a full-buffer lagged self-join over every minute; for the live latest-minute reduce we need
+        only ``close[T]`` and the four ``close[T-W]`` slices, so we look those up directly (time-based, so a
+        symbol without a bar exactly ``W`` ago gets a null ``|return|`` — excluded from the mean, identical
+        to the rolling form). Symbols absent at ``T`` are not in ``close_t`` and so do not contribute."""
+        close_t = frame.filter(pl.col("minute") == latest).select(
+            ["symbol", pl.col("close").alias("_close_t")]
+        )
+        measures = close_t
+        for window in ABSRET_WINDOWS:
+            target = latest - pl.duration(minutes=window)
+            close_lag = frame.filter(pl.col("minute") == target).select(
+                ["symbol", pl.col("close").alias(f"_lag{window}")]
+            )
+            measures = measures.join(close_lag, on="symbol", how="left")
+        return measures.with_columns(
+            [
+                (pl.col("_close_t") / pl.col(f"_lag{window}") - 1.0).abs().alias(f"_absret_{window}m")
+                for window in ABSRET_WINDOWS
+            ]
+        ).select(["symbol", *[f"_absret_{window}m" for window in ABSRET_WINDOWS]])
+
+    def _realized_vol_latest(self, frame: pl.DataFrame, latest: pl.Series | object) -> pl.DataFrame:
+        """Per-symbol trailing-``RV_WINDOW`` realized vol at the SINGLE minute ``latest`` = std of the 1m log
+        returns over ``(T-RV_WINDOW, T]``, defined with at least ``RV_MIN_OBS`` valid returns. The rolling
+        ``_realized_vol`` runs ``rolling_std_by`` over every minute of the buffer; here we slice the buffer to
+        the trailing ``RV_WINDOW`` minutes ending at ``T`` and reduce ONCE. The slice starts at ``T-RV_WINDOW``
+        so the oldest in-window logret (at ``T-(RV_WINDOW-1)``) has its prior close, then logrets at the left
+        boundary minute ``T-RV_WINDOW`` are dropped to realise the left-open ``(T-RV_WINDOW, T]`` window the
+        rolling form uses. Same point-in-time logret guard (exact 1m step, both closes positive)."""
+        window_start = latest - pl.duration(minutes=RV_WINDOW)
+        rv_buffer = frame.filter(pl.col("minute") >= window_start).sort(["symbol", "minute"])
+        logret = rv_buffer.with_columns(
+            pl.col("close").shift(1).over("symbol").alias("_prev_close"),
+            pl.col("minute").shift(1).over("symbol").alias("_prev_minute"),
+        ).with_columns(
+            pl.when(
+                (pl.col("_prev_close") > 0)
+                & (pl.col("close") > 0)
+                & ((pl.col("minute") - pl.col("_prev_minute")) == pl.duration(minutes=1))
+            )
+            .then((pl.col("close") / pl.col("_prev_close")).log())
+            .otherwise(None)
+            .alias("_logret")
+        )
+        logret = logret.filter(pl.col("minute") > window_start)
+        return (
+            logret.group_by("symbol")
+            .agg(
+                pl.col("_logret").drop_nulls().std().alias(f"_rv{RV_WINDOW}"),
+                pl.col("_logret").drop_nulls().len().alias("_rv_obs"),
+            )
+            .with_columns(
+                pl.when(pl.col("_rv_obs") >= RV_MIN_OBS)
+                .then(pl.col(f"_rv{RV_WINDOW}"))
+                .otherwise(None)
+                .alias(f"_rv{RV_WINDOW}")
+            )
+            .select(["symbol", f"_rv{RV_WINDOW}"])
+        )
+
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         minute_keys = ctx.frame("minute_agg").select(["symbol", "minute"])
         return self._assemble(ctx, minute_keys)
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE gather: the turbulence at minute T depends only on THAT minute's per-symbol
-        measures, so the reduce is identical to compute() — we just emit only the latest minute's rows.
-        The measures are still built over the buffer (lagged join / RV window), then the reduce + broadcast
-        run unchanged, so compute_latest == compute().last by construction (guarded by tests/test_fp_latest).
-        """
+        """LATEST-MINUTE gather: the turbulence at minute ``T`` depends only on THAT minute's per-symbol
+        measures, so we build the per-symbol measures FOR ``T`` ALONE — a handful of ``close[T-W]`` lookups
+        and one trailing-``RV_WINDOW`` std slice — instead of the rolling ``_abs_returns``/``_realized_vol``
+        full-buffer derive that ``compute()`` runs over every minute then discards all but the last. The
+        reduce + broadcast are then the same universe-mean GATHER, so ``compute_latest`` == ``compute()``
+        filtered to the last minute cell-for-cell (guarded by ``tests/test_fp_market_turbulence`` and the
+        generic ``tests/test_fp_latest`` parity test). Symbols with no bar at ``T`` do not contribute to
+        either measure (``_abs_returns_latest`` keys off ``close[T]``; the RV is LEFT-joined onto that set)."""
         minute_keys = ctx.frame("minute_agg").select(["symbol", "minute"])
         latest = minute_keys["minute"].max()
-        return self._assemble(ctx, minute_keys.filter(pl.col("minute") == latest))
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
+
+        abs_returns = self._abs_returns_latest(frame, latest)
+        realized_vol = self._realized_vol_latest(frame, latest)
+        # LEFT join: keep only symbols present at ``T`` (the ``_abs_returns_latest`` set) — a symbol with no
+        # bar AT ``T`` must not contribute to minute ``T``'s reduce even if it has RV-window logrets, exactly
+        # as the rolling form (filtered to ``minute == latest``) drops it.
+        measures = abs_returns.join(realized_vol, on="symbol", how="left").with_columns(
+            pl.lit(latest).alias("minute")
+        )
+        measures = self._pin_universe(ctx, measures)
+        market = self._reduce(measures)
+
+        names = [spec.name for spec in self.declare()]
+        latest_keys = minute_keys.filter(pl.col("minute") == latest)
+        out = latest_keys.join(market, on="minute", how="left")
+        exprs = [pl.col(name).cast(pl.Float64).alias(name) for name in names]
+        return out.with_columns(exprs).select(["symbol", "minute", *names])

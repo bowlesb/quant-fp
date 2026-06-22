@@ -168,6 +168,10 @@ GROUP_METADATA: dict[str, dict[str, str]] = {
         "kind": "Gather",
         "mechanism": "universe gather (reader-phase)",
         "incremental_ready": "n-a",
+        "note": "compute_latest builds the per-symbol measures for the latest minute ALONE (a few "
+        "close[T-W] lookups + one trailing-RV std slice) instead of the full-buffer rolling derive "
+        "compute() runs over every minute — measured ~30->~4ms p50 at REF scale, parity-true to "
+        "declared tolerance (Lever B compute-once-for-T).",
     },
     "size_entropy": {
         "kind": "hand-written",
