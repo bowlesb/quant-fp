@@ -615,13 +615,18 @@ fn assemble_canonical<'py>(
                     // Relative variance floors (mirror _OLS_DENOM_X/Y_REL_EPS in declarative.py): on a
                     // near-flat regressor (or regressand) denom_x/denom_y is a cancellation difference whose
                     // sign is float-noise, so a bare `> 0.0` would diverge from the polars/numpy paths. Gate
-                    // each on a fraction of its own scale ((Σx)² / (Σy)²). For an anchored (y-centered)
-                    // regression sy collapses, so denom_y is gated on the translation-invariant variance scale
-                    // eps·b·syy with a larger eps (running-sum noise) — see _OLS_DENOM_Y_CENTERED_REL_EPS.
+                    // each on a fraction of its own scale ((Σx)² / (Σy)²). The raw (non-anchored) floor is 1e-10
+                    // (raised from 1e-12): for a small-RETURN corr regressor (return_dynamics / market_beta /
+                    // price_volume) a near-constant-return window's denom_x/denom_y sits in the [1e-12, ~3e-12]
+                    // noise/noise band where the batch fresh-sum and incremental running-sum paths' ~1-ULP
+                    // difference amplifies past tolerance; 1e-10 nulls that band on BOTH paths (correct — a flat
+                    // window has no defined corr) and is 5+ decades below real return variance (CV² ≥ ~4.5e-5).
+                    // For an anchored (y-centered) regression sy collapses, so denom_y is gated on the
+                    // translation-invariant variance scale eps·b·syy with eps 1e-9 — see _OLS_DENOM_Y_CENTERED_REL_EPS.
                     let anchored = k == 8 || k == 9;
                     let denom_y_scale = if anchored { b * syy } else { sy * sy };
-                    let denom_y_eps: f64 = if anchored { 1e-9 } else { 1e-12 };
-                    let defined = b >= 2.0 && denom_x > 1e-12 * (sx * sx);
+                    let denom_y_eps: f64 = if anchored { 1e-9 } else { 1e-10 };
+                    let defined = b >= 2.0 && denom_x > 1e-10 * (sx * sx);
                     let defined_corr = defined && denom_y > denom_y_eps * denom_y_scale;
                     // n==2 perfect-fit corner (mirror _OLS_PERFECT_FIT_COUNT in declarative.py): a line through
                     // two distinct points is an EXACT fit, so r2==1.0 and corr==sign(cov). From the sums the

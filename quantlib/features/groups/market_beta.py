@@ -48,17 +48,19 @@ BETA_MAX = 15.0
 @register
 class MarketBetaGroup(ReductionGroup):
     name = "market_beta"
-    version = "1.0.0"
+    version = "1.1.0"
     owner = "modeller"
     type = FeatureType.CROSS_SECTIONAL
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
-    # The OLS regressor x is SPY's one-minute return broadcast onto every symbol. On a gappy symbol the few
-    # in-window paired bars give a near-constant x, so the corr denominator b·Σx²−(Σx)² is a difference of
-    # float-noise that incremental's running sum rounds differently from the batch fresh sum, straddling the
-    # corr defined-guard — incremental emits market_corr=±1 / idio_vol=0 where batch NULLs (real 06-18 gappy
-    # A/B: MO/SLB). Same conditioning class as the gated correlation groups; routed LIVE to the batch path.
-    # (Smooth-synthetic gappy sweep missed it: no SPY symbol -> _mret all-null -> corr-denom unexercised.)
-    incremental_safe = False
+    # The OLS regressor x is SPY's one-minute return broadcast onto every symbol; the regressand y is the
+    # symbol's own return — BOTH small returns, so denom_x = b·Σx²−(Σx)² AND denom_y are float-noise on a gappy
+    # near-constant window (incremental emitted market_corr=±1 / idio_vol=0 where batch NULLed: real 06-18 gappy
+    # A/B MO/SLB). The SAME two-sided corr-denom class as return_dynamics. CLOSED by the OLS defined-guard floor
+    # raise 1e-12→1e-10 (declarative.py _OLS_DENOM_X/Y_REL_EPS): the noise/noise denom band is now NULL on BOTH
+    # paths (correct — a flat SPY-return window has no defined beta), 5+ decades below real return variance so no
+    # well-conditioned window is touched. Value change on the degenerate band only -> version 1.0.0→1.1.0 +
+    # re-trust. Now SAFE for the incremental fast path.
+    incremental_safe = True
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

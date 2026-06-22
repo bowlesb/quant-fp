@@ -14,25 +14,31 @@
 > the P2 FP_INCREMENTAL enablement flip (now **20 of 23** reductions ready → live incremental) and the
 > Rust-resident emit kernel (the only thing that moves the ~289ms isolated per-bet floor toward <100ms).
 >
-> ⭐ REDUCTION INCREMENTAL-READINESS: declared **20/23 incremental_safe=True**, but a REAL-DATA A/B soak
-> (2026-06-17, 30 symbols × 779 graded post-warmup minutes, production `_incremental_parity` self-check,
-> `slice_derive=True`) finds **15/20 actually CLEAN**. The synthetic degenerate stream (test_fp_incremental_
-> features) only triggers `distribution`; the real gappy/sparse tape triggers **5 rare degenerate-cell
-> guard-straddle breachers** the synthetic stream cannot reproduce — the SAME root cause as the parked
-> corr-denom class, just rarer (0.4–7.8% of minutes). These 5 are NOT yet GO for FP_INCREMENTAL:
+> ⭐ REDUCTION INCREMENTAL-READINESS: the REAL-DATA A/B soak (2026-06-17, 30 symbols × 779 graded post-warmup
+> minutes, production `_incremental_parity` self-check, `slice_derive=True`) now finds **17/17 declared-safe
+> groups CLEAN** (worst tol-ratio overall 0.00). `return_dynamics` + `market_beta` were UN-GATED by the
+> two-sided OLS defined-guard floor raise (1e-12→1e-10, declarative.py `_OLS_DENOM_X/Y_REL_EPS`): their breach
+> was a near-constant-RETURN window where denom_x/denom_y collapse to the [1e-12, ~3e-12] noise/noise band, so
+> the batch fresh-sum and incremental running-sum paths rounded a MEANINGLESS corr differently (autocorr_2
+> null-flip / 4.5e-4 value-Δ). The floor nulls that whole degenerate band on BOTH paths (correct — a flat-return
+> window has no defined autocorrelation/beta), value-identical on every well-conditioned cell (real-return CV²
+> ≥ ~4.5e-5, 5+ decades above the floor; MEASURED 0.000% of realistic cells touched). Both bumped to version
+> 1.1.0 (a value change on the degenerate band → fingerprint bump + re-trust).
+>
+> The remaining **4 NOT-yet-GO** real-tape breachers (the synthetic degenerate stream only triggers
+> `distribution`; the real gappy/sparse tape triggers these rarer degenerate-cell breachers):
 >
 > | group | breach freq (real A/B) | worst ratio | worst cell | straddle |
 > |---|---|---|---|---|
 > | `range_expansion` | 61/779 (7.8%) | inf (null-flip) | range_expansion_5_30m | trailing-mean RATIO denom `>0` guard |
 > | `trend_quality` | 21/779 (2.7%) | 1683× | price_r2_5m | OLS R² cov²/(var·var) (the parked corr-denom class) |
 > | `clean_momentum` | 12/779 (1.5%) | 620× | clean_momentum_score_5m | moment/std power-sum cancellation |
-> | `return_dynamics` | 4/779 (0.5%) | inf (null-flip) | autocorr_2_10m | autocorrelation denom straddle |
 > | `distribution` | 3/779 (0.4%) | 10404× | ret_kurt_10m | kurtosis higher-moment cancellation |
 >
-> **GO (15)** — clean across the whole soak: count_fano, efficiency, liquidity, momentum, momentum_consistency,
-> ohlc_vol, quote_spread, realized_range, signed_trade_ratio, trade_flow, trade_freq_z, volatility, **volume**,
-> volume_exhaustion, volume_leads_price. (`volume` is clean ONLY when the centering anchor is per-MINUTE scale,
-> see ⚠ below.)
+> **GO (now 17)** — clean across the whole soak: count_fano, efficiency, liquidity, **market_beta**, momentum,
+> momentum_consistency, ohlc_vol, quote_spread, realized_range, **return_dynamics**, signed_trade_ratio,
+> trade_flow, trade_freq_z, volatility, **volume**, volume_exhaustion, volume_leads_price. (`volume` is clean
+> ONLY when the centering anchor is per-MINUTE scale, see ⚠ below.)
 >
 > ⛔ **#386's 4 time-axis groups (trend_quality / clean_momentum / residual_analysis / price_volume) do NOT
 > expand this set.** The DataIntegrity real-tape promotion gate (2026-06-21, see "REAL-TAPE PROMOTION GATE"
@@ -69,7 +75,7 @@
 | `distribution` | 20 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `efficiency` | 18 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `liquidity` | 15 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `market_beta` | 21 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | PARKED — corr-denom-straddle (see §Parked); centering does NOT apply (regressors small) |
+| `market_beta` | 21 | shared running-sum (WindowedSumState) | READY — UN-GATED by the two-sided OLS defined-guard floor (1e-12→1e-10): the SPY-return corr-denom noise/noise band is now NULL on both paths (real-tape soak CLEAN). version 1.1.0 |
 | `momentum` | 22 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `momentum_consistency` | 18 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `ohlc_vol` | 12 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
@@ -78,7 +84,7 @@
 | `range_expansion` | 2 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `realized_range` | 3 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `residual_analysis` | 6 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | PARKED — near-perfect-fit SSR cancellation (see §Parked); already mean-centered, anchor N/A |
-| `return_dynamics` | 15 | shared running-sum (WindowedSumState) | READY — un-gated by P2 Neumaier (#283/#294); incremental==batch parity-green |
+| `return_dynamics` | 15 | shared running-sum (WindowedSumState) | READY — UN-GATED by the two-sided OLS defined-guard floor (1e-12→1e-10): the autocorrelation corr-denom noise/noise band is now NULL on both paths (real-tape soak CLEAN, was 4/779). version 1.1.0 |
 | `signed_trade_ratio` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_flow` | 23 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_freq_z` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
@@ -140,6 +146,20 @@
 
 ## Parked: the corr-denom-straddle class (price_volume / market_beta / residual_analysis)
 
+> ✅ RESOLVED for the TWO-RETURNS sub-class (2026-06-22): `market_beta` and `return_dynamics` (both regress a
+> small RETURN on a small RETURN, so denom_x AND denom_y collapse) are UN-GATED by raising the OLS
+> defined-guard floor `_OLS_DENOM_X/Y_REL_EPS` 1e-12→1e-10. The prior write-up below concluded floor-widening
+> was "non-separable" — but it measured the guard ratio only on the ADVERSARIAL walk (where genuinely-flat
+> noise/noise cells that happen to AGREE sit in the same band as those that disagree). The correct framing:
+> NULL the whole degenerate band on BOTH paths (a flat-return window has no defined corr — the value there is
+> meaningless noise/noise), which IS cleanly separable from real signal (realistic-return CV² ≥ ~4.5e-5, 5+
+> decades above 1e-10; MEASURED 0.000% of well-conditioned cells touched, real-tape 2026-06-17 soak CLEAN).
+> `price_volume`'s RETURN-x-side breach is ALSO closed by this floor; its remaining gate is the raw-VOLUME
+> y-side (FP_RUST_REDUCE y-anchoring) + the obv_slope TIME-axis (FP_CENTERED_TIME) — those flips ride the
+> existing flag machinery, not this floor. `residual_analysis` (perfect-fit SSR) is untouched (a different
+> cancellation). So the parked set shrinks to: price_volume (volume-y/obv, flag-gated) + residual_analysis.
+>
+> ── historical record (the path that got here; kept as context, not current state) ──
 > A DISTINCT reduction-stability problem, PARKED (Lead decision 2026-06-20): the 3 remaining gated reductions
 > are NOT the centering class. They stay correctly on the batch fresh-sum path under FP_INCREMENTAL (no
 > correctness loss, no incremental acceleration). 20/23 ready is the win; this captures the last 3 as a

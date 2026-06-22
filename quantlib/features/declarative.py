@@ -98,11 +98,24 @@ _RESID_REL_FLOOR = 1e-6
 # sums land it on OPPOSITE sides of zero at the ~1e-16 (machine-eps) relative level. A bare ``denom > 0.0``
 # then sends one path to a finite stat and the other to NULL: a stream-vs-backfill parity break on
 # degenerate-flat names (e.g. kyle_lambda on a constant-signed-flow window). Require each numerator to be a
-# non-trivial fraction of its own scale ((Σx)² / (Σy)²) so a genuinely-flat window is NULL on BOTH paths;
-# 1e-12 sits far above the float-noise floor (~1e-16 here) and far below any real intraday variance, so
-# well-conditioned windows are untouched.
-_OLS_DENOM_X_REL_EPS = 1e-12
-_OLS_DENOM_Y_REL_EPS = 1e-12
+# non-trivial fraction of its own scale ((Σx)² / (Σy)²) so a genuinely-flat window is NULL on BOTH paths.
+#
+# The floor is 1e-10 (raised from 1e-12). For a corr/r2 group whose regressor (and/or regressand) is a small
+# one-minute RETURN — return_dynamics (lagged-return vs return), market_beta (SPY-return broadcast), price_volume
+# (return vs volume) — the batch fresh-sum and incremental running-sum paths do NOT just round zero differently;
+# on a near-CONSTANT-return window the ratio ``denom_x/(Σx)²`` lands the cell in [1e-12, ~3e-12], where the
+# corr is ``noise/noise`` (a meaningless reading on a flat window) and the two paths' ~1-ULP sum difference is
+# AMPLIFIED by the tiny denom into a >tol value Δ (MEASURED 4.5e-4 on a 60m autocorr cell at the old 1e-12
+# floor). 1e-12 sat just BELOW that breach band, so it admitted the degenerate cell on both paths but let them
+# disagree. 1e-10 nulls the whole degenerate band on BOTH paths (the CORRECT answer — a flat-return window has
+# no defined autocorrelation/beta), and is cleanly separated from real signal: on realistic-volatility returns
+# the ratio min is ~4.5e-5 (CV² ≈ O(0.01–1)), 5+ decades ABOVE 1e-10 — so NO well-conditioned window is nulled
+# (MEASURED 0.000% of realistic cells affected across return vols 1e-4..1e-3). Same principle as the centered-y
+# ``_OLS_DENOM_Y_CENTERED_REL_EPS = 1e-9`` floor (#386): clear the running-sum noise, stay far below real variance.
+# This is a VALUE CHANGE on the degenerate band only (per-group version bump + re-trust), un-gating
+# return_dynamics + market_beta + price_volume's return-side denom from the incremental fast path.
+_OLS_DENOM_X_REL_EPS = 1e-10
+_OLS_DENOM_Y_REL_EPS = 1e-10
 
 # Centered-y (FP_RUST_REDUCE anchored regression) denom_y guard eps, relative to the variance scale ``b·syy``.
 # When y is centered on the per-symbol anchor the RAW ``eps·sy²`` scale collapses (sy → small), so the guard

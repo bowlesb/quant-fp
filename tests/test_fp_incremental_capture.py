@@ -79,47 +79,47 @@ def _with_anchors(frame: pl.DataFrame) -> pl.DataFrame:
 # The conditioning-sensitive groups gated to the batch fresh-sum recompute, each DEMONSTRATED to breach the
 # engine-vs-batch parity self-check on a gappy/near-flat walk by test_gappy_denom_group_breaches_raw_so_gate_is_
 # load_bearing below (worst ratio + null/non-null mismatch recorded there). ``volume`` (variance-family std:
-# power-sum sqrt vs backfill rolling_std_by FORMULA gap) is the original. ``return_dynamics`` (lagged-return
-# autocorrelation) and ``volume_leads_price`` (lagged-volume×return correlation) breach because the OLS pairing
-# count and cross-product running sums round across the corr defined-guard differently from the batch fresh sum
-# when the paired series collapse on a sparse window. ``price_volume`` reverts to gated (was #155 True): its
-# ``pv_correlation`` regresses return on RAW share volume and breaches BEYOND the b==2 perfect-fit corner the
-# n==2 guard closed (77x tolerance + 6 null mismatches in the sweep). ``market_beta`` regresses each symbol's
-# return on SPY's broadcast return; on a gappy symbol the few paired bars give a near-constant SPY-return x, so
-# the corr denominator collapses the SAME way — the real-06-18 A/B (test_market_beta_breaches_on_real_gappy_
-# spy_regressor) flagged market_corr_*=±1 / idio_vol_*=0 where batch NULLs on MO/SLB. The shared centered-denom
-# kernel (fingerprint-affecting, Lead-coordinated) is the queued follow-up to widen incremental coverage here.
+# power-sum sqrt vs backfill rolling_std_by FORMULA gap) is the original. ``volume_leads_price`` (lagged-volume×
+# return correlation) breaches because the OLS pairing count and cross-product running sums round across the corr
+# defined-guard differently from the batch fresh sum when the paired series collapse on a sparse window.
+# ``price_volume`` stays gated: its ``pv_correlation`` regresses return on RAW share volume (~1e6) and its
+# ``obv_slope`` regresses cumulative OBV on a time axis — the volume-y-side and the time-axis breaches need
+# FP_RUST_REDUCE (y-anchoring) + FP_CENTERED_TIME (origin rebase) armed to close; its return-X-side breach is
+# closed by the shared OLS defined-guard floor (1e-10), but the y/time modes keep its gate load-bearing until
+# those flags arm (the coordinated relaunch step).
+#
+# ``return_dynamics`` (lagged-return autocorrelation) and ``market_beta`` (SPY-return broadcast beta) were the
+# TWO-SIDED corr-denom class (BOTH regressor and regressand are small returns, so denom_x AND denom_y collapse on
+# a near-flat window). They are NOW UN-GATED (incremental_safe=True): the OLS defined-guard floor raise 1e-12→1e-10
+# (declarative.py _OLS_DENOM_X/Y_REL_EPS) nulls the noise/noise denom band on BOTH paths, value-identical on every
+# well-conditioned cell (real-return CV² ≥ ~4.5e-5, 5+ decades above the floor). See test_two_sided_corr_denom_*.
 #
 # NOT gated (verified parity-clean on the real-06-18 gappy A/B, no null mismatch, worst < 4e-4x tolerance):
 # distribution, volatility — their power-sum-moment / std algebra does NOT collapse the way the correlation-of-
-# two-sparse-series groups do. The task's draft gate list also named market_beta with these; the SYNTHETIC
-# gappy sweep cleared all three, but the REAL-DATA A/B reconciliation showed market_beta breaches (the synthetic
-# had no SPY regressor so its corr-denom was never exercised) while distribution/volatility stayed clean.
+# two-sparse-series groups do.
 INCREMENTAL_UNSAFE = {
-    # The PARKED corr-denom-class trio (centering does not reach these — they stay on batch under
-    # FP_INCREMENTAL with no correctness loss, just no acceleration).
-    "price_volume",  # the SAME centered-std fix applies (a centered-std vertical slice for price_volume next).
-    "market_beta",  # corr-denom centering on the same anchor (the sibling fix; not this PR).
+    # ``price_volume`` stays gated: the return-X-side is closed by the shared OLS floor (this PR), but its raw-
+    # volume y-side (FP_RUST_REDUCE) and obv time-axis (FP_CENTERED_TIME) modes keep the gate load-bearing until
+    # those flags arm at the coordinated relaunch.
+    "price_volume",
     # residual_analysis: the OLS residual SSR is a difference of large near-equal centered power sums on a
     # near-perfect intraday fit — the corr-denom-class centering (sibling), not the std-class. Stays gated here.
     "residual_analysis",
-    # The 5 REAL-DATA soak NO-GO breachers (docs/INCREMENTAL_READINESS.md, 2026-06-17 A/B, set False by #332):
+    # The REAL-DATA soak NO-GO breachers (docs/INCREMENTAL_READINESS.md, 2026-06-17 A/B, set False by #332):
     # rare guard-straddle / power-sum-cancellation cells the synthetic degenerate stream cannot reach on real
-    # gappy tape. Batch-gated until the cancellation-free reduction-denom fix lands; same class as the trio.
+    # gappy tape. Batch-gated until each one's cancellation-free reduction-denom fix lands.
     "range_expansion",  # ratio-denom `>0` guard straddle (7.8% of minutes, the most frequent)
     "trend_quality",  # OLS R² cov²/(var·var) denom straddle (2.7%)
     "clean_momentum",  # moment/std power-sum cancellation (1.5%)
-    "return_dynamics",  # autocorrelation denom null-flip (0.5%) — the Neumaier fix didn't reach this cell
     "distribution",  # higher-moment (kurtosis) Σx⁴ cancellation (0.4%)
 }
-# The 5 groups #332 re-gated to batch on the real-data soak verdict — they must be incremental_safe=False and
-# therefore byte-identical to batch under FP_INCREMENTAL. (An earlier synthetic-only pass had flipped
-# trend_quality + clean_momentum to safe; the real-data soak reverted that.)
+# The groups #332 re-gated to batch on the real-data soak verdict — they must be incremental_safe=False and
+# therefore byte-identical to batch under FP_INCREMENTAL. (return_dynamics left this set when the two-sided
+# corr-denom floor closed its autocorrelation null-flip.)
 INCREMENTAL_REGATED = {
     "range_expansion",
     "trend_quality",
     "clean_momentum",
-    "return_dynamics",
     "distribution",
 }
 
@@ -604,29 +604,32 @@ def _gappy_corr_breaches(group_name: str) -> bool:
 
 
 @pytest.mark.parametrize("group_name", ["return_dynamics", "volume_leads_price"])
-def test_gappy_denom_group_now_clean_after_p2_neumaier(group_name: str) -> None:
-    """⭐ P2 PROOF (stable summation): on the gappy near-constant-return walk these corr-family groups USED to
-    breach engine-vs-batch (their ``incremental_safe=False`` was the gate). The Neumaier-compensated running
-    sum (``_comp`` carries the add/expire rounding loss) now makes the corr-kernel power-sum denominator match
-    the batch fresh sum, so engine-vs-batch is CLEAN — the former breach is CLOSED. They keep
-    ``incremental_safe=False`` until the LEAD sequences the enablement flip; this asserts the parity is now
-    green so that flip is unblocked."""
+def test_gappy_denom_group_now_clean(group_name: str) -> None:
+    """⭐ These corr-family groups USED to breach engine-vs-batch on the gappy near-constant-return walk (their
+    ``incremental_safe=False`` was the gate). For volume_leads_price the P2 Neumaier-compensated running sum
+    closed it; for return_dynamics the OLS defined-guard floor raise (1e-12→1e-10) nulls the noise/noise denom
+    band on BOTH paths. Engine-vs-batch is now CLEAN — the former breach is CLOSED and they ride the incremental
+    fast path (``incremental_safe=True``)."""
     assert not _gappy_corr_breaches(group_name), (
-        f"{group_name} engine-vs-batch is now CLEAN on the gappy walk after the P2 Neumaier fix "
-        "(former incremental_safe=False breach closed)"
+        f"{group_name} engine-vs-batch is now CLEAN on the gappy walk "
+        "(former incremental_safe=False corr-denom breach closed)"
     )
 
 
 @pytest.mark.parametrize("group_name", ["price_volume"])
-def test_gappy_denom_group_still_breaches_gate_load_bearing(group_name: str) -> None:
-    """``price_volume``'s ``incremental_safe=False`` is STILL LOAD-BEARING after P2: its breach on the gappy
-    near-constant-return walk is NOT purely a summation-rounding effect (Neumaier closed return_dynamics /
-    volume_leads_price but not this one — the cross-product corr-denom straddle here survives stable summation),
-    so the gate must stay. Comparing the engine DIRECTLY against the batch (no gate) must still breach."""
-    assert _gappy_corr_breaches(group_name), (
-        f"{group_name} expected to STILL breach engine-vs-batch on the gappy walk after P2 — its gate remains "
-        "load-bearing (stable summation alone does not close this corr-denom straddle)"
+def test_gappy_return_side_corr_denom_now_clean(group_name: str) -> None:
+    """``price_volume``'s ``pv_correlation`` RETURN-X-side breach on the gappy near-constant-return walk is now
+    CLOSED by the shared OLS defined-guard floor (1e-12→1e-10) — the same fix that un-gated return_dynamics /
+    market_beta. price_volume STAYS ``incremental_safe=False``: its raw-VOLUME y-side (~1e6 magnitude) and
+    obv_slope TIME-axis breach modes — which this small-volume return-flat walk does NOT exercise — still need
+    FP_RUST_REDUCE (y-anchoring) + FP_CENTERED_TIME (origin rebase) armed to close (the readiness-doc real-tape
+    measurement: volume-y 77x + obv; docs/INCREMENTAL_READINESS.md §Parked). This asserts only that the shared
+    floor removed the return-side as a blocker; the group's gate remains until those flags arm."""
+    assert not _gappy_corr_breaches(group_name), (
+        f"{group_name} return-X-side corr-denom is now CLEAN on the gappy walk after the OLS floor raise"
     )
+    pv = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == group_name]
+    assert pv and not pv[0].incremental_safe, "price_volume stays gated (volume-y / obv modes need flags armed)"
 
 
 def _gappy_market_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -> list[list[dict]]:
@@ -678,18 +681,17 @@ def _gappy_market_minutes(n_sym: int, n_min: int, present_p: float, seed: int) -
     return out
 
 
-def test_market_beta_breaches_on_real_gappy_spy_regressor() -> None:
-    """``market_beta``'s ``incremental_safe = False`` is LOAD-BEARING and is the case the SYNTHETIC gappy sweep
-    MISSED: feeding a gappy walk WITH a dense SPY regressor through batch vs IncrementalEngine, the SPY-broadcast
-    corr denominator collapses on a sparse satellite symbol and the engine emits market_corr=±1 / idio_vol=0
-    where batch NULLs — a real null/non-null divergence (reproduced on real 06-18 bars for MO/SLB). The earlier
-    smooth ``_gappy_corr_minutes`` walk carried no SPY symbol, so it could not surface this; this test is the
-    regression that catches it where the synthetic could not. Comparing the engine DIRECTLY against the batch
-    (no gate) must breach, which is exactly WHY the group is routed to batch live."""
+def test_market_beta_clean_on_real_gappy_spy_regressor() -> None:
+    """⭐ ``market_beta`` USED to breach engine-vs-batch on a gappy walk WITH a dense SPY regressor: the
+    SPY-broadcast corr denominator collapses on a sparse satellite symbol and the engine emitted market_corr=±1 /
+    idio_vol=0 where batch NULLed (reproduced on real 06-18 bars for MO/SLB) — the case the smooth no-SPY
+    synthetic sweep MISSED. The OLS defined-guard floor raise (1e-12→1e-10) nulls that noise/noise denom band on
+    BOTH paths (a flat SPY-return window has no defined beta), so the breach is now CLOSED and market_beta rides
+    the incremental fast path (``incremental_safe=True``). Comparing the engine DIRECTLY against the batch (no
+    gate) must NOT breach."""
     group = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == "market_beta"]
     assert group, "market_beta missing from registry"
-    assert not group[0].incremental_safe, "market_beta must be incremental_safe=False"
-    breached = False
+    assert group[0].incremental_safe, "market_beta must now be incremental_safe=True (two-sided corr-denom floor)"
     for seed in (7, 17, 29):
         walk = _gappy_market_minutes(n_sym=12, n_min=70, present_p=0.45, seed=seed)
         ring = MinuteRing(maxlen=120)
@@ -704,18 +706,11 @@ def test_market_beta_breaches_on_real_gappy_spy_regressor() -> None:
             if engine is None:
                 engine = IncrementalEngine(group)
             inc = engine.step(frame, slice_derive=True)
-            try:
-                if _worst_tol_ratio(batch, inc) > _PARITY_BREACH_RATIO:
-                    breached = True
-            except AssertionError:  # null/non-null mismatch -> the corr-denom straddle
-                breached = True
-        if breached:
-            break
-    assert breached, (
-        "market_beta expected to breach engine-vs-batch on a gappy walk with a dense SPY regressor "
-        "(the SPY-broadcast corr-denom conditioning the incremental_safe=False gate guards against — "
-        "the case the smooth no-SPY synthetic sweep missed)"
-    )
+            # No null/non-null mismatch (would raise) and worst ratio within the breach threshold.
+            assert _worst_tol_ratio(batch, inc) <= _PARITY_BREACH_RATIO, (
+                f"market_beta breached engine-vs-batch on the gappy SPY walk (seed {seed}) — the two-sided "
+                "corr-denom floor should have closed it"
+            )
 
 
 def test_gappy_denom_groups_stay_on_batch_under_incremental(

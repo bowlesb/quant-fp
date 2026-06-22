@@ -27,21 +27,21 @@ DYN_TOL = 1e-4
 @register
 class ReturnDynamicsGroup(ReductionGroup):
     name = "return_dynamics"
-    version = "1.0.0"
+    version = "1.1.0"
     owner = "modeller"
     type = FeatureType.MOMENTUM
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
-    # The autocorrelation OLS regressor x is the LAGGED one-minute return. On a gappy window x≈0, so the corr
-    # denominator denom_x = b·Σx²−(Σx)² is a difference of float-noise. UNGATED by P2 (#283): the Neumaier
-    # compensated running sum (``_comp`` carries the add/expire rounding loss) makes the corr-denom power sums
-    # match the batch fresh sum, so this straddle no longer breaches — engine-vs-batch is CLEAN (0/295 across
-    # adversarial gappy/large-magnitude seeds; guarded by test_gappy_denom_group_now_clean_after_p2_neumaier).
-    # NOT the same class as `volume` (whose blocker is a batch-vs-canonical std FORMULA gap, drift-independent).
-    # NO-GO for FP_INCREMENTAL (real-data soak, scripts/incremental_realdata_soak.py, 2026-06-17): the P2
-    # Neumaier compensation cleared the adversarial-seed corr-denom straddle, but the real gappy tape still
-    # breaches on ~0.5% of minutes (null/non-null flip at autocorr_2_10m) — a degenerate-cell defined-guard
-    # straddle the synthetic seeds don't reproduce. Stays on the batch path until the cancellation-free fix lands.
-    incremental_safe = False
+    # The autocorrelation OLS regressor x is the LAGGED one-minute return; the regressand y is the return — BOTH
+    # near-zero on a gappy near-constant window, so denom_x = b·Σx²−(Σx)² AND denom_y are catastrophic-cancellation
+    # differences of float-noise (the same two-sided corr-denom class as market_beta). P2 Neumaier cleared the
+    # adversarial-seed straddle but the real gappy tape still breached ~0.5% of minutes (autocorr_2 null-flip /
+    # value-Δ up to ~4.5e-4): the degenerate cell sat in the [1e-12, ~3e-12] denom/(Σ)² band where the corr is
+    # noise/noise and batch-vs-incremental round it differently. CLOSED by the OLS defined-guard floor raise
+    # 1e-12→1e-10 (declarative.py _OLS_DENOM_X/Y_REL_EPS): the whole noise/noise band is now NULL on BOTH paths
+    # (correct — a flat-return window has no defined autocorrelation), and 1e-10 is 5+ decades below real return
+    # variance (CV² min ~4.5e-5) so no well-conditioned window is touched. Value change on the degenerate band
+    # only -> version 1.0.0→1.1.0 + re-trust. Now SAFE for the incremental fast path.
+    incremental_safe = True
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
