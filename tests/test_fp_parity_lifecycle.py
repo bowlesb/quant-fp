@@ -45,7 +45,13 @@ from quantlib.features.trust_lifecycle import (
 from quantlib.features import validation_sweep
 from quantlib.features.base import FeatureType
 from quantlib.features.registry import REGISTRY
-from quantlib.features.validation_sweep import MARKET_TICKERS, MIN_CLEAN_SYMBOLS
+from quantlib.features.validation_sweep import (
+    MARKET_TICKERS,
+    MAX_DAY_INCOHERENT_FRAC,
+    MIN_CLEAN_FRACTION,
+    MIN_CLEAN_SYMBOLS,
+    day_contamination_reason,
+)
 
 OPEN_ET = dt.datetime(2026, 6, 12, 13, 30, tzinfo=dt.timezone.utc)  # 09:30 ET (June -> EDT, UTC-4)
 
@@ -181,6 +187,58 @@ def _clean_cleanliness(symbols: list[str]) -> pl.DataFrame:
 def _coherent() -> dict[str, float | int | bool]:
     """A coherent gather verdict (single-gather day) — the sweep then runs the cross-sectional grade."""
     return {"rth_minutes": 390, "incoherent_minutes": 0, "incoherent_frac": 0.0, "is_coherent": True}
+
+
+def test_contamination_guard_passes_a_clean_day() -> None:
+    """A normal day (~10k discovered, thousands clean, coherent gather) is NOT contaminated — grading proceeds.
+    The clean fraction sits well above MIN_CLEAN_FRACTION, so the guard returns None."""
+    assert day_contamination_reason(discovered_count=10000, clean_count=4000, incoherent_frac=0.0) is None
+    # Even a coherent day with a moderate clean fraction (well above the floor) grades.
+    assert day_contamination_reason(discovered_count=10000, clean_count=1500, incoherent_frac=0.02) is None
+
+
+def test_contamination_guard_rejects_2026_06_15() -> None:
+    """The canonical contaminated day: 92 CLEAN of 10,381 DISCOVERED at incoherent_frac=0.885. The clean
+    fraction (0.0089) is below MIN_CLEAN_FRACTION, so the day is vetoed before any grading — the guard that
+    would have prevented the ~1e12 false defects and the 181 re-opened defects."""
+    reason = day_contamination_reason(discovered_count=10381, clean_count=92, incoherent_frac=0.885)
+    assert reason is not None
+    assert "clean fraction" in reason
+
+
+def test_contamination_guard_absolute_floor() -> None:
+    """Below MIN_CLEAN_SYMBOLS the day is vetoed regardless of fraction (a tiny universe where the fraction is
+    meaningless) — the absolute-breadth condition, surfaced first."""
+    reason = day_contamination_reason(discovered_count=30, clean_count=MIN_CLEAN_SYMBOLS - 1, incoherent_frac=0.0)
+    assert reason is not None
+    assert "MIN_CLEAN_SYMBOLS" in reason
+
+
+def test_contamination_guard_does_not_veto_fragmentation_alone() -> None:
+    """Gross fragmentation ALONE (incoherent_frac above the ceiling) must NOT veto the whole day when the clean
+    breadth is HEALTHY — the per-symbol features still grade (only the cross-sectional grade is fragmentation
+    -sensitive, skipped separately by the coherence gate). Vetoing here would regress the per-symbol unblock."""
+    healthy_fraction_count = int(10000 * 2 * MIN_CLEAN_FRACTION) + 1  # above the co-condition's 2x band
+    assert (
+        day_contamination_reason(
+            discovered_count=10000,
+            clean_count=healthy_fraction_count,
+            incoherent_frac=MAX_DAY_INCOHERENT_FRAC + 0.1,
+        )
+        is None
+    )
+
+
+def test_contamination_guard_fragmentation_plus_thin_slice() -> None:
+    """Gross fragmentation co-occurring with a thin (but above-floor-fraction) clean slice IS vetoed — the
+    06-15 signature where a restart both shredded the gather and left a small clean set."""
+    # A fraction between MIN_CLEAN_FRACTION and 2*MIN_CLEAN_FRACTION: passes the fraction veto alone, but the
+    # gross-fragmentation co-condition catches it.
+    thin_count = int(10000 * 1.5 * MIN_CLEAN_FRACTION)
+    assert day_contamination_reason(10000, thin_count, 0.0) is None  # not fragmented -> grades
+    reason = day_contamination_reason(10000, thin_count, MAX_DAY_INCOHERENT_FRAC + 0.1)
+    assert reason is not None
+    assert "fragmented" in reason
 
 
 def test_cross_sectional_groups_are_universe_reduce_only() -> None:
@@ -428,6 +486,75 @@ def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:
     assert persist_called["n"] == 0  # nothing was persisted
     assert summary["features_graded"] == 0
     assert summary["clean_symbols"] == 1
+
+
+def test_sweep_skips_all_grading_on_06_15_shape_contaminated_day(monkeypatch) -> None:
+    """The 06-15 contamination guard: a day whose clean set is a vanishing FRACTION of the discovered universe
+    (here 5 clean / 1000 discovered = 0.5% << MIN_CLEAN_FRACTION) on a grossly fragmented gather must SKIP ALL
+    grading even though clean breadth (5) — well, here below the floor anyway, so use a count ABOVE the absolute
+    floor to exercise the FRACTION veto specifically. No compare runs, nothing is persisted, and write_lifecycle
+    is called with EMPTY states + EMPTY defects (the cleanliness audit trail only — no trust/lifecycle change)."""
+    discovered = [f"SYM{i}" for i in range(1000)]
+    clean = discovered[:30]  # 30 > MIN_CLEAN_SYMBOLS (20), but 30/1000 = 0.03 < MIN_CLEAN_FRACTION (0.05)
+    full_called = {"n": 0}
+    compare_calls: list[dict] = []
+    persist_called = {"n": 0}
+    lifecycle_calls: list[tuple] = []
+
+    monkeypatch.setattr(validation_sweep.validate_mod, "assert_settled", lambda day, allow_today: None)
+    monkeypatch.setattr(validation_sweep, "assert_raw_present", lambda *a, **k: None)
+    monkeypatch.setattr(validation_sweep, "assert_tail_settled", lambda *a, **k: None)
+    monkeypatch.setattr(
+        validation_sweep,
+        "tail_settle_status",
+        lambda *a, **k: validation_sweep.TailSettleStatus(True, True, 200, 200, 1.0, []),
+    )
+    monkeypatch.setattr(validation_sweep.store, "stream_symbols_on", lambda *a, **k: discovered)
+    monkeypatch.setattr(validation_sweep.store, "clear_backfill_day", lambda *a, **k: [])
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw", lambda *a, **k: None)
+
+    def _full(*a, **k):  # noqa: ANN002,ANN003,ANN202
+        full_called["n"] += 1
+
+    monkeypatch.setattr(validation_sweep, "materialize_from_raw_full", _full)
+    _stub_split_validation(monkeypatch, compare_calls)
+    monkeypatch.setattr(
+        validation_sweep.validate_mod,
+        "persist_validation",
+        lambda *a, **k: persist_called.__setitem__("n", persist_called["n"] + 1) or pl.DataFrame(),
+    )
+    monkeypatch.setattr(validation_sweep, "day_cleanliness", lambda *a, **k: _clean_cleanliness(clean))
+    # FRAGMENTED gather, mirroring the live 06-15 numbers.
+    monkeypatch.setattr(
+        validation_sweep,
+        "day_gather_coherence",
+        lambda *a, **k: {
+            "rth_minutes": 364,
+            "incoherent_minutes": 322,
+            "incoherent_frac": 0.885,
+            "is_coherent": False,
+        },
+    )
+    monkeypatch.setattr(
+        validation_sweep.trust_lifecycle,
+        "write_lifecycle",
+        lambda states, defects, *a, **k: lifecycle_calls.append((states, defects)),
+    )
+
+    summary = validation_sweep.sweep_day("/feat", "/val", "2026-06-12", raw_root="/raw", allow_today=True)
+
+    assert full_called["n"] == 0  # no costly tick materialize
+    assert compare_calls == []  # NO compare ran (neither cross-sectional nor per-symbol)
+    assert persist_called["n"] == 0  # nothing persisted
+    assert summary["skipped_contaminated"] is True
+    assert summary["features_graded"] == 0
+    assert summary["clean_symbols"] == 30
+    # write_lifecycle was called ONCE with EMPTY states + EMPTY defects — the cleanliness audit trail only,
+    # so a contaminated day can never write a trust-lifecycle row or a defect.
+    assert len(lifecycle_calls) == 1
+    states, defects = lifecycle_calls[0]
+    assert states.height == 0
+    assert defects == []
 
 
 def test_sweep_skips_cross_sectional_grade_on_fragmented_gather(monkeypatch) -> None:
