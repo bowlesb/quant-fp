@@ -115,8 +115,11 @@ def _global_run_length(present: pl.DataFrame) -> pl.DataFrame:
     present = present.with_columns(sgn.alias("__sgn"))
     new_run = ((pl.col("__sgn") != pl.col("__sgn").shift(1).over("symbol")) | (pl.col("__sgn") == 0)).fill_null(True)
     present = present.with_columns(new_run.cum_sum().over("symbol").alias("__runid"))
-    rank = pl.col("__sgn").cum_count().over(["symbol", "__runid"])
-    run_length = pl.when(pl.col("__sgn") == 0).then(0).otherwise(rank - rank.min().over(["symbol", "__runid"]) + 1)
+    # ``cum_count`` along a (symbol, runid) group whose rows are minute-sorted IS the 1..k position within the
+    # run, so it equals the global run length directly. (The earlier form took ``rank - rank.min() + 1`` over
+    # the same group — an identity, since the first row's cum_count is 1 — at the cost of a second window pass.)
+    in_run = pl.col("__sgn").cum_count().over(["symbol", "__runid"])
+    run_length = pl.when(pl.col("__sgn") == 0).then(0).otherwise(in_run)
     return present.with_columns(run_length.cast(pl.Int64).alias("__rl"))
 
 
