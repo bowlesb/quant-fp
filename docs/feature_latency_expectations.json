@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-06-22T03:46:30Z",
+  "generated_at": "2026-06-22T04:09:47Z",
   "units": "milliseconds",
   "sorted_by": "p99_ms descending (slowest-first)",
   "measurement": {
@@ -40,52 +40,31 @@
     "status": "ok",
     "metric": "live crypto-capture per-minute compute_ms (whole crypto-applicable feature set)",
     "samples": 400,
-    "p50_ms": 493.0,
-    "p95_ms": 956.0,
-    "p99_ms": 1117.0,
+    "p50_ms": 519.0,
+    "p95_ms": 960.0,
+    "p99_ms": 1159.0,
     "note": "Genuine LIVE latency on the shared compute core, but a tiny 2-5 symbol crypto universe with SPY-relative groups excluded -> fixed-overhead-dominated, NOT per-group-attributable for equity. Use as a realism floor that the reproducible sim per-group numbers must be sane against, not as a per-group source."
   },
-  "group_count": 61,
-  "feature_count": 692,
+  "group_count": 63,
+  "feature_count": 734,
   "not_measured_groups": [
-    {
-      "group": "clean_momentum",
-      "reason": "gather group - runs once in the reader phase, not a per-bet cost, and not runnable in the isolated reference-shard frames (no measurable compute_latest here)",
-      "kind": "B incremental-sum"
-    },
     {
       "group": "peer_relative",
       "reason": "gather group - runs once in the reader phase, not a per-bet cost, and not runnable in the isolated reference-shard frames (no measurable compute_latest here)",
       "kind": "Gather"
-    },
-    {
-      "group": "trend_quality",
-      "reason": "gather group - runs once in the reader phase, not a per-bet cost, and not runnable in the isolated reference-shard frames (no measurable compute_latest here)",
-      "kind": "B incremental-sum"
     }
   ],
   "groups": [
     {
-      "group": "volatility",
-      "feat_count": 15,
+      "group": "price_volume",
+      "feat_count": 70,
       "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 37.6,
-      "p95_ms": 98.17,
-      "p99_ms": 105.97
-    },
-    {
-      "group": "distribution",
-      "feat_count": 20,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
+      "mechanism": "shared running-sum (WindowedSumState)",
+      "incremental_ready": "parked",
       "path": "batch",
-      "p50_ms": 81.93,
-      "p95_ms": 90.24,
-      "p99_ms": 94.01
+      "p50_ms": 57.42,
+      "p95_ms": 67.72,
+      "p99_ms": 69.22
     },
     {
       "group": "return_dynamics",
@@ -94,9 +73,9 @@
       "mechanism": "shared running-sum",
       "incremental_ready": "ready",
       "path": "batch",
-      "p50_ms": 62.99,
-      "p95_ms": 72.94,
-      "p99_ms": 74.33
+      "p50_ms": 34.96,
+      "p95_ms": 38.57,
+      "p99_ms": 40.78
     },
     {
       "group": "market_beta",
@@ -105,20 +84,31 @@
       "mechanism": "shared running-sum",
       "incremental_ready": "parked",
       "path": "batch",
-      "p50_ms": 38.44,
-      "p95_ms": 43.35,
-      "p99_ms": 45.37
+      "p50_ms": 20.3,
+      "p95_ms": 25.13,
+      "p99_ms": 25.66
     },
     {
-      "group": "residual_analysis",
-      "feat_count": 6,
+      "group": "clean_momentum",
+      "feat_count": 12,
       "kind": "B incremental-sum",
       "mechanism": "shared running-sum",
-      "incremental_ready": "parked",
+      "incremental_ready": "ready",
       "path": "batch",
-      "p50_ms": 22.79,
-      "p95_ms": 37.28,
-      "p99_ms": 40.16
+      "p50_ms": 20.11,
+      "p95_ms": 25.26,
+      "p99_ms": 25.62
+    },
+    {
+      "group": "trend_quality",
+      "feat_count": 30,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "batch",
+      "p50_ms": 17.87,
+      "p95_ms": 20.95,
+      "p99_ms": 24.15
     },
     {
       "group": "momentum_run",
@@ -127,20 +117,9 @@
       "mechanism": "own latest-only (skew+streak)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 34.41,
-      "p95_ms": 37.32,
-      "p99_ms": 39.3
-    },
-    {
-      "group": "range_expansion",
-      "feat_count": 2,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "batch",
-      "p50_ms": 20.86,
-      "p95_ms": 34.56,
-      "p99_ms": 36.6
+      "p50_ms": 17.56,
+      "p95_ms": 20.65,
+      "p99_ms": 21.07
     },
     {
       "group": "breadth",
@@ -149,31 +128,9 @@
       "mechanism": "universe gather (reader-phase)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 30.89,
-      "p95_ms": 33.32,
-      "p99_ms": 34.73
-    },
-    {
-      "group": "price_volume",
-      "feat_count": 70,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum (WindowedSumState)",
-      "incremental_ready": "parked",
-      "path": "incremental (live)",
-      "p50_ms": 21.37,
-      "p95_ms": 32.53,
-      "p99_ms": 33.82
-    },
-    {
-      "group": "return_dispersion",
-      "feat_count": 10,
-      "kind": "A cached/static",
-      "mechanism": "SessionCache daily memo (#281)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 23.85,
-      "p95_ms": 26.7,
-      "p99_ms": 28.01
+      "p50_ms": 17.28,
+      "p95_ms": 19.65,
+      "p99_ms": 19.88
     },
     {
       "group": "sector_return",
@@ -182,31 +139,20 @@
       "mechanism": "universe gather (reader-phase)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 22.74,
-      "p95_ms": 24.93,
-      "p99_ms": 25.54
+      "p50_ms": 10.75,
+      "p95_ms": 13.08,
+      "p99_ms": 14.04
     },
     {
-      "group": "momentum_consistency",
-      "feat_count": 18,
+      "group": "residual_analysis",
+      "feat_count": 6,
       "kind": "B incremental-sum",
       "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 18.82,
-      "p95_ms": 20.43,
-      "p99_ms": 23.73
-    },
-    {
-      "group": "volume_leads_price",
-      "feat_count": 12,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 16.33,
-      "p95_ms": 21.76,
-      "p99_ms": 23.37
+      "incremental_ready": "parked",
+      "path": "batch",
+      "p50_ms": 10.29,
+      "p95_ms": 12.73,
+      "p99_ms": 13.0
     },
     {
       "group": "sector_beta",
@@ -215,86 +161,9 @@
       "mechanism": "universe gather (reader-phase)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 19.06,
-      "p95_ms": 22.18,
-      "p99_ms": 23.11
-    },
-    {
-      "group": "realized_range",
-      "feat_count": 3,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 12.47,
-      "p95_ms": 22.31,
-      "p99_ms": 22.88
-    },
-    {
-      "group": "cross_sectional_rank",
-      "feat_count": 6,
-      "kind": "Gather",
-      "mechanism": "universe gather (reader-phase)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 17.75,
-      "p95_ms": 21.13,
-      "p99_ms": 21.3
-    },
-    {
-      "group": "trade_freq_z",
-      "feat_count": 4,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 14.91,
-      "p95_ms": 18.97,
-      "p99_ms": 19.37
-    },
-    {
-      "group": "liquidity",
-      "feat_count": 15,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 14.83,
-      "p95_ms": 16.88,
-      "p99_ms": 17.9
-    },
-    {
-      "group": "quote_spread",
-      "feat_count": 21,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 12.72,
-      "p95_ms": 15.41,
-      "p99_ms": 16.2
-    },
-    {
-      "group": "efficiency",
-      "feat_count": 18,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 14.18,
-      "p95_ms": 15.88,
-      "p99_ms": 16.05
-    },
-    {
-      "group": "volume_exhaustion",
-      "feat_count": 10,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 11.84,
-      "p95_ms": 14.12,
-      "p99_ms": 15.72
+      "p50_ms": 9.31,
+      "p95_ms": 12.16,
+      "p99_ms": 12.6
     },
     {
       "group": "calendar_events",
@@ -303,20 +172,75 @@
       "mechanism": "consolidated point-in-time pass",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 12.67,
-      "p95_ms": 13.79,
-      "p99_ms": 15.21
+      "p50_ms": 6.86,
+      "p95_ms": 9.95,
+      "p99_ms": 11.7
     },
     {
-      "group": "subminute_gap_fano",
-      "feat_count": 1,
-      "kind": "hand-written",
-      "mechanism": "bespoke compute_latest (per-minute tick group-by)",
+      "group": "distribution",
+      "feat_count": 20,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 8.22,
+      "p95_ms": 11.1,
+      "p99_ms": 11.16
+    },
+    {
+      "group": "volume_leads_price",
+      "feat_count": 12,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 7.91,
+      "p95_ms": 10.58,
+      "p99_ms": 10.87
+    },
+    {
+      "group": "cross_sectional_rank",
+      "feat_count": 6,
+      "kind": "Gather",
+      "mechanism": "universe gather (reader-phase)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 10.35,
-      "p95_ms": 14.0,
-      "p99_ms": 15.02
+      "p50_ms": 9.01,
+      "p95_ms": 10.41,
+      "p99_ms": 10.56
+    },
+    {
+      "group": "momentum_consistency",
+      "feat_count": 18,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 8.59,
+      "p95_ms": 10.46,
+      "p99_ms": 10.55
+    },
+    {
+      "group": "return_dispersion",
+      "feat_count": 10,
+      "kind": "A cached/static",
+      "mechanism": "SessionCache daily memo (#281)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 8.58,
+      "p95_ms": 10.2,
+      "p99_ms": 10.21
+    },
+    {
+      "group": "volatility",
+      "feat_count": 15,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 7.15,
+      "p95_ms": 9.19,
+      "p99_ms": 10.05
     },
     {
       "group": "trade_flow",
@@ -325,53 +249,20 @@
       "mechanism": "shared running-sum",
       "incremental_ready": "ready",
       "path": "incremental (live)",
-      "p50_ms": 12.43,
-      "p95_ms": 13.46,
-      "p99_ms": 14.52
+      "p50_ms": 6.91,
+      "p95_ms": 8.38,
+      "p99_ms": 9.64
     },
     {
-      "group": "momentum",
-      "feat_count": 22,
+      "group": "efficiency",
+      "feat_count": 18,
       "kind": "B incremental-sum",
       "mechanism": "shared running-sum",
       "incremental_ready": "ready",
       "path": "incremental (live)",
-      "p50_ms": 12.04,
-      "p95_ms": 13.7,
-      "p99_ms": 14.37
-    },
-    {
-      "group": "intraday_seasonality",
-      "feat_count": 2,
-      "kind": "B latest-only",
-      "mechanism": "own latest-only session agg (#286)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 11.88,
-      "p95_ms": 13.69,
-      "p99_ms": 13.73
-    },
-    {
-      "group": "signed_trade_ratio",
-      "feat_count": 4,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 12.05,
-      "p95_ms": 13.6,
-      "p99_ms": 13.72
-    },
-    {
-      "group": "count_fano",
-      "feat_count": 1,
-      "kind": "B incremental-sum",
-      "mechanism": "shared running-sum",
-      "incremental_ready": "ready",
-      "path": "incremental (live)",
-      "p50_ms": 12.26,
-      "p95_ms": 13.45,
-      "p99_ms": 13.66
+      "p50_ms": 7.74,
+      "p95_ms": 8.82,
+      "p99_ms": 9.33
     },
     {
       "group": "ohlc_vol",
@@ -380,9 +271,20 @@
       "mechanism": "shared running-sum",
       "incremental_ready": "ready",
       "path": "incremental (live)",
-      "p50_ms": 12.32,
-      "p95_ms": 13.31,
-      "p99_ms": 13.37
+      "p50_ms": 7.11,
+      "p95_ms": 8.76,
+      "p99_ms": 9.23
+    },
+    {
+      "group": "trade_freq_z",
+      "feat_count": 4,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 6.76,
+      "p95_ms": 8.31,
+      "p99_ms": 8.93
     },
     {
       "group": "volume",
@@ -391,42 +293,86 @@
       "mechanism": "shared running-sum + centered-std (#307)",
       "incremental_ready": "ready",
       "path": "incremental (live)",
-      "p50_ms": 11.91,
-      "p95_ms": 12.96,
-      "p99_ms": 13.25
+      "p50_ms": 6.26,
+      "p95_ms": 8.8,
+      "p99_ms": 8.82
     },
     {
-      "group": "technical",
-      "feat_count": 14,
-      "kind": "Rust-resident",
-      "mechanism": "StatefulEngine (EMA fold)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 10.4,
-      "p95_ms": 11.77,
-      "p99_ms": 12.39
-    },
-    {
-      "group": "price_returns",
-      "feat_count": 40,
-      "kind": "Rust-resident",
-      "mechanism": "StatefulEngine (EMA/lag/extrema fold)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 8.2,
-      "p95_ms": 10.43,
-      "p99_ms": 10.7
-    },
-    {
-      "group": "runner_state",
-      "feat_count": 6,
+      "group": "intraday_seasonality",
+      "feat_count": 2,
       "kind": "B latest-only",
-      "mechanism": "shared session-cumulative pass (#285)",
+      "mechanism": "own latest-only session agg (#286)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 7.83,
-      "p95_ms": 9.57,
-      "p99_ms": 10.39
+      "p50_ms": 7.09,
+      "p95_ms": 8.37,
+      "p99_ms": 8.56
+    },
+    {
+      "group": "liquidity",
+      "feat_count": 15,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 7.28,
+      "p95_ms": 7.8,
+      "p99_ms": 8.27
+    },
+    {
+      "group": "momentum",
+      "feat_count": 22,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 6.27,
+      "p95_ms": 8.14,
+      "p99_ms": 8.2
+    },
+    {
+      "group": "range_expansion",
+      "feat_count": 2,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "batch",
+      "p50_ms": 5.8,
+      "p95_ms": 7.72,
+      "p99_ms": 7.97
+    },
+    {
+      "group": "quote_spread",
+      "feat_count": 21,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 5.91,
+      "p95_ms": 7.83,
+      "p99_ms": 7.86
+    },
+    {
+      "group": "count_fano",
+      "feat_count": 1,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 5.59,
+      "p95_ms": 7.37,
+      "p99_ms": 7.47
+    },
+    {
+      "group": "signed_trade_ratio",
+      "feat_count": 4,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 5.66,
+      "p95_ms": 7.32,
+      "p99_ms": 7.36
     },
     {
       "group": "price_levels",
@@ -435,9 +381,20 @@
       "mechanism": "StatefulEngine (ExtremaState fold)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 7.71,
-      "p95_ms": 9.21,
-      "p99_ms": 9.78
+      "p50_ms": 4.07,
+      "p95_ms": 6.08,
+      "p99_ms": 6.64
+    },
+    {
+      "group": "realized_range",
+      "feat_count": 3,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 5.42,
+      "p95_ms": 6.01,
+      "p99_ms": 6.41
     },
     {
       "group": "calendar",
@@ -446,65 +403,9 @@
       "mechanism": "consolidated point-in-time pass",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 7.41,
-      "p95_ms": 9.19,
-      "p99_ms": 9.77
-    },
-    {
-      "group": "size_entropy",
-      "feat_count": 2,
-      "kind": "hand-written",
-      "mechanism": "bespoke compute_latest",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 8.44,
-      "p95_ms": 9.45,
-      "p99_ms": 9.6
-    },
-    {
-      "group": "dumper_state",
-      "feat_count": 6,
-      "kind": "B latest-only",
-      "mechanism": "shared session-cumulative pass (#285)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 6.65,
-      "p95_ms": 7.94,
-      "p99_ms": 8.73
-    },
-    {
-      "group": "market_turbulence",
-      "feat_count": 5,
-      "kind": "Gather",
-      "mechanism": "universe gather (reader-phase)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 7.53,
-      "p95_ms": 8.32,
-      "p99_ms": 8.34,
-      "note": "compute_latest builds the per-symbol measures for the latest minute ALONE (a few close[T-W] lookups + one trailing-RV std slice) instead of the full-buffer rolling derive compute() runs over every minute \u2014 measured ~30->~4ms p50 at REF scale, parity-true to declared tolerance (Lever B compute-once-for-T)."
-    },
-    {
-      "group": "gap_fill_state",
-      "feat_count": 2,
-      "kind": "B latest-only",
-      "mechanism": "shared session-cumulative pass (#285)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 7.08,
-      "p95_ms": 8.09,
-      "p99_ms": 8.14
-    },
-    {
-      "group": "market_context",
-      "feat_count": 36,
-      "kind": "Gather",
-      "mechanism": "universe gather (reader-phase)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 6.4,
-      "p95_ms": 7.74,
-      "p99_ms": 7.83
+      "p50_ms": 5.11,
+      "p95_ms": 6.26,
+      "p99_ms": 6.33
     },
     {
       "group": "candlestick",
@@ -513,9 +414,98 @@
       "mechanism": "StatefulEngine (LastKState fold)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 5.78,
-      "p95_ms": 7.14,
-      "p99_ms": 7.62
+      "p50_ms": 3.24,
+      "p95_ms": 4.97,
+      "p99_ms": 5.94
+    },
+    {
+      "group": "price_returns",
+      "feat_count": 40,
+      "kind": "Rust-resident",
+      "mechanism": "StatefulEngine (EMA/lag/extrema fold)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 3.58,
+      "p95_ms": 3.85,
+      "p99_ms": 5.65
+    },
+    {
+      "group": "volume_exhaustion",
+      "feat_count": 10,
+      "kind": "B incremental-sum",
+      "mechanism": "shared running-sum",
+      "incremental_ready": "ready",
+      "path": "incremental (live)",
+      "p50_ms": 5.35,
+      "p95_ms": 5.55,
+      "p99_ms": 5.64
+    },
+    {
+      "group": "size_entropy",
+      "feat_count": 2,
+      "kind": "hand-written",
+      "mechanism": "bespoke compute_latest",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 4.32,
+      "p95_ms": 5.56,
+      "p99_ms": 5.6
+    },
+    {
+      "group": "technical",
+      "feat_count": 14,
+      "kind": "Rust-resident",
+      "mechanism": "StatefulEngine (EMA fold)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 5.07,
+      "p95_ms": 5.31,
+      "p99_ms": 5.38
+    },
+    {
+      "group": "runner_state",
+      "feat_count": 6,
+      "kind": "B latest-only",
+      "mechanism": "shared session-cumulative pass (#285)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 3.92,
+      "p95_ms": 4.61,
+      "p99_ms": 5.14
+    },
+    {
+      "group": "market_context",
+      "feat_count": 36,
+      "kind": "Gather",
+      "mechanism": "universe gather (reader-phase)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 2.94,
+      "p95_ms": 5.11,
+      "p99_ms": 5.13
+    },
+    {
+      "group": "subminute_gap_fano",
+      "feat_count": 1,
+      "kind": "hand-written",
+      "mechanism": "bespoke compute_latest (per-minute tick group-by)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 4.47,
+      "p95_ms": 4.67,
+      "p99_ms": 4.78
+    },
+    {
+      "group": "market_turbulence",
+      "feat_count": 5,
+      "kind": "Gather",
+      "mechanism": "universe gather (reader-phase)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 3.21,
+      "p95_ms": 4.65,
+      "p99_ms": 4.67,
+      "note": "compute_latest builds the per-symbol measures for the latest minute ALONE (a few close[T-W] lookups + one trailing-RV std slice) instead of the full-buffer rolling derive compute() runs over every minute \u2014 measured ~30->~4ms p50 at REF scale, parity-true to declared tolerance (Lever B compute-once-for-T)."
     },
     {
       "group": "draw_range",
@@ -524,65 +514,31 @@
       "mechanism": "own latest-only window agg (#257)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 6.33,
-      "p95_ms": 7.39,
-      "p99_ms": 7.6
+      "p50_ms": 3.02,
+      "p95_ms": 4.01,
+      "p99_ms": 4.36
     },
     {
-      "group": "print_hhi",
+      "group": "dumper_state",
+      "feat_count": 6,
+      "kind": "B latest-only",
+      "mechanism": "shared session-cumulative pass (#285)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 3.3,
+      "p95_ms": 3.73,
+      "p99_ms": 3.76
+    },
+    {
+      "group": "gap_fill_state",
       "feat_count": 2,
-      "kind": "hand-written",
-      "mechanism": "bespoke compute_latest",
+      "kind": "B latest-only",
+      "mechanism": "shared session-cumulative pass (#285)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 3.91,
-      "p95_ms": 5.53,
-      "p99_ms": 5.87
-    },
-    {
-      "group": "swing",
-      "feat_count": 9,
-      "kind": "Rust-resident",
-      "mechanism": "quant_tick.swing_fold kernel; live carries per-symbol leg-state (FP_SWING_STATEFUL) \u2014 default re-folds whole buffer",
-      "incremental_ready": "stateful-gated",
-      "path": "batch",
-      "p50_ms": 3.84,
-      "p95_ms": 5.4,
-      "p99_ms": 5.42,
-      "note": "The Rust kernel folds O(1)/bar, but DEFAULT compute_latest re-invokes it over the WHOLE ring each minute. FP_SWING_STATEFUL=1 carries the leg-state and folds only the new minute (value-identical, fp-unchanged): measured 26.1->15.5ms p50 group-local; full O(1) needs delta-passing (docs/FEATURE_EFFICIENCY_AUDIT.md)."
-    },
-    {
-      "group": "sector",
-      "feat_count": 12,
-      "kind": "A cached/static",
-      "mechanism": "consolidated point-in-time pass",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 3.21,
-      "p95_ms": 4.19,
-      "p99_ms": 4.27
-    },
-    {
-      "group": "large_print_burst",
-      "feat_count": 3,
-      "kind": "hand-written",
-      "mechanism": "bespoke compute_latest",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 2.02,
-      "p95_ms": 3.91,
-      "p99_ms": 4.12
-    },
-    {
-      "group": "microstructure_burst",
-      "feat_count": 4,
-      "kind": "hand-written",
-      "mechanism": "bespoke compute_latest",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 3.2,
-      "p95_ms": 3.99,
-      "p99_ms": 4.09
+      "p50_ms": 3.02,
+      "p95_ms": 3.58,
+      "p99_ms": 3.73
     },
     {
       "group": "inter_arrival",
@@ -591,75 +547,43 @@
       "mechanism": "bespoke compute_latest",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 2.93,
-      "p95_ms": 3.66,
-      "p99_ms": 3.84
-    },
-    {
-      "group": "prior_day",
-      "feat_count": 10,
-      "kind": "A cached/static",
-      "mechanism": "consolidated daily-broadcast pass",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 2.78,
-      "p95_ms": 3.61,
-      "p99_ms": 3.66
-    },
-    {
-      "group": "multi_day_vwap",
-      "feat_count": 10,
-      "kind": "A cached/static",
-      "mechanism": "consolidated daily-broadcast pass",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 2.13,
-      "p95_ms": 2.67,
-      "p99_ms": 3.36
-    },
-    {
-      "group": "edgar_filing_frequency",
-      "feat_count": 10,
-      "kind": "A-hybrid (event-kind)",
-      "mechanism": "SessionCache filings; intraday available_at<=minute gate",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 1.97,
-      "p95_ms": 2.97,
-      "p99_ms": 3.31
-    },
-    {
-      "group": "liquidity_rank",
-      "feat_count": 2,
-      "kind": "A cached/static",
-      "mechanism": "SessionCache daily memo (#281)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 2.15,
-      "p95_ms": 2.92,
-      "p99_ms": 3.29
-    },
-    {
-      "group": "multi_day_returns",
-      "feat_count": 28,
-      "kind": "A cached/static",
-      "mechanism": "consolidated daily-broadcast pass",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 1.84,
-      "p95_ms": 2.54,
-      "p99_ms": 3.19
-    },
-    {
-      "group": "overnight_beta",
-      "feat_count": 3,
-      "kind": "A cached/static",
-      "mechanism": "SessionCache daily memo (#262)",
-      "incremental_ready": "n-a",
-      "path": "batch",
-      "p50_ms": 2.2,
-      "p95_ms": 2.56,
+      "p50_ms": 1.4,
+      "p95_ms": 2.55,
       "p99_ms": 2.81
+    },
+    {
+      "group": "swing",
+      "feat_count": 9,
+      "kind": "Rust-resident",
+      "mechanism": "quant_tick.swing_fold kernel; live carries per-symbol leg-state (FP_SWING_STATEFUL) \u2014 default re-folds whole buffer",
+      "incremental_ready": "stateful-gated",
+      "path": "batch",
+      "p50_ms": 2.27,
+      "p95_ms": 2.42,
+      "p99_ms": 2.63,
+      "note": "The Rust kernel folds O(1)/bar, but DEFAULT compute_latest re-invokes it over the WHOLE ring each minute. FP_SWING_STATEFUL=1 carries the leg-state and folds only the new minute (value-identical, fp-unchanged): measured 26.1->15.5ms p50 group-local; full O(1) needs delta-passing (docs/FEATURE_EFFICIENCY_AUDIT.md)."
+    },
+    {
+      "group": "microstructure_burst",
+      "feat_count": 4,
+      "kind": "hand-written",
+      "mechanism": "bespoke compute_latest",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 1.8,
+      "p95_ms": 2.05,
+      "p99_ms": 2.28
+    },
+    {
+      "group": "sector",
+      "feat_count": 12,
+      "kind": "A cached/static",
+      "mechanism": "consolidated point-in-time pass",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 1.61,
+      "p95_ms": 2.16,
+      "p99_ms": 2.18
     },
     {
       "group": "daily_beta",
@@ -668,42 +592,75 @@
       "mechanism": "SessionCache daily memo (#281)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 1.93,
-      "p95_ms": 2.62,
-      "p99_ms": 2.79
+      "p50_ms": 0.96,
+      "p95_ms": 1.22,
+      "p99_ms": 1.65
     },
     {
-      "group": "overnight_intraday_split",
-      "feat_count": 3,
-      "kind": "A cached/static",
-      "mechanism": "SessionCache daily memo (#281)",
+      "group": "print_hhi",
+      "feat_count": 2,
+      "kind": "hand-written",
+      "mechanism": "bespoke compute_latest",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 2.17,
-      "p95_ms": 2.64,
-      "p99_ms": 2.71
+      "p50_ms": 1.26,
+      "p95_ms": 1.49,
+      "p99_ms": 1.54
     },
     {
-      "group": "tick_runlength",
+      "group": "edgar_filing_frequency",
+      "feat_count": 10,
+      "kind": "A-hybrid (event-kind)",
+      "mechanism": "SessionCache filings; intraday available_at<=minute gate",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 1.36,
+      "p95_ms": 1.41,
+      "p99_ms": 1.46
+    },
+    {
+      "group": "multi_day_returns",
+      "feat_count": 28,
+      "kind": "A cached/static",
+      "mechanism": "consolidated daily-broadcast pass",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 1.08,
+      "p95_ms": 1.39,
+      "p99_ms": 1.43
+    },
+    {
+      "group": "large_print_burst",
       "feat_count": 3,
       "kind": "hand-written",
       "mechanism": "bespoke compute_latest",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 1.84,
-      "p95_ms": 2.32,
-      "p99_ms": 2.6
+      "p50_ms": 0.76,
+      "p95_ms": 1.31,
+      "p99_ms": 1.34
     },
     {
-      "group": "news_sentiment",
-      "feat_count": 9,
-      "kind": "A-hybrid (event-kind)",
-      "mechanism": "news snapshot; intraday available_at<=minute point-in-time gate",
+      "group": "liquidity_rank",
+      "feat_count": 2,
+      "kind": "A cached/static",
+      "mechanism": "SessionCache daily memo (#281)",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 1.73,
-      "p95_ms": 2.29,
-      "p99_ms": 2.55
+      "p50_ms": 0.98,
+      "p95_ms": 1.08,
+      "p99_ms": 1.33
+    },
+    {
+      "group": "overnight_beta",
+      "feat_count": 3,
+      "kind": "A cached/static",
+      "mechanism": "SessionCache daily memo (#262)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 0.95,
+      "p95_ms": 1.24,
+      "p99_ms": 1.28
     },
     {
       "group": "asset_flags",
@@ -712,20 +669,42 @@
       "mechanism": "consolidated point-in-time pass",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 1.18,
-      "p95_ms": 1.58,
-      "p99_ms": 2.42
+      "p50_ms": 0.61,
+      "p95_ms": 1.18,
+      "p99_ms": 1.24
     },
     {
-      "group": "trade_size_dist",
-      "feat_count": 3,
-      "kind": "hand-written",
-      "mechanism": "bespoke compute_latest",
+      "group": "multi_day_vwap",
+      "feat_count": 10,
+      "kind": "A cached/static",
+      "mechanism": "consolidated daily-broadcast pass",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 1.65,
-      "p95_ms": 2.08,
-      "p99_ms": 2.38
+      "p50_ms": 0.93,
+      "p95_ms": 1.06,
+      "p99_ms": 1.18
+    },
+    {
+      "group": "prior_day",
+      "feat_count": 10,
+      "kind": "A cached/static",
+      "mechanism": "consolidated daily-broadcast pass",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 1.08,
+      "p95_ms": 1.15,
+      "p99_ms": 1.17
+    },
+    {
+      "group": "overnight_intraday_split",
+      "feat_count": 3,
+      "kind": "A cached/static",
+      "mechanism": "SessionCache daily memo (#281)",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 0.91,
+      "p95_ms": 1.02,
+      "p99_ms": 1.09
     },
     {
       "group": "round_levels",
@@ -734,9 +713,42 @@
       "mechanism": "consolidated point-in-time pass",
       "incremental_ready": "n-a",
       "path": "batch",
-      "p50_ms": 1.02,
-      "p95_ms": 1.29,
-      "p99_ms": 1.46
+      "p50_ms": 0.67,
+      "p95_ms": 0.93,
+      "p99_ms": 0.95
+    },
+    {
+      "group": "news_sentiment",
+      "feat_count": 9,
+      "kind": "A-hybrid (event-kind)",
+      "mechanism": "news snapshot; intraday available_at<=minute point-in-time gate",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 0.85,
+      "p95_ms": 0.89,
+      "p99_ms": 0.93
+    },
+    {
+      "group": "tick_runlength",
+      "feat_count": 3,
+      "kind": "hand-written",
+      "mechanism": "bespoke compute_latest",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 0.77,
+      "p95_ms": 0.78,
+      "p99_ms": 0.81
+    },
+    {
+      "group": "trade_size_dist",
+      "feat_count": 3,
+      "kind": "hand-written",
+      "mechanism": "bespoke compute_latest",
+      "incremental_ready": "n-a",
+      "path": "batch",
+      "p50_ms": 0.53,
+      "p95_ms": 0.67,
+      "p99_ms": 0.72
     }
   ]
 }
