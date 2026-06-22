@@ -182,8 +182,10 @@ def _news_stream(reference: datetime) -> dict[str, object]:
         }
     window_start = reference - timedelta(minutes=TIMELINE_WINDOW_MIN)
     rate_start = reference - timedelta(minutes=RATE_WINDOW_MIN)
+    # extra_columns="ignore": newer partitions carry a re-scored ``sentiment`` column absent from older ones,
+    # so a multi-file scan sees a heterogeneous schema; tolerate the extra column instead of erroring on it.
     recent = (
-        pl.scan_parquet(paths)
+        pl.scan_parquet(paths, extra_columns="ignore")
         .filter(pl.col("available_at_source") == SRC_LIVE)
         .filter(pl.col("available_at") >= window_start)
         .select(pl.col("available_at"))
@@ -244,7 +246,9 @@ def _news_composition() -> dict[str, object]:
             "latest_date": None,
             "top_symbols": [],
         }
-    lazy = pl.scan_parquet(paths)
+    # extra_columns="ignore": tolerate the ``sentiment`` column present only in re-scored newer partitions
+    # (heterogeneous schema across the full-history glob) rather than erroring on the extra column.
+    lazy = pl.scan_parquet(paths, extra_columns="ignore")
     total_articles = int(lazy.select(pl.len()).collect().item())
     symbols = lazy.select("symbols").explode("symbols").drop_nulls("symbols")
     n_symbols = int(symbols.select(pl.col("symbols").n_unique()).collect().item())

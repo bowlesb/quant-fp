@@ -11,9 +11,10 @@ Covers, with NO real DB / store / Mongo (every data-access helper is monkeypatch
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import polars as pl
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
@@ -57,6 +58,61 @@ def test_news_composition_empty_when_no_partitions(monkeypatch: pytest.MonkeyPat
     assert payload["n_symbols"] == 0
     assert payload["top_symbols"] == []
     assert payload["earliest_date"] is None
+
+
+def _write_news_partition(
+    directory: Path, published_date: str, when: datetime, symbol: str, sentiment: float | None
+) -> str:
+    """Write one ``published_date=.../data.parquet`` partition; include ``sentiment`` only when given.
+
+    The re-scored newer partitions carry a ``sentiment`` column the older ones lack, so a multi-file scan
+    sees a heterogeneous schema — exactly the condition that 500'd the stream/composition routes.
+    """
+    part_dir = directory / f"published_date={published_date}"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    columns: dict[str, object] = {
+        "available_at_source": [ne.SRC_LIVE],
+        "available_at": [when],
+        "symbols": [[symbol]],
+    }
+    if sentiment is not None:
+        columns["sentiment"] = [sentiment]
+    path = part_dir / "data.parquet"
+    pl.DataFrame(columns).write_parquet(path)
+    return str(path)
+
+
+def test_news_stream_tolerates_extra_sentiment_column(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A newer partition carrying an extra ``sentiment`` column must not raise a SchemaError on scan."""
+    reference = _BUSINESS_MOMENT
+    old_path = _write_news_partition(
+        tmp_path, "2026-06-18", reference - timedelta(minutes=30), "AAPL", sentiment=None
+    )
+    new_path = _write_news_partition(
+        tmp_path, "2026-06-19", reference - timedelta(minutes=10), "MSFT", sentiment=0.42
+    )
+    monkeypatch.setattr(ne, "recent_news_partition_paths", lambda limit: [old_path, new_path])
+    payload = ne._news_stream(reference)
+    # Both live rows fall inside the trailing rate window — the scan must read across both schemas.
+    assert payload["window_count"] == 2
+    assert payload["per_min"] == round(2 / ne.RATE_WINDOW_MIN, 3)
+
+
+def test_news_composition_tolerates_extra_sentiment_column(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The full-history composition glob spans schemas with/without ``sentiment``; it must not raise."""
+    base = datetime(2026, 6, 18, 14, 0, tzinfo=timezone.utc)
+    _write_news_partition(tmp_path, "2026-06-18", base, "AAPL", sentiment=None)
+    _write_news_partition(tmp_path, "2026-06-19", base, "MSFT", sentiment=0.42)
+    monkeypatch.setattr(ne, "NEWS_GLOB", str(tmp_path / "published_date=*/data.parquet"))
+    payload = ne._news_composition()
+    assert payload["total_articles"] == 2
+    assert payload["n_symbols"] == 2
+    assert payload["earliest_date"] == "2026-06-18"
+    assert payload["latest_date"] == "2026-06-19"
 
 
 def _stub_build(monkeypatch: pytest.MonkeyPatch, marker: list[int]) -> None:
