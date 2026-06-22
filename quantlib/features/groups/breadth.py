@@ -35,6 +35,7 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    daily_snapshot_token,
     lagged,
 )
 from quantlib.features.registry import register
@@ -168,8 +169,18 @@ class BreadthGroup(FeatureGroup):
         """Per-(symbol, date) point-in-time daily return over each DAY_WINDOWS horizon, as
         ``_ret_{w}d`` columns. Point-in-time as of the PRIOR close (``_asof`` = close[D-1]), so at any
         minute of day D the most recent completed bar is used — identical to multi_day_returns; the
-        daily frame is split-adjusted, so the long horizons inherit that handling."""
-        daily = ctx.frame("daily").select(["symbol", "date", "close"]).sort(["symbol", "date"])
+        daily frame is split-adjusted, so the long horizons inherit that handling.
+
+        The daily snapshot is fixed all session, so these returns are intraday-invariant — memoize them on
+        the per-session cache (keyed on the snapshot's content token) so the live gather doesn't re-shift
+        the whole ~250-day daily frame every minute (the same Class-A memo return_dispersion uses)."""
+        source = ctx.frame("daily")
+        return self.session_cache.get(
+            daily_snapshot_token(source), lambda: self._compute_daily_returns(source)
+        )
+
+    def _compute_daily_returns(self, source: pl.DataFrame) -> pl.DataFrame:
+        daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
         return daily.with_columns(
             [(pl.col("_asof") / pl.col("_asof").shift(window).over("symbol") - 1.0).alias(f"_ret_{_window_tag(window, True)}") for window in DAY_WINDOWS]
