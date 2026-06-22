@@ -146,16 +146,18 @@ def test_declares_volume_y_anchor_under_flag() -> None:
         assert _anchored_namespaces([group]) == set()
 
 
-def test_stays_parked_until_lead_arms() -> None:
-    """The conditioning MECHANISM ships here, but ``incremental_safe`` stays False (parked on the batch fresh-sum
-    recompute, byte-identical under FP_INCREMENTAL) regardless of the flag — same posture as the y-anchored
-    groups. The flip to True is the Lead's enablement call after a real-data soak (this test guards against an
-    accidental premature un-gate; the parity readiness is proven separately by the breach-clears test below)."""
+def test_incremental_safe_gated_on_rust_reduce() -> None:
+    """``incremental_safe`` is flag-gated: FALSE with FP_RUST_REDUCE off (the y-side raw-volume cancellation is
+    re-exposed → stay parked on the batch fresh-sum), TRUE with it on (BOTH denom sides conditioned — the
+    volume y-anchor closes denom_y, the always-on centered-variance x-guard closes denom_x on near-constant
+    returns). The flag default-OFF preserves today's parked behavior; the prod flip is the Lead's FP_RUST_REDUCE
+    relaunch, which arms the y-anchor and this property together. The parity readiness for the ON state is
+    proven by the breach-clears tests below (y-side) and test_fp_price_volume_xside (x-side)."""
     group = _group()
     with _flag(False):
         assert group.incremental_safe is False
     with _flag(True):
-        assert group.incremental_safe is False
+        assert group.incremental_safe is True
 
 
 def test_y_centering_value_identical_off_vs_on() -> None:
