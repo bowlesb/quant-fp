@@ -5,6 +5,7 @@ import { CanvasHeatmap, type HoverCell, type DisplayColumn } from "./CanvasHeatm
 import { Tooltip } from "./Tooltip";
 import { GroupDetailPanel } from "./GroupDetailPanel";
 import { LatencyView } from "./LatencyView";
+import { LifecycleView } from "./LifecycleView";
 import { NewsEdgarView } from "./NewsEdgarView";
 import { StatusView } from "./StatusView";
 
@@ -12,13 +13,15 @@ import { StatusView } from "./StatusView";
 // generated_at advances.
 const META_POLL_MS = 60_000;
 
-// The four top-level views. The coverage grid stays the default; "latency" is the additive #321 read-side
+// The top-level views. The coverage grid stays the default; "lifecycle" is the per-group certification-
+// lifecycle state (UNVERIFIED → MONITORING → CERTIFIED → TRUSTED); "latency" is the additive #321 read-side
 // page; "news" is the News & Filings live-rate + store-composition tab; "status" is the Lead-owned hourly
 // status table (hour×workstream Progress/Blockers + Ben's per-row reaction).
-type View = "grid" | "latency" | "news" | "status";
+type View = "grid" | "lifecycle" | "latency" | "news" | "status";
 
 const VIEW_TITLES: Record<View, string> = {
   grid: "Feature-store coverage",
+  lifecycle: "Certification lifecycle",
   latency: "Feature latency expectations",
   news: "News & Filings",
   status: "Hourly status",
@@ -224,6 +227,12 @@ export function App() {
             Coverage grid
           </button>
           <button
+            className={`view-tab${view === "lifecycle" ? " active" : ""}`}
+            onClick={() => setView("lifecycle")}
+          >
+            Lifecycle
+          </button>
+          <button
             className={`view-tab${view === "latency" ? " active" : ""}`}
             onClick={() => setView("latency")}
           >
@@ -244,7 +253,9 @@ export function App() {
         </nav>
       </header>
 
-      {view === "latency" ? (
+      {view === "lifecycle" ? (
+        <LifecycleView />
+      ) : view === "latency" ? (
         <LatencyView />
       ) : view === "status" ? (
         <StatusView />

@@ -2,6 +2,7 @@ import type {
   CellDrill,
   GridMeta,
   LatencyExpectations,
+  LifecycleState,
   NewsEdgarComposition,
   NewsEdgarStream,
   StatusGrid,
@@ -65,6 +66,12 @@ export function fetchNewsEdgarComposition(): Promise<NewsEdgarComposition> {
 // `postReaction` records Ben's reaction to a row (the input box's write path), returning the updated row.
 export function fetchStatusGrid(): Promise<StatusGrid> {
   return getJson<StatusGrid>("/api/status-grid");
+}
+
+// The Lifecycle tab — the per-group certification-lifecycle state (UNVERIFIED → MONITORING → CERTIFIED →
+// TRUSTED). A short-TTL server cache backs it, so a poll every ~30s tracks the running monitor cheaply.
+export function fetchLifecycleState(): Promise<LifecycleState> {
+  return getJson<LifecycleState>("/api/lifecycle-state");
 }
 
 export async function postReaction(hour: string, reaction: string): Promise<StatusRow> {
