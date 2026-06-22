@@ -132,3 +132,33 @@ def test_volume_exhaustion_no_up_volume_is_null() -> None:
     out = run_group(REGISTRY.get_group("volume_exhaustion"), BatchContext(frames={"minute_agg": _ohlcv(bars)}))
     r = _row(out, BASE + timedelta(minutes=5))
     assert r["vol_down_up_ratio_5m"] is None
+
+
+def test_volume_exhaustion_negligible_up_volume_is_null() -> None:
+    """A NEGLIGIBLE up-volume (below the relative floor of total participating volume) reads NULL, not a huge
+    ratio — the SIGN-at-threshold hardening (_UP_VOL_REL_EPS). This is the no-up-bar case as it appears under a
+    tiny non-zero running-sum residual (e.g. the shared-engine Neumaier-rebase residue): a bare ``up > 0`` guard
+    would emit down/residual ≈ 1e15, the relative floor nulls it on every path. Five all-down bars (up=0) plus a
+    single up bar whose volume is ~1e-12 of the down volume → up-share ≪ 1e-9 → still null."""
+    bars = [(101.0, 100.0, 100.0) for _ in range(4)]
+    bars.append((100.0, 100.0 + 1e-9, 1e-7))  # an up bar with negligible volume vs the ~400 down volume
+    out = run_group(
+        REGISTRY.get_group("volume_exhaustion"), BatchContext(frames={"minute_agg": _ohlcv(bars)})
+    )
+    r = _row(out, BASE + timedelta(minutes=4))
+    # up_vol = 1e-7, down_vol = 400 -> up share = 1e-7/400 ≈ 2.5e-10 < _UP_VOL_REL_EPS (1e-9) -> null
+    assert r["vol_down_up_ratio_5m"] is None
+
+
+def test_volume_exhaustion_real_up_volume_unaffected_by_floor() -> None:
+    """The relative floor is VALUE-IDENTICAL on a window with genuine up-volume: a real (even if small) up
+    share well above the floor still produces the exact down/up ratio (guards against the floor over-nulling).
+    """
+    # down vol 400 (4 down bars), up vol 4 (one up bar, vol 4) -> up share 4/404 ≈ 1e-2 ≫ 1e-9 -> defined.
+    bars = [(101.0, 100.0, 100.0) for _ in range(4)]
+    bars.append((100.0, 101.0, 4.0))
+    out = run_group(
+        REGISTRY.get_group("volume_exhaustion"), BatchContext(frames={"minute_agg": _ohlcv(bars)})
+    )
+    r = _row(out, BASE + timedelta(minutes=4))
+    assert r["vol_down_up_ratio_5m"] == pytest.approx(400.0 / 4.0)

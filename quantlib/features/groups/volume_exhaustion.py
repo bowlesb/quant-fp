@@ -17,7 +17,8 @@ All three are pure windowed reductions over the EXISTING ``minute_agg`` columns 
 single-pass ``compute_latest()`` from one declaration and they are parity-true by construction
 (``tests/test_fp_latest.py`` guards cell-equality). Up/down classification uses only the SAME bar's
 open/close (no shift, no future bar), so every cell reads data <= T — look-ahead-safe. A window with no
-volume on a side, or a zero-volume window, yields null (the ratio is undefined) rather than a fabricated 0.
+volume on the up side (up-volume below a tiny relative floor of total participating volume), or a
+zero-volume window, yields null (the ratio is undefined) rather than a fabricated 0 — see ``_UP_VOL_REL_EPS``.
 """
 from __future__ import annotations
 
@@ -30,6 +31,17 @@ from quantlib.features.registry import register
 WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
 # vol_contraction = (short trailing mean volume) / (longer trailing baseline mean volume): (short, long).
 CONTRACTIONS: tuple[tuple[int, int], ...] = ((5, 30), (10, 60))
+
+# Relative floor on the up-volume denominator of ``vol_down_up_ratio`` (mirrors the trade_freq_z /
+# _OLS_DENOM_*_REL_EPS discipline). A bare ``vex_up_vol_sum > 0`` is the SIGN-at-threshold trap: when a window
+# has NO up-bars the batch fresh-sum is EXACTLY 0 (→ null) but the incremental running sum can carry a tiny
+# residual (~1e-15, e.g. when a co-resident time-OLS group's rebase realizes the shared Neumaier compensation),
+# so ``> 0`` passes on one path and not the other → a null/non-null parity FLIP (ratio = down/1e-15 ≈ 1e15
+# where batch nulls). Gating the up-volume on a fraction of the window's TOTAL participating volume
+# (up + down) makes a genuinely-no-up-bar window null on BOTH paths (0 ≤ eps·down) while never touching a
+# window with real up-volume (up ≫ eps·(up+down)). 1e-9 sits far above the running-sum residual and far below
+# any real participation share. Value-identical to the bare guard on well-conditioned cells.
+_UP_VOL_REL_EPS = 1e-9
 
 
 @register
@@ -106,7 +118,10 @@ class VolumeExhaustionGroup(ReductionGroup):
         feats: dict[str, pl.Expr] = {}
         for w in WINDOWS:
             feats[f"vol_down_up_ratio_{w}m"] = (
-                pl.when(sum_("vex_up_vol", w) > 0.0)
+                pl.when(
+                    sum_("vex_up_vol", w)
+                    > _UP_VOL_REL_EPS * (sum_("vex_up_vol", w) + sum_("vex_down_vol", w))
+                )
                 .then(sum_("vex_down_vol", w) / sum_("vex_up_vol", w))
                 .otherwise(None)
             )
