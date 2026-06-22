@@ -568,7 +568,9 @@ def _gappy_corr_breaches(group_name: str) -> bool:
             if not bars:
                 continue
             ring.push(_bars_to_frame(bars))
-            frame = ring.materialize()
+            # price_volume's InputSpec declares __anchor_volume (its pv_correlation x-side conditioning), so the
+            # materialized frame must carry the volume anchor production attaches before either path runs.
+            frame = _with_volume_anchor(ring.materialize())
             ctx = BatchContext(frames={"minute_agg": frame})
             batch = compute_reduction_batch(group, ctx)
             if engine is None:
@@ -675,7 +677,9 @@ def test_market_beta_breaches_on_real_gappy_spy_regressor() -> None:
         engine: IncrementalEngine | None = None
         for bars in walk:
             ring.push(_bars_to_frame(bars))
-            frame = ring.materialize()
+            # price_volume's InputSpec declares __anchor_volume (its pv_correlation x-side conditioning), so the
+            # materialized frame must carry the volume anchor production attaches before either path runs.
+            frame = _with_volume_anchor(ring.materialize())
             ctx = BatchContext(frames={"minute_agg": frame})
             batch = compute_reduction_batch(group, ctx)
             if engine is None:

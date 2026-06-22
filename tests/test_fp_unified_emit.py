@@ -21,6 +21,7 @@ from quantlib.features.base import BatchContext
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup
 from quantlib.features.incremental import IncrementalEngine
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 
 BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 
@@ -41,7 +42,16 @@ def _stream(n_sym: int = 8, n_min: int = 70) -> pl.DataFrame:
                  "quote_imbalance": rng.standard_normal() * 0.3, "mean_bid_size": rng.random() * 100,
                  "mean_ask_size": rng.random() * 100}
             )
-    return pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    frame = pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    # Attach the per-symbol centering anchors production attaches before either path runs, so price_volume
+    # (InputSpec now declares __anchor_volume for pv_correlation's x-side conditioning) stays runnable here —
+    # this gate iterates EVERY reduction group, so price_volume must not silently drop out. Value-additive.
+    daily = (
+        frame.group_by("symbol")
+        .agg(pl.col("volume").sum().alias("volume"), pl.col("close").last().alias("close"))
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_reduction_anchors({"minute_agg": frame, "daily": daily})["minute_agg"]
 
 
 def _assert_cellwise(reference: pl.DataFrame, candidate: pl.DataFrame, label: str, tol: float = 0.0) -> None:

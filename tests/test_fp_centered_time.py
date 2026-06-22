@@ -30,7 +30,7 @@ from quantlib.features.declarative import (
 )
 from quantlib.features.incremental import _TIME_ORIGIN_LAG
 from quantlib.features.latest import rust_windowed_sums
-from quantlib.features.reduction_anchor import attach_close_anchor
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 from quantlib.features.registry import REGISTRY
 
 quant_tick = pytest.importorskip("quant_tick")
@@ -77,15 +77,16 @@ def _trend_frame(n_sym: int, n_min: int, present_p: float, seed: int, *, near_pe
     frame = (
         pl.DataFrame(rows).with_columns(pl.col("minute").dt.cast_time_unit("us")).sort(["symbol", "minute"])
     )
-    # The OLS y-centering groups (trend_quality / clean_momentum) declare the close anchor in their InputSpec
-    # (production attaches it via attach_reduction_anchors before either path runs); attach it here so the
-    # frame carries the column the groups select. Value-additive (the anchor is read only under FP_RUST_REDUCE).
+    # The centering groups declare their anchor columns in their InputSpec (trend_quality / clean_momentum the
+    # close anchor; price_volume the volume anchor); production attaches them via attach_reduction_anchors before
+    # either path runs. Attach both here so every TIME_AXIS_GROUP stays runnable. Value-additive (anchors are
+    # read only under FP_RUST_REDUCE, and this test exercises only the time-axis regression, never the volume-x).
     daily = (
         frame.group_by("symbol")
-        .agg(pl.col("close").last().alias("close"))
+        .agg(pl.col("close").last().alias("close"), pl.col("volume").sum().alias("volume"))
         .with_columns(pl.lit(1).alias("date"))
     )
-    return attach_close_anchor(frame, daily)
+    return attach_reduction_anchors({"minute_agg": frame, "daily": daily})["minute_agg"]
 
 
 def test_time_axis_groups_declare_a_time_regression() -> None:
