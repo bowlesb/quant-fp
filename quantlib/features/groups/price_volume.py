@@ -16,27 +16,52 @@ from quantlib.features.base import (
     InputSpec,
 )
 from quantlib.features.declarative import ReductionGroup, StatefulRegressor, corr_, mean_, pt_, slope_, sum_
+from quantlib.features.reduction_anchor import anchor_column
 from quantlib.features.registry import register
 
 WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
+
+_ANCHOR_VOLUME = anchor_column("volume")  # per-symbol volume anchor pv_correlation's y-side OLS conditioning centers on
 
 
 @register
 class PriceVolumeGroup(ReductionGroup):
     name = "price_volume"
-    # 1.2.0: n==2 perfect-fit guard makes pv_correlation exactly sign(cov) at the b==2 corner.
+    # 1.2.0: n==2 perfect-fit guard makes pv_correlation exactly sign(cov) at the b==2 corner. The y-centering
+    # of pv_correlation's volume regressand (regression_y_anchor, FP_RUST_REDUCE) that conditions its corr denom
+    # is VALUE-IDENTICAL (OLS is translation-invariant in y — only the float conditioning changes), so it is
+    # NOT a version/fingerprint bump (same precedent as the close-y anchored groups).
     version = "1.2.0"
     owner = "modeller"
     type = FeatureType.PRICE_VOLUME
-    inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "high", "low", "close", "volume")),)
-    # pv_correlation is a Pearson corr (cov / √(var_x·var_y)) of one-minute return against RAW share volume.
-    # The n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT, #155) closes ONLY the b==2 perfect-fit corner — it does
-    # NOT cover the general gappy-window case: when a sparse symbol skips minutes the in-window volume regressor
-    # x≈0 over the window, so the corr denominator denom_x = b·Σx²−(Σx)² is a difference of float-noise that
-    # incremental's running Σx² rounds differently from the batch fresh sum, straddling the defined-guard at
-    # n>2 cells — incremental emits where batch NULLs. Same conditioning class as `volume`; route LIVE to the
-    # batch fresh-sum recompute. (OBV-slope regresses on a centered time axis and is well-conditioned; it rides
-    # the batch path here with no loss. The shared centered-denom kernel is the queued follow-up to widen this.)
+    inputs = (
+        InputSpec(
+            name="minute_agg",
+            columns=("symbol", "minute", "high", "low", "close", "volume", _ANCHOR_VOLUME),
+        ),
+    )
+
+    def regression_y_anchor(self) -> dict[str, str]:
+        """Center pv_correlation's RAW-share-volume regressand on the per-symbol ``__anchor_volume`` constant.
+        pv_correlation is a Pearson corr (cov / √(var_x·var_y)) of one-minute RETURN (x, ~1e-4) against raw
+        share VOLUME (y, ~1e6) — so the large-magnitude cancellation is on the Y side: the corr y-side denom
+        ``denom_y = b·Σy² − (Σy)²`` is a difference of near-equal large sums whose low bits the incremental
+        running-Σy² rounds differently from the batch fresh-sum (measured worst self-check tol-ratio ~670× the
+        production breach threshold). Centering y on the same per-minute-scale volume anchor the ``volume``
+        group's centered std already reads conditions ``denom_y`` on small centered volume, so both paths round
+        it identically. This rides the EXISTING y-anchor mechanism (the close-y groups' FP_RUST_REDUCE
+        conditioning) — no new engine/kernel path. OLS corr is translation-invariant in y → value-identical (fp
+        unchanged); only the float conditioning changes. The OBV-slope regression (``obv``) regresses a
+        cumulative on a centered TIME axis (well-conditioned) and is NOT centered — only ``pv`` is declared."""
+        return {"pv": anchor_column("volume")}
+
+    # PARKED on the batch fresh-sum recompute, byte-identical to batch under FP_INCREMENTAL — same posture as the
+    # close-y anchored groups (trend_quality / clean_momentum): the conditioning MECHANISM (regression_y_anchor)
+    # ships here, but the flip to incremental_safe=True is the LEAD's enablement call after a real-data soak
+    # proves the volume-y-centered denom rounds identically on both paths in production (synthetic proof:
+    # tests/test_fp_price_volume_comoment.py — worst self-check tol-ratio 670x→<1x with FP_RUST_REDUCE on). Until
+    # then it stays gated in the INCREMENTAL_UNSAFE set. NOTE: the fast path requires FP_RUST_REDUCE on (the
+    # volume y-anchor active); arming incremental_safe=True without it would re-expose the raw-volume cancellation.
     incremental_safe = False
 
     def declare(self) -> list[FeatureSpec]:
