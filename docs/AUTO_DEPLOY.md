@@ -16,8 +16,9 @@ deliver exactly that.
 - **TIER-1 (auto)** — a self-contained container that can be rebuilt + recreated **by name** WITHOUT touching
   the live feature-computer or moving the bus fingerprint: the **dashboard**, the **store-grid worker**, the
   **news/edgar capture** services, the individual **trading strategies**. These deploy **immediately** on
-  merge via an isolated image build + `docker compose up -d --no-deps --build <svc>` (the proven #368/#382
-  pattern). The fc keeps running its pinned bind-mount tree, untouched.
+  merge via an isolated image build (`docker compose build --build-arg GIT_SHA=<sha> <svc>`, so the image is
+  stamped with its source commit) + `docker compose up -d --no-deps <svc>` (the proven #368/#382 pattern).
+  The fc keeps running its pinned bind-mount tree, untouched.
 - **TIER-2 (coordinated)** — anything that changes the **feature-compute surface** or the **bus fingerprint**:
   `quantlib/features/**`, `quantlib/bus/**`, `rust/**`, `services/fc|ingestor|executor/**`. These are **never**
   hot-deployed mid-session. They **batch** onto the next coordinated market-closed relaunch
@@ -58,8 +59,9 @@ are stale") from the single consumer (the applier, "deploy one at a time"):
 ## The daemon (`ops/auto_deploy.py`) — extends the grade daemon
 
 Per poll: **observe** a new `origin/main` SHA → **map** its changed paths → **enqueue** one entry per affected
-service → **apply** the ripe auto-batch (FF the live tree once, `compose up -d --no-deps --build <svc>` each
-TIER-1 service) → **report** the deferred TIER-2 batch. It is the Phase-3 sibling of the grade daemon
+service → **apply** the ripe auto-batch (FF the live tree once, then `compose build --build-arg GIT_SHA=<sha>
+<svc>` + `compose up -d --no-deps <svc>` each TIER-1 service — the SHA computed from the FF'd HEAD so the
+image is stamped with exactly the code shipped) → **report** the deferred TIER-2 batch. It is the Phase-3 sibling of the grade daemon
 (Phase-1/2): grade → (Ben-armed) merge → **enqueue deploy → applier deploys per these batching/safety rules**.
 
 ### Safety (fail-closed, enforced in `auto_deploy.py`)
@@ -67,8 +69,8 @@ TIER-1 service) → **report** the deferred TIER-2 batch. It is the Phase-3 sibl
 - **GOLDEN RULE — fc is NEVER deployed here.** `feature-computer` is TIER-2 by `deploy_scope` AND in a
   belt-and-suspenders `_FORBIDDEN` set; it is relaunched ONLY by `ops/nightly_relaunch.sh` at the coordinated
   window. A fc/fingerprint merge just sits batched until then (Ben-gated).
-- **Never `docker kill`/`restart`**; only `compose up -d --no-deps --build <safe-svc>`. **Never**
-  `docker kill --filter ancestor=fp-dev`.
+- **Never `docker kill`/`restart`**; only `compose build --build-arg GIT_SHA` + `compose up -d --no-deps
+  <safe-svc>`. **Never** `docker kill --filter ancestor=fp-dev`.
 - The live tree is FF'd to `origin/main` ONLY for a TIER-1 deploy (which carries no fc rebuild — fc keeps its
   pinned bind-mount until the relaunch).
 - **Box-load pre-check** (`CI_DEPLOY_MAX_LOAD`, default 40): a deploy build is deferred (re-enqueued) if the
@@ -80,19 +82,24 @@ TIER-1 service) → **report** the deferred TIER-2 batch. It is the Phase-3 sibl
 
 ## Per-service deploy commands (what the applier runs)
 
-`deploy_scope.deploy_command(service, live_tree)` returns the exact argv. The applier FFs the live tree first
-(`git pull --ff-only origin main` in `/home/ben/quant-fp`) then runs it with `cwd` = the real repo dir so
-`.env`/`DB_PASSWORD` load. Examples:
+`deploy_scope.deploy_commands(service, git_sha)` returns the exact ordered argv steps (build-with-SHA, then
+up). The applier FFs the live tree first (`git pull --ff-only origin main` in `/home/ben/quant-fp`), computes
+`git_sha` from the FF'd HEAD, then runs the steps with `cwd` = the real repo dir so `.env`/`DB_PASSWORD` load.
+The build step bakes `GIT_SHA` into the image (`ARG GIT_SHA` → `ENV GIT_SHA` in each Dockerfile) so the
+deployed-sha verification surface never reads `unknown`; the up step has NO `--build` (a second `--build` would
+rebuild without the arg and overwrite the image with `GIT_SHA=unknown`). Examples (`<sha>` = the FF'd HEAD):
 
 ```bash
 # dashboard (+ frontend) — TIER-1, the proven #368/#382 pattern
-docker compose up -d --no-deps --build dashboard
+docker compose build --build-arg GIT_SHA=<sha> dashboard && docker compose up -d --no-deps dashboard
 
 # a strategy — TIER-1, with its compose overlay
-docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --no-deps --build reversion-strategy
+docker compose -f docker-compose.yml -f docker-compose.strategies.yml build --build-arg GIT_SHA=<sha> reversion-strategy
+docker compose -f docker-compose.yml -f docker-compose.strategies.yml up -d --no-deps reversion-strategy
 
 # news capture — TIER-1
-docker compose -f docker-compose.yml -f docker-compose.news.yml up -d --no-deps --build news-capture
+docker compose -f docker-compose.yml -f docker-compose.news.yml build --build-arg GIT_SHA=<sha> news-capture
+docker compose -f docker-compose.yml -f docker-compose.news.yml up -d --no-deps news-capture
 
 # feature-computer — TIER-2: NEVER here. Only:
 ops/nightly_relaunch.sh    # the coordinated, Ben-gated, market-closed relaunch

@@ -191,18 +191,37 @@ def affected_services(changed_paths: list[str]) -> DeployPlan:
     )
 
 
-def deploy_command(service: str, live_tree: str) -> list[str]:
-    """The exact ``docker compose`` argv to rebuild + recreate ONE TIER-1 service by name.
+def _compose_prefix(spec: ServiceSpec) -> list[str]:
+    """``docker compose`` + the right ``-f`` overlay for a service (the core file is implicit by default)."""
+    compose = ["docker", "compose"]
+    if spec.compose_file != "docker-compose.yml":
+        compose += ["-f", "docker-compose.yml", "-f", spec.compose_file]
+    return compose
 
-    Mirrors the proven #368/#382 pattern: build the service's image from the (already-FF'd) live tree and
-    recreate ONLY that container (``--no-deps``, no ``--remove-orphans`` so sibling containers from other
-    compose contexts are left untouched). The caller FFs the live tree first and runs this with ``cwd``=the
-    real repo dir so ``.env`` loads. NEVER returns a command for a TIER-2/fc service (the applier refuses those).
+
+def deploy_commands(service: str, git_sha: str) -> list[list[str]]:
+    """The ordered ``docker compose`` steps to rebuild + recreate ONE TIER-1 service by name, SHA-stamped.
+
+    TWO steps (mirrors the proven ``scripts/run_tool.sh`` pattern — the only place that already builds with a
+    correct ``GIT_SHA``):
+
+      1. ``docker compose build --build-arg GIT_SHA=<sha> <svc>`` — bake the deployed source SHA into the
+         image (the services' Dockerfiles take ``ARG GIT_SHA`` → ``ENV GIT_SHA``). Without this the
+         auto-built image stamps ``GIT_SHA=unknown``, so the deployed-sha verification surface (the dashboard
+         footer / ``scripts/assert_image_fresh.sh`` / ``baked_sha``) reads ``unknown`` for every auto-deploy.
+      2. ``docker compose up -d --no-deps <svc>`` — recreate ONLY that container from the freshly-built
+         image (``--no-deps``, no ``--remove-orphans`` so sibling containers from other compose contexts are
+         left untouched). No ``--build`` here: step 1 already built WITH the build-arg, and a second
+         ``--build`` would drop the arg and overwrite the image with a ``GIT_SHA=unknown`` rebuild.
+
+    The caller FFs the live tree first, computes ``git_sha`` from THAT tree (so the stamp matches the deployed
+    code), and runs these with ``cwd``=the real repo dir so ``.env`` loads. NEVER returns commands for a
+    TIER-2/fc service (raises — the applier refuses those).
     """
     spec = SERVICE_REGISTRY[service]
     if spec.tier is DeployTier.COORDINATED:
         raise ValueError(f"{service} is TIER-2 (coordinated) — not auto-deployable; use the relaunch window")
-    compose = ["docker", "compose"]
-    if spec.compose_file != "docker-compose.yml":
-        compose += ["-f", "docker-compose.yml", "-f", spec.compose_file]
-    return [*compose, "up", "-d", "--no-deps", "--build", spec.name]
+    compose = _compose_prefix(spec)
+    build = [*compose, "build", "--build-arg", f"GIT_SHA={git_sha}", spec.name]
+    up = [*compose, "up", "-d", "--no-deps", spec.name]
+    return [build, up]
