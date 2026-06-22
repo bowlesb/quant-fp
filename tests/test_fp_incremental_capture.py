@@ -52,12 +52,24 @@ def _with_anchors(frame: pl.DataFrame) -> pl.DataFrame:
     attach_reduction_anchors before either path runs), so the anchor-declaring OLS-y-centered groups
     (trend_quality, clean_momentum) are runnable / select their anchor column on a synthetic minute frame.
     Value-additive — the close anchor is consumed only under FP_RUST_REDUCE; it never changes a feature value
-    with the flag off, it only makes the group selectable."""
+    with the flag off, it only makes the group selectable.
+
+    The ``daily`` snapshot uses each symbol's EARLIEST buffered close/volume, NOT ``last()``. The anchor is a
+    per-SESSION CONSTANT (production sources it from the prior-day daily bar, fixed all session) — the parity-
+    critical contract reduction_anchor.py guarantees: the SAME per-symbol value read identically by the batch
+    fresh-sum path AND the per-minute incremental fold. ``last()`` over the GROWING per-minute buffer made the
+    2-sig-fig anchor FLIP across minutes as a symbol's latest close drifted over a sig-fig boundary, so the
+    incremental engine (folds each minute once at the then-current anchor) and the batch (re-derives every row
+    at the current anchor) centered the SAME historical row on DIFFERENT constants — a synthetic divergence the
+    production fixed-snapshot anchor never has (verified: late-appearance/degenerate FP_RUST_REDUCE walks go
+    from ~9e5x to <1e-4x once the anchor is session-constant). ``first()`` over the cumulative buffer is the
+    stable per-session proxy."""
     daily = (
-        frame.group_by("symbol", maintain_order=True)
+        frame.sort(["symbol", "minute"])
+        .group_by("symbol", maintain_order=True)
         .agg(
-            (pl.col("volume").last() * _RTH_MINUTES_PER_DAY).alias("volume"),
-            pl.col("close").last().alias("close"),
+            (pl.col("volume").first() * _RTH_MINUTES_PER_DAY).alias("volume"),
+            pl.col("close").first().alias("close"),
         )
         .with_columns(pl.lit(1).alias("date"))
     )
@@ -443,7 +455,14 @@ def test_regated_ols_engine_matches_batch_on_late_appearance_reseed(
     emitting a ±1.0 correlation (the n==2 perfect-fit value) where the batch correctly emits ``null``. The
     helper ``_worst_tol_ratio`` returns ``inf`` on any null/non-null mismatch, so a re-breach fails loudly.
     (These groups are prod-gated to batch by the real-data soak; this test exercises the engine kernel
-    directly so the slice-derive correctness stays guarded regardless of the gating decision.)"""
+    directly so the slice-derive correctness stays guarded regardless of the gating decision.)
+
+    Under FP_RUST_REDUCE this ALSO guards the y-anchor centering contract: ``_with_anchors`` now sources the
+    close anchor from each symbol's session-constant EARLIEST close (a non-flipping per-session constant), so
+    the engine (folds each minute once at the fold-time anchor) and the batch (re-derives every row at the
+    current anchor) center the SAME historical row on the SAME constant. (A ``last()``-over-the-growing-buffer
+    anchor flipped across the 2-sig-fig boundary as a symbol's latest close drifted and produced a SYNTHETIC
+    ~9e5x divergence that the production fixed-snapshot anchor never has.)"""
     walk = _late_appearance_minutes(n_sym=20, n_min=40, present_p=present_p, seed=seed, vol=vol)
     flipped = [
         g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name in INCREMENTAL_REGATED
