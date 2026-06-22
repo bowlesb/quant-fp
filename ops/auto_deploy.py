@@ -81,6 +81,33 @@ def _merge_changed_paths(old_sha: str, new_sha: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
+def _ff_safe_from_changed_paths(changed_paths: list[str]) -> tuple[bool, list[str]]:
+    """Pure core: given the paths origin/main adds over the live tree, is a full-tree FF fc-safe?
+
+    A TIER-1 deploy FFs the WHOLE fc bind-mount tree before the rebuild. That is UNSAFE if origin/main
+    carries any fc / fingerprint-surface change ahead of the pinned HEAD (``deploy_scope`` routes such a
+    path to a COORDINATED ``feature-computer`` entry): the FF would advance the fc compute tree on disk,
+    and the next coordinated relaunch would then apply a fingerprint change that never went through the
+    Ben-gated coordinated-deploy decision. Returns (safe, the coordinated services that block the FF).
+    """
+    plan = affected_services(changed_paths)
+    return (not plan.coordinated), plan.coordinated
+
+
+def _tree_ff_is_fp_safe(live_tree: str = LIVE_TREE) -> tuple[bool, list[str]]:
+    """True iff FF-ing ``live_tree`` to origin/main would NOT cross an fc/fingerprint boundary (git-backed).
+
+    Guards the GOLDEN RULE on the auto path: the continuous deployer must never advance the fc fingerprint
+    tree — that only moves at the coordinated, Ben-gated relaunch. Delegates the decision to the pure,
+    unit-tested :func:`_ff_safe_from_changed_paths`.
+    """
+    head = run(["git", "rev-parse", "HEAD"], cwd=live_tree).stdout.strip()
+    origin_main = run(["git", "rev-parse", "origin/main"], cwd=live_tree).stdout.strip()
+    if not head or not origin_main or head == origin_main:
+        return True, []  # nothing to FF (or already current) — no boundary to cross
+    return _ff_safe_from_changed_paths(_merge_changed_paths(head, origin_main))
+
+
 def _read_state() -> str:
     if os.path.isfile(STATE_FILE):
         with open(STATE_FILE) as handle:
@@ -146,6 +173,18 @@ def deploy_service(service: str, dry_run: bool) -> bool:
             load,
             MAX_LOAD_FOR_DEPLOY,
             service,
+        )
+        return False
+
+    ff_safe, blocking = _tree_ff_is_fp_safe(LIVE_TREE)
+    if not ff_safe:
+        logger.error(
+            "REFUSING live-tree FF for '%s': origin/main has un-deployed TIER-2/fingerprint changes "
+            "pending the coordinated relaunch (%s). Advancing the tree now would move the fc fingerprint "
+            "outside the Ben-gated window — deferring (re-enqueued; deploys after ops/nightly_relaunch.sh "
+            "brings the tree current).",
+            service,
+            blocking,
         )
         return False
 
