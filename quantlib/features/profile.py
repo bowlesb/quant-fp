@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import polars as pl
 
 from quantlib.features.base import BatchContext, FeatureGroup
-from quantlib.features.reduction_anchor import attach_volume_anchor
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup
 from quantlib.features.engine import run_group
@@ -82,11 +82,11 @@ def build_frames(
         (BASE - pl.duration(days=pl.col("_off")) + pl.duration(minutes=pl.col("_off"))).alias("available_at"),
         (((pl.int_range(pl.len()) % 5) - 2) / 2.0).cast(pl.Float64).alias("sentiment"),
     ).select("symbol", "available_at", "sentiment")
-    # Attach the per-symbol volume centering anchor (from the daily snapshot) to minute_agg — the same
-    # attachment production capture / backfill apply where minute_agg is built, so the centered-std groups
-    # (volume) are runnable and center identically here.
-    intraday = attach_volume_anchor(intraday, daily)
+    # Attach every per-symbol reduction centering anchor (volume / close / return, from the daily snapshot) to
+    # minute_agg — the same attachment production capture / backfill apply where minute_agg is built, so the
+    # centered groups (volume, distribution, the y-anchored OLS groups) are runnable and center identically.
     frames = {"minute_agg": intraday, "daily": daily, "reference": reference, "filings": filings, "news": news}
+    frames = attach_reduction_anchors(frames)
     if include_trades:
         frames["trades"] = _build_trades(symbols, window_min)
     return frames

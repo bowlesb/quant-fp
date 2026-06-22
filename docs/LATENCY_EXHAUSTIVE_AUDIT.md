@@ -102,7 +102,7 @@ math. The live O(1) payoff is the Lead-gated `FP_INCREMENTAL` flip; profiler row
 | `price_volume` | 70 | 99.0 | BATCH-recompute (parked) | 🦀 centered-denom kernel | 🦀 Lever I ⭐ | ➖ (corr-denom, not foldable in Py) |
 | `volume_leads_price` | 12 | 74.2 | BATCH-in-live (flag off) | ⚙️ flip | ✅ | ✅ fold |
 | `liquidity` | 15 | 63.8 | BATCH-in-live | ⚙️ flip | ✅ | ✅ fold + A-PRE tick (#378) |
-| `distribution` | 20 | 61.3 | BATCH-recompute (parked) | 🦀 kernel | 🦀 | ➖ |
+| `distribution` | 20 | 61.3 | ⚙️ UN-GATED (incremental_safe=True, 2026-06-22) | ✅ return-anchor + moment guard | ✅ fold | ➖ |
 | `momentum_consistency` | 18 | 47.5 | BATCH-in-live | ⚙️ flip | ✅ | ✅ fold |
 | `return_dynamics` | 15 | 39.5 | BATCH-recompute (parked) | 🦀 kernel | 🦀 | ➖ |
 | `clean_momentum` | 12 | 30.6 | BATCH-recompute (parked) | 🦀 kernel | 🦀 | ➖ |
@@ -123,11 +123,14 @@ math. The live O(1) payoff is the Lead-gated `FP_INCREMENTAL` flip; profiler row
 | `volume` | 23 | 8.2 | BATCH-in-live (centered std, #307) | ⚙️ flip | ✅ | ✅ fold |
 | `trade_freq_z` | 4 | 7.7 | BATCH-in-live | ⚙️ flip | ✅ | ✅ A-PRE tick |
 
-**Parked = `incremental_safe=False` (8, SOURCE-CONFIRMED):** `clean_momentum`, `distribution`, `market_beta`,
+**Parked = `incremental_safe=False` (7 — `distribution` UN-GATED 2026-06-22):** `clean_momentum`, `market_beta`,
 `price_volume`, `range_expansion`, `residual_analysis`, `return_dynamics`, `trend_quality`. #362 names only 3
 (`price_volume`/`market_beta`/`residual_analysis`) as the "kernel-unparks" set; that is the **highest-$-leverage
 subset** (they carry the corr/OLS `denom_x = b·Σx² − (Σx)²` straddle), but the kernel `[RustIncremental]` is
-building unparks more broadly. **All 8 share the SAME fix — the centered-denom kernel — so they count as ONE win.**
+building unparks more broadly. **These 7 share the corr/OLS centered-denom kernel. `distribution` did NOT — it
+was MISATTRIBUTED here: it has no regression/corr; its breach was a standalone 3rd/4th central-moment
+cancellation, un-gated separately by a return-anchor + a raised moment defined-guard (NOT the corr-denom kernel),
+value-identically, measured 63.8ms→12.6ms (5.1x). See docs/INCREMENTAL_READINESS.md.**
 
 ### 2b. StatefulGroups — ➖ profiler artifact, ✅ already O(1) live (verified `stream_sim.py`)
 
