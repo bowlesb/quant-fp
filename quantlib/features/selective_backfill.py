@@ -34,6 +34,7 @@ import psycopg
 
 from quantlib.data.raw_backfill import trading_client, trading_days, universe_symbols
 from quantlib.data.source_dependency import ensure_inputs_for_groups
+from quantlib.data.source_inputs import ensure_sources_for_groups
 from quantlib.features import store
 from quantlib.features.loaders import DB_KWARGS
 from quantlib.features.materialize import materialize_from_raw_groups
@@ -295,16 +296,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--ensure-inputs",
         action="store_true",
         help=(
-            "STEP 1 (default off): before computing, ENSURE the raw layers the target groups declare "
-            "(bars/trades/quotes) are in the store over this horizon — patch only manifest holes, then read "
-            "source from the store only (docs/SOURCE_DATA_DEPENDENCY.md). Use --ensure-inputs-live to actually "
-            "fetch + take the ingest lock; without it this only REPORTS the holes it would fetch (dry-run)."
+            "STEP 1 (default off): before computing, ENSURE the INPUT SOURCES the target groups declare — the "
+            "raw market layers (bars/trades/quotes) AND the alt-data sources (news/edgar) — are current in the "
+            "store over this horizon (the alt sources over the horizon expanded by each group's lookback); "
+            "patch only holes, then read source from the store only (docs/SOURCE_DATA_DEPENDENCY.md). Use "
+            "--ensure-inputs-live to actually fetch + take the ingest locks; without it this only REPORTS the "
+            "holes it would fetch (dry-run)."
         ),
     )
     parser.add_argument(
         "--ensure-inputs-live",
         action="store_true",
-        help="with --ensure-inputs, run the real fetch + take the per-layer ingest lock (NOT dry-run).",
+        help="with --ensure-inputs, run the real fetch + take the per-source ingest locks (NOT dry-run).",
     )
     return parser.parse_args(argv)
 
@@ -350,6 +353,28 @@ def main() -> None:
             raise SystemExit(
                 "ensure_inputs could not secure every layer (an ingest lock was held by another job): "
                 f"{[layer.value for layer in report.skipped_locked]}. Retry once it releases."
+            )
+        # Same flag covers the ALT-DATA sources (news/edgar) the target groups declare: ensure them current
+        # over the horizon EXPANDED by each group's lookback (docs/SOURCE_DATA_DEPENDENCY.md). Advisory in this
+        # first wiring — a skipped alt source (EDGAR has no in-process fetcher; its submissions backfill is the
+        # services/edgar operator job) is REPORTED, not a hard abort, so a market-tape backfill is never
+        # blocked on the alt-data acquisition path. A news lock genuinely held by another job is logged here.
+        alt_report = ensure_sources_for_groups(
+            args.raw_root,
+            sorted(group_versions),
+            symbols,
+            days[0],
+            days[-1],
+            agent_id="selective_backfill",
+            dry_run=not args.ensure_inputs_live,
+        )
+        if alt_report.sources:
+            logger.info(
+                "ensure_sources (%s): holes_before=%s fetched=%s skipped=%s",
+                "LIVE" if args.ensure_inputs_live else "DRY-RUN",
+                {source.value: n for source, n in alt_report.holes_before.items()},
+                {source.value: n for source, n in alt_report.fetched_dates.items()},
+                [source.value for source in alt_report.skipped_locked],
             )
 
     run(

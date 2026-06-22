@@ -40,10 +40,17 @@ from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
+    Source,
 )
 from quantlib.features.registry import register
 
 COUNT_WINDOWS_D: tuple[int, ...] = (7, 30, 90)
+# How far back the EDGAR source must be PRESENT for a backfill of this group (the deepest window — the
+# 365-day burst baseline — plus calendar-edge slack) — declared via ``source_lookback_days`` so ensure_sources
+# expands a backfill's horizon by it. MIRRORS ``loaders.FILINGS_LOOKBACK_DAYS`` (the reader's snapshot window);
+# kept here rather than imported because ``loaders`` reads DB env at module import, and a pure source
+# DECLARATION must import without a DB.
+FILINGS_LOOKBACK_DAYS = 370
 # SEC form_type label (as stored in the filings table) -> feature-name suffix. Form 4 is stored as "4".
 MAJOR_FORMS: dict[str, str] = {"8-K": "8k", "10-Q": "10q", "10-K": "10k", "4": "form4"}
 BURST_BASELINE_D = 365  # trailing-year window the 7-day burst rate is compared against
@@ -64,6 +71,21 @@ class EdgarFilingFrequencyGroup(FeatureGroup):
     # whole session, so the point-in-time join is recomputed only when either snapshot changes. compute()
     # and compute_latest() share it (compute_latest slices to T's minute off the same cached frame).
     _cache: tuple[int, int, pl.DataFrame] | None = None
+
+    def required_sources(self) -> frozenset[Source]:
+        """This group reads ONLY the EDGAR ``filings`` event store — its minute grid comes from the bar tape
+        but every feature value derives from the filings source, so a backfill must ENSURE EDGAR is current
+        first (docs/SOURCE_DATA_DEPENDENCY.md). Overrides the default (which would lift only ``{bars}``) to
+        declare the alt-data EDGAR source."""
+        return frozenset({Source.EDGAR})
+
+    def source_lookback_days(self, source: Source) -> int:
+        """EDGAR must be present back the deepest window the group reads — the 365-day burst baseline — so the
+        trailing counts and minutes-since-last are correct from the session's first minute. Matches
+        ``loaders.FILINGS_LOOKBACK_DAYS`` (the same snapshot window the live/backfill reader loads)."""
+        if source is Source.EDGAR:
+            return FILINGS_LOOKBACK_DAYS
+        return 0
 
     def declare(self) -> list[FeatureSpec]:
         specs: list[FeatureSpec] = []

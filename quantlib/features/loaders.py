@@ -82,7 +82,9 @@ WHERE symbol IS NOT NULL
   AND available_at < %(day_end)s
 """
 # The burst baseline reads the trailing 365 days — the deepest window the group touches, so the snapshot
-# must reach back at least this far (a few slack days for the calendar-day window edge).
+# must reach back at least this far (a few slack days for the calendar-day window edge). MIRRORED by
+# ``edgar_filing_frequency.FILINGS_LOOKBACK_DAYS`` (the source-presence horizon ensure_sources expands by);
+# keep the two in sync — they are the same window read from the reader side vs the source-declaration side.
 FILINGS_LOOKBACK_DAYS = 370
 
 
@@ -202,6 +204,8 @@ NEWS_SCHEMA_FEATURE = {
 }
 # The news_sentiment group's deepest trailing window is 7 calendar days; load a few slack days beyond it so
 # the trailing sums/means are correct from the session's first minute, not just from the day's own articles.
+# MIRRORED by ``news_sentiment.NEWS_LOOKBACK_DAYS`` (the source-presence horizon ensure_sources expands by);
+# keep the two in sync — they are the same window read from the reader side vs the source-declaration side.
 NEWS_LOOKBACK_DAYS = 9
 NEWS_STORE_ROOT = os.environ.get("FP_NEWS_STORE", "/store")
 

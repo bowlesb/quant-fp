@@ -28,13 +28,25 @@ from __future__ import annotations
 
 import polars as pl
 
-from quantlib.features.base import BatchContext, FeatureGroup, FeatureSpec, FeatureType, InputSpec
+from quantlib.features.base import (
+    BatchContext,
+    FeatureGroup,
+    FeatureSpec,
+    FeatureType,
+    InputSpec,
+    Source,
+)
 from quantlib.features.registry import register
 
 # Trailing windows (in MINUTES) the sentiment aggregates are kept over: 1 hour, 1 day, 7 days.
 WINDOWS_M: dict[str, int] = {"60m": 60, "1d": 1440, "7d": 10080}
 # The windows the article COUNT and net-sum (intensity) features use — the shorter, intraday-relevant ones.
 COUNT_WINDOWS_M: dict[str, int] = {"60m": 60, "1d": 1440}
+# How far back the news source must be PRESENT for a backfill of this group (the deepest 7-day window plus
+# slack) — declared via ``source_lookback_days`` so ensure_sources expands a backfill's horizon by it. MIRRORS
+# ``loaders.NEWS_LOOKBACK_DAYS`` (the reader's snapshot window); kept here rather than imported because
+# ``loaders`` reads DB env at module import, and a pure source DECLARATION must import without a DB.
+NEWS_LOOKBACK_DAYS = 9
 
 
 @register
@@ -51,6 +63,21 @@ class NewsSentimentGroup(FeatureGroup):
     # session, so the point-in-time join is recomputed only when either snapshot changes. compute() and
     # compute_latest() share it (compute_latest slices to T's minute off the same cached frame).
     _cache: tuple[int, int, pl.DataFrame] | None = None
+
+    def required_sources(self) -> frozenset[Source]:
+        """This group reads ONLY the ``/store/news`` article tape — its minute grid comes from the bar tape
+        but every feature value derives from the news source, so a backfill must ENSURE news is current first
+        (docs/SOURCE_DATA_DEPENDENCY.md). Overrides the default (which would lift only ``{bars}``) to declare
+        the alt-data NEWS source."""
+        return frozenset({Source.NEWS})
+
+    def source_lookback_days(self, source: Source) -> int:
+        """News must be present back the group's deepest trailing window so the 7-day sentiment aggregate is
+        correct from the session's first minute. Matches ``loaders.NEWS_LOOKBACK_DAYS`` (the same snapshot
+        window the live/backfill reader loads) so ensure_sources and the reader agree by construction."""
+        if source is Source.NEWS:
+            return NEWS_LOOKBACK_DAYS
+        return 0
 
     def declare(self) -> list[FeatureSpec]:
         specs: list[FeatureSpec] = []
