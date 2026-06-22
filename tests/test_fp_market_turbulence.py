@@ -122,7 +122,12 @@ def test_realized_vol_requires_min_obs() -> None:
 
 
 def test_compute_latest_equals_compute_last() -> None:
-    """The latest-minute gather must equal compute() filtered to the last minute, cell-for-cell."""
+    """The latest-minute gather must equal compute() filtered to the last minute, cell-for-cell to each
+    feature's DECLARED parity tolerance. ``compute_latest`` overrides ``compute()`` for speed — it builds the
+    per-symbol measures for the latest minute alone (a few ``close[T-W]`` lookups + one trailing-RV std
+    slice) rather than the full-buffer rolling derive — so the universe-mean reduce may differ from the
+    rolling form only by float-reassociation noise (~1e-19), well within tolerance. Null-vs-value mismatches
+    (the parity break that matters) are still held exactly."""
     closes = {
         sym: [100.0 * (1.0 + 0.0013 * math.cos(i * 0.5 + s)) for i in range(65)]
         for s, sym in enumerate(["A", "B", "C", "D", "E"])
@@ -133,10 +138,65 @@ def test_compute_latest_equals_compute_last() -> None:
     last = full.filter(pl.col("minute") == full["minute"].max()).sort("symbol")
     latest = group.compute_latest(ctx).sort("symbol")
     assert latest.height == last.height
+    tolerances = {spec.name: spec.tolerance for spec in group.declare()}
     for column in FEATURE_NAMES:
         a = np.asarray(last[column].to_list(), dtype=float)
         b = np.asarray(latest[column].to_list(), dtype=float)
-        np.testing.assert_array_equal(np.nan_to_num(a, nan=-7.0), np.nan_to_num(b, nan=-7.0))
+        null_mismatch = np.isnan(a) != np.isnan(b)
+        assert not null_mismatch.any(), f"{column}: null-vs-value mismatch"
+        both = ~(np.isnan(a) | np.isnan(b))
+        bound = 1e-9 + tolerances[column] * np.abs(a)
+        assert np.all(np.abs(a[both] - b[both]) <= bound[both]), f"{column}: beyond declared tolerance"
+
+
+def _gappy_frame() -> pl.DataFrame:
+    """A frame the fast ``compute_latest`` must survive: missing minutes (gaps), a non-positive close, a
+    sparse late-entrant, and a symbol with NO bar at the latest minute — exactly the cases the time-based
+    rolling form handles and the latest-minute fast path must reproduce."""
+    rng = np.random.default_rng(7)
+    n_minutes = 90
+    rows = []
+    for s in range(40):
+        start = 0 if s < 30 else int(rng.integers(60, 80))  # sparse late entrants
+        drop_final = s in (2, 5)  # these two have no bar at the latest minute
+        price = 100.0
+        for i in range(start, n_minutes):
+            if drop_final and i >= n_minutes - 2:
+                continue
+            if rng.random() < 0.2:  # 20% missing minutes
+                continue
+            price *= 1.0 + rng.normal(0.0, 0.002)
+            close = price if (s != 11 or i % 17 != 0) else 0.0  # occasional non-positive close
+            rows.append({"symbol": f"S{s}", "minute": BASE + timedelta(minutes=i), "close": close})
+    return pl.DataFrame(rows)
+
+
+def test_compute_latest_matches_rolling_under_gaps() -> None:
+    """The fast latest-minute path must equal ``compute()``'s last minute under gaps / sparse universe /
+    non-positive closes / symbols-absent-at-T, to declared tolerance with NO null-vs-value mismatch. This is
+    the regression guard for the latest-minute fast path's two hazards: a symbol with no bar at T must be
+    excluded from the reduce, and the trailing-RV window boundary must match the rolling ``(T-W, T]``."""
+    ctx = BatchContext(frames={"minute_agg": _gappy_frame()})
+    group = _group()
+    full = group.compute(ctx)
+    latest_minute = full["minute"].max()
+    last = full.filter(pl.col("minute") == latest_minute).sort("symbol")
+    fast = group.compute_latest(ctx).sort("symbol").select(last.columns)
+    assert fast.height == last.height, "fast path emitted a different symbol set than the rolling last minute"
+    tolerances = {spec.name: spec.tolerance for spec in group.declare()}
+    for column in FEATURE_NAMES:
+        merged = last.select("symbol", column).join(
+            fast.select("symbol", pl.col(column).alias("_fast")), on="symbol"
+        )
+        bad = merged.filter(
+            (pl.col(column).is_null() != pl.col("_fast").is_null())
+            | (
+                pl.col(column).is_not_null()
+                & pl.col("_fast").is_not_null()
+                & ((pl.col(column) - pl.col("_fast")).abs() > 1e-9 + tolerances[column] * pl.col(column).abs())
+            )
+        )
+        assert bad.height == 0, f"{column}: fast latest != rolling.last on {bad.height} rows"
 
 
 def test_universe_pin_bounds_denominator() -> None:
