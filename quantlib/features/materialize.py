@@ -9,15 +9,17 @@ Usage: python -m quantlib.features.materialize <root> <YYYY-MM-DD> <stream|backf
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 
+from quantlib.data.source_dependency import default_fetcher, ensure_inputs
 from quantlib.features import store
 from quantlib.features.backfill_bars import (
     backfill_bars,
     backfill_daily,
     tradable_universe,
 )
-from quantlib.features.base import BatchContext
+from quantlib.features.base import BatchContext, RawLayer
 from quantlib.features.compare import runnable
 from quantlib.features.engine import run_group
 from quantlib.features.loaders import (
@@ -210,10 +212,32 @@ def main() -> None:
         )
         return
     if args and args[0] == "raw":
-        # raw <root> <day> <n_symbols> [raw_root]: read /store/raw minute bars (download-once) and write
-        root, day, n = args[1], args[2], int(args[3])
-        raw_root = args[4] if len(args) > 4 else DEFAULT_RAW_ROOT
+        # raw <root> <day> <n_symbols> [raw_root] [--ensure-inputs[-live]]: read /store/raw minute bars
+        # (download-once) and write. With --ensure-inputs, FIRST ensure the bars layer is in the store over
+        # this day for these symbols (patch only holes), then read from the store (the step-1 contract).
+        positional = [a for a in args[1:] if not a.startswith("--")]
+        flags = {a for a in args[1:] if a.startswith("--")}
+        root, day, n = positional[0], positional[1], int(positional[2])
+        raw_root = positional[3] if len(positional) > 3 else DEFAULT_RAW_ROOT
         symbols = tradable_universe(limit=n)
+        if "--ensure-inputs" in flags:
+            live = "--ensure-inputs-live" in flags
+            report = ensure_inputs(
+                raw_root,
+                frozenset({RawLayer.BARS}),  # materialize_from_raw is bar-only
+                symbols,
+                [dt.date.fromisoformat(day)],
+                agent_id="materialize_raw",
+                fetcher=default_fetcher(raw_root),
+                dry_run=not live,
+            )
+            print(
+                f"ensure_inputs ({'LIVE' if live else 'DRY-RUN'}): "
+                f"bars holes_before={report.holes_before.get(RawLayer.BARS, 0)} "
+                f"fetched={report.fetched_units.get(RawLayer.BARS, 0)}"
+            )
+            if live and not report.all_present:
+                raise SystemExit("ensure_inputs: bars ingest lock held by another job — retry")
         count = materialize_from_raw(root, raw_root, day, symbols)
         print(
             f"materialized {count} symbols from {raw_root}/raw for {day} (requested {len(symbols)})"

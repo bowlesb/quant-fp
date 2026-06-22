@@ -266,6 +266,33 @@ def ensure_inputs(
     return report
 
 
+def ensure_inputs_for_groups(
+    raw_store: str,
+    group_names: list[str],
+    symbols: list[str],
+    days: list[dt.date],
+    agent_id: str,
+    dry_run: bool = True,
+) -> EnsureReport:
+    """The CLI-facing one-call form: resolve the raw layers ``group_names`` DECLARE, then ``ensure_inputs``
+    them into ``raw_store`` over ``symbols × days`` using the production ``default_fetcher``.
+
+    This is the step-1 a feature-backfill CLI runs BEFORE computing (the contract that makes the abstraction
+    actually deliver A/B/C): the union of declared layers is patched (only holes) so the feature compute
+    reads source exclusively from the store. ``dry_run`` (default) reports holes without fetching or a DB
+    lock — the live activation (real fetch + real lock) is the gated step the caller opts into."""
+    layers = required_layers_for_groups(group_names)
+    return ensure_inputs(
+        raw_store,
+        layers,
+        symbols,
+        days,
+        agent_id=agent_id,
+        fetcher=default_fetcher(raw_store),
+        dry_run=dry_run,
+    )
+
+
 _CLAIM = """
 INSERT INTO source_ingest_lock (layer, agent_id, claimed_at, heartbeat_at, status)
 VALUES (%(layer)s, %(agent_id)s, now(), now(), 'active')
