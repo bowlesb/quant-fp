@@ -26,10 +26,12 @@ feature-store schema/format/fingerprint change — this service is read-side onl
 import os
 from pathlib import Path
 
+import psycopg
 from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from latency_expectations import load_latency_expectations
+from lifecycle_state import lifecycle_snapshot
 from news_edgar import composition_snapshot, stream_snapshot
 from pydantic import BaseModel, Field
 from status_grid import append_reaction
@@ -145,6 +147,25 @@ def status_grid_reaction(body: ReactionBody) -> JSONResponse:
     these every cycle. Returns the updated row."""
     row = append_reaction(body.hour, body.reaction)
     return JSONResponse(row, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/lifecycle-state")
+def lifecycle_state() -> JSONResponse:
+    """The per-group CERTIFICATION-LIFECYCLE state — makes the now-running within-day parity lifecycle legible
+    (docs/WITHIN_DAY_PARITY_CERTIFICATION.md). Each feature-group's FURTHEST stage on the staged progression
+    UNVERIFIED → MONITORING → CERTIFIED → TRUSTED, read off the live ``within_day_assignment`` (who owns the
+    monitoring lock), ``within_day_parity_cert`` (the latest within-day intraday-parity verdict +
+    stable_cycles/value_rate/cert_day), and ``feature_trust`` (the permanent binary TRUSTED grant), joined to
+    groups via the registry catalog. Three small indexed queries, short-TTL cached off the request path;
+    ``no-store`` so Ben always sees the latest cycle. Returns 503 ``booting`` if the trust DB is unreachable
+    (mirrors the grid's first-boot state) rather than 500-ing the page."""
+    try:
+        return JSONResponse(lifecycle_snapshot(), headers={"Cache-Control": "no-store"})
+    except psycopg.OperationalError as exc:
+        return JSONResponse(
+            {"booting": True, "detail": f"trust DB unreachable: {exc}"},
+            status_code=503,
+        )
 
 
 @app.get("/healthz")

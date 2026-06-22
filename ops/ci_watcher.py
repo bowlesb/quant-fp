@@ -77,6 +77,7 @@ DASHBOARD_DEP_TESTS = (
     "tests/test_latency_expectations_route.py",
     "tests/test_news_edgar_route.py",
     "tests/test_status_grid.py",  # imports status_grid -> filelock (a dashboard-only dep)
+    "tests/test_lifecycle_state.py",  # route tests import app -> fastapi/pymongo (dashboard-only deps)
 )
 DASHBOARD_REQUIREMENTS = "services/dashboard/requirements.txt"
 # WALL-CLOCK TIMING tests — they measure elapsed ms against a budget/ceiling, so they FALSE-RED on a loaded

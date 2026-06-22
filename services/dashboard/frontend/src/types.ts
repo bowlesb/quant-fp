@@ -257,3 +257,51 @@ export interface StatusGrid {
   rows: StatusRow[]; // newest hour first
   n_rows: number;
 }
+
+// Shapes returned by /api/lifecycle-state (services/dashboard/lifecycle_state.py) — the per-group
+// CERTIFICATION-LIFECYCLE state. Each feature-group's furthest stage on the staged progression
+// UNVERIFIED → MONITORING → CERTIFIED → TRUSTED, read off within_day_assignment + within_day_parity_cert +
+// feature_trust. Makes the now-running within-day parity lifecycle legible.
+export type LifecycleStage = "unverified" | "monitoring" | "certified" | "trusted";
+
+// One active assignment lock — a subagent currently MONITORING a group's live==backfill match.
+export interface LifecycleOwner {
+  group_name: string;
+  agent_id: string;
+  status: string; // active | released | timed_out
+  claimed_at: string | null;
+  heartbeat_at: string | null;
+  released_at: string | null;
+  stale: boolean; // an active lock whose heartbeat went cold (dead-agent reclaim candidate)
+}
+
+// One feature-group's place in the lifecycle: the furthest STAGE reached + the evidence behind each stage.
+export interface LifecycleGroup {
+  group: string;
+  stage: LifecycleStage;
+  n_features: number;
+  n_trusted: number;
+  fully_trusted: boolean;
+  // MONITORING evidence (the assignment lock), if any.
+  owner: string | null;
+  owner_status: string | null;
+  owner_stale: boolean;
+  // CERTIFIED evidence (the latest within-day cert roll-up), if any.
+  cert_status: string | null; // certified | fix_pending | defected | skipped_*
+  cert_day: string | null;
+  cert_stable_cycles: number | null;
+  cert_window_minutes: number | null;
+  cert_value_rate: number | null;
+  cert_reason: string | null;
+}
+
+export interface LifecycleState {
+  generated_at: string;
+  stage_order: LifecycleStage[];
+  summary: Record<LifecycleStage, number>; // per-stage group counts
+  n_groups: number;
+  n_features: number;
+  n_trusted_features: number;
+  active_owners: LifecycleOwner[];
+  groups: LifecycleGroup[];
+}
