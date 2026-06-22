@@ -21,13 +21,20 @@ BASE = dt.datetime(2026, 6, 15, 13, 30, tzinfo=dt.timezone.utc)
 
 
 def _anchored(frame: pl.DataFrame) -> pl.DataFrame:
-    """Attach the per-symbol volume + close centering anchors (production attaches them via
+    """Attach the per-symbol volume + close + return centering anchors (production attaches them via
     attach_reduction_anchors before either path runs), so the anchor-declaring groups (volume, trend_quality,
-    clean_momentum) are runnable on these streams. Value-additive — the anchors are only consumed under the
-    centered-std / FP_RUST_REDUCE flags; they make the groups selectable, never change a feature value."""
+    clean_momentum, distribution) are runnable on these streams. Value-additive — the anchors are only consumed
+    by the centered power sums (shift-invariant); they make the groups selectable, never change a feature value.
+    The synthetic ``daily`` carries open (first close) + close (last close) so the per-symbol return anchor
+    ``(close/open−1)/390`` tracks the symbol's typical per-minute return — the scale the distribution centering
+    needs to condition its 3rd/4th-moment cancellation."""
     daily = (
         frame.group_by("symbol")
-        .agg(pl.col("volume").sum().alias("volume"), pl.col("close").last().alias("close"))
+        .agg(
+            pl.col("volume").sum().alias("volume"),
+            pl.col("close").first().alias("open"),
+            pl.col("close").last().alias("close"),
+        )
         .with_columns(pl.lit(1).alias("date"))
     )
     return attach_reduction_anchors({"minute_agg": frame, "daily": daily})["minute_agg"]
@@ -163,7 +170,7 @@ def test_incremental_step_matches_batch() -> None:
 # momentum_consistency) is only fully confirmable on a real-data A/B. This test guarantees the deep windows
 # are EXERCISED + the breach class is CAUGHT (non-vacuous); the real-data A/B remains the authority on the
 # exact per-group arming list.
-DEEP_WINDOW_KNOWN_BREACHERS: frozenset[str] = frozenset({"distribution"})
+DEEP_WINDOW_KNOWN_BREACHERS: frozenset[str] = frozenset()
 
 _PARITY_ATOL = 1e-6
 _PARITY_RTOL = 1e-6

@@ -29,6 +29,14 @@
 > | `return_dynamics` | 4/779 (0.5%) | inf (null-flip) | autocorr_2_10m | autocorrelation denom straddle |
 > | `distribution` | 3/779 (0.4%) | 10404× | ret_kurt_10m | kurtosis higher-moment cancellation |
 >
+> **UPDATE (2026-06-22): `distribution` is RESOLVED + un-gated** (`incremental_safe=True`). Its breach was NOT
+> the corr-denom class — it is a standalone 3rd/4th central-moment cancellation on a near-constant-but-nonzero-
+> return window. CLOSED by (1) centering the return on a per-symbol constant anchor before the power sums
+> (`Σ(r−a)^k`, translation-invariant → value-identical, max diff 1.5e-13 vs origin/main on a realistic walk) and
+> (2) raising the moment defined-guard `1e-16 → 1e-12` to null the degenerate float-noise-variance cells where
+> the moment is meaningless and the two paths cannot agree (0 real cells nulled). Deep-window degenerate parity
+> test green; MEASURED 63.8ms batch → 12.6ms incremental (5.1x @ 500 syms). fp-neutral (version/names unchanged).
+>
 > **GO (15)** — clean across the whole soak: count_fano, efficiency, liquidity, momentum, momentum_consistency,
 > ohlc_vol, quote_spread, realized_range, signed_trade_ratio, trade_flow, trade_freq_z, volatility, **volume**,
 > volume_exhaustion, volume_leads_price. (`volume` is clean ONLY when the centering anchor is per-MINUTE scale,

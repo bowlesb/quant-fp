@@ -119,6 +119,41 @@ def attach_close_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFram
     )
 
 
+def attach_return_anchor(frame: pl.DataFrame, daily: pl.DataFrame) -> pl.DataFrame:
+    """Attach the per-symbol one-minute-RETURN centering anchor to ``frame`` (keyed on symbol), from the
+    ``daily`` snapshot's most-recent per-symbol open/close. The SAME join the backfill batch path and the live
+    seed path apply, so the anchor column is identical in both — the parity-critical invariant the distribution
+    group's skew/kurtosis conditioning relies on.
+
+    Used by ``distribution`` to center the one-minute return ``r`` before forming its power sums ``Σ(r−a)^k``
+    (k=1..4) → central moments → skew/excess-kurtosis. Subtracting a per-symbol constant near the typical
+    per-minute return shrinks ``(r−a)`` so the higher-power sums stay conditioned on a near-constant-return
+    window. Central moments are translation-invariant, so the centered result is VALUE-IDENTICAL to the raw
+    form in exact arithmetic — only the float conditioning changes (fp unchanged). The anchor is the daily-bar
+    return ``close/open − 1`` on the per-minute scale (``/ _RTH_MINUTES_PER_DAY``, the same /390 rescale the
+    volume anchor applies), rounded to 2 significant figures so it is a stable per-symbol constant. A symbol
+    not in ``daily`` — or one whose daily return is zero/undefined — gets 0.0 (no centering; its raw return is
+    then near-zero and already well-conditioned)."""
+    daily_return = pl.col("_close") / pl.col("_open") - 1.0
+    per_minute = daily_return / _RTH_MINUTES_PER_DAY
+    # sigfig_rounded_anchor is magnitude-only (0.0 for non-positive); preserve the sign so a symbol drifting
+    # DOWN at a constant rate (negative per-minute return) centers on a negative anchor, not 0.0.
+    signed_anchor = pl.when(per_minute < 0.0).then(-sigfig_rounded_anchor(-per_minute)).otherwise(
+        sigfig_rounded_anchor(per_minute)
+    )
+    latest = (
+        daily.select(["symbol", "date", "open", "close"])
+        .sort(["symbol", "date"])
+        .group_by("symbol", maintain_order=True)
+        .agg(pl.col("open").last().alias("_open"), pl.col("close").last().alias("_close"))
+        .with_columns(signed_anchor.alias(anchor_column("return")))
+        .select(["symbol", anchor_column("return")])
+    )
+    return frame.join(latest, on="symbol", how="left").with_columns(
+        pl.col(anchor_column("return")).fill_null(0.0)
+    )
+
+
 def attach_reduction_anchors(frames: dict[str, pl.DataFrame]) -> dict[str, pl.DataFrame]:
     """Attach every centered-std reduction anchor onto ``frames["minute_agg"]`` in place of the original
     frame, from the per-session snapshots ``frames`` already holds — the SINGLE wiring point shared by
@@ -144,15 +179,21 @@ def attach_reduction_anchors(frames: dict[str, pl.DataFrame]) -> dict[str, pl.Da
     daily = frames.get("daily")
     if daily is None:
         anchored = minute_agg.with_columns(
-            pl.lit(0.0).alias(anchor_column("volume")), pl.lit(0.0).alias(anchor_column("close"))
+            pl.lit(0.0).alias(anchor_column("volume")),
+            pl.lit(0.0).alias(anchor_column("close")),
+            pl.lit(0.0).alias(anchor_column("return")),
         )
         return {**frames, "minute_agg": anchored}
     anchored = attach_volume_anchor(minute_agg, daily)
-    # The close anchor is only sourced when the daily snapshot carries a ``close`` column (the daily-bar
-    # close); a snapshot that predates it falls back to the 0.0 sentinel (uncentered — raw close). Both paths
-    # read this identical column, so the y-side OLS conditioning stays parity-true.
+    # The close + return anchors are only sourced when the daily snapshot carries the columns they need (the
+    # daily-bar close / open+close); a snapshot that predates them falls back to the 0.0 sentinel (uncentered).
+    # Both paths read these identical columns, so the centering stays parity-true.
     if "close" in daily.columns:
         anchored = attach_close_anchor(anchored, daily)
     else:
         anchored = anchored.with_columns(pl.lit(0.0).alias(anchor_column("close")))
+    if "open" in daily.columns and "close" in daily.columns:
+        anchored = attach_return_anchor(anchored, daily)
+    else:
+        anchored = anchored.with_columns(pl.lit(0.0).alias(anchor_column("return")))
     return {**frames, "minute_agg": anchored}

@@ -103,14 +103,15 @@ INCREMENTAL_UNSAFE = {
     # residual_analysis: the OLS residual SSR is a difference of large near-equal centered power sums on a
     # near-perfect intraday fit — the corr-denom-class centering (sibling), not the std-class. Stays gated here.
     "residual_analysis",
-    # The 5 REAL-DATA soak NO-GO breachers (docs/INCREMENTAL_READINESS.md, 2026-06-17 A/B, set False by #332):
+    # The REAL-DATA soak NO-GO breachers (docs/INCREMENTAL_READINESS.md, 2026-06-17 A/B, set False by #332):
     # rare guard-straddle / power-sum-cancellation cells the synthetic degenerate stream cannot reach on real
     # gappy tape. Batch-gated until the cancellation-free reduction-denom fix lands; same class as the trio.
+    # (``distribution`` was previously here — its higher-moment Σ(r)^4 cancellation is now UN-GATED by the
+    # return-anchor centering + the raised moment defined-guard; see quantlib/features/groups/distribution.py.)
     "range_expansion",  # ratio-denom `>0` guard straddle (7.8% of minutes, the most frequent)
     "trend_quality",  # OLS R² cov²/(var·var) denom straddle (2.7%)
     "clean_momentum",  # moment/std power-sum cancellation (1.5%)
     "return_dynamics",  # autocorrelation denom null-flip (0.5%) — the Neumaier fix didn't reach this cell
-    "distribution",  # higher-moment (kurtosis) Σx⁴ cancellation (0.4%)
 }
 # The 5 groups #332 re-gated to batch on the real-data soak verdict — they must be incremental_safe=False and
 # therefore byte-identical to batch under FP_INCREMENTAL. (An earlier synthetic-only pass had flipped
@@ -120,7 +121,6 @@ INCREMENTAL_REGATED = {
     "trend_quality",
     "clean_momentum",
     "return_dynamics",
-    "distribution",
 }
 
 
