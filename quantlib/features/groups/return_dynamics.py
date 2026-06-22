@@ -31,17 +31,17 @@ class ReturnDynamicsGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.MOMENTUM
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
-    # The autocorrelation OLS regressor x is the LAGGED one-minute return. On a gappy window x≈0, so the corr
-    # denominator denom_x = b·Σx²−(Σx)² is a difference of float-noise. UNGATED by P2 (#283): the Neumaier
-    # compensated running sum (``_comp`` carries the add/expire rounding loss) makes the corr-denom power sums
-    # match the batch fresh sum, so this straddle no longer breaches — engine-vs-batch is CLEAN (0/295 across
-    # adversarial gappy/large-magnitude seeds; guarded by test_gappy_denom_group_now_clean_after_p2_neumaier).
-    # NOT the same class as `volume` (whose blocker is a batch-vs-canonical std FORMULA gap, drift-independent).
-    # NO-GO for FP_INCREMENTAL (real-data soak, scripts/incremental_realdata_soak.py, 2026-06-17): the P2
-    # Neumaier compensation cleared the adversarial-seed corr-denom straddle, but the real gappy tape still
-    # breaches on ~0.5% of minutes (null/non-null flip at autocorr_2_10m) — a degenerate-cell defined-guard
-    # straddle the synthetic seeds don't reproduce. Stays on the batch path until the cancellation-free fix lands.
-    incremental_safe = False
+    # The autocorrelation OLS regressor x is the LAGGED one-minute return; the corr denom x-side is conditioned
+    # by the shared variance-scale guard (_OLS_DENOM_X_CENTERED_REL_EPS, #416). The last residual breach was a
+    # SHARED-ENGINE artifact, not this group's math: when price_volume's obv time regression co-resided in the
+    # IncrementalEngine, the per-minute rebase_time_axis realized the Neumaier compensation across the WHOLE
+    # value array, collapsing a flat-name Σxx-exactly-zero cell into a ~1e-22 residue → a spurious autocorr_2_10m
+    # where the batch NULLs (real-soak 2026-06-17: 4/779 min, ONLY under FP_RUST_REDUCE with price_volume armed).
+    # FIXED in WindowedSumState.rebase_time_axis (realize only the time-OLS columns it shifts), so a co-resident
+    # time group no longer perturbs this group — engine==batch is CLEAN on the real-tape soak at BOTH FR=0 and
+    # FR=1 (17/17 and 18/18 ALL-GO, worst tol-ratio 0.00; guarded by
+    # test_co_resident_time_ols_group_does_not_perturb_unanchored_group). Now SAFE for the incremental fast path.
+    incremental_safe = True
 
     def declare(self) -> list[FeatureSpec]:
         specs = []

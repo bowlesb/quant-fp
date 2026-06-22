@@ -26,7 +26,6 @@
 > | `range_expansion` | 61/779 (7.8%) | inf (null-flip) | range_expansion_5_30m | trailing-mean RATIO denom `>0` guard |
 > | `trend_quality` | 21/779 (2.7%) | 1683× | price_r2_5m | OLS R² cov²/(var·var) (the parked corr-denom class) |
 > | `clean_momentum` | 12/779 (1.5%) | 620× | clean_momentum_score_5m | moment/std power-sum cancellation |
-> | `return_dynamics` | 4/779 (0.5%) | inf (null-flip) | autocorr_2_10m | autocorrelation denom straddle |
 > | `distribution` | 3/779 (0.4%) | 10404× | ret_kurt_10m | kurtosis higher-moment cancellation |
 >
 > **UPDATE (2026-06-22): `distribution` is RESOLVED + un-gated** (`incremental_safe=True`). Its breach was NOT
@@ -36,6 +35,17 @@
 > (2) raising the moment defined-guard `1e-16 → 1e-12` to null the degenerate float-noise-variance cells where
 > the moment is meaningless and the two paths cannot agree (0 real cells nulled). Deep-window degenerate parity
 > test green; MEASURED 63.8ms batch → 12.6ms incremental (5.1x @ 500 syms). fp-neutral (version/names unchanged).
+>
+> ✅ **UPDATE (this PR): `return_dynamics` (was 4/779 autocorr_2_10m null-flip) + `market_beta` (1/779
+> market_corr) are RESOLVED + un-gated** (`incremental_safe=True`). Their residual breach was NOT their own
+> math: it was a SHARED-ENGINE artifact. When `price_volume`'s `obv` time-OLS regression co-resides in the
+> IncrementalEngine (only under FP_RUST_REDUCE), the per-minute `WindowedSumState.rebase_time_axis` realized the
+> Neumaier compensation across the WHOLE shared value array, collapsing a flat-name `Σxx`-exactly-zero cell into
+> a ~1e-22 residue → a spurious corr=±1 where the batch NULLs. Fixed by restricting the rebase to realize ONLY
+> the time-OLS columns it shifts (so a co-resident group folds bit-identically to standalone). Real-soak
+> 2026-06-17 is now CLEAN for both at FR=0 (17/17 ALL-GO) AND FR=1 (18/18 ALL-GO incl price_volume), worst
+> tol-ratio 0.00. fp-neutral (no value change vs the batch truth → no version bump). Guard:
+> `test_co_resident_time_ols_group_does_not_perturb_unanchored_group`.
 >
 > **GO (15)** — clean across the whole soak: count_fano, efficiency, liquidity, momentum, momentum_consistency,
 > ohlc_vol, quote_spread, realized_range, signed_trade_ratio, trade_flow, trade_freq_z, volatility, **volume**,
@@ -77,7 +87,7 @@
 | `distribution` | 20 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `efficiency` | 18 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `liquidity` | 15 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
-| `market_beta` | 21 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | PARKED — corr-denom-straddle (see §Parked); centering does NOT apply (regressors small) |
+| `market_beta` | 21 | shared running-sum (WindowedSumState) | READY (incremental_safe=True) — x-side variance guard (#416) + the shared-engine rebase fix (a co-resident obv time-OLS no longer perturbs it); real-soak 2026-06-17 CLEAN at FR=0 AND FR=1 |
 | `momentum` | 22 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `momentum_consistency` | 18 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `ohlc_vol` | 12 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
@@ -86,7 +96,7 @@
 | `range_expansion` | 2 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `realized_range` | 3 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `residual_analysis` | 6 | shared running-sum (WindowedSumState); FP_INCREMENTAL gated | PARKED — near-perfect-fit SSR cancellation (see §Parked); already mean-centered, anchor N/A |
-| `return_dynamics` | 15 | shared running-sum (WindowedSumState) | READY — un-gated by P2 Neumaier (#283/#294); incremental==batch parity-green |
+| `return_dynamics` | 15 | shared running-sum (WindowedSumState) | READY (incremental_safe=True) — x-side variance guard (#416) + the shared-engine rebase fix (a co-resident obv time-OLS no longer perturbs its flat-name Σxx); real-soak 2026-06-17 CLEAN at FR=0 AND FR=1 |
 | `signed_trade_ratio` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_flow` | 23 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
 | `trade_freq_z` | 4 | shared running-sum (WindowedSumState) | P2 enablement flip (Lead) — incremental==batch parity-green |
