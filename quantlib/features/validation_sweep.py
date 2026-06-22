@@ -89,6 +89,36 @@ MARKET_TICKERS: tuple[str, ...] = tuple(sorted(set(MARKET_INDICES.values())))
 # clean liquid names, so this only ever suppresses pathologically contaminated days.
 MIN_CLEAN_SYMBOLS = 20
 
+# DAY-LEVEL CONTAMINATION GUARD. The MIN_CLEAN_SYMBOLS floor (an ABSOLUTE clean-breadth count) is necessary
+# but NOT sufficient: a grossly contaminated capture day can still leave a few DOZEN marginal clean survivors
+# — above the floor, yet a vanishing FRACTION of the day's true universe. 2026-06-15 is the canonical case:
+# 92 CLEAN symbols passed MIN_CLEAN_SYMBOLS=20, but they were 92 of 10,381 DISCOVERED (a 0.9% clean fraction)
+# on a day whose live universe-wide gather had FRAGMENTED (gather_incoherent_frac=0.885 — 88.5% of RTH minutes
+# carried a multi-valued broadcast scalar). Grading that marginal subset manufactured ~1e12 RELATIVE-ERROR
+# false defects (a thin survivor's near-zero-denominator parity ratios masquerade as catastrophic divergence)
+# and RE-OPENED 181 previously-fixed defects (533 -> 352) — pure noise written into the trust ledger off a
+# day that was never a fair parity test. The existing per-grade gates could not catch it: MIN_CLEAN_SYMBOLS
+# (92 > 20) passed, and the gather-coherence gate only protects the CROSS-SECTIONAL grade, not the per-symbol
+# PASS-2 where these false defects were filed.
+#
+# This guard is a DAY-LEVEL veto evaluated BEFORE any grading. The day is NOT a fair parity test for ANY group
+# (so SKIP grading entirely — file no defects, write no trust/lifecycle changes; only the deterministic
+# CALENDAR grants and the cleanliness audit trail are kept) when EITHER:
+#   - clean breadth < MIN_CLEAN_SYMBOLS (the absolute floor — too few names to grade in any universe), OR
+#   - the clean FRACTION of the discovered universe < MIN_CLEAN_FRACTION (the 06-15 root cause: a clean slice
+#     that is a vanishing fraction of the true universe grades off thin marginal survivors), OR
+#   - the gather is GROSSLY fragmented (incoherent_frac > MAX_DAY_INCOHERENT_FRAC) AND the clean fraction is
+#     thin — the exact 06-15 signature (a restart that both shredded the gather and left a vanishing clean set).
+# Gross fragmentation ALONE does NOT veto the day: a fragmented gather with a HEALTHY clean breadth still grades
+# its per-symbol features fine (only the CROSS-SECTIONAL grade is fragmentation-sensitive, and the downstream
+# coherence gate already skips just that). Vetoing the whole day on fragmentation alone would regress that
+# deliberate per-symbol unblock (see day_gather_coherence / the xsec gate). Thresholds carry wide margin: a
+# clean day (~10k discovered, incoherent_frac ~0, thousands clean -> clean fraction well above 0.10) passes
+# every condition by a large margin, while 06-15 (92/10381 = 0.009 clean fraction at incoherent_frac=0.885)
+# trips both fraction conditions.
+MAX_DAY_INCOHERENT_FRAC = 0.50  # gross-fragmentation ceiling (co-condition with a thin clean fraction)
+MIN_CLEAN_FRACTION = 0.05  # clean / discovered below this -> too small a slice of the universe to grade fairly
+
 # UNIVERSE-REDUCE (cross-sectional) groups: a symbol's value is a reduction over the WHOLE universe present
 # that minute (a breadth fraction, a percentile rank, a dispersion stat, a peer demean), so it can ONLY be
 # reproduced when the SAME symbol set is present both sides. The gradable-set PASS-2 backfill is a ~92-symbol
@@ -344,6 +374,43 @@ def day_gather_coherence(feature_root: str, day: str, symbols: list[str]) -> dic
     return gather_coherence(stream, GATHER_COHERENCE_FEATURE)
 
 
+def day_contamination_reason(
+    discovered_count: int, clean_count: int, incoherent_frac: float
+) -> str | None:
+    """The DAY-LEVEL contamination verdict (see MAX_DAY_INCOHERENT_FRAC / MIN_CLEAN_FRACTION / MIN_CLEAN_SYMBOLS).
+    Returns a human-readable SKIP reason when the day is too contaminated to grade ANY group fairly, or None
+    when the day may be graded. Pure arithmetic over the day-level signals so it is unit-testable in isolation.
+
+    The conditions are deliberately ordered so the most diagnostic reason surfaces first. ABSOLUTE breadth and
+    the clean FRACTION are independent full-day vetoes (a low fraction is the 06-15 root cause; the absolute
+    floor catches a tiny universe where the fraction is meaningless). A GROSSLY fragmented gather is a full-day
+    veto ONLY when it co-occurs with a low clean fraction — that pair IS the 06-15 signature (a restart that
+    both shredded the gather AND left a vanishing clean slice). Fragmentation ALONE never vetoes the day: a
+    fragmented gather with a HEALTHY clean breadth still grades its per-symbol features fine (the cross-sectional
+    grade is separately skipped by the coherence gate downstream); nuking the whole day on fragmentation alone
+    would regress that deliberate per-symbol unblock."""
+    if clean_count < MIN_CLEAN_SYMBOLS:
+        return (
+            f"clean breadth {clean_count} < MIN_CLEAN_SYMBOLS {MIN_CLEAN_SYMBOLS} — too few clean symbols to "
+            f"grade off without condemning features on a handful of marginal survivors"
+        )
+    clean_fraction = clean_count / discovered_count if discovered_count else 0.0
+    if clean_fraction < MIN_CLEAN_FRACTION:
+        return (
+            f"clean fraction {clean_fraction:.4f} ({clean_count}/{discovered_count}) < MIN_CLEAN_FRACTION "
+            f"{MIN_CLEAN_FRACTION} — the clean set is a vanishing slice of the discovered universe; grading it "
+            f"manufactures false defects from thin-name near-zero-denominator parity ratios (the 06-15 ~1e12 "
+            f"relative-error failure mode)"
+        )
+    if incoherent_frac > MAX_DAY_INCOHERENT_FRAC and clean_fraction < 2 * MIN_CLEAN_FRACTION:
+        return (
+            f"grossly fragmented gather (incoherent_frac {incoherent_frac:.3f} > MAX_DAY_INCOHERENT_FRAC "
+            f"{MAX_DAY_INCOHERENT_FRAC}) on a thin clean slice ({clean_fraction:.4f}) — the 06-15 signature: a "
+            f"restart both shredded the universe-wide gather AND left too small a clean set to grade fairly"
+        )
+    return None
+
+
 def _registry_maps() -> tuple[dict[str, str], dict[str, str]]:
     group_of = {spec.name: group.name for group, spec in REGISTRY.feature_specs()}
     version_of = {spec.name: group.version for group, spec in REGISTRY.feature_specs()}
@@ -471,16 +538,30 @@ def sweep_day(
     contaminated = (cleanliness.height - clean_count) if cleanliness.height else 0
     gradable = clean_symbols(cleanliness)
 
-    # Insufficient clean breadth -> the day is too contaminated to be a fair parity test. Record the
-    # per-symbol cleanliness (the audit trail) but contribute NO clean-day grade, so no feature is condemned
-    # off a handful of marginal survivors. Features simply stay PENDING for this day. Both the cross-sectional
-    # grade and the expensive full-tape PASS 2 are skipped — neither runs on a day that can't grade.
     group_of, version_of = _registry_maps()
     # Deterministic features (CALENDAR) are TRUSTED by construction — grant them on EVERY run, independent
     # of the day's cleanliness (they need no parity day). Idempotent: already-trusted features are skipped.
     trust_binary.write_trust_grants([], trust_binary.deterministic_features(), pl.DataFrame(), day)
     tolerance_of = trust_binary.cell_tolerance_map()
-    if clean_count < MIN_CLEAN_SYMBOLS:
+
+    # DAY-LEVEL CONTAMINATION GUARD (see MAX_DAY_INCOHERENT_FRAC / MIN_CLEAN_FRACTION / MIN_CLEAN_SYMBOLS).
+    # Evaluate the three day-level signals BEFORE any grading: a grossly fragmented live gather, too few clean
+    # symbols in absolute terms, or a clean set that is a vanishing FRACTION of the discovered universe. Any of
+    # these means the day is not a fair parity test for ANY group, so SKIP grading entirely — file NO defects,
+    # write NO trust-lifecycle rows (write_lifecycle is called with EMPTY states + EMPTY defects, so it touches
+    # neither the trust ledger nor the defect backlog — only the cleanliness audit is persisted). The
+    # deterministic CALENDAR grants (already written above) are kept. This is the 06-15 guard: 92 clean of
+    # 10,381 discovered at incoherent_frac=0.885 produced ~1e12 false relative-error defects and re-opened 181
+    # fixed ones; the old per-grade gates missed it (92 > MIN_CLEAN_SYMBOLS, and coherence only guarded the
+    # cross-sectional grade).
+    coherence = day_gather_coherence(feature_root, day, discovered)
+    incoherent_frac = float(coherence["incoherent_frac"])
+    skip_reason = day_contamination_reason(len(discovered), clean_count, incoherent_frac)
+    if skip_reason is not None:
+        logger.warning("SKIP grading %s — contaminated day: %s", day, skip_reason)
+        # Persist ONLY the cleanliness audit trail (empty states + empty defects -> write_lifecycle writes no
+        # trust-lifecycle rows and no defects, just the per-symbol cleanliness). No feature's trust state or
+        # defect backlog is touched by a contaminated day.
         trust_lifecycle.write_lifecycle(pl.DataFrame(), [], cleanliness, version_of, day)
         return {
             "day": day,
@@ -490,9 +571,11 @@ def sweep_day(
             "no_raw_examples": no_raw[:10],
             "clean_symbols": clean_count,
             "contaminated_symbols": contaminated,
+            "gather_incoherent_frac": round(incoherent_frac, 3),
             "features_graded": 0,
-            "note": f"clean breadth {clean_count} < MIN_CLEAN_SYMBOLS {MIN_CLEAN_SYMBOLS} — day too "
-            "contaminated to grade; features stay PENDING (no defects filed)",
+            "skipped_contaminated": True,
+            "note": f"day too contaminated to grade — {skip_reason}; features stay PENDING (no defects "
+            "filed, no trust/lifecycle changes; deterministic CALENDAR grants + cleanliness audit kept)",
         }
 
     # GATHER-COHERENCE gate — is the live universe-wide gather coherent (one breadth scalar per minute), or
@@ -509,7 +592,9 @@ def sweep_day(
     # grade on BOTH a coherent live gather AND a settled tail; either failing skips it (those features stay
     # PENDING for the day, ungraded, never condemned). The per-symbol PASS 2 runs regardless on the settled
     # clean subset — that is the unblock: per-symbol features advance trust even while the tail is still landing.
-    coherence = day_gather_coherence(feature_root, day, discovered)
+    # (``coherence`` was computed above for the day-level contamination guard; a coherent day passed that guard
+    # but may still fail the stricter xsec-only coherence gate, since the guard's ceiling tolerates partial
+    # fragmentation that this cross-sectional grade cannot.)
     xsec_groups = cross_sectional_groups()
     if coherence["is_coherent"] and tail_status.is_settled:
         # CROSS-SECTIONAL grade — graded against a FULL-UNIVERSE, SINGLE-COMPUTE backfill, BEFORE pass 2 clears
