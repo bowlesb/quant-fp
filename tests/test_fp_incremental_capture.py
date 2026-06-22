@@ -96,30 +96,27 @@ def _with_anchors(frame: pl.DataFrame) -> pl.DataFrame:
 # gappy sweep cleared all three, but the REAL-DATA A/B reconciliation showed market_beta breaches (the synthetic
 # had no SPY regressor so its corr-denom was never exercised) while distribution/volatility stayed clean.
 INCREMENTAL_UNSAFE = {
-    # The PARKED corr-denom-class trio (centering does not reach these — they stay on batch under
-    # FP_INCREMENTAL with no correctness loss, just no acceleration).
-    "price_volume",  # the SAME centered-std fix applies (a centered-std vertical slice for price_volume next).
-    "market_beta",  # corr-denom centering on the same anchor (the sibling fix; not this PR).
+    # price_volume's incremental_safe is a PROPERTY gated on FP_RUST_REDUCE (its volume-y anchor + obv arm
+    # together). With the flag OFF (the default this set is evaluated under) it is False, so it belongs here.
+    "price_volume",
     # residual_analysis: the OLS residual SSR is a difference of large near-equal centered power sums on a
     # near-perfect intraday fit — the corr-denom-class centering (sibling), not the std-class. Stays gated here.
     "residual_analysis",
-    # The 5 REAL-DATA soak NO-GO breachers (docs/INCREMENTAL_READINESS.md, 2026-06-17 A/B, set False by #332):
+    # The REAL-DATA soak NO-GO breachers (docs/INCREMENTAL_READINESS.md, 2026-06-17 A/B, set False by #332):
     # rare guard-straddle / power-sum-cancellation cells the synthetic degenerate stream cannot reach on real
-    # gappy tape. Batch-gated until the cancellation-free reduction-denom fix lands; same class as the trio.
+    # gappy tape. Batch-gated until each one's cancellation-free reduction-denom fix lands.
     "range_expansion",  # ratio-denom `>0` guard straddle (7.8% of minutes, the most frequent)
     "trend_quality",  # OLS R² cov²/(var·var) denom straddle (2.7%)
     "clean_momentum",  # moment/std power-sum cancellation (1.5%)
-    "return_dynamics",  # autocorrelation denom null-flip (0.5%) — the Neumaier fix didn't reach this cell
     "distribution",  # higher-moment (kurtosis) Σx⁴ cancellation (0.4%)
 }
-# The 5 groups #332 re-gated to batch on the real-data soak verdict — they must be incremental_safe=False and
-# therefore byte-identical to batch under FP_INCREMENTAL. (An earlier synthetic-only pass had flipped
-# trend_quality + clean_momentum to safe; the real-data soak reverted that.)
+# The groups #332 re-gated to batch on the real-data soak verdict — they must be incremental_safe=False and
+# therefore byte-identical to batch under FP_INCREMENTAL. (return_dynamics left this set when the shared-engine
+# rebase fix closed its only remaining breach — the co-resident-time-OLS perturbation under FP_RUST_REDUCE.)
 INCREMENTAL_REGATED = {
     "range_expansion",
     "trend_quality",
     "clean_momentum",
-    "return_dynamics",
     "distribution",
 }
 
@@ -612,12 +609,12 @@ def _gappy_corr_breaches(group_name: str) -> bool:
 
 @pytest.mark.parametrize("group_name", ["return_dynamics", "volume_leads_price"])
 def test_gappy_denom_group_now_clean_after_p2_neumaier(group_name: str) -> None:
-    """⭐ P2 PROOF (stable summation): on the gappy near-constant-return walk these corr-family groups USED to
-    breach engine-vs-batch (their ``incremental_safe=False`` was the gate). The Neumaier-compensated running
-    sum (``_comp`` carries the add/expire rounding loss) now makes the corr-kernel power-sum denominator match
-    the batch fresh sum, so engine-vs-batch is CLEAN — the former breach is CLOSED. They keep
-    ``incremental_safe=False`` until the LEAD sequences the enablement flip; this asserts the parity is now
-    green so that flip is unblocked."""
+    """⭐ On the gappy near-constant-return walk these corr-family groups USED to breach engine-vs-batch (their
+    ``incremental_safe=False`` was the gate). The Neumaier-compensated running sum (``_comp`` carries the
+    add/expire rounding loss) makes the corr-kernel power-sum denominator match the batch fresh sum, so
+    engine-vs-batch is CLEAN — the former breach is CLOSED. Both are now ``incremental_safe=True`` (volume_leads_
+    price was already armed; return_dynamics un-gated once the shared-engine rebase fix closed its co-resident-
+    time-OLS perturbation); this asserts the gappy-walk parity stays green."""
     assert not _gappy_corr_breaches(group_name), (
         f"{group_name} engine-vs-batch is now CLEAN on the gappy walk after the P2 Neumaier fix "
         "(former incremental_safe=False breach closed)"
@@ -695,13 +692,14 @@ def test_market_beta_xside_clean_on_gappy_spy_regressor() -> None:
     breach the smooth no-SPY synthetic sweep missed). The SAME shared translation-invariant x-side variance guard
     (``_OLS_DENOM_X_CENTERED_REL_EPS``) that closes price_volume's return x-side ALSO closes this — a near-
     constant SPY-return window is now NULL on BOTH paths, so the engine-vs-batch comparison is CLEAN (a verified
-    cross-group benefit of the shared guard). market_beta nonetheless keeps ``incremental_safe = False`` here:
-    arming it is a SEPARATE evaluation (its own gappy-y / sparse-pairing regimes, owned by the market_beta
-    workstream) — this test only certifies the x-side breach class is closed, not that the group is armable.
+    cross-group benefit of the shared guard). market_beta is now ``incremental_safe = True`` (un-gated): the
+    x-side breach class is closed by this guard, and its only remaining real-tape breach — the shared-engine
+    rebase perturbation when price_volume's obv time regression co-resides — is fixed in
+    ``WindowedSumState.rebase_time_axis`` (real-soak 2026-06-17 CLEAN at FR=0 and FR=1).
     """
     group = [g for g in REGISTRY.groups() if isinstance(g, ReductionGroup) and g.name == "market_beta"]
     assert group, "market_beta missing from registry"
-    assert not group[0].incremental_safe, "market_beta stays incremental_safe=False (arming is separate)"
+    assert group[0].incremental_safe, "market_beta is now incremental_safe=True (x-side guard + rebase fix)"
     breached = False
     for seed in (7, 17, 29):
         walk = _gappy_market_minutes(n_sym=12, n_min=70, present_p=0.45, seed=seed)

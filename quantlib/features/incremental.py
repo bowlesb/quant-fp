@@ -173,12 +173,21 @@ class WindowedSumState:
         delta = float(delta_minutes)
         if delta == 0.0:
             return
-        # Realize the Neumaier compensation into ``running`` before the in-place axis shift, so the shift acts
-        # on the full effective sum and ``_comp`` does not go stale for the OLS columns (rebase mutates
-        # ``running`` directly). The correction is folded in and re-accumulated by subsequent adds from here.
-        self.running += self._comp
-        self._comp = np.zeros_like(self.running)
-        for matrix in (self.running.reshape(-1, self.running.shape[-1]), *self._buf_vals):
+        # Realize the Neumaier compensation into ``running`` for ONLY the time-OLS columns the shift mutates,
+        # so the shift acts on their full effective sum and ``_comp`` does not go stale for them (rebase mutates
+        # ``running`` directly). Every OTHER column's ``running`` / ``_comp`` is left EXACTLY untouched: a
+        # co-resident non-time group (e.g. an autocorrelation corr group sharing the engine with price_volume's
+        # obv time regression) must fold bit-identically to its standalone engine — realizing the WHOLE array's
+        # compensation here would collapse such a group's compensated-to-exactly-zero cell (a flat-name ``Σxx``)
+        # into a ~1e-22 residue, straddling the OLS defined-guard and emitting a spurious corr where the batch
+        # NULLs (a shared-engine-only parity breach). Restricting realization to the shifted columns keeps the
+        # rebase a no-op for everyone else.
+        touched = sorted({idx for cols in time_ols_cols for idx in cols})
+        running_flat = self.running.reshape(-1, self.running.shape[-1])
+        comp_flat = self._comp.reshape(-1, self._comp.shape[-1])
+        running_flat[:, touched] += comp_flat[:, touched]
+        comp_flat[:, touched] = 0.0
+        for matrix in (running_flat, *self._buf_vals):
             for b_i, x_i, y_i, xy_i, xx_i in time_ols_cols:
                 b_col = matrix[..., b_i]
                 x_col = matrix[..., x_i]

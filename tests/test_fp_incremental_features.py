@@ -407,3 +407,79 @@ def test_sqrt_features_clip_negative_residue_to_zero_not_nan() -> None:
                 f"NaN) — the clip-to-zero fix is missing"
             )
             assert value == 0.0, f"{group_name}.{name}: clipped residue should be exactly 0.0, got {value}"
+
+
+def _flat_name_stream(n_min: int = MIN_DEEP_STREAM_M) -> pl.DataFrame:
+    """A stream with a FLAT-RETURN name (FLAT grinds one direction by the same tiny amount each minute, so its
+    one-minute return — and its lagged return — is a constant, making return_dynamics' autocorrelation regressor
+    x EXACTLY constant → Σxx == 0 with no float residue) alongside an ordinary noisy name (so the engine has the
+    normal columns too). This is the degenerate cell the shared-engine rebase interaction corrupted."""
+    rows = []
+    rng = np.random.default_rng(11)
+    flat_price, noisy_price = 100.0, 250.0
+    for mi in range(n_min):
+        minute = BASE + dt.timedelta(minutes=mi)
+        flat_price *= 1.001  # EXACT constant return -> lagged-return regressor is constant -> Σxx == 0
+        noisy_price *= 1.0 + rng.standard_normal() * 0.002
+        for sym, close in (("FLAT", flat_price), ("NOISY", noisy_price)):
+            rows.append(
+                {
+                    "symbol": sym, "minute": minute, "open": close * 0.999, "high": close * 1.002,
+                    "low": close * 0.998, "close": close, "volume": 1000.0 + rng.random() * 4000,
+                    "n_trades": float(rng.integers(1, 200)), "signed_volume": rng.standard_normal() * 1000,
+                    "mean_spread_bps": rng.random() * 5, "quote_imbalance": rng.standard_normal() * 0.3,
+                    "mean_bid_size": rng.random() * 100, "mean_ask_size": rng.random() * 100,
+                }
+            )
+    return _anchored(pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))))
+
+
+def test_co_resident_time_ols_group_does_not_perturb_unanchored_group() -> None:
+    """⭐ SHARED-ENGINE INVARIANCE (the price_volume × return_dynamics interaction): an unanchored corr group's
+    incremental output MUST be bit-identical whether or not a co-resident TIME-OLS group (one declaring a
+    ``kind="time"`` regression — price_volume.obv / trend_quality.trend) shares the IncrementalEngine. The
+    time-OLS group triggers the per-minute ``WindowedSumState.rebase_time_axis``; if that rebase realizes the
+    Neumaier compensation across the WHOLE shared array (not just the time-OLS columns it shifts), it collapses
+    a flat-name ``Σxx``-exactly-zero cell into a ~1e-22 residue → the corr defined-guard straddles and the
+    engine emits a spurious value where the batch (and the standalone engine) NULL — a shared-engine-only
+    parity breach. This pins the fix: rebase must touch ONLY its own columns, so a co-resident group folds
+    exactly as standalone."""
+    stream = _flat_name_stream()
+    minutes = sorted(stream["minute"].unique())
+    runnable_groups = {g.name: g for g in runnable({"minute_agg": stream}) if isinstance(g, ReductionGroup)}
+    rd = runnable_groups["return_dynamics"]
+    time_ols = runnable_groups["trend_quality"]  # declares a kind="time" regression -> triggers the rebase
+
+    eng_solo = IncrementalEngine([rd])
+    eng_shared = IncrementalEngine([rd, time_ols])
+    assert eng_shared.time_ols_cols, "the co-resident group must declare a time regression (else vacuous)"
+
+    autocorr_cols = [c for c in rd.feature_names if c.startswith("autocorr_")]
+    saw_flat_degenerate = False
+    for minute in minutes:
+        buffer = stream.filter(pl.col("minute") <= minute)
+        out_solo = eng_solo.step(buffer, slice_derive=True)["return_dynamics"].sort("symbol")
+        out_shared = eng_shared.step(buffer, slice_derive=True)["return_dynamics"].sort("symbol")
+        for name in rd.feature_names:
+            solo = out_solo[name].to_numpy()
+            shared = out_shared[name].to_numpy()
+            # null mask must match exactly (the breach was a null/non-null flip), and finite values bit-identical
+            assert np.array_equal(np.isnan(solo), np.isnan(shared)), (
+                f"{name} @ {minute}: co-resident time-OLS group flipped a null vs standalone — the shared-engine "
+                f"rebase perturbed an unanchored group's sums (solo={solo} shared={shared})"
+            )
+            both = ~np.isnan(solo)
+            if both.any():
+                assert np.array_equal(solo[both], shared[both]), (
+                    f"{name} @ {minute}: co-resident time-OLS group changed a finite value vs standalone"
+                )
+        # anti-vacuity: the FLAT name (exactly-constant return) must reach the degenerate Σxx≈0 regime past
+        # warmup — its autocorrelation is undefined (NULL on the correct path), which is EXACTLY the cell the
+        # rebase residue would flip to non-null in the shared engine. Confirming the FLAT row is present with
+        # NULL autocorr proves the test exercises that path (not just all-warmup rows).
+        flat_solo = out_solo.filter(pl.col("symbol") == "FLAT")
+        if flat_solo.height and all(flat_solo[c][0] is None for c in autocorr_cols):
+            saw_flat_degenerate = True
+    assert saw_flat_degenerate, (
+        "the FLAT name never reached a degenerate (null-autocorr) cell past warmup — test is vacuous"
+    )
