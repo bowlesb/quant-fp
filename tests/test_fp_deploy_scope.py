@@ -2,7 +2,8 @@
 
 The critical properties: (1) fc/fingerprint-surface changes are ALWAYS TIER-2 (coordinated relaunch), never
 hot-deployed; (2) self-contained services (dashboard/strategies/news) are TIER-1 and rebuild-by-name; (3) an
-unknown container-bearing path ESCALATES rather than being silently skipped; (4) deploy_command refuses fc.
+unknown container-bearing path ESCALATES rather than being silently skipped; (4) deploy_commands refuses fc
+and stamps the deployed GIT_SHA via a build-arg (so an auto-deployed image is never GIT_SHA=unknown).
 Named test_fp_* so the CI gate runs these on itself.
 """
 
@@ -14,7 +15,7 @@ from ops.deploy_scope import (
     SERVICE_REGISTRY,
     DeployTier,
     affected_services,
-    deploy_command,
+    deploy_commands,
 )
 
 
@@ -87,20 +88,39 @@ def test_ops_ci_change_routes_to_grade_daemon_no_container_op() -> None:
     assert any("grade daemon" in reason for reason in plan.reasons)
 
 
-def test_deploy_command_dashboard_is_compose_up_by_name() -> None:
-    cmd = deploy_command("dashboard", "/home/ben/quant-fp")
-    assert cmd == ["docker", "compose", "up", "-d", "--no-deps", "--build", "dashboard"]
+def test_deploy_commands_dashboard_builds_with_git_sha_then_ups() -> None:
+    steps = deploy_commands("dashboard", "abc1234")
+    # Two steps: build WITH the GIT_SHA build-arg, then a plain up (no second --build that would drop the arg).
+    assert steps == [
+        ["docker", "compose", "build", "--build-arg", "GIT_SHA=abc1234", "dashboard"],
+        ["docker", "compose", "up", "-d", "--no-deps", "dashboard"],
+    ]
 
 
-def test_deploy_command_strategy_includes_overlay_compose_file() -> None:
-    cmd = deploy_command("reversion-strategy", "/home/ben/quant-fp")
-    assert "-f" in cmd and "docker-compose.strategies.yml" in cmd
-    assert cmd[-3:] == ["--no-deps", "--build", "reversion-strategy"]
+def test_deploy_commands_up_step_has_no_build_flag() -> None:
+    # The up step must NOT re-build: a second `--build` rebuilds without the arg → GIT_SHA=unknown image.
+    _build, up = deploy_commands("dashboard", "abc1234")
+    assert "--build" not in up
+    assert up == ["docker", "compose", "up", "-d", "--no-deps", "dashboard"]
 
 
-def test_deploy_command_refuses_fc() -> None:
+def test_deploy_commands_stamp_the_passed_sha() -> None:
+    build, _up = deploy_commands("dashboard", "deadbee")
+    assert "--build-arg" in build
+    assert "GIT_SHA=deadbee" in build
+
+
+def test_deploy_commands_strategy_includes_overlay_compose_file() -> None:
+    build, up = deploy_commands("reversion-strategy", "abc1234")
+    for step in (build, up):
+        assert "-f" in step and "docker-compose.strategies.yml" in step
+    assert build[-3:] == ["--build-arg", "GIT_SHA=abc1234", "reversion-strategy"]
+    assert up[-2:] == ["--no-deps", "reversion-strategy"]
+
+
+def test_deploy_commands_refuses_fc() -> None:
     with pytest.raises(ValueError):
-        deploy_command("feature-computer", "/home/ben/quant-fp")
+        deploy_commands("feature-computer", "abc1234")
 
 
 def test_fc_is_registered_tier2() -> None:

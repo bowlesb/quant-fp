@@ -9,14 +9,16 @@ FLOW per poll:
   2. map its merge's changed paths → affected services + tier (``deploy_scope.affected_services``);
   3. ENQUEUE one entry per affected service (``deploy_queue``);
   4. drain the queue's RIPE auto-batch (coalesced per service to the newest SHA) and DEPLOY each TIER-1 service
-     by name (FF the live tree once, then ``compose up -d --no-deps --build <svc>`` — the proven #368/#382
-     pattern). TIER-2 / fc-surface entries are LEFT on the queue for the coordinated relaunch.
+     by name (FF the live tree once, then ``compose build --build-arg GIT_SHA=<sha> <svc>`` followed by
+     ``compose up -d --no-deps <svc>`` — the proven #368/#382 pattern, SHA-stamped so the deployed image
+     carries its source commit). TIER-2 / fc-surface entries are LEFT on the queue for the coordinated relaunch.
 
 SAFETY (fail-closed, enforced here):
   * GOLDEN RULE — fc is NEVER deployed here. ``feature-computer`` is TIER-2 by ``deploy_scope`` and is in a
     belt-and-suspenders ``_FORBIDDEN`` set; it is relaunched ONLY by ``ops/nightly_relaunch.sh`` at the
     coordinated window. A fc/fingerprint merge just sits batched until that window (Ben-gated).
-  * NEVER ``docker kill``/``restart``; only ``compose up -d --no-deps --build <safe-svc>``.
+  * NEVER ``docker kill``/``restart``; only ``compose build --build-arg GIT_SHA`` + ``compose up -d
+    --no-deps <safe-svc>``.
   * NEVER ``docker kill --filter ancestor=fp-dev``.
   * the live tree is FF'd to origin/main ONLY for a TIER-1 deploy (it carries no fc rebuild — fc keeps running
     its pinned bind-mount until the relaunch). A crypto-canary contention pre-check guards box load.
@@ -39,7 +41,7 @@ import sys
 import time
 
 from ops.deploy_queue import DeployEntry, claim_batch, enqueue
-from ops.deploy_scope import SERVICE_REGISTRY, DeployTier, affected_services, deploy_command
+from ops.deploy_scope import SERVICE_REGISTRY, DeployTier, affected_services, deploy_commands
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s auto-deploy %(message)s")
 logger = logging.getLogger("auto_deploy")
@@ -72,6 +74,17 @@ def run(cmd: list[str], cwd: str | None = None, timeout: int | None = None) -> s
 def _origin_main_sha() -> str:
     run(["git", "fetch", "origin", "main"], cwd=LIVE_TREE)
     return run(["git", "rev-parse", "origin/main"], cwd=LIVE_TREE).stdout.strip()
+
+
+def _short_head_sha(live_tree: str = LIVE_TREE) -> str:
+    """The current short HEAD SHA of the (already-FF'd) live tree — baked into the deployed image as GIT_SHA.
+
+    Computed AFTER the FF so it stamps the exact code the rebuild ships (matching scripts/run_tool.sh's
+    ``git rev-parse --short HEAD``). Falls back to ``unknown`` only if git fails, never crashing the deploy.
+    """
+    result = run(["git", "rev-parse", "--short", "HEAD"], cwd=live_tree)
+    sha = result.stdout.strip()
+    return sha if sha else "unknown"
 
 
 def _merge_changed_paths(old_sha: str, new_sha: str) -> list[str]:
@@ -161,9 +174,17 @@ def deploy_service(service: str, dry_run: bool) -> bool:
             "REFUSING to auto-deploy '%s' (forbidden / TIER-2) — that's the relaunch window", service
         )
         return False
-    cmd = deploy_command(service, LIVE_TREE)
     if dry_run:
-        logger.info("[dry-run] would FF %s to origin/main + run: %s", LIVE_TREE, " ".join(cmd))
+        # origin/main short SHA = what HEAD would be after the FF; the build-arg stamp the deploy would carry.
+        would_sha = run(["git", "rev-parse", "--short", "origin/main"], cwd=LIVE_TREE).stdout.strip()
+        steps = deploy_commands(service, would_sha or "unknown")
+        rendered = "  &&  ".join(" ".join(step) for step in steps)
+        logger.info(
+            "[dry-run] would FF %s to origin/main (GIT_SHA=%s) + run: %s",
+            LIVE_TREE,
+            would_sha or "unknown",
+            rendered,
+        )
         return True
 
     load = _box_load()
@@ -193,11 +214,19 @@ def deploy_service(service: str, dry_run: bool) -> bool:
         logger.error("live-tree FF failed (not fast-forwardable?): %s", ff.stderr.strip())
         return False
 
-    logger.info("deploying TIER-1 '%s' (rebuild + recreate by name)", service)
-    up = run(cmd, cwd=LIVE_TREE, timeout=900)
-    if up.returncode != 0:
-        logger.error("deploy '%s' failed: %s", service, up.stderr.strip()[-500:])
-        return False
+    # Compute the SHA AFTER the FF so the build-arg stamps the exact code being shipped (not a stale HEAD).
+    git_sha = _short_head_sha(LIVE_TREE)
+    logger.info("deploying TIER-1 '%s' (build --build-arg GIT_SHA=%s + recreate by name)", service, git_sha)
+    for step in deploy_commands(service, git_sha):
+        result = run(step, cwd=LIVE_TREE, timeout=900)
+        if result.returncode != 0:
+            logger.error(
+                "deploy '%s' step failed (%s): %s",
+                service,
+                " ".join(step[:4]),
+                result.stderr.strip()[-500:],
+            )
+            return False
 
     state = run(["docker", "ps", "--filter", f"name={service}", "--format", "{{.Status}}"])
     healthy = "up" in state.stdout.lower()
