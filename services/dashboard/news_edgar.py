@@ -20,9 +20,9 @@ TWO SURFACES, two cost profiles:
     the manifest / partitions.
 
 The FEATURE-STATUS block in the composition payload reports what we actually compute off these tapes today:
-``edgar_filing_frequency`` is LIVE (parity-passing); news sentiment / hotness is COMING (built by a separate
-fingerprint-affecting PR). A ``sentiment`` slot is left in the payload for when the news-sentiment summary
-lands, so the UI can fill it without a contract change.
+``edgar_filing_frequency`` and ``news_sentiment`` are LIVE (parity-passing); ``news_hotness`` is COMING (not
+yet registered). The news-sentiment summary slot in the payload is left for that summary to fill without a
+contract change.
 """
 
 from __future__ import annotations
@@ -63,8 +63,8 @@ EDGAR_FAIL_MIN = 120.0
 NEWS_WARN_MIN = 90.0
 NEWS_FAIL_MIN = 240.0
 
-# The one feature group computed live off these tapes today (parity-passing). News sentiment/hotness is built
-# by a separate fingerprint-affecting PR; reported as COMING with an explicit sentiment slot for the summary.
+# The feature groups computed live off these tapes today (parity-passing): edgar_filing_frequency and
+# news_sentiment. news_hotness is not yet registered and is reported as COMING.
 FEATURE_STATUS = {
     "edgar_filing_frequency": {
         "label": "edgar_filing_frequency",
@@ -81,8 +81,9 @@ FEATURE_STATUS = {
     "news_sentiment": {
         "label": "news_sentiment",
         "source": "Alpaca news",
-        "status": "COMING",
-        "detail": "per-symbol windowed lexicon sentiment off headline/summary; being built (NewsSentiment).",
+        "status": "LIVE",
+        "detail": "per-symbol windowed sentiment/count off /store/news (9 features); "
+        "scored at ingest on both the live and backfill paths, parity-passing.",
     },
 }
 
