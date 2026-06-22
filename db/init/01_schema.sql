@@ -84,22 +84,8 @@ ALTER TABLE trades_raw SET (timescaledb.compress, timescaledb.compress_segmentby
 SELECT add_compression_policy('trades_raw', INTERVAL '1 day');
 SELECT add_retention_policy('trades_raw', INTERVAL '30 days');
 
--- ---------------------------------------------------------------------------
--- News (permanent, small)
--- ---------------------------------------------------------------------------
-CREATE TABLE news (
-    id          bigint      PRIMARY KEY,          -- Alpaca article id
-    created_at  timestamptz NOT NULL,
-    updated_at  timestamptz,
-    headline    text,
-    summary     text,
-    source      text,
-    url         text,
-    symbols     text[],
-    ingested_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX news_created_idx ON news (created_at);
-CREATE INDEX news_symbols_idx ON news USING gin (symbols);
+-- News is persisted in /store/news parquet (NOT the DB); there is no ``news`` table. A dead one once lived
+-- here and was dropped by 17_drop_news_table.sql.
 
 -- ---------------------------------------------------------------------------
 -- Point-in-time universe membership
