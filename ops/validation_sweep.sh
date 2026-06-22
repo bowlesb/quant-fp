@@ -26,6 +26,12 @@ FEATURE_ROOT="${FEATURE_ROOT:-/store}"
 VAL_ROOT="${VAL_ROOT:-/store/_validation}"
 RAW_ROOT="${RAW_ROOT:-/store}"
 CHUNK="${CHUNK:-200}"
+# Hard container memory cap (belt-and-suspenders for the in-process symbol sub-batching, which is the real
+# fix). The PASS-2 compare is now symbol-sub-batched in compare_groups so its peak is bounded to a few GiB;
+# this cgroup limit ensures that even a regression OOM-KILLS only this --rm sweep container (cleanly, exit
+# 137) instead of the host OOM-killer reaping the live feature-computer or the capture process. Sits well
+# above the bounded sweep's real peak yet far under the box RAM. Set MEM_LIMIT= (empty) to disable the cap.
+MEM_LIMIT="${MEM_LIMIT:-24g}"
 
 ARGS=()
 [ -n "${DAY:-}" ] && ARGS+=("$DAY")
@@ -35,8 +41,12 @@ ARGS+=("$FEATURE_ROOT" "$VAL_ROOT" "$RAW_ROOT" "--chunk" "$CHUNK")
 
 GIT_COMMIT="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)"
 
+MEM_ARGS=()
+[ -n "${MEM_LIMIT:-}" ] && MEM_ARGS+=("--memory" "$MEM_LIMIT")
+
 docker run --rm \
   --network "$NETWORK" \
+  "${MEM_ARGS[@]}" \
   --env-file "$ENV_FILE" \
   -e FP_GIT_COMMIT="$GIT_COMMIT" \
   -v "$STORE_VOLUME":/store \

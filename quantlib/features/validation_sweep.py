@@ -609,8 +609,18 @@ def sweep_day(
         store.clear_backfill_groups_day(feature_root, day, xsec_groups)
         xsec_scope, xsec_tiers = validate_mod.scoped_tiers(day, discovered)
         materialize_from_raw_bar_groups(feature_root, raw_root, day, xsec_scope, only_groups=xsec_groups)
+        # symbol_batch_size=None: the universe-reduce grade MUST compare every symbol in a SINGLE compute (a
+        # breadth / rank / dispersion / peer value reduces over the WHOLE present universe). Sub-batching it
+        # would split the universe into partial-universe reductions the full live gather can never match —
+        # exactly the per-chunk mis-grade the un-chunked full-universe materialize above exists to avoid.
         xsec_result = validate_mod.compare_groups(
-            feature_root, day, xsec_scope, xsec_tiers, groups=xsec_groups, tolerance_of=tolerance_of
+            feature_root,
+            day,
+            xsec_scope,
+            xsec_tiers,
+            groups=xsec_groups,
+            tolerance_of=tolerance_of,
+            symbol_batch_size=None,
         )
     else:
         xsec_result = validate_mod.empty_result()
@@ -623,10 +633,12 @@ def sweep_day(
     store.clear_backfill_day(feature_root, day)
     materialized, _ = _materialize_chunks(full_materialize, feature_root, raw_root, day, gradable, chunk)
     # ONE compare over the full gradable scope: a per-chunk validate would only retain the last chunk in the
-    # whole-day-replace cell store and cap the grade. Comparing the union once builds the complete cell rows;
-    # the per-group read inside ``compare_groups`` (one group's features at a time, symbol-filter pushed
-    # down) keeps it memory-bounded. The market tickers are pinned so the reference-relative features resolve
-    # their SPY/QQQ reference. The cross-sectional groups are EXCLUDED here (graded full-universe in pass 1).
+    # whole-day-replace cell store and cap the grade. Comparing the union once builds the complete cell rows.
+    # The per-symbol grade is memory-bounded INSIDE ``compare_groups`` by its symbol sub-batching (one group's
+    # per-minute join is computed over one symbol batch at a time, not the whole gradable set at once — the
+    # PASS-2 OOM fix; the full gradable set's join previously peaked >48 GiB). The market tickers are pinned so
+    # the reference-relative features resolve their SPY/QQQ reference. The cross-sectional groups are EXCLUDED
+    # here (graded full-universe in pass 1).
     grade_scope = gradable + [ticker for ticker in MARKET_TICKERS if ticker not in gradable]
     per_symbol_groups = [group.name for group in REGISTRY.groups() if group.name not in set(xsec_groups)]
     per_symbol_scope, per_symbol_tiers = validate_mod.scoped_tiers(day, grade_scope)
