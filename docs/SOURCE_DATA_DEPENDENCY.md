@@ -207,3 +207,79 @@ false-divergent noise from the within-day certifier.
 
 **Follow-up (Lead-gated):** flip `SourceIngestLock` to `dry_run=False` (live DB writes) now the schema is
 applied — turning on the real per-layer lock for live `--ensure-inputs-live` runs.
+
+## Extension: NEWS + EDGAR as input sources
+
+*Ben: "we need to make News and Edgar into sources as well." Status: built + unit-tested (this PR,
+`quantlib/data/source_inputs.py`, `tests/test_source_inputs.py`, 20 tests); fp-neutral (fingerprint
+`0x204f9ee42521b36f`, 737 fields, unchanged — a source DECLARATION never touches the bus field names). Live
+fetch is the Lead's gated step, exactly as the market path.*
+
+Two feature groups consume alt-data, not the market tape: `news_sentiment` reads the `/store/news` article
+tape, and `edgar_filing_frequency` reads the Postgres `filings` event store. The same contract now covers
+them — a backfill of either group `ensure`s its source is current FIRST, then reads from the store.
+
+### (a) The `Source` enum + `required_sources()`
+
+`Source` is the **superset** of `RawLayer` (`bars`/`trades`/`quotes`, by-value identical) plus the two
+alt-data sources (`news`/`edgar`). A group declares `required_sources()` — the **default lifts its
+`required_raw_layers()` into `Source`** (so every market group is source-aware with no edit) and adds any
+alt-data source its type maps to. The REFERENCE family holds BOTH alt groups, so each declares its source via
+an **override** (legible, unambiguous): `news_sentiment → {news}`, `edgar_filing_frequency → {edgar}`.
+
+The alt-data **horizon** is the backfill window EXPANDED by the consuming group's lookback (a news feature on
+day D reads articles back 7d+slack; an edgar feature reads filings back the 365d burst baseline). Declared by
+`source_lookback_days(source)` on the group (mirroring `loaders.NEWS_LOOKBACK_DAYS` /
+`FILINGS_LOOKBACK_DAYS`), so the backfill never hardcodes it.
+
+### (b) Per-source hole adapters — why a sibling, not a fold into `ensure_inputs`
+
+The market path's hole unit is `(symbol, date)` against the per-symbol-day raw manifest. The alt sources are
+NOT keyed that way, so each gets its own DATE-keyed adapter (`quantlib/data/source_inputs.py`):
+
+| Source | Store | Hole adapter | Resume key reused |
+|---|---|---|---|
+| `news` | `/store/news` date-partitioned parquet + manifest | `find_news_holes` | `news_store.backfilled_dates` (the **same** key a news backfill skips on — one definition of "done") |
+| `edgar` | Postgres `filings` hypertable (NO `/store` manifest) | `find_edgar_holes` | the table IS the manifest: `edgar_covered_dates` (`DISTINCT available_at::date`) + a settle-window rule |
+
+The EDGAR subtlety: SEC genuinely disseminates **nothing** on weekends/holidays, so a blanket "no rows ⇒
+hole" would churn forever. `find_edgar_holes` resolves it the same way the market settle-window does — a
+RECENT uncovered day (within `settle_window_days=1`) IS a hole (re-checked until rows land), an AGED uncovered
+day is a genuine empty day, NOT a permanent hole.
+
+### (c) `ensure_sources` + per-source locks + fetchers
+
+`ensure_sources(store, sources, symbols, days, agent_id, fetchers, dry_run=True)` mirrors `ensure_inputs`:
+per source, in stable order, claim the per-source `SourceIngestLock` (a `'news'` lock + an `'edgar'` lock —
+distinct rows in the **same** ingest-lock table, since the PK column is plain `text` and the keys never
+collide), detect missing dates, fetch ONLY them via the source's fetcher, release. The same `dry_run` default,
+the same lock-held `skipped_locked` skip, the same idempotent / share-the-source no-op.
+
+Per-source fetchers, wired like `default_fetcher`:
+
+- **news** → `news_fetcher(store)` → `news_backfill.seed_day` (the existing news acquire engine; de-dup by
+  article id → idempotent). In-process.
+- **edgar** → no in-process fetcher. The EDGAR submissions backfill is the `services/edgar` operator job
+  (`EDGAR_MODE=backfill`, per-CIK `data.sec.gov/submissions`), run separately **under the same `'edgar'`
+  ingest lock**. `ensure_sources` HOLE-DETECTS + reports the dates the operator job must cover (recorded in
+  `skipped_locked` so a require-all caller sees the source is not yet self-served), rather than threading the
+  service's CIK-mapper + rate-limiter into a feature backfill.
+
+### (d) CLI wiring
+
+`selective_backfill --ensure-inputs[-live]` now covers BOTH paths: after the market `ensure_inputs`, it calls
+`ensure_sources_for_groups(raw_store, groups, symbols, start, end, …)` over the lookback-expanded horizon.
+Alt-data ensuring is **advisory** in this first wiring — a skipped alt source (EDGAR's no-fetcher report, or a
+held news lock) is LOGGED, not a hard abort, so a market-tape backfill is never blocked on the alt-data path.
+
+```bash
+# news_sentiment / edgar_filing_frequency backfill: ensure news/edgar current first (dry-run reports holes)
+python -m quantlib.features.selective_backfill --groups news_sentiment,edgar_filing_frequency \
+    --symbols AAPL,MSFT --start 2026-06-16 --end 2026-06-17 --ensure-inputs
+#   → ensure_sources (DRY-RUN): holes_before={'edgar': 0, 'news': 372} …  (edgar already current; news unseeded)
+```
+
+**Follow-up (Lead-gated):** flip `SourceIngestLock` to `dry_run=False` (live news/edgar locks) and run the
+news seed (`news_backfill` under the `'news'` lock) + the EDGAR submissions sweep (`services/edgar` under the
+`'edgar'` lock) for the dates `ensure_sources` reports — turning on the real alt-data fetch for
+`--ensure-inputs-live` runs.

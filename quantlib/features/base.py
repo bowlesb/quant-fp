@@ -34,6 +34,52 @@ class RawLayer(str, Enum):
     QUOTES = "quotes"
 
 
+class Source(str, Enum):
+    """A declarable INPUT SOURCE a feature group's data ultimately derives from — the superset of the raw
+    market layers PLUS the alt-data sources (news, EDGAR filings).
+
+    The three market values (``bars``/``trades``/``quotes``) are the ``RawLayer`` tiers in ``/store/raw``;
+    ``news`` is the ``/store/news`` article tape (date-partitioned parquet + manifest); ``edgar`` is the
+    Postgres ``filings`` event store (db/init/08_filings.sql). A group DECLARES which of these its inputs
+    derive from (``FeatureGroup.required_sources``), so a backfill can ENSURE every source is current before
+    computing — not just the market layers (docs/SOURCE_DATA_DEPENDENCY.md). The market values match the
+    ``RawLayer`` values verbatim (``Source.BARS.value == RawLayer.BARS.value``) so the two enums interoperate
+    by value: ``source_inputs`` routes a market ``Source`` through the existing ``ensure_inputs`` path and a
+    news/edgar ``Source`` through its own per-source adapter + fetcher.
+    """
+
+    BARS = "bars"
+    TRADES = "trades"
+    QUOTES = "quotes"
+    NEWS = "news"
+    EDGAR = "edgar"
+
+    @property
+    def is_market_layer(self) -> bool:
+        """True for ``bars``/``trades``/``quotes`` — the sources backed by a ``RawLayer`` in ``/store/raw``
+        (ensured via the existing market hole-detection); False for ``news``/``edgar`` (their own adapters).
+        """
+        return self in _MARKET_SOURCES
+
+    def as_raw_layer(self) -> RawLayer:
+        """The ``RawLayer`` for a market source (``bars``/``trades``/``quotes``). Raises for news/edgar —
+        they are NOT ``/store/raw`` tiers, so calling this on them is a programming error to surface."""
+        if not self.is_market_layer:
+            raise ValueError(f"{self.value} is not a /store/raw market layer (no RawLayer)")
+        return RawLayer(self.value)
+
+
+_MARKET_SOURCES: frozenset[Source] = frozenset({Source.BARS, Source.TRADES, Source.QUOTES})
+
+
+def raw_layers_as_sources(layers: frozenset[RawLayer]) -> frozenset[Source]:
+    """Lift a set of raw market ``RawLayer`` values into the ``Source`` enum (by matching value).
+
+    Lets ``required_sources`` default-derive the market sources from a group's existing
+    ``required_raw_layers`` declaration, so a bar/trade/quote group needs no edit to also be source-aware."""
+    return frozenset(Source(layer.value) for layer in layers)
+
+
 class FeatureType(str, Enum):
     """Family taxonomy (FEATURE_PLATFORM.md §11). Used for catalog organization + breadth checks."""
 
@@ -140,6 +186,15 @@ _TYPE_RAW_LAYERS: dict[FeatureType, frozenset[RawLayer]] = {
     FeatureType.MICROSTRUCTURE: frozenset({RawLayer.BARS, RawLayer.TRADES, RawLayer.QUOTES}),
 }
 _DEFAULT_RAW_LAYERS: frozenset[RawLayer] = frozenset({RawLayer.BARS})
+
+# Default ALT-DATA source requirement DERIVED from a group's family type — the news/edgar analogue of
+# ``_TYPE_RAW_LAYERS``. Empty by default: alt-data consumers are sparse and family-ambiguous (the REFERENCE
+# family holds BOTH the news-sentiment group [news] AND the edgar-filing-frequency group [edgar]), so a
+# group's alt-data source is DECLARED on the group via a ``required_sources`` override rather than guessed
+# from its type. The mapping is kept (not deleted) so a future family that uniformly consumes one alt source
+# can default-derive it here without re-plumbing — mirroring how a new market family would extend
+# ``_TYPE_RAW_LAYERS``.
+_TYPE_ALT_SOURCES: dict[FeatureType, frozenset[Source]] = {}
 
 
 class FeatureGroup(ABC):
@@ -257,6 +312,30 @@ class FeatureGroup(ABC):
         family default OVERRIDES this (the same self-declaration pattern as ``reduce_buffer_minutes`` /
         ``up_to_date``) — the declaration lives with the group, not in a backfill-side lookup table."""
         return _TYPE_RAW_LAYERS.get(self.type, _DEFAULT_RAW_LAYERS)
+
+    def required_sources(self) -> frozenset[Source]:
+        """The full set of INPUT SOURCES this group's data derives from — market layers (bars/trades/quotes)
+        AND alt-data sources (news, EDGAR filings). The superset of ``required_raw_layers`` extended to the
+        non-``/store/raw`` sources (docs/SOURCE_DATA_DEPENDENCY.md).
+
+        DEFAULT lifts the group's declared ``required_raw_layers`` into the ``Source`` enum (so every existing
+        market group is source-aware with no edit), then ADDS any alt-data source its ``type`` maps to
+        (``_TYPE_ALT_SOURCES``). A group whose true requirement differs OVERRIDES this — the news_sentiment
+        group declares ``{news}`` and edgar_filing_frequency declares ``{edgar}`` (each consumes ONLY its
+        alt-data tape on a bar minute-grid that is itself reconstructable, so they override to the alt source
+        alone rather than carry the unused ``bars`` market layer). The declaration lives WITH the group."""
+        market = raw_layers_as_sources(self.required_raw_layers())
+        return market | _TYPE_ALT_SOURCES.get(self.type, frozenset())
+
+    def source_lookback_days(self, source: Source) -> int:
+        """How far back (in calendar days) this group reads ``source`` to compute one session day correctly —
+        the amount a backfill must EXPAND its window so the source is present for this group's trailing
+        windows (docs/SOURCE_DATA_DEPENDENCY.md). 0 (the default) for a group that does not consume ``source``,
+        or for a market source whose presence is per-symbol-day (the market path expands nothing). An alt-data
+        group OVERRIDES this for the source it consumes (news_sentiment reads news back its deepest window;
+        edgar_filing_frequency reads filings back the 365-day burst baseline) so the horizon lives WITH the
+        group, not in a backfill-side constant."""
+        return 0
 
     def reduce_buffer_minutes(self) -> int | None:
         """The deepest trailing-window (in minutes) this group needs to compute its latest minute

@@ -51,7 +51,7 @@ from quantlib.data.raw_backfill import (BARS_CHUNK_DAYS,
                                         TRADES_CHUNK_DAYS, BackfillConfig,
                                         fetch_bars_tier)
 from quantlib.data.raw_store import load_manifest, resumable_done_keys
-from quantlib.features.base import RawLayer
+from quantlib.features.base import RawLayer, Source
 from quantlib.features.registry import REGISTRY
 from quantlib.features.validation_db import DB_KWARGS
 
@@ -339,13 +339,19 @@ class SourceIngestLock:
     PER LAYER, not per symbol-day, because the acquire engines fan out symbol-days internally and the
     APPEND-ONLY MANIFEST is the shared resource two writers would race; serializing the layer serializes
     that. ``dry_run`` (default) logs intent + returns success without a DB write — the live activation is
-    the Lead's gated step, exactly as ``within_day_assignment``."""
+    the Lead's gated step, exactly as ``within_day_assignment``.
+
+    The PK column is plain ``text``, so the SAME lock table serializes the alt-data SOURCES too: a
+    ``Source.NEWS`` / ``Source.EDGAR`` lock is just another row keyed on its ``.value`` (``'news'`` /
+    ``'edgar'``), distinct from the ``bars``/``trades``/``quotes`` rows. Every method therefore accepts a
+    ``RawLayer`` OR a ``Source`` (both expose ``.value``) — one single-writer mechanism across all sources.
+    """
 
     agent_id: str
     timeout_s: int = DEFAULT_LOCK_TIMEOUT_S
     dry_run: bool = True
 
-    def claim(self, layer: RawLayer) -> bool:
+    def claim(self, layer: RawLayer | Source) -> bool:
         """Claim ``layer`` for this agent. True if claimed (free / released / a timed-out lock), False if
         another agent holds a LIVE lock. dry_run logs + returns True with no DB write."""
         params: dict[str, object] = {
@@ -358,7 +364,7 @@ class SourceIngestLock:
             return True
         return bool(_execute(_CLAIM, params))
 
-    def heartbeat(self, layer: RawLayer) -> bool:
+    def heartbeat(self, layer: RawLayer | Source) -> bool:
         """Bump the lock's heartbeat (liveness) during a long fetch. True if the agent still holds it."""
         params: dict[str, object] = {"layer": layer.value, "agent_id": self.agent_id}
         if self.dry_run:
@@ -366,7 +372,7 @@ class SourceIngestLock:
             return True
         return bool(_execute(_HEARTBEAT, params))
 
-    def release(self, layer: RawLayer) -> bool:
+    def release(self, layer: RawLayer | Source) -> bool:
         """Release the lock (on fetch done). True if it was this agent's active lock."""
         params: dict[str, object] = {"layer": layer.value, "agent_id": self.agent_id}
         if self.dry_run:
