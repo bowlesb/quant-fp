@@ -116,7 +116,7 @@ def emit_daily_broadcast(
         prior_group = by_name["prior_day"]
         assert isinstance(prior_group, PriorDayGroup)
         names = prior_group.feature_names
-        outputs["prior_day"] = joined.with_columns(prior_group.exprs()).select(["symbol", "minute", *names])
+        outputs["prior_day"] = joined.with_columns(prior_group.broadcast_exprs()).select(["symbol", "minute", *names])
     return outputs
 
 
@@ -150,7 +150,10 @@ def _merged_daily(
         merged = daily if merged is None else merged.join(daily, on=["symbol", "date"], how="left")
     pd_group = by_name.get("prior_day")
     if isinstance(pd_group, PriorDayGroup):
-        levels = pd_group._daily_levels(ctx)
+        # prior_day is an A.2 DailySnapshotGroup: its cached snapshot frame holds the per-(symbol, date)
+        # LEVELS (gap / prior H/L/C / pivots), and the close-relative features are applied per minute via
+        # ``broadcast_exprs`` after the broadcast join. ``_daily`` returns the cached levels frame.
+        levels, _ = pd_group._daily(ctx)
         merged = levels if merged is None else merged.join(levels, on=["symbol", "date"], how="left")
 
     assert merged is not None
