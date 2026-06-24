@@ -29,12 +29,11 @@ import polars as pl
 
 from quantlib.features.base import (
     BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    daily_snapshot_token,
 )
+from quantlib.features.daily_snapshot_group import DailySnapshotGroup
 from quantlib.features.registry import register
 
 MARKET_TICKER = "SPY"
@@ -43,7 +42,7 @@ MIN_PAIRS = 20
 
 
 @register
-class OvernightBetaGroup(FeatureGroup):
+class OvernightBetaGroup(DailySnapshotGroup):
     name = "overnight_beta"
     version = "1.0.0"
     owner = "modeller"
@@ -94,16 +93,8 @@ class OvernightBetaGroup(FeatureGroup):
         ).over("symbol")
         return pl.when(mkt_var > 0).then(cov_roll / mkt_var).otherwise(None).alias(out)
 
-    def _daily_features(self, ctx: BatchContext) -> pl.DataFrame:
-        """Per (symbol, date) rolling-60d overnight/intraday betas to SPY. Cached on the daily-snapshot
-        identity so the (identical-all-day) daily features are computed once, not per minute."""
-        source = ctx.frame("daily")
-        return self.session_cache.get(
-            daily_snapshot_token(source), lambda: self._compute_daily_features(source)
-        )
-
-    def _compute_daily_features(self, source: pl.DataFrame) -> pl.DataFrame:
-        """The actual per-(symbol, date) daily feature computation (the cached body)."""
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
+        """Per (symbol, date) rolling-60d overnight/intraday betas to SPY."""
         daily = source.select(["symbol", "date", "open", "close"]).sort(["symbol", "date"])
         prev_close = pl.col("close").shift(1).over("symbol")
         daily = daily.with_columns(
@@ -142,26 +133,3 @@ class OvernightBetaGroup(FeatureGroup):
                 ]
             )
         )
-
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        names = [spec.name for spec in self.declare()]
-        minutes = (
-            ctx.frame("minute_agg")
-            .select(["symbol", "minute"])
-            .with_columns(pl.col("minute").dt.date().alias("date"))
-        )
-        joined = minutes.join(
-            self._daily_features(ctx), on=["symbol", "date"], how="left"
-        )
-        return joined.select(["symbol", "minute", *names])
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        minute_agg = ctx.frame("minute_agg")
-        latest = minute_agg["minute"].max()
-        sub = BatchContext(
-            frames={
-                **ctx.frames,
-                "minute_agg": minute_agg.filter(pl.col("minute") == latest),
-            }
-        )
-        return self.compute(sub)

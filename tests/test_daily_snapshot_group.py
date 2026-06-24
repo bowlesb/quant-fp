@@ -1,14 +1,17 @@
-"""POC parity gate: the Class-A groups migrated onto ``DailySnapshotGroup`` emit cell-identical output.
+"""Parity gate: the Class-A groups migrated onto ``DailySnapshotGroup`` emit cell-identical output.
 
-The overhaul (docs/FEATURE_PREP_OVERHAUL.md) collapses the nine Class-A groups' hand-rolled four-method
+The overhaul (docs/FEATURE_PREP_OVERHAUL.md) collapses the Class-A groups' hand-rolled four-method
 boilerplate (``_compute_daily`` + ``_daily`` cache wrapper + ``compute`` broadcast + ``compute_latest``
 latest-broadcast) onto one engine-owned base (``DailySnapshotGroup``), leaving each group to write ONLY its
 per-(symbol, date) ``daily_snapshot`` math. This is a pure refactor — it MUST be value-identical.
 
-These tests pin that: the two migrated POC groups (``multi_day_returns``, ``multi_day_vwap``) emit
-cell-for-cell what the origin/main four-method versions emitted, on the standard test frames, for BOTH
-``compute()`` (backfill) and ``compute_latest()`` (live). The generic ``test_fp_latest`` already proves
-``compute_latest == compute().filter(T)`` for every group; this proves the migration itself changed no value.
+These tests pin that: the migrated groups (Stage 0 POC: ``multi_day_returns`` / ``multi_day_vwap``; Stage 1:
+``daily_beta`` / ``overnight_beta`` / ``overnight_intraday_split`` / ``liquidity_rank``) ride the shared base
+with the cache/broadcast/split INHERITED, and emit the latest minute equal to ``compute()``'s last row. The
+generic ``test_fp_latest`` proves ``compute_latest == compute().filter(T)`` for every group; the
+``test_parity_stage1`` script (committed evidence in the PR) proves cell-identity vs the origin/main
+four-method versions. ``liquidity_rank``'s universe-witness override (the one multi-input snapshot) gets its
+own test here, since the standard frames carry no universe.
 """
 from __future__ import annotations
 
@@ -19,7 +22,17 @@ import pytest
 from quantlib.features import BatchContext, REGISTRY
 from quantlib.features.base import FeatureSpec, FeatureType
 from quantlib.features.daily_snapshot_group import DailySnapshotGroup
+from quantlib.features.groups.liquidity_rank import LiquidityRankGroup
 from quantlib.features.profile import build_frames
+
+MIGRATED_SNAPSHOT_GROUPS = [
+    "multi_day_returns",
+    "multi_day_vwap",
+    "daily_beta",
+    "overnight_beta",
+    "overnight_intraday_split",
+    "liquidity_rank",
+]
 
 
 @pytest.fixture(scope="module")
@@ -28,18 +41,18 @@ def ctx() -> BatchContext:
     return BatchContext(frames=frames)
 
 
-@pytest.mark.parametrize("group_name", ["multi_day_returns", "multi_day_vwap"])
+@pytest.mark.parametrize("group_name", MIGRATED_SNAPSHOT_GROUPS)
 def test_migrated_group_is_a_daily_snapshot_group(group_name: str) -> None:
-    """The migrated POC groups ride the shared base — they declare only their per-(symbol,date) math."""
+    """Every migrated group rides the shared base — it declares only its per-(symbol,date) math; the
+    cache/broadcast/live-backfill split are INHERITED (not overridden)."""
     group = REGISTRY.get_group(group_name)
     assert isinstance(group, DailySnapshotGroup)
-    # The group implements daily_snapshot; the cache/broadcast/split are inherited (not overridden).
     assert type(group).daily_snapshot is not DailySnapshotGroup.daily_snapshot
     assert type(group).compute is DailySnapshotGroup.compute
     assert type(group).compute_latest is DailySnapshotGroup.compute_latest
 
 
-@pytest.mark.parametrize("group_name", ["multi_day_returns", "multi_day_vwap"])
+@pytest.mark.parametrize("group_name", MIGRATED_SNAPSHOT_GROUPS)
 def test_compute_latest_broadcasts_one_minute(group_name: str, ctx: BatchContext) -> None:
     """compute_latest emits exactly the latest minute's row per symbol, and it equals compute()'s last row."""
     group = REGISTRY.get_group(group_name)
@@ -57,6 +70,41 @@ def test_session_cache_is_value_identical_across_minutes(ctx: BatchContext) -> N
     first = group.compute(ctx)
     second = group.compute(ctx)  # cache hit on the unchanged snapshot witness
     assert first.equals(second)
+
+
+def test_liquidity_rank_universe_witness_path(ctx: BatchContext) -> None:
+    """liquidity_rank is the one multi-input snapshot group: its rank denominator depends on the universe
+    membership, paired into the cache witness via the ``_snapshot_witness`` override. The standard frames carry
+    no universe, so exercise the universe-PRESENT path explicitly at the snapshot level (where the rank is
+    observable — the broadcast LEFT-join can null it out on these synthetic dates). A narrower universe must
+    (a) re-key the cache witness and (b) re-rank within only its members — a different, correct result —
+    proving the override is live and never stale-serves across a changed membership."""
+    daily = ctx.frame("daily")
+    all_symbols = daily.select("symbol").unique().sort("symbol")
+    half = all_symbols.head(all_symbols.height // 2)
+
+    ctx_full = BatchContext(frames={**ctx.frames, "universe": all_symbols})
+    ctx_half = BatchContext(frames={**ctx.frames, "universe": half})
+
+    # The witness differs across the two universes (so the cache cannot collide them).
+    group = LiquidityRankGroup()
+    assert group._snapshot_witness(daily, ctx_full) != group._snapshot_witness(daily, ctx_half)
+
+    # The snapshot itself re-ranks within the narrowed member set: fewer rows (inner join to members) and a
+    # different rank denominator, so the per-member ranks change (a real value effect of the witness input).
+    snap_full = LiquidityRankGroup().daily_snapshot(daily, ctx_full).sort(["symbol", "date"])
+    snap_half = LiquidityRankGroup().daily_snapshot(daily, ctx_half).sort(["symbol", "date"])
+    assert snap_full.height > snap_half.height  # narrowed universe drops the excluded members' rows
+    shared = half["symbol"].to_list()
+    full_shared = snap_full.filter(pl.col("symbol").is_in(shared)).select("symbol", "date", "liquidity_rank")
+    half_shared = snap_half.filter(pl.col("symbol").is_in(shared)).select("symbol", "date", "liquidity_rank")
+    assert not full_shared.equals(half_shared)  # same members, different denominator -> different ranks
+
+    # The per-instance cache is consulted by witness: re-keying the SAME instance recomputes (no stale serve).
+    instance = LiquidityRankGroup()
+    first, _ = instance._daily(ctx_full)
+    second, _ = instance._daily(ctx_half)
+    assert not first.sort(["symbol", "date"]).equals(second.sort(["symbol", "date"]))
 
 
 class _ProbeSnapshotGroup(DailySnapshotGroup):
@@ -79,7 +127,7 @@ class _ProbeSnapshotGroup(DailySnapshotGroup):
             )
         ]
 
-    def daily_snapshot(self, source: pl.DataFrame) -> pl.DataFrame:
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
         daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         return daily.with_columns(
             pl.col("close").shift(1).over("symbol").cast(pl.Float64).alias("probe_last_close")

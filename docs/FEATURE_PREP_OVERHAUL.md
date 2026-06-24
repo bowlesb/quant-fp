@@ -104,9 +104,24 @@ Every one of the 64 groups is provably one of three patterns. Mapped mechanicall
 ### Pattern A — intraday-invariant → compute once + cache (13 groups / 99 features)
 The value for `(symbol, date)` is a pure function of the per-session-CONSTANT daily snapshot — identical at
 every minute. **State = one memoized frame per session.** Compute once, broadcast.
-> `multi_day`, `multi_day_vwap`, `prior_day`, `daily_beta`, `liquidity_rank`, `overnight_beta`,
-> `overnight_intraday_split`, `return_dispersion` (hybrid), `breadth`, + the 5 pure-ts reference filters
-> (`sector`, `calendar`, `asset_flags`, `round_levels`, `calendar_events`).
+
+**Stage-1 finding — Pattern A is NOT one uniform shape; it has THREE sub-shapes** (surfaced by migrating the
+groups, exactly the taxonomy validation the POC was for):
+- **A.1 — pure daily-snapshot broadcast** (`DailySnapshotGroup` fits directly): the finished per-(symbol,date)
+  features are joined onto every minute, no per-minute math. → `multi_day`, `multi_day_vwap`, `daily_beta`,
+  `overnight_beta`, `overnight_intraday_split`, `liquidity_rank` (the last with an extra universe witness).
+  **All 6 migrated (Stage 0 + Stage 1).**
+- **A.2 — snapshot LEVELS + at-T per-minute expr**: the snapshot holds per-(symbol,date) LEVELS, then the final
+  feature mixes a level with the at-T `close` per minute (`close/prev_high − 1`). → `prior_day`. Needs a tiny
+  optional `broadcast_exprs` hook on the base (a real sub-pattern, not a fork). **Deferred to Stage 1b.**
+- **A.3 — A-cache + B-gather HYBRID (NOT pure A)**: a per-minute cross-sectional GATHER (group_by minute →
+  market/sector scalar over the whole universe) whose daily inputs are A-cached but whose reduce is a live
+  Pattern-B operation. → `return_dispersion`, `breadth`. **These do NOT belong on `DailySnapshotGroup`** — their
+  `SessionCache` use is already correct (the A part); the gather is a legitimate B. **Left as-is.** (Corrects
+  the earlier "13 Pattern-A groups" framing: 11 are A-shaped, 2 are A+B hybrids whose A-cache is already clean.)
+> A.1+A.2: `multi_day`, `multi_day_vwap`, `prior_day`, `daily_beta`, `liquidity_rank`, `overnight_beta`,
+> `overnight_intraday_split`; the 5 pure-ts reference filters (`sector`, `calendar`, `asset_flags`,
+> `round_levels`, `calendar_events`). A.3 hybrids: `return_dispersion`, `breadth`.
 
 ### Pattern B — windowed reducer → prior state + O(1) per-minute fold (27 groups / ~464 features)
 The value is a reduction over a trailing window (sum / mean / std / OLS / EMA / extrema / cumulative).
@@ -175,32 +190,51 @@ test (`tests/test_fp_latest.py`: `compute_latest == compute().filter(T)` for eve
 migrated-vs-origin cell-identity test, and the registry surface-hash (group/feature names + versions) must stay
 byte-identical (fp unchanged).
 
-- **Stage 0 — POC (THIS PR).** `DailySnapshotGroup` base + migrate `multi_day` + `multi_day_vwap`. Proven
-  cell-identical to origin/main; fp unchanged (64 groups / 737 features, surface-hash unchanged). This proves
-  the reduction is real and safe on the highest-frequency redundancy (#1-vs-#2).
-- **Stage 1 — finish Pattern A (A1+A2).** Migrate the remaining 7 daily-snapshot groups + the 5 reference
-  filters onto the base. Pure mechanical, each gated by its cell-identity test. (~330–430 LOC out.)
+- **Stage 0 — POC (MERGED, #434).** `DailySnapshotGroup` base + migrate `multi_day` + `multi_day_vwap`. Proven
+  cell-identical to origin/main; fp unchanged (64 groups / 737 features, surface-hash unchanged). Proves the
+  reduction is real and safe on the highest-frequency redundancy (#1-vs-#2).
+- **Stage 1 — finish Pattern A.1 (DONE, this PR).** Migrated the 4 remaining pure-broadcast snapshot groups
+  (`daily_beta`, `overnight_beta`, `overnight_intraday_split`, `liquidity_rank`) onto the base. Each
+  `.equals()` cell-identical to origin/main; surface-hash unchanged. Surfaced the A.1/A.2/A.3 sub-shape split
+  (§3): `prior_day` (A.2, needs a `broadcast_exprs` hook) deferred to **Stage 1b**; `return_dispersion` +
+  `breadth` (A.3 hybrids) correctly left as-is. Generalized the base's `daily_snapshot(source, ctx)` +
+  `_snapshot_witness(source, ctx)` to support the one multi-input group (`liquidity_rank`'s universe witness).
+- **Stage 1b — Pattern A.2 + reference filters.** Add the optional `broadcast_exprs` hook, migrate `prior_day`;
+  migrate the 5 pure-ts reference filters. Each cell-identity-gated.
 - **Stage 2 — collapse the B duplicates (B1+B2).** Point `ReductionFoldState` at `WindowedSumState`; fold
   `CumulativeState` into an infinite-window kind. Gated by `test_fp_stateful` + `test_fp_incremental` parity.
   (~220 LOC out.) Independent of the FP_INCREMENTAL live flip (that's an activation lever, not this refactor).
 - **Stage 3 — declare the bounded-window groups (B3/C1).** Convert the ~33 bespoke `compute_latest` overrides
-  to declared windows so the engine generates the slice. The riskiest stage (touches the most groups) → do it
-  group-by-group, each behind the generic latest-parity test. The largest line reclaim.
+  to declared windows/kinds so the engine generates the slice — **this is the same surface CriticalProfiler's
+  resolve_points carried-state work lands on** (the per-minute whole-buffer point/lag reads), measured at 107×
+  byte-identical on the reference fixture. Owned jointly: this design owns the declaration surface (reuse/extend
+  `LastKState`), CriticalProfiler owns the measured before→after + sparse-symbol parity harness. The riskiest
+  stage (most groups) → group-by-group, each behind the generic latest-parity test. The largest line reclaim.
 
 Each stage is independently shippable, parity-gated, and fp-neutral. None requires a coordinated fc+strategy
 deploy (no fingerprint change) — they deploy on the normal feature-computer relaunch.
 
 ---
 
-## 6. POC evidence (this PR)
+## 6. Evidence
 
-- **New:** `quantlib/features/daily_snapshot_group.py` (`DailySnapshotGroup`, ~100 LOC) — owns the
-  cache + broadcast + live/backfill split for Pattern A. A group implements ONLY `daily_snapshot(source)`.
+### Stage 0 (POC, merged #434)
+- **New:** `quantlib/features/daily_snapshot_group.py` (`DailySnapshotGroup`) — owns the cache + broadcast +
+  live/backfill split for Pattern A. A group implements ONLY `daily_snapshot(source, ctx)`.
 - **Migrated:** `multi_day.py` (120 → 87 LOC), `multi_day_vwap.py` (91 → 68 LOC) — 4 methods → 1.
-- **Proof:** `tests/test_daily_snapshot_group.py` — migrated `compute()` (10,000 rows) and `compute_latest()`
-  (40 rows) are `.equals()` cell-identical to the origin/main four-method versions on the standard frames; the
-  generic `test_fp_latest` passes for both; the registry surface-hash is unchanged (`937c0065b9a1`, 64/737).
-- **Suite:** `test_fp_latest.py` + `test_fp_new_families.py` + the new POC test = 111 passed, 1 skipped.
 
-The pattern generalizes directly to the other 7 daily-snapshot groups (identical four-method shape, confirmed)
-— Stage 1 is mechanical from here.
+### Stage 1 (this PR)
+- **Migrated** the 4 remaining pure-broadcast (A.1) snapshot groups, 4 methods → 1 each:
+  `daily_beta`, `overnight_beta`, `overnight_intraday_split`, `liquidity_rank`.
+- **Base generalized:** `daily_snapshot(source, ctx)` + `_snapshot_witness(source, ctx)` so a multi-input
+  snapshot group (`liquidity_rank`'s universe-membership rank denominator) pairs the extra input into the cache
+  witness — proven live + never stale-serving by a dedicated test.
+- **Proof:** all 6 migrated groups (Stage 0 + Stage 1) are `.equals()` cell-identical to the origin/main
+  four-method versions on the standard frames for both `compute()` and `compute_latest()`; the generic
+  `test_fp_latest` passes for every group; the registry surface-hash is unchanged (`937c0065b9a1`, 64 groups /
+  737 features) → **fp-neutral**.
+- **Suite:** `test_fp_latest.py` + `test_fp_new_families.py` + `test_daily_beta.py` + `test_daily_snapshot_group.py`
+  = 124 passed, 1 skipped.
+
+Remaining Pattern-A work: `prior_day` (A.2, Stage 1b) + the 5 reference filters. The A.3 hybrids
+(`return_dispersion`, `breadth`) stay as-is by design.

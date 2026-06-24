@@ -30,12 +30,11 @@ import polars as pl
 
 from quantlib.features.base import (
     BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    daily_snapshot_token,
 )
+from quantlib.features.daily_snapshot_group import DailySnapshotGroup
 from quantlib.features.registry import register
 
 MARKET_TICKER = "SPY"
@@ -44,7 +43,7 @@ MIN_PAIRS = 20
 
 
 @register
-class DailyBetaGroup(FeatureGroup):
+class DailyBetaGroup(DailySnapshotGroup):
     name = "daily_beta"
     version = "1.0.0"
     owner = "modeller"
@@ -81,16 +80,8 @@ class DailyBetaGroup(FeatureGroup):
             ),
         ]
 
-    def _daily_features(self, ctx: BatchContext) -> pl.DataFrame:
-        """Per (symbol, date) rolling-60d beta/corr/idio-vol to SPY from the daily frame. Cached on the
-        daily-snapshot identity so the (identical-all-day) daily features are computed once, not per minute."""
-        source = ctx.frame("daily")
-        return self.session_cache.get(
-            daily_snapshot_token(source), lambda: self._compute_daily_features(source)
-        )
-
-    def _compute_daily_features(self, source: pl.DataFrame) -> pl.DataFrame:
-        """The actual per-(symbol, date) daily feature computation (the cached body)."""
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
+        """Per (symbol, date) rolling-60d beta/corr/idio-vol to SPY from the daily frame."""
         daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(
             (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias(
@@ -147,26 +138,3 @@ class DailyBetaGroup(FeatureGroup):
         ).select(
             ["symbol", "date", "daily_beta_60d", "daily_corr_60d", "daily_idio_vol_60d"]
         )
-
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        names = [spec.name for spec in self.declare()]
-        minutes = (
-            ctx.frame("minute_agg")
-            .select(["symbol", "minute"])
-            .with_columns(pl.col("minute").dt.date().alias("date"))
-        )
-        joined = minutes.join(
-            self._daily_features(ctx), on=["symbol", "date"], how="left"
-        )
-        return joined.select(["symbol", "minute", *names])
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        minute_agg = ctx.frame("minute_agg")
-        latest = minute_agg["minute"].max()
-        sub = BatchContext(
-            frames={
-                **ctx.frames,
-                "minute_agg": minute_agg.filter(pl.col("minute") == latest),
-            }
-        )
-        return self.compute(sub)
