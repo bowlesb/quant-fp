@@ -57,6 +57,11 @@ from quantlib.features.capture import (
     process_bars,
 )
 from quantlib.features.tick_capture import enrich_bars_with_ticks, trades_frame
+from quantlib.features.within_day_live_wiring import (
+    LiveSwapConfig,
+    live_swap_enabled,
+    poll_and_apply_at_boundary,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("crypto_capture")
@@ -147,6 +152,25 @@ def run_crypto_capture(
     stream = build_stream()
     subscribe_pairs = list(pairs)
 
+    # ⭐ The zero-gap WDPC hot-swap seam (docs/WITHIN_DAY_PARITY_CONTINUOUS_DEPLOY.md §3/§5), wired on the
+    # CRYPTO CANARY. OFF by default — built only when FP_WDPC_LIVE_SWAP=1, and even then the poll itself
+    # short-circuits unless the flag is set. The crypto bus namespace + the crypto store sample feed the
+    # tripwire; the live tree is the bind-mounted source the reload re-imports. NEVER wired on equity fc here.
+    live_swap_config: LiveSwapConfig | None = None
+    if live_swap_enabled():
+        live_swap_config = LiveSwapConfig(
+            feature_root=root,
+            feature_tree=os.environ.get("FP_WDPC_FEATURE_TREE", "/app"),
+            sample_symbols=[store_symbol(pair) for pair in subscribe_pairs],
+            seed_symbols=[store_symbol(pair) for pair in subscribe_pairs],
+            bus_prefix=CRYPTO_BUS_PREFIX,
+            dry_run=os.environ.get("FP_WDPC_LIVE_WRITE", "") != "1",
+        )
+        logger.info(
+            "WDPC live hot-swap seam ARMED on crypto canary (tree=%s dry_run=%s) — between-minute queue poll on",
+            live_swap_config.feature_tree, live_swap_config.dry_run,
+        )
+
     def dispatch(minute: datetime) -> None:
         bars = pending["bars"]
         if not bars:
@@ -184,6 +208,11 @@ def run_crypto_capture(
             dispatch(pending["minute"])
             pending["bars"] = []
             pending["trades"] = []
+            # MINUTE BOUNDARY: the just-completed minute is dispatched + the next minute's bars have not yet
+            # been computed → the safe point to hot-swap one group's compute (§3.2 cond 5). No-op unless armed.
+            if live_swap_config is not None:
+                for line in poll_and_apply_at_boundary(state, live_swap_config):
+                    logger.info("WDPC hot-swap: %s", line)
         now = time.time()
         if not pending["bars"]:
             pending["arrival"] = now

@@ -117,6 +117,48 @@ def evaluate_summary(
     return clean, results
 
 
+def compare_is_clean(
+    feature_root: str,
+    group_name: str,
+    *,
+    sample_symbols: list[str],
+    window_minutes: int = DEFAULT_WINDOW_MINUTES,
+    materialize_backfill: bool = False,
+    raw_root: str = DEFAULT_RAW_ROOT,
+    day: dt.date | None = None,
+) -> bool:
+    """ONE settled-window phase-1 compare → cycle-clean bool (no streak). The post-swap TRIPWIRE: the live
+    hot-swap applier calls this to confirm the just-swapped group's live stream == backfill on the current
+    settled window (the SAME read the monitor streak + nightly sweep use, so 'confirmed' means the same thing
+    everywhere). Returns True iff there is at least one comparable feature and every feature clears its policy
+    ``min_pass_rate`` (:func:`evaluate_summary`). ``materialize_backfill`` recomputes the settled-window
+    backfill side on demand for the live-intraday case (the current day is not pre-materialized).
+
+    Distinct from :func:`monitor`: no claim/lock, no cert write, no streak — a single point-in-time confirm
+    the applier composes. Read-only except the optional on-demand materialize (its own dry_run)."""
+    cert_day = day or dt.datetime.now(dt.timezone.utc).date()
+    if not sample_symbols:
+        return False
+    lag = settle_lag_for_group(group_name)
+    window_start, window_end = settled_window(dt.datetime.now(dt.timezone.utc), lag, window_minutes)
+    if materialize_backfill:
+        _default_materialize(
+            feature_root,
+            group_name,
+            cert_day,
+            sample_symbols,
+            raw_root=raw_root,
+            ensure_inputs_first=False,
+            agent_id="wdpc-tripwire",
+            dry_run=False,
+        )
+    summary = compare_window(
+        feature_root, group_name, cert_day, sample_symbols, window_start, window_end
+    )
+    clean, results = evaluate_summary(summary, group_name, cert_day, 1, window_minutes, lag)
+    return clean and bool(results)
+
+
 def _replay_windows(
     day: dt.date, window_minutes: int, n_windows: int
 ) -> list[tuple[dt.datetime, dt.datetime]]:

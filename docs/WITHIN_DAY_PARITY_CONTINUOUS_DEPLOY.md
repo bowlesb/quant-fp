@@ -444,3 +444,29 @@ risks (shared-code/fingerprint/trusted-feature changes), disjoint assignment rem
 serialization removes deploy races. **Real-time deploy mechanism: per-group hot-swap (Ben's decision) —
 production-confirmed within a minute, with an honest relaunch-only fallback for the irreducible
 stateful-reseed cases the applier can't safely swap mid-session.**
+
+---
+
+## 11. ⭐ LIVE WIRING — the zero-gap seam, its arm step, and the safety scope (BUILT, flag OFF)
+
+The connective piece §3/§5 named as "the Lead's gated wiring" is now built: `quantlib/features/within_day_live_wiring.py`. It binds the canary-proven `apply_in_running_loop` hot-swap and the inert `within_day_deploy_run` queue loop to the RUNNING capture process so a merged, in-scope, fp-neutral single-group fix reaches the LIVE feature-computer with NO relaunch and NO capture gap.
+
+**The seam.** The live capture loop calls `poll_and_apply_at_boundary(state, config)` AT EACH MINUTE BOUNDARY — right after a minute's `dispatch`/`process_bars` completes and before the next minute's bars compute (the only safe swap point, §3.2 cond 5). It claims one FIFO job, gathers fresh scope-guard evidence (defence-in-depth), and runs `apply_job` with the four LIVE callbacks bound to the running `CaptureState`:
+- `live_do_merge` — fast-forward (`--ff-only`) the bind-mounted live tree to the merged commit so the reload re-imports the FIXED source (a non-ff diverged tree RAISES → escalate, never clobbers a pinned tree).
+- `live_do_swap` — `apply_in_running_loop` = the §3 registry swap + `RunningState` reseed, at the boundary.
+- `live_confirm_tripwire` — `within_day_monitor.compare_is_clean`: the authoritative settled-window phase-1 compare (live stream == backfill) for the group's sample. The SAME read the nightly sweep uses.
+- `live_rollback_swap` — scoped checkout of the prior commit + re-swap (symmetric single-group revert).
+On a clean confirm → `mark_applied` + version reset (re-earn trust under the new content hash); on a tripwire fail → `mark_rolled_back`; on a guard/hot-swap refusal → `mark_escalated`. One job per boundary keeps the dent bounded; serialization is by construction (one process, one swap, confirmed before the next).
+
+**THE ARM STEP (Lead/Ben-gated).** Everything is OFF until the env flag is set on a capture relaunch:
+- `FP_WDPC_LIVE_SWAP=1` — the master arm. Unset (default) ⇒ `poll_and_apply_at_boundary` returns `[]` immediately, before ANY DB/git/registry/bus access. The capture loop calls the seam every minute regardless; it is a pure no-op until armed.
+- `FP_WDPC_FEATURE_TREE=/app` — the bind-mounted tree the merge/rollback fast-forwards (defaults to `/app`, the fc bind-mount).
+- `FP_WDPC_LIVE_WRITE=1` — flips the config off dry-run so DB queue writes + git merges actually happen. Staged: arm `FP_WDPC_LIVE_SWAP=1` with `FP_WDPC_LIVE_WRITE` UNSET first (the seam runs, swaps nothing, logs intent) to observe the loop with zero mutation, then add `FP_WDPC_LIVE_WRITE=1`.
+
+**SAFETY SCOPE (what can ever auto-hot-swap).** The scope-guard (§4) is re-checked fail-closed per job, so a swap fires ONLY for a fix that is: single-group owned-scope, **fingerprint-unchanged**, parity-flipping (mismatch→clean proven), byte-eq elsewhere, on an **UNTRUSTED** feature (never traded), unit-tested + QA-green, and hot-swap-safe (the `RunningState` contract reseeds to parity or RAISES → escalate). Anything else — shared-kernel changes, fingerprint moves, trusted-feature perturbation — escalates to a human; it CANNOT ride the auto path.
+
+**WHERE IT IS WIRED.** The seam is wired on the CRYPTO CANARY capture loop (`crypto_capture.py`) only, behind the flag. It is NOT wired into the live equity fc loop in this change — the equity activation is a separate, deliberately-staged Lead step after the crypto-canary proof. The GOLDEN RULE (never mutate live equity fc out-of-band) holds by construction: with the flag unset the equity fc is untouched, and the equity loop carries no seam call yet.
+
+**PROOF.** `tests/test_within_day_live_wiring_seam.py` drives a real in-RAM `process_bars` loop, hot-swaps a stateful (incremental) group via the seam at a minute boundary, and asserts: no missed minute, the swapped group's next-minute output is **value-identical to a never-swapped reference** (reseed-correct parity), fingerprint held, tripwire green → applied; plus the rollback and escalate paths. Zero container, zero DB, zero git.
+
+**RESIDUAL RISK + the equity gate (honest).** The reseed for incremental/stateful kinds is proven value-identical OFFLINE (the contract's `seed(H);fold(m) == seed(H+m)` invariant + this seam's reference-parity test), and on the crypto canary 24/7. The remaining equity-only unknowns: (a) a live-only minute-boundary race the sandbox can't reproduce (mitigated — the seam runs strictly between `process_bars` calls in the single capture thread; there is no concurrent compute); (b) the reseed against the REAL equity ring under FP_INCREMENTAL-armed groups at 11k-symbol scale (the canary is small-universe). The gate to flip `FP_WDPC_LIVE_SWAP=1` on the equity fc: a clean crypto-canary run (a real untrusted crypto group fix hot-swapped, tripwire-confirmed, no dent) + the equity reseed-parity asserted on a staged equity relaunch with `FP_WDPC_LIVE_WRITE` UNSET first. Until then: relaunch-only for equity, canary-only for the live swap.
