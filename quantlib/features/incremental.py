@@ -464,6 +464,10 @@ class IncrementalEngine:
         # to ring, and ``_latest_frame`` keeps the resolve_points path (which returns an empty __pt_ frame).
         self._use_point_ring = bool(self.point_specs)
         self.point_ring: PointRing | None = None
+        # FP_EMIT_NUMPY: assemble from the running-sum numpy array (emit_numpy) instead of the per-group polars
+        # pivot loop (assemble_from_long). Same fold + same latest_frame; only the assemble representation
+        # differs — byte-identical (tests/test_fp_incremental_emit.py). OFF by default (polars assemble path).
+        self._use_emit_numpy = os.environ.get("FP_EMIT_NUMPY") == "1"
 
     def _collect_stateful_specs(self) -> dict[str, dict[str, StatefulRegressor]]:
         specs: dict[str, dict[str, StatefulRegressor]] = {}
@@ -764,8 +768,27 @@ class IncrementalEngine:
         resolved)."""
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=slice_derive)
-        long = self._running_long()
         latest_frame = self._latest_frame(frame, latest)
+        if self._use_emit_numpy:
+            # FP_EMIT_NUMPY: assemble the canonical/OLS columns DIRECTLY from the running-sum numpy array
+            # (emit_numpy) instead of the per-group polars pivot loop (assemble_from_long over _running_long).
+            # Parity-true by construction — emit_numpy uses the IDENTICAL canonical/OLS algebra (guarded
+            # cell-for-cell by tests/test_fp_incremental_emit.py + the engine on-vs-off test). Both paths share
+            # the SAME _fold_latest above and the SAME latest_frame, so only the assemble representation changes.
+            assert self.state is not None
+            return emit_numpy(
+                self.groups,
+                self.state.corrected(),
+                self.symbols or [],
+                self.windows,
+                self.col_index,
+                latest_frame,
+                latest,
+                self.plan,
+                self.reg_plan,
+                self.centered,
+            )
+        long = self._running_long()
         return assemble_from_long(
             self.groups, long, latest_frame, latest, self.plan, self.reg_plan, self.centered
         )

@@ -1179,9 +1179,16 @@ def emit_numpy(
             piv, on="symbol", how="left"
         )
         feats = group.assemble()
+        feature_names = group._feature_names()
         results[group.name] = (
             wide.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in feats.items()])
+            # The numpy running-sum carries NaN for a missing/degenerate cell; the polars assemble_from_long
+            # TRUTH carries NULL there (verified: assemble_from_long emits 0 bare NaN — every missing value is
+            # null, and the two paths agree EXACTLY on which cells are missing). fill_nan(None) maps NaN -> null
+            # so this emit is byte-identical to assemble_from_long (not merely null↔NaN-equivalent), which the
+            # store + trust grading distinguish. fill_nan touches only float NaN — real nulls/finite untouched.
+            .with_columns([pl.col(name).fill_nan(None) for name in feature_names])
             .with_columns(pl.lit(latest).alias("minute"))
-            .select(["symbol", "minute", *group._feature_names()])
+            .select(["symbol", "minute", *feature_names])
         )
     return results
