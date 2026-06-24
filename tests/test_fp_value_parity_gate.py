@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 import polars as pl
 import pytest
 
 from quantlib.features import declarative
 from quantlib.features.base import BatchContext, FeatureGroup
 from quantlib.features.compare import runnable
+from quantlib.features.declarative import ReductionGroup
 from quantlib.features.incremental import IncrementalEngine
 from quantlib.features.profile import (
     build_frames,
@@ -39,6 +41,7 @@ from quantlib.features.profile import (
     runs_incremental,
     thin_trades_to_live_breadth,
 )
+from quantlib.features.reduction_anchor import attach_reduction_anchors
 from quantlib.features.stateful import StatefulEngine, StatefulGroup
 
 BASE = dt.datetime(2026, 6, 16, 13, 30, tzinfo=dt.timezone.utc)
@@ -246,3 +249,113 @@ def test_sparse_fixture_is_genuinely_gappy() -> None:
     assert sparse_rows < dense_rows, "sparsifier dropped no bars — the gate would be vacuous"
     # at least a few hundred bars dropped (gap_period 9, 40% of symbols, 250 minutes)
     assert dense_rows - sparse_rows > 100, f"only {dense_rows - sparse_rows} bars dropped — too few to gate"
+
+
+# The SECOND axis of the demolition value contract: CO-RESIDENCY. The per-group tests above engine each group
+# ISOLATED (IncrementalEngine([group])). But the unified-state demolition collapses the two engines into ONE
+# container that co-resides ALL groups — so the biggest risk of the structural rewrite is a group's fold
+# perturbing a CO-RESIDENT group's cell. The known instance: a TIME-OLS group (price_volume's obv_slope)
+# triggers WindowedSumState.rebase_time_axis; if the rebase realizes the Neumaier compensation across the
+# WHOLE shared array it flips a flat-name Σxx-exactly-zero cell to a ~1e-22 residue, so a co-resident corr
+# group emits a spurious value where the batch (and standalone engine) NULL. An ISOLATED gate is blind to
+# exactly this failure mode. So #451 certifies per-group AND co-resident, FR=0 AND FR=1, vs the SAME truth.
+
+_COR_BASE = dt.datetime(2026, 6, 16, 13, 30, tzinfo=dt.timezone.utc)
+_COR_INPUT_COLS = (
+    "open", "high", "low", "close", "volume", "n_trades", "signed_volume",
+    "mean_spread_bps", "quote_imbalance", "mean_bid_size", "mean_ask_size",
+)
+
+
+def _flat_degenerate_stream(n_min: int = 200) -> dict[str, pl.DataFrame]:
+    """A minute_agg with a FLAT-RETURN name (grinds one direction by the SAME tiny amount each minute, so its
+    one-minute return — and its lagged return — is an EXACT constant → the autocorrelation regressor x is
+    exactly constant → Σxx == 0 with no float residue) alongside an ordinary noisy name. ``FLAT`` is the
+    degenerate cell the shared-engine rebase straddle corrupts; ``NOISY`` carries the normal columns. Anchored
+    so the centered-power-sum groups (volume/distribution) are runnable, then attached the reduction anchors."""
+    rows = []
+    rng = np.random.default_rng(11)
+    flat_price, noisy_price = 100.0, 250.0
+    for minute_i in range(n_min):
+        minute = _COR_BASE + dt.timedelta(minutes=minute_i)
+        flat_price *= 1.001  # EXACT constant return -> lagged-return regressor constant -> Σxx == 0
+        noisy_price *= 1.0 + rng.standard_normal() * 0.002
+        for symbol, close in (("FLAT", flat_price), ("NOISY", noisy_price)):
+            rows.append(
+                {
+                    "symbol": symbol, "minute": minute, "open": close * 0.999, "high": close * 1.002,
+                    "low": close * 0.998, "close": close, "volume": 1000.0 + rng.random() * 4000,
+                    "n_trades": float(rng.integers(1, 200)), "signed_volume": rng.standard_normal() * 1000,
+                    "mean_spread_bps": rng.random() * 5, "quote_imbalance": rng.standard_normal() * 0.3,
+                    "mean_bid_size": rng.random() * 100, "mean_ask_size": rng.random() * 100,
+                }
+            )
+    frame = pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC")))
+    daily = (
+        frame.group_by("symbol")
+        .agg(
+            pl.col("volume").sum().alias("volume"),
+            pl.col("close").first().alias("open"),
+            pl.col("close").last().alias("close"),
+        )
+        .with_columns(pl.lit(1).alias("date"))
+    )
+    return attach_reduction_anchors({"minute_agg": frame, "daily": daily})
+
+
+def _coresident_group_names() -> list[str]:
+    frames = _flat_degenerate_stream()
+    return sorted(
+        g.name
+        for g in runnable(frames)
+        if isinstance(g, ReductionGroup) and runs_incremental(g) and g.name != "price_volume"
+    )
+
+
+@pytest.mark.parametrize("rust_reduce", [False, True], ids=["FR0", "FR1"])
+@pytest.mark.parametrize("group_name", _coresident_group_names())
+def test_coresident_with_price_volume_matches_backfill(
+    group_name: str, rust_reduce: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE co-residency axis of the contract: a group's live output in a SHARED engine with the time-OLS group
+    ``price_volume`` (which arms ``rebase_time_axis``) == the BACKFILL truth, at FR=0 AND FR=1, on a gappy tape
+    with a flat Σxx≈0 degenerate name. This is the failure mode the demolition's one-container rewrite is most
+    likely to introduce (a co-resident fold perturbing another group's cell), which an isolated gate misses."""
+    monkeypatch.setattr(declarative, "_USE_RUST_REDUCE", rust_reduce)
+    frames = _make_sparse(_flat_degenerate_stream(), gap_period=7, gap_fraction=0.5)
+    runnable_now = {g.name: g for g in runnable(frames)}
+    if group_name not in runnable_now or "price_volume" not in runnable_now:
+        pytest.skip("group or price_volume not runnable after sparsification")
+    group = runnable_now[group_name]
+    price_volume = runnable_now["price_volume"]
+
+    buffer_frame = frames["minute_agg"]
+    latest = buffer_frame["minute"].max()
+    history = buffer_frame.filter(pl.col("minute") < latest)
+
+    # The shared engine arms the rebase (price_volume co-resident); the group's row must equal backfill truth.
+    shared = IncrementalEngine([group, price_volume])
+    assert shared.time_ols_cols, "price_volume must arm rebase_time_axis (else this test is vacuous)"
+    shared.seed(history)
+    live = shared.step(buffer_frame)[group.name]
+
+    rolling = group.compute(BatchContext(frames=frames))
+    truth = rolling.filter(pl.col("minute") == rolling["minute"].max()).sort("symbol")
+    _assert_values_equal(truth, live.sort("symbol"), group, f"coresident:{group_name}:FR{int(rust_reduce)}")
+
+
+def test_coresident_fixture_reaches_the_degenerate_cell() -> None:
+    """Anti-vacuity (mirrors the focused :444 guard): the FLAT name must actually reach a degenerate Σxx≈0
+    cell — i.e. return_dynamics' autocorrelation is NULL for FLAT past warmup. That is EXACTLY the cell the
+    shared-engine rebase residue would flip to non-null, so confirming it is reached proves the co-resident
+    tests above exercise the straddle, not just all-warmup rows."""
+    frames = _flat_degenerate_stream()
+    rd = {g.name: g for g in runnable(frames)}["return_dynamics"]
+    rolling = rd.compute(BatchContext(frames=frames))
+    latest = rolling.filter(pl.col("minute") == rolling["minute"].max())
+    flat = latest.filter(pl.col("symbol") == "FLAT")
+    autocorr_cols = [c for c in rd.feature_names if c.startswith("autocorr_")]
+    assert flat.height == 1, "FLAT must be present at the latest minute"
+    assert any(
+        flat[col][0] is None for col in autocorr_cols
+    ), "FLAT never reached a degenerate (null-autocorr) cell — the co-resident straddle test is vacuous"
