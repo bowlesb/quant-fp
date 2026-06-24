@@ -137,6 +137,93 @@ def test_composition_snapshot_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     assert second["cache_age_seconds"] >= 0.0
 
 
+class _FakeFilingsCursor:
+    """A cursor over an in-memory filings table that honours the ``available_at`` window bounds.
+
+    The span queries (``ORDER BY available_at ASC/DESC LIMIT 1``) return the min/max instant; the windowed
+    ``GROUP BY form_type`` query returns only the rows whose ``available_at`` falls in the ``[start, end)``
+    bounds it is passed — so a test sees the SAME chunk-exclusion the real bounded query gets, and proves the
+    Python merge reassembles the whole-store totals from the per-window partials.
+    """
+
+    def __init__(self, rows: list[tuple[datetime, str, str]]) -> None:
+        # rows: (available_at, form_type, source)
+        self._rows = rows
+        self._result: list[tuple[object, ...]] = []
+
+    def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
+        if "ORDER BY available_at ASC" in query:
+            self._result = [(min(row[0] for row in self._rows),)] if self._rows else []
+        elif "ORDER BY available_at DESC" in query:
+            self._result = [(max(row[0] for row in self._rows),)] if self._rows else []
+        else:
+            assert params is not None
+            start, end = params
+            counts: dict[str, list[int]] = {}
+            for when, form_type, source in self._rows:
+                if start <= when < end:
+                    bucket = counts.setdefault(form_type, [0, 0])
+                    bucket[0] += 1
+                    if source == "stream":
+                        bucket[1] += 1
+            self._result = [(form_type, n, sn) for form_type, (n, sn) in counts.items()]
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self._result[0] if self._result else None
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self._result
+
+    def __enter__(self) -> "_FakeFilingsCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeFilingsConn:
+    def __init__(self, rows: list[tuple[datetime, str, str]]) -> None:
+        self._rows = rows
+
+    def cursor(self) -> _FakeFilingsCursor:
+        return _FakeFilingsCursor(self._rows)
+
+
+def test_filings_composition_empty_store() -> None:
+    payload = ne._filings_composition(_FakeFilingsConn([]))
+    assert payload["total_filings"] == 0
+    assert payload["stream_filings"] == 0
+    assert payload["earliest_available_at"] is None
+    assert payload["latest_available_at"] is None
+    assert payload["form_types"] == []
+
+
+def test_filings_composition_windows_merge_to_whole_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows spanning more than one window must merge into the whole-store totals + a full form-type breakdown.
+
+    With a small window, the span (~400 days here) forces several bounded queries; the merged result must
+    equal a single full-table aggregate, proving the chunk-bounded walk loses no rows at the window seams.
+    """
+    monkeypatch.setattr(ne, "FILINGS_WINDOW_DAYS", 100)
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        (base + timedelta(days=0), "4", "backfill"),
+        (base + timedelta(days=50), "8-K", "backfill"),
+        (base + timedelta(days=150), "4", "stream"),  # 2nd window
+        (base + timedelta(days=250), "10-Q", "backfill"),  # 3rd window
+        (base + timedelta(days=399), "4", "stream"),  # last window
+    ]
+    payload = ne._filings_composition(_FakeFilingsConn(rows))
+    assert payload["total_filings"] == 5
+    assert payload["stream_filings"] == 2
+    assert payload["earliest_available_at"] == rows[0][0].isoformat()
+    assert payload["latest_available_at"] == rows[-1][0].isoformat()
+    # form_type "4" appears in three separate windows and must sum across them, ranked first.
+    by_type = {entry["form_type"]: entry["count"] for entry in payload["form_types"]}
+    assert by_type == {"4": 3, "8-K": 1, "10-Q": 1}
+    assert payload["form_types"][0]["form_type"] == "4"
+
+
 def _import_app() -> object:
     import app as dashboard_app  # noqa: E402  (path inserted above)
 

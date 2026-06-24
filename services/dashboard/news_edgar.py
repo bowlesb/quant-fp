@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import glob
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -55,6 +56,15 @@ COMPOSITION_TTL_SECONDS = 300
 # How many top symbols (by article mention count) the composition surfaces, and how many form types.
 TOP_SYMBOLS = 15
 TOP_FORM_TYPES = 15
+
+# The filings hypertable is partitioned by ``available_at`` into ~1700 seven-day chunks spanning 1994..now. A
+# single un-bounded aggregate (count/group-by) plans against EVERY chunk and so takes a lock per chunk+index in
+# one transaction — far past ``max_locks_per_transaction`` (the shared lock table overflows: "out of shared
+# memory"). The composition still describes the WHOLE store, so we walk the full span in time WINDOWS, each its
+# own autocommit query: ``available_at`` bounds let the planner exclude every out-of-window chunk, so each query
+# locks only the handful of chunks it touches, and Python merges the per-window partials into the whole-store
+# totals. 180 days ≈ 26 chunks/window — comfortably under the lock budget with margin for concurrent ingestion.
+FILINGS_WINDOW_DAYS = 180
 
 # Freshness thresholds mirror data_freshness (so the tab and the cron alert grade identically). Re-declared
 # here as the tab's own knobs rather than imported, since data_freshness reads them from the env at import.
@@ -102,7 +112,10 @@ def _now() -> datetime:
 
 
 def _db_connect() -> psycopg.Connection:
-    return psycopg.connect(**DB_KWARGS, connect_timeout=8)
+    # autocommit: every read here is single-statement and read-only, and the windowed composition walk RELIES on
+    # each query committing as it returns so its chunk locks release before the next window — otherwise the
+    # whole walk would accumulate every window's locks in one transaction, defeating the chunk-bounded fix.
+    return psycopg.connect(**DB_KWARGS, connect_timeout=8, autocommit=True)
 
 
 def _status_for(
@@ -274,27 +287,69 @@ def _news_composition() -> dict[str, object]:
     }
 
 
+def _filings_span(conn: psycopg.Connection) -> tuple[datetime | None, datetime | None]:
+    """The earliest/latest ``available_at`` in the store, each from an indexed ``ORDER BY .. LIMIT 1``.
+
+    An ordered single-row read walks chunks newest/oldest-first and stops at the first row, so it locks one
+    chunk, not all ~1700 (unlike ``min()``/``max()`` aggregates which plan against every chunk).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT available_at FROM filings ORDER BY available_at ASC LIMIT 1")
+        earliest_row = cur.fetchone()
+        cur.execute("SELECT available_at FROM filings ORDER BY available_at DESC LIMIT 1")
+        latest_row = cur.fetchone()
+    earliest = earliest_row[0] if earliest_row else None
+    latest = latest_row[0] if latest_row else None
+    return earliest, latest
+
+
 def _filings_composition(conn: psycopg.Connection) -> dict[str, object]:
     """Total filings + span + per-form-type breakdown + live-stream count, from the filings hypertable.
 
-    Full-table aggregates (~3M rows, ~3s each) — paid behind the composition TTL cache, never on the hot path.
+    Walks the full store span in ``FILINGS_WINDOW_DAYS`` windows (each an ``available_at``-bounded query so the
+    planner excludes out-of-window chunks and locks only a handful), merging the per-window partials into the
+    whole-store totals. This keeps the snapshot whole-store while never locking all ~1700 chunks in one
+    transaction. ``conn`` is in autocommit so each window's locks release as soon as its query returns. Heavy
+    (~3M rows total) but paid behind the composition TTL cache, never on the hot request path.
     """
+    earliest, latest = _filings_span(conn)
+    if earliest is None or latest is None:
+        return {
+            "total_filings": 0,
+            "stream_filings": 0,
+            "earliest_available_at": None,
+            "latest_available_at": None,
+            "form_types": [],
+        }
+    total = 0
+    stream_count = 0
+    form_counts: Counter[str] = Counter()
+    window = timedelta(days=FILINGS_WINDOW_DAYS)
+    window_start = earliest
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT count(*), min(available_at), max(available_at), "
-            "count(*) FILTER (WHERE source = 'stream') FROM filings"
-        )
-        total, earliest, latest, stream_count = cur.fetchone()
-        cur.execute(
-            "SELECT form_type, count(*) AS n FROM filings GROUP BY form_type ORDER BY n DESC LIMIT %s",
-            (TOP_FORM_TYPES,),
-        )
-        form_types = [{"form_type": row[0], "count": int(row[1])} for row in cur.fetchall()]
+        while window_start <= latest:
+            window_end = window_start + window
+            cur.execute(
+                "SELECT form_type, count(*) AS n, "
+                "count(*) FILTER (WHERE source = 'stream') AS stream_n "
+                "FROM filings WHERE available_at >= %s AND available_at < %s "
+                "GROUP BY form_type",
+                (window_start, window_end),
+            )
+            for form_type, count, stream_n in cur.fetchall():
+                total += int(count)
+                stream_count += int(stream_n)
+                form_counts[form_type] += int(count)
+            window_start = window_end
+    form_types = [
+        {"form_type": form_type, "count": count}
+        for form_type, count in form_counts.most_common(TOP_FORM_TYPES)
+    ]
     return {
-        "total_filings": int(total),
-        "stream_filings": int(stream_count),
-        "earliest_available_at": earliest.astimezone(timezone.utc).isoformat() if earliest else None,
-        "latest_available_at": latest.astimezone(timezone.utc).isoformat() if latest else None,
+        "total_filings": total,
+        "stream_filings": stream_count,
+        "earliest_available_at": earliest.astimezone(timezone.utc).isoformat(),
+        "latest_available_at": latest.astimezone(timezone.utc).isoformat(),
         "form_types": form_types,
     }
 
