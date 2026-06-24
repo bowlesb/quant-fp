@@ -122,21 +122,32 @@ monitor can never wedge a slot). The default loops until the queue empties.
 ## 5. Maintaining the pool (`ops/feature_worker_fleet.sh`)
 
 This box has no systemd-user, so the pool is kept alive by a **cheap cron** running the guard every few
-minutes — the SAME idempotent pattern as `ops/ci_daemon_guard.sh`. The guard counts live workers and
-launches only the deficit to reach the target (default 5), each detached via `setsid` + `nohup` so it
-survives the guard exiting.
+minutes — the SAME idempotent pattern as `ops/ci_daemon_guard.sh`. The guard counts live worker CONTAINERS
+and launches only the deficit to reach the target (default 5), each a detached (`-d`) `--rm` `fp-dev`
+container so it survives the guard exiting and frees its slot on exit.
+
+Each worker runs **inside an `fp-dev` container on the `quant_default` docker network** — NOT on the bare
+host. The host launch fails twice: the python worker reaches the DB only on `quant_default` (`DB_HOST=`
+`timescaledb` resolves only there) and reads the `/store` feature root only as a mounted volume. The
+container mirrors how the live feature-computer runs (same image, network, `--env-file` for `DB_PASSWORD`
+etc., `/store` volume, code bind-mounted at `/app` from the always-current fleet tree) but is fully
+decoupled — a throwaway `--rm` container per `--once` worker, named `fworker-*` so the guard counts/stops its
+own via `docker ps` and the dashboard active-owners panel ties each lock to a worker.
 
 ```bash
 ops/feature_worker_fleet.sh            # ensure >=N workers alive (N=FLEET_SIZE, default 5)
 ops/feature_worker_fleet.sh --status   # how many alive, change nothing
-ops/feature_worker_fleet.sh --stop     # stop the whole fleet
+ops/feature_worker_fleet.sh --stop     # stop the whole fleet (docker rm -f the fworker-* containers)
 ```
 
-**Recommended cron** (add to `ops/install_crons.sh`; every 3 minutes keeps >=5 alive):
+**Recommended cron** (installed by `ops/install_crons.sh`; every 3 minutes keeps >=5 alive, DRY-RUN until
+armed). It self-bootstraps the dedicated fleet checkout like the CI guard does:
 
 ```cron
-*/3 * * * * /home/ben/.fleet-repo/ops/feature_worker_fleet.sh >> ~/.quant-ops/feature_worker_fleet.log 2>&1
+2-59/3 * * * * { [ -d /home/ben/.fleet-repo/.git ] || git clone -q $(git -C /home/ben/quant-fp remote get-url origin) /home/ben/.fleet-repo; } && FLEET_TREE=/home/ben/.fleet-repo /home/ben/.fleet-repo/ops/feature_worker_fleet.sh >> ~/.quant-ops/feature_worker_fleet.log 2>&1
 ```
+
+To ARM the real lock + cert writes, prefix `FLEET_WRITE=1` on that line (§6) — Ben's/the Lead's gated click.
 
 The guard runs workers from a **dedicated, always-current checkout** (`/home/ben/.fleet-repo`, fetched +
 `reset --hard origin/main` each cycle), decoupled from the pinned fc bind-mount tree — the fleet is

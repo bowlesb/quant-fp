@@ -14,6 +14,8 @@
 #   - compact_stream     : nightly fold of SETTLED stream partitions' per-minute files, 22:33 PT weekdays.
 #   - late re-sweep      : 23:30 PT weekday re-acquire + re-sweep once Alpaca's illiquid tail has settled
 #                          (the 18:30 sweep often RawNotSettled-SKIPs) — the trust-jump unblock.
+#   - feature_worker_fleet: every 3 min keep >=5 feature-workers alive (docs/FEATURE_WORKER_FLEET.md) — DRY-RUN
+#                          until Ben/Lead prefixes FLEET_WRITE=1; workers never edit code / restart fc / deploy.
 #
 #   ops/install_crons.sh --dry-run   # show what WOULD change; change nothing
 #   ops/install_crons.sh             # install any missing managed cron
@@ -23,6 +25,9 @@ REPO="${REPO:-/home/ben/quant-fp}"
 # The DEDICATED CI checkout the grade daemon runs from (decoupled from the pinned fc bind-mount $REPO). The
 # guard keeps it reset --hard to origin/main; the cron clones it if absent. NEVER the fc tree.
 CI_REPO="${CI_REPO:-/home/ben/.ci-repo}"
+# The DEDICATED feature-worker checkout the fleet guard runs from (same decoupling as $CI_REPO; the guard
+# keeps it reset --hard to origin/main, the cron clones it if absent). NEVER the fc bind-mount tree.
+FLEET_REPO="${FLEET_REPO:-/home/ben/.fleet-repo}"
 TRUST_LOG=/home/ben/.quant-validation/trust_random_check.log
 COMPACT_LOG=/home/ben/.quant-validation/compact_stream.log
 LATE_SWEEP_LOG=/home/ben/.quant-validation/daily_lifecycle_late.log
@@ -80,6 +85,20 @@ LINES+=("30 23 * * 1-5 cd $REPO && ops/daily_lifecycle.sh >> $LATE_SWEEP_LOG 2>&
 MATCHES+=("ci_daemon_guard.sh grade")
 COMMENTS+=("# every 5 min keep the CI GRADE daemon alive (docs/CD_ARM_CHECKLIST.md Phase 1) — runs from the DEDICATED CI repo (NOT the pinned fc tree); grade-only (--no-auto-merge); NEVER merges/deploys")
 LINES+=("*/5 * * * * { [ -d $CI_REPO/.git ] || git clone -q \$(git -C $REPO remote get-url origin) $CI_REPO; } && $CI_REPO/ops/ci_daemon_guard.sh grade >> /home/ben/.quant-ops/ci_daemon_guard.log 2>&1")
+
+# Every 3 min — KEEP the FEATURE-WORKER FLEET at >=5 (docs/FEATURE_WORKER_FLEET.md §5). The guard is a no-op
+# when >=5 fworker-* containers are already alive and launches only the deficit otherwise (each a --rm fp-dev
+# container on quant_default — the only place the worker reaches the DB + /store). --once per worker, so the
+# cron IS the loop. Like the CI guard it self-bootstraps from the DEDICATED $FLEET_REPO (NOT the pinned fc
+# tree) and keeps it reset --hard to origin/main each cycle.
+#
+# SAFE BY DEFAULT: no FLEET_WRITE env → DRY-RUN (workers read the queue + log the intended claim/advance but
+# write NOTHING). ARMING the real lock + cert writes is Ben's/the Lead's gated click — prefix `FLEET_WRITE=1`
+# on this line (docs/FEATURE_WORKER_FLEET.md §6). Even armed, a worker NEVER edits the tree / restarts fc /
+# applies a hot-swap / enqueues a deploy — the live hot-swap stays behind FP_WDPC_LIVE_SWAP (Lead-gated).
+MATCHES+=("feature_worker_fleet.sh")
+COMMENTS+=("# every 3 min keep the FEATURE-WORKER FLEET at >=5 (docs/FEATURE_WORKER_FLEET.md §5) — self-bootstraps from the DEDICATED fleet repo (NOT the pinned fc tree); DRY-RUN until Ben/Lead prefixes FLEET_WRITE=1; workers NEVER edit code/restart fc/deploy")
+LINES+=("2-59/3 * * * * { [ -d $FLEET_REPO/.git ] || git clone -q \$(git -C $REPO remote get-url origin) $FLEET_REPO; } && FLEET_TREE=$FLEET_REPO $FLEET_REPO/ops/feature_worker_fleet.sh >> /home/ben/.quant-ops/feature_worker_fleet.log 2>&1")
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
