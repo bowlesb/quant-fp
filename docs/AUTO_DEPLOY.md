@@ -129,3 +129,5 @@ Everything below is **dry-run / off** until armed. The grade daemon (Phase-1) is
 - Not a fc hot-swap (that's WDPC, separate). fc only moves at the coordinated relaunch.
 - Not auto-merge (that's Phase-2, the grade daemon, separately Ben-armed). This deploys what is ALREADY on
   main.
+
+<!-- CD canary 2026-06-24T11:08 ET: TIER-1 docs-only PR to exercise grade->auto-merge (Phase-2 armed). fp-neutral. -->
