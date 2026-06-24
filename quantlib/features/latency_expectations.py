@@ -51,6 +51,7 @@ from pathlib import Path
 
 from quantlib.features.base import FeatureGroup
 from quantlib.features.compare import runnable
+from quantlib.features.declarative import ReductionGroup
 from quantlib.features.profile import _live_call, build_frames, runs_incremental
 from quantlib.features.profile_sim import run_profile_sim_raw
 from quantlib.features.registry import REGISTRY
@@ -448,6 +449,19 @@ def _meta_for(name: str) -> dict[str, str]:
     )
 
 
+def _incremental_ready(group: FeatureGroup, meta: dict[str, str]) -> str:
+    """The incremental-readiness label, DERIVED from the group's live ``incremental_safe`` for reduction
+    groups so it can never drift from the actual ``path``. A ``ReductionGroup`` is "armed" when it rides the
+    incremental running-sum ``step`` fold live (``runs_incremental`` — what ``path`` reflects) and "parked"
+    when its conditioning keeps it on the batch fresh-sum recompute. price_volume/market_beta are armed only
+    under FP_RUST_REDUCE (their y-anchored corr denom rounds path-identically there); with the flag off they
+    fall back to "parked", and this label tracks that automatically. Non-reduction groups keep their stable
+    hand-curated label (``n-a`` for stateful/cached/gather/hand-written)."""
+    if isinstance(group, ReductionGroup):
+        return "armed" if runs_incremental(group) else "parked"
+    return meta["incremental_ready"]
+
+
 def measure_group_rows(reps: int) -> list[dict]:
     """Per-group DISTINCT p50/p95/p99: time each runnable group's ``compute_latest`` (the LIVE per-minute
     path) in isolation at the reference shard, over ``reps`` runs (after a warmup), keeping the full
@@ -463,7 +477,7 @@ def measure_group_rows(reps: int) -> list[dict]:
             "feat_count": FEATURE_COUNTS.get(group.name, len(group.feature_names)),
             "kind": meta["kind"],
             "mechanism": meta["mechanism"],
-            "incremental_ready": meta["incremental_ready"],
+            "incremental_ready": _incremental_ready(group, meta),
             # The EXECUTION PATH whose cost the p50/p95/p99 below reflect: "incremental (live)" for the 15
             # armed incremental_safe reduction groups (their O(1) running-sum ``step`` fold — the default live
             # path since #391, what the live fc actually runs), "batch" for every other group (the
