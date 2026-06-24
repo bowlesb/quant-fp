@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import polars as pl
 
+from quantlib.features import declarative
 from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
     InputSpec,
 )
 from quantlib.features.declarative import (
-    _USE_RUST_REDUCE,
     ReductionGroup,
     StatefulRegressor,
     mean_,
@@ -51,6 +51,20 @@ FLAG_SLOPE_MIN = 0.0002  # |slope| threshold for the quality flag (was 0.02 %/mi
 FLAG_R2_MIN = 0.7
 FLAG_RESID_MAX = 0.3  # residual_std (%) ceiling for the quality flag
 
+# momentum_quality_flag's >/< compares snap their continuous inputs to this many decimals (under FP_RUST_REDUCE)
+# so the ~1e-12 batch-vs-incremental running-sum divergence cannot straddle a hard threshold (the
+# sign-at-threshold trap). 6 dp is ~1e6× coarser than that float noise yet far finer than any meaningful
+# resolution of r2 (~0.7), |slope| (~2e-4), or resid_std% (~0.3) — so it changes the flag only on the
+# float-noise-ambiguous boundary cells, never a well-separated one.
+FLAG_SNAP_DP = 6
+
+
+def _snap(value: pl.Expr) -> pl.Expr:
+    """Round a flag comparison input to FLAG_SNAP_DP decimals when FP_RUST_REDUCE is on (so batch and
+    incremental land on the SAME side of a threshold), else pass it through unchanged (byte-identical
+    to today's raw compare when the flag is off)."""
+    return value.round(FLAG_SNAP_DP) if declarative._USE_RUST_REDUCE else value
+
 
 def _norm_slope(w: int) -> pl.Expr:
     return slope_("cm_clean", w) / mean_("cm_close", w)  # fractional price move per minute
@@ -65,21 +79,45 @@ def _resid_std_pct(w: int) -> pl.Expr:
 @register
 class CleanMomentumScoreGroup(ReductionGroup):
     name = "clean_momentum"
-    # 1.1.0: inherits trend_quality's n==2 r2 guard (r2 at the b==2 corner is now exactly 1.0).
-    version = "1.1.0"
+    # 1.2.0: momentum_quality_flag's hard-threshold conjunction ((r2>0.7)&(|slope|>2e-4)&(resid_std<0.3)) snaps
+    # its comparison inputs to FLAG_SNAP_DP decimals before the >/< compares so the ~1e-12 batch-vs-incremental
+    # rounding noise can no longer straddle a threshold (the sign-at-threshold trap). This changes the flag only
+    # on cells within FLAG_SNAP_DP of a threshold (float-noise-ambiguous boundary cells) -> version bump. The
+    # continuous score is UNCHANGED. 1.1.0 added trend_quality's n==2 r2 guard (r2 at the b==2 corner = 1.0).
+    version = "1.2.0"
     owner = "modeller"
     type = FeatureType.TREND_QUALITY
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close", _ANCHOR_CLOSE)),)
     # The score blends the OLS R² (r2_("cm_clean")) of close on time, so it inherited trend_quality's
-    # near-perfect-fit conditioning. Closed AT SOURCE by the time-OLS origin-rebase (PR #132, well-conditioned
-    # n>=3) plus the n==2 perfect-fit guard (_OLS_PERFECT_FIT_COUNT) emitting r2=1.0 exactly at the b==2 corner
-    # — batch==incremental cell-for-cell on smooth/degenerate/n==2 walks. The guard changes the degenerate r2
-    # value (0.9998->1.0), which flows into the score/flag at those cells -> the version bump above.
-    # NO-GO for FP_INCREMENTAL (real-data soak, scripts/incremental_realdata_soak.py, 2026-06-17): breaches the
-    # incremental==batch parity self-check on ~1.5% of minutes (worst ~620x) — a power-sum cancellation
-    # degenerate cell the synthetic stream never reproduces. Same class as the parked corr-denom groups; stays
-    # on the batch path until the cancellation-free reduction fix lands.
-    incremental_safe = False
+    # near-perfect-fit conditioning, now closed by the y-side close anchor under FP_RUST_REDUCE
+    # (regression_y_anchor) + the n==2 perfect-fit guard. The CONTINUOUS clean_momentum_score is parity-safe
+    # under the anchor (real-tape soak worst tol-ratio 0.02× — value-identical batch==incremental). The only
+    # residual breach is momentum_quality_flag, a hard-thresholded BINARY: a cell whose r2/|slope|/resid_std
+    # sits on a knife-edge has the batch fresh-sum and incremental running-sum round the ~13th sig-digit to
+    # OPPOSITE sides of a threshold -> a 0<->1 flip (the sign-at-threshold trap, ~1 cell/23k on the real tape).
+    # _snap() conditions those compares so the flip can't happen (validated 0 flips on the 2026-06-17
+    # soak co-resident with price_volume). See incremental_safe below.
+
+    @property
+    def incremental_safe(self) -> bool:  # type: ignore[override]
+        """SAFE to ride the incremental running sums ONLY when ``FP_RUST_REDUCE`` is on. Two conditions had to
+        close together:
+
+          * The CONTINUOUS r2/resid-std y-side cancellation (the 620× former NO-GO): ``regression_y_anchor`` +
+            ``centered_std`` center ``y = close`` / the close power sums on the per-symbol ``__anchor_close``
+            constant under FP_RUST_REDUCE, conditioning ``denom_y``/the residual variance on small centered close
+            so both paths round them identically (OLS/std are translation-invariant → value-identical, fp
+            unchanged). Real-tape soak: clean_momentum_score worst 0.02× (clean).
+          * The BINARY momentum_quality_flag sign-at-threshold flip: ``_snap`` rounds the flag's
+            comparison inputs to ``FLAG_SNAP_DP`` decimals under FP_RUST_REDUCE so the ~1e-12 batch-vs-incremental
+            divergence can no longer straddle a hard threshold. Real-tape soak: 0 flips (vs 1 boundary flip at
+            momentum_quality_flag_5m / BAC without the snap).
+
+        With FP_RUST_REDUCE OFF the y-side is uncentered AND the flag compares are raw (byte-identical to today),
+        so the group stays PARKED on the batch fresh-sum recompute. The prod flip is the Lead's FP_RUST_REDUCE
+        relaunch; the flag snap rides the same flag so its boundary-cell value change deploys with the version
+        bump above (coordinated, re-trust). Mirrors price_volume's FR-gated property."""
+        return declarative._USE_RUST_REDUCE
 
     def declare(self) -> list[FeatureSpec]:
         specs: list[FeatureSpec] = []
@@ -115,7 +153,7 @@ class CleanMomentumScoreGroup(ReductionGroup):
         # sums Σ(c−a)/Σ(c−a)² (shift-invariant == raw var, but conditioned), so the residual-std term
         # (std_close²·(1−r2)) the score reads matches batch and incremental cell-for-cell. Empty when the flag
         # is off (raw power-sum std, byte-identical to today). Both paths read the SAME anchor column.
-        if not _USE_RUST_REDUCE:
+        if not declarative._USE_RUST_REDUCE:
             return {}
         return {"cm_close": _ANCHOR_CLOSE}
 
@@ -151,7 +189,13 @@ class CleanMomentumScoreGroup(ReductionGroup):
             resid_score = (1.0 - resid_std / RESID_SCALE).clip(lower_bound=0.0) * RESID_WEIGHT
             score = slope_score + r2_score + resid_score
             feats[f"clean_momentum_score_{w}m"] = pl.when(resid_std.is_null()).then(None).otherwise(score)
-            flag = (abs_slope > FLAG_SLOPE_MIN) & (r2 > FLAG_R2_MIN) & (resid_std < FLAG_RESID_MAX)
+            # Snap the hard-threshold compares (under FP_RUST_REDUCE) so the ~1e-12 batch-vs-incremental
+            # running-sum divergence can't straddle a threshold and flip the binary flag 0<->1 (sign-at-threshold).
+            flag = (
+                (_snap(abs_slope) > FLAG_SLOPE_MIN)
+                & (_snap(r2) > FLAG_R2_MIN)
+                & (_snap(resid_std) < FLAG_RESID_MAX)
+            )
             feats[f"momentum_quality_flag_{w}m"] = (
                 pl.when(resid_std.is_null()).then(None).otherwise(flag.cast(pl.Float64))
             )

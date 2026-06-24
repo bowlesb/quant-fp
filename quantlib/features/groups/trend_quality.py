@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import polars as pl
 
+from quantlib.features import declarative
 from quantlib.features.base import (
     FeatureSpec,
     FeatureType,
@@ -47,11 +48,24 @@ class TrendQualityGroup(ReductionGroup):
     # emits the EXACT r2=1.0 at the b==2 corner where cov²/(var_x·var_y) was noise/noise. With both, batch and
     # incremental agree cell-for-cell on smooth/degenerate/n==2 walks, so the fast path is parity-true here. The
     # n==2 guard changes the degenerate-cell value (0.9998->1.0) -> the version bump above.
-    # NO-GO for FP_INCREMENTAL (real-data soak, scripts/incremental_realdata_soak.py, 2026-06-17): breaches the
-    # incremental==batch parity self-check on ~2.7% of minutes (worst ~1683x) at price_r2_5m — the OLS R²
-    # cov²/(var_x·var_y) corr-denom straddle on near-flat real regressors (the parked corr-denom class), which
-    # the smooth/n==2 synthetic walks don't hit. Stays on the batch path until the cancellation-free fix lands.
-    incremental_safe = False
+
+    @property
+    def incremental_safe(self) -> bool:  # type: ignore[override]
+        """SAFE to ride the incremental running sums ONLY when ``FP_RUST_REDUCE`` is on. The former NO-GO was the
+        OLS R² ``cov²/(var_x·var_y)`` y-side cancellation: ``denom_y = b·Σy² − (Σy)²`` formed from large-magnitude
+        ``y = close`` (~$45–$500) is a difference of near-equal large sums on a near-perfect-fit window, which the
+        batch fresh-sum and incremental running-sum round into materially different r² (real-tape soak worst
+        ~1683× at price_r2_5m). ``regression_y_anchor`` centers ``y`` on the per-symbol ``__anchor_close`` constant
+        under FP_RUST_REDUCE so ``denom_y`` is conditioned on small centered close and rounds identically on both
+        paths (OLS is translation-invariant in y → value-identical, fp unchanged). REAL-TAPE PROOF
+        (scripts/incremental_realdata_soak.py 2026-06-17, FP_RUST_REDUCE=1, co-resident with price_volume + the
+        other 19 safe groups): trend_quality CLEAN (0 breaches/779 graded minutes), vs 1536× NO-GO with the flag
+        OFF. With FP_RUST_REDUCE OFF the y-side is uncentered (raw-close cancellation re-exposed), so the group
+        stays PARKED on the batch fresh-sum recompute (byte-identical under FP_INCREMENTAL). The prod flip is the
+        Lead's FP_RUST_REDUCE relaunch (the y-anchor + this property arm together). Mirrors price_volume's
+        FR-gated ``incremental_safe`` so tests toggling ``declarative._USE_RUST_REDUCE`` drive both states.
+        """
+        return declarative._USE_RUST_REDUCE
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
