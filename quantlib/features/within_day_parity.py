@@ -32,7 +32,8 @@ import logging
 import polars as pl
 
 from quantlib.features import store
-from quantlib.features.compare import cell_verdict
+from quantlib.features.base import FeatureSpec
+from quantlib.features.compare import cell_verdict, dist_score
 from quantlib.features.registry import REGISTRY
 from quantlib.features.session import rth_mask
 from quantlib.features.settle_lag import FALLBACK_LAG_MINUTES
@@ -110,9 +111,12 @@ def compare_window(
 ) -> pl.DataFrame:
     """Per-feature match summary for the group over the settled window + symbol sample.
 
-    Reads BOTH sources from the store, joins on (symbol, minute), filters to the window ∩ RTH, and applies
-    the group's own cell_verdict per feature. Returns one row per feature: n_compared / n_match /
-    n_mismatch / n_extra / n_missing / value_rate. Read-only — no store writes."""
+    Reads BOTH sources from the store, joins on (symbol, minute), filters to the window ∩ RTH, and grades
+    each feature by its declared ``parity_method``: ``tolerance`` features get the per-cell ``cell_verdict``;
+    ``distributional`` features get the sample-wide ``dist_score`` (paired-fraction + quantile shape), the
+    SAME dispatch the nightly sweep uses (``validate.compare_groups``) so the within-day and nightly grades
+    agree by construction. Returns one row per feature: n_compared / n_match / n_mismatch / n_extra /
+    n_missing / value_rate. Read-only — no store writes."""
     group = REGISTRY.get_group(group_name)
     specs = {spec.name: spec for spec in group.declare()}
     feature_names = list(specs.keys())
@@ -146,6 +150,9 @@ def compare_window(
     for feature, spec in specs.items():
         if feature not in joined.columns or f"{feature}_bk" not in joined.columns:
             continue
+        if spec.parity_method == "distributional":
+            rows.append(_distributional_summary_row(joined, feature, spec))
+            continue
         verdicts = joined.select(cell_verdict(spec, feature, joined.schema).alias("v"))
         counts = verdicts.group_by("v").len().to_dict(as_series=False)
         tally = dict(zip(counts["v"], counts["len"]))
@@ -168,6 +175,28 @@ def compare_window(
             }
         )
     return pl.DataFrame(rows)
+
+
+def _distributional_summary_row(joined: pl.DataFrame, feature: str, spec: FeatureSpec) -> dict[str, object]:
+    """One per-feature summary row for a ``parity_method="distributional"`` feature over the within-day
+    sample, mirroring the nightly sweep's ``validate._feature_day_distributional``: the paired cells are
+    the comparison unit, and they ALL count as agreeing iff the sample-wide ``dist_score`` passes (the
+    quantile shape AND the paired-fraction held). value_rate is thus 1.0 on a passing sample, the paired
+    fraction otherwise — so the ``value_rate >= min_pass_rate`` cert gate certifies on a clean
+    distribution exactly as the nightly path does (the two grades agree by construction)."""
+    _score, passed = dist_score(joined, feature, spec.tolerance)
+    n_paired = joined.drop_nulls([feature, f"{feature}_bk"]).height
+    n_agree = n_paired if passed else 0
+    return {
+        "feature": feature,
+        "tolerance": spec.tolerance,
+        "n_compared": n_paired,
+        "n_match": n_agree,
+        "n_mismatch": n_paired - n_agree,
+        "n_extra_live": 0,
+        "n_missing_live": 0,
+        "value_rate": (n_agree / n_paired) if n_paired else None,
+    }
 
 
 def run(
