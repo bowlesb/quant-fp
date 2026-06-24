@@ -136,8 +136,29 @@ The value is a reduction over a trailing window (sum / mean / std / OLS / EMA / 
 > `compute_latest` is really a bounded-window reduction not yet *declared* as one (the §2 #6 bucket).
 
 ### Pattern C — point-in-time / event (the residual hand-written groups)
-Last-event, minutes-since, a small fixed lookback. **State = a tiny ring of the last k minutes** (already the
-`LastKState` kind) or no state at all (pure at-T). Most are already cheap single-minute passes.
+Last-event, minutes-since, a small fixed lookback. **State = a tiny ring of the recent per-symbol rows** or no
+state at all (pure at-T). Most are already cheap single-minute passes.
+
+> **⚠ CORRECTION (2026-06-24, ratified with CriticalProfiler; gated by the sparse-parity test #435).** The
+> last-k ring kind has TWO distinct keyings, and a Stage-3 consumer MUST pick the right one or it emits wrong
+> values for every sparse (gappy) symbol:
+> - **TIME / epoch-keyed** (`LastKState` in `stateful.py`): value as of minute `T − L` (null if that exact
+>   minute is absent) — the `base.lagged` self-join contract. Correct for a TIME-based lag.
+> - **POSITIONAL row-keyed** (the semantics `slice_derive`'s `max_lag+1` per-symbol tail / the `_matrix_at` cut
+>   already use): the k-th prior PRESENT ROW (`close.shift(k).over("symbol")`), advancing only on present
+>   minutes. Correct for a POSITIONAL shift. (The chosen IMPLEMENTATION of this keying for points is the
+>   dedicated `PointRing` below — same semantics, a cheaper structure — not the `slice_derive` tail itself.)
+>
+> **The `resolve_points` point-lags are POSITIONAL `shift(k).over("symbol")`, NOT time/epoch lags** —
+> CriticalProfiler's #435 proved that an epoch-keyed `LastKState` would emit wrong values for every sparse
+> symbol (the L-th prior minute ≠ the L-th prior row on a gappy grid). So the Stage-3 carried-state kind for
+> point-lags is a **dedicated `PointRing`** (a point-sources-only depth-121 numpy circular buffer), NOT
+> `LastKState` and NOT a `slice_derive` wrapper — CriticalProfiler MEASURED the wrapper net-slower (point-lags
+> reach `shift(120)` while value-derive's `max_lag` is 5, so wrapping forces a 121-deep all-column slice every
+> minute; `PointRing` is 138× cheaper, 0.10ms vs 14.4ms). `PointRing` is `#435`-gated byte-identical to the
+> canonical `resolve_points` truth on sparse symbols (the same proven positional invariant, via a distinct perf
+> structure — equality by PROOF, not code-reuse). `LastKState` stays correct for genuine time-based lags. See
+> §5 Stage 3.
 
 ### The ONE primitive: `RunningState` (already on `base.FeatureGroup`)
 A / B / C differ only in *what* state they hold; they share *how* staleness and reseed work. That is the single
@@ -172,7 +193,7 @@ two running-sum folds (#3, #4-reduction) and the cumulative class (#5) should co
 | ~~**B1** `ReductionFoldState` → reuse `WindowedSumState`~~ | — | **ALREADY DONE** (it HOLDS a `WindowedSumState`, not a second fold — verified 2026-06-24) | 0 |
 | ~~**B2** `CumulativeState` → infinite-window kind~~ | — | **NO-OP** (justified distinct session-reset kind; its 3-group live redundancy already consolidated by `session_cumulative_agg` #284) | 0 |
 | **B3** #6 bounded-window `compute_latest` — the WHOLE-BUFFER ones | 3 cross-sectional gathers lagged/sorted the full buffer in `compute_latest` | bounded `compute_latest_on_window` / minute-slice (Stage 2a, #442) | 3 whole-buffer passes/min |
-| **C1** point-in-time groups → declared last-k / at-T | bespoke `compute_latest` | `LastKState` kind or no state | (subset of B3) |
+| **C1** point-in-time groups → declared at-T (no state) / `PointRing` | bespoke `compute_latest` | dedicated depth-121 `PointRing` (point-sources only, #435-gated) for positional lags, else no state | (subset of B3) |
 
 **Realistic reclaim of the ~4,743-LOC core + the group-level boilerplate: on the order of 1,000–1,500 LOC of
 mechanism deleted, and — more importantly — SEVEN state mechanisms reduced to ONE primitive + ~6 declared
@@ -205,7 +226,7 @@ byte-identical (fp unchanged).
   (§3): `prior_day` (A.2, needs a `broadcast_exprs` hook) deferred to **Stage 1b**; `return_dispersion` +
   `breadth` (A.3 hybrids) correctly left as-is. Generalized the base's `daily_snapshot(source, ctx)` +
   `_snapshot_witness(source, ctx)` to support the one multi-input group (`liquidity_rank`'s universe witness).
-- **Stage 1b — Pattern A.2 (DONE, this PR).** Added the optional `broadcast_exprs` + `minute_columns` hooks to
+- **Stage 1b — Pattern A.2 (DONE, #439).** Added the optional `broadcast_exprs` + `minute_columns` hooks to
   the base; migrated `prior_day` (120 → 100 LOC) — its snapshot returns prior-day LEVELS and `broadcast_exprs`
   derives the close-relative features from the levels + the at-T close after the broadcast. Cell-identical to
   origin/main; surface-hash unchanged. **FINDING — the 5 reference filters need NO migration:** `sector`,
@@ -224,12 +245,24 @@ byte-identical (fp unchanged).
   already HOLDS a `WindowedSumState` (no second fold to merge); `CumulativeState` is a justified distinct
   session-reset kind whose 3-group live redundancy was already consolidated by `session_cumulative_agg` (#284).
   No churn-only refactor — the B mechanisms are already minimal. (Corrects the original §4 over-count.)
-- **Stage 3 — declare the bounded-window groups (B3/C1).** Convert the ~33 bespoke `compute_latest` overrides
-  to declared windows/kinds so the engine generates the slice — **this is the same surface CriticalProfiler's
-  resolve_points carried-state work lands on** (the per-minute whole-buffer point/lag reads), measured at 107×
-  byte-identical on the reference fixture. Owned jointly: this design owns the declaration surface (reuse/extend
-  `LastKState`), CriticalProfiler owns the measured before→after + sparse-symbol parity harness. The riskiest
-  stage (most groups) → group-by-group, each behind the generic latest-parity test. The largest line reclaim.
+- **Stage 3 — declare the bounded-window groups (B3/C1) + the carried point/lag state (DONE, #440).** Convert
+  the ~33 bespoke `compute_latest` overrides to declared windows so the engine generates the slice.
+  CriticalProfiler built the `resolve_points` slice of this (the per-minute whole-buffer point/lag reads →
+  carried O(1) state). **Scoping (CriticalProfiler's attribution):** of the 18 incremental groups, **15 carry
+  ONLY at-T points → pure DELETION, zero state** (read `matrix_at`'s latest row, stop the whole-buffer resolve).
+  Only **3** (`efficiency`, `return_dynamics`, `momentum_consistency`) need carried positional-lag state — the
+  risky surface is just 3 groups; the other 15 are a clean delete. **Interface decision (ratified):** the carried
+  point-lag state is a **dedicated `PointRing`** — a point-sources-only depth-121 numpy circular buffer — NOT
+  `LastKState` and NOT a `slice_derive` wrapper. Two measured facts drove this: (a) #435 proved an epoch-keyed
+  ring breaches every sparse symbol (the point-lags are positional `shift(k)` ROWS, not minute lags); (b)
+  wrapping `slice_derive`'s tail is net-SLOWER (value-derive's `max_lag` is 5 while point-lags reach `shift(120)`,
+  so the wrap forces a 121-deep ALL-column slice every minute) — `PointRing` (point columns only, depth 121) is
+  138× cheaper (0.10ms vs 14.4ms). The "single sparse-correct encoding" requirement is satisfied by PROOF, not
+  code-reuse: `PointRing` is `#435`-gated byte-identical to the canonical `resolve_points` truth on sparse
+  symbols. The kind is `quantlib/features/point_ring.py` (#440): `PointRing(symbols, specs: list[PointSpec])`
+  with `fold(minute_frame)` then `at_t(source)` / `lag(source, window)`, armed by `FP_POINT_RING=1` (default
+  OFF — a gated flip, like `FP_INCREMENTAL`). Joint ownership: this design owns the declaration surface + the
+  kind's taxonomy slot, CriticalProfiler owns `point_ring.py` + the `#435` gate.
 
 Each stage is independently shippable, parity-gated, and fp-neutral. None requires a coordinated fc+strategy
 deploy (no fingerprint change) — they deploy on the normal feature-computer relaunch.
