@@ -8,7 +8,7 @@ the prior Edgar system's FEATURE_GROUP_DURATION histogram.
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 # Buckets span 0.5ms .. 2.5s — the range a per-group live compute can plausibly take at shard scale.
 GROUP_COMPUTE_SECONDS = Histogram(
@@ -137,6 +137,17 @@ INCREMENTAL_PARITY_BREACH = Counter(
     ["reduce_input"],
 )
 
+POINT_RING_BREACH = Counter(
+    "feature_point_ring_breach_total",
+    "Minutes where the PointRing carried __pt_ columns diverged from the whole-buffer resolve_points truth "
+    "(FP_POINT_RING_PARITY self-check) — any common-symbol __pt_ cell beyond 1e-12 absolute, or a symbol "
+    "present in resolve_points but missing from the ring (only_truth>0)",
+)
+POINT_RING_MAX_ABS_DIFF = Gauge(
+    "feature_point_ring_max_abs_diff",
+    "Worst per-minute absolute __pt_ cell divergence between PointRing and resolve_points (0.0 when clean)",
+)
+
 
 # Ingestion-rate counters, incremented in the READER process per message off the websocket and exposed on
 # the reader's own /metrics port, so `rate(feature_*_ingested_total[1m])` gives bars/trades/quotes per
@@ -153,6 +164,15 @@ def record_incremental_parity(reduce_input: str, tol_ratio: float, breached: boo
     INCREMENTAL_PARITY_TOL_RATIO.labels(reduce_input=reduce_input).observe(tol_ratio)
     if breached:
         INCREMENTAL_PARITY_BREACH.labels(reduce_input=reduce_input).inc()
+
+
+def record_point_ring_parity(max_abs_diff: float, breached: bool) -> None:
+    """Observe one minute's PointRing-vs-resolve_points self-check (FP_POINT_RING_PARITY): the worst absolute
+    __pt_ cell divergence, and whether it breached (any common-symbol cell > 1e-12 or a symbol present in
+    resolve_points but absent from the ring). MONITORING-ONLY — the served output is still the ring's."""
+    POINT_RING_MAX_ABS_DIFF.set(max_abs_diff)
+    if breached:
+        POINT_RING_BREACH.inc()
 
 
 def record_group_timings(timings: dict[str, float]) -> None:
