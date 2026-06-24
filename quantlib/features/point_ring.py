@@ -255,7 +255,21 @@ class ValueInputRing:
     def materialize_tail(self, minute_dtype: pl.DataType) -> pl.DataFrame:
         """Reconstruct the (symbol, minute, value-cols) frame the per-minute ``_matrix_at`` slice produces:
         each symbol's last ``min(count, depth)`` present rows. Row ORDER is irrelevant (``_derived_row``
-        re-sorts by symbol+minute); only the (symbol, minute) row SET + values must match the buffer-tail."""
+        re-sorts by symbol+minute); only the (symbol, minute) row SET + values must match the buffer-tail.
+
+        VARIABLE-HEIGHT CHURN — the GENERAL unified-primitive reconstruct (not a ``_matrix_at`` special-
+        case): under membership churn each symbol carries a DIFFERENT number of present rows (a symbol
+        absent for the last k minutes has ``count`` rows ending k minutes back; a fully-present one has
+        ``depth``). The naive fixed-height trick (reshape a static n×depth block, reuse one minute index for
+        all symbols) is WRONG here — it would emit phantom rows for absent minutes on a single shared minute
+        axis. The correct, fast pattern: carry a per-symbol ``_count`` + a per-slot ``_minute`` epoch
+        channel, build a per-symbol VALID mask (``[:min(count, depth)]``), and emit only the masked rows
+        with their OWN stored minutes. This produces exactly the variable-height tail the buffer-slice
+        produces, byte-identical, while marshaling only the carried numeric arrays (no whole-buffer scan).
+        This is THE answer to the demolition's uniform-churn read-surface constraint: every kind that
+        materializes a structured tail (windowed-sum long-frame, lag tail, this value tail) reconstructs
+        its variable-height churned frame the SAME way — per-symbol count mask + a parallel epoch channel —
+        so churn is handled once in the ring, not per kind."""
         valid = np.zeros((self.n, self.depth), dtype=bool)
         for symbol_i in range(self.n):
             valid[symbol_i, : min(self._count[symbol_i], self.depth)] = True
