@@ -68,18 +68,23 @@ Gate: `tests/test_fp_points_carried_parity.py` (PR #435) — `CarriedPoints` pos
 `resolve_points` byte-identical on a genuinely-sparse fixture (vacuity-guarded) + the seed/fold replay
 invariant. This IS the executable contract.
 
-## Two ways to source the ring — pick one (the only open decision)
+## Two ways to source the ring — RESOLVED to (a) by a viability check
 
-- **(a) New `PointRing` kind** in the taxonomy (the interface above), declared per group, parity-tested once.
-  Clean kind boundary; ~1 new state class.
-- **(b) Reuse `_matrix_at`'s slice-derive tail / `_CodedBuffer`** as the carried point source — the engine
-  already materializes each symbol's last `max_lag+1` positional rows every minute for the value columns;
-  the points are the SAME positional reads off that SAME tail. **No new state class, no second ring** — the
-  points stop being a separate whole-buffer pass and become extra reads off the tail the engine already
-  builds. **Lower surface; recommended** unless the taxonomy wants the explicit kind for Stage-3 reuse.
+Initially (b) "reuse `_matrix_at`'s slice-derive tail" looked lowest-surface. **A measured check killed it:**
+the value-derive tail is only `max_lag+1` rows where `max_lag = 5` (the value columns are short-lag returns),
+but the POINT lags reach **`shift(120)`** (efficiency / return_dynamics). Reusing the tail would force it to
+deepen from 6 to **121 rows per symbol every minute** — a 20× deeper slice-derive of ALL value columns,
+which makes `_matrix_at` (the next phase we want to cut) SLOWER. (b) defeats its own purpose.
 
-Both clear the same gate (#435). The choice is purely how much new surface vs. taxonomy explicitness
-ArchOverhaul's Stage-3 wants.
+- **(a) Dedicated `PointRing` — RECOMMENDED.** A numpy ring of ONLY the point-SOURCE columns
+  (`close` / `volume` / `high` / `low`) at depth 121, separate from the value tail. Measured: fold+resolve =
+  **0.10ms** vs `resolve_points` 14.4ms (**138× cheaper**), **1.2 MB/shard** (312 × 121 × 4 × 8B). The fold is
+  an array shift+write; resolve is indexed reads. It does NOT widen the value tail.
+- **(b) Reuse the value tail — REJECTED** (forces a 121-deep all-column slice-derive; net-slower).
+
+So: a dedicated `PointRing` state kind (option a). It still slots under the SAME `RunningState` lifecycle
+contract and clears the SAME gate (#435) — the only thing the viability check changed is "don't piggyback on
+the value tail; carry the point sources in their own shallow-footprint ring."
 
 ## Ship plan once ratified
 
