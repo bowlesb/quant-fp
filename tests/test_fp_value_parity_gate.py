@@ -29,6 +29,7 @@ import datetime as dt
 import polars as pl
 import pytest
 
+from quantlib.features import declarative
 from quantlib.features.base import BatchContext, FeatureGroup
 from quantlib.features.compare import runnable
 from quantlib.features.incremental import IncrementalEngine
@@ -151,11 +152,17 @@ def _assert_values_equal(truth: pl.DataFrame, live: pl.DataFrame, group, label: 
         ), f"{label}.{feature}: live != backfill on {bad.height} cells (tol={tol})\n{bad.head()}"
 
 
+@pytest.mark.parametrize("rust_reduce", [False, True], ids=["FR0", "FR1"])
 @pytest.mark.parametrize("group_name", _runnable_group_names())
-def test_live_path_matches_backfill_on_sparse(group_name: str) -> None:
+def test_live_path_matches_backfill_on_sparse(
+    group_name: str, rust_reduce: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The universal gate: for EVERY runnable group, the LIVE stateful path == the backfill truth
-    (compute().filter(last)) on a genuinely-sparse fixture, within declared tolerance. This is the value
-    contract the unified-primitive demolition must keep green."""
+    (compute().filter(last)) on a genuinely-sparse fixture, within declared tolerance, at BOTH FR=0 and FR=1.
+    This is the value contract the unified-primitive demolition must keep green. FR=1 (FP_RUST_REDUCE) arms the
+    y-centered/rebase_time_axis conditioning the corr-denom + time-OLS reductions ride — a distinct numerical
+    path that a FR=0-only gate would miss, so both are required for the full contract."""
+    monkeypatch.setattr(declarative, "_USE_RUST_REDUCE", rust_reduce)
     dense = build_frames(n_tickers=24, window_min=250, daily_days=60)
     if group_name not in {g.name for g in runnable(dense)}:
         pytest.skip("group inputs not present in the standard test frames")
