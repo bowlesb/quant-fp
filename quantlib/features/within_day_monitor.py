@@ -2,13 +2,17 @@
 
 This is the connective tissue between the already-built primitives (the piece that makes the certification
 lifecycle actually RUN). A subagent owns ONE group via the assignment lock, then each cycle compares that
-group's live==backfill on the freshly-settled window (phase-1 :func:`within_day_parity.compare_window`); a
-CLEAN cycle (every feature at/above its ``min_pass_rate``) increments ``stable_cycles``, any mismatch RESETS
-it. Once the streak holds for ``--stable-cycles`` consecutive clean cycles — the within-day "it's matched for
-a while" bar — it stamps ``within_day_parity_cert`` (status='certified' = "intraday-OK, pending the full-day
-nightly sweep") via phase-2 :func:`within_day_trust.write_certifications`, then releases the lock. The nightly
-sweep + ``MIN_CLEAN_DAYS=2`` carry it the rest of the way to binary trust — so a within-day cert is the
-PROVISIONAL intraday stage, not the final grant.
+group's live==backfill on the freshly-settled window (phase-1 :func:`within_day_parity.compare_window`).
+Stability is tracked PER FEATURE: a feature at/above its ``min_pass_rate`` this cycle advances its own clean
+streak, a mismatch resets only that feature's streak. The instant a feature's streak holds for
+``--stable-cycles`` consecutive clean cycles — the within-day "it's matched for a while" bar — that feature
+stamps ``within_day_parity_cert`` (status='certified' = "intraday-OK, pending the full-day nightly sweep")
+via phase-2 :func:`within_day_trust.write_certifications`, INDEPENDENTLY of any divergent sibling in the same
+group. A parity-clean feature is no longer held hostage by an irreducibly-divergent long-window sibling: each
+feature earns trust on its own evidence. The group is certified once every comparable feature has been
+granted; the lock releases then (or at ``max_cycles``, keeping whatever features already granted). The
+nightly sweep + ``MIN_CLEAN_DAYS=2`` carry each granted feature the rest of the way to binary trust — so a
+within-day cert is the PROVISIONAL intraday stage, not the final grant.
 
 Modes:
   * ``--mode live`` (default): the window ends ``settle_lag`` before wall-clock now; one cycle per
@@ -228,8 +232,9 @@ def monitor(
     claim_lock: bool = True,
     max_cycles: int | None = None,
 ) -> CertResult | None:
-    """Run the per-group monitor until the group certifies (or ``max_cycles`` is hit). Returns the first
-    feature's CertResult on certify, else None. The subagent's whole within-day job is this one call.
+    """Run the per-group monitor until every comparable feature has granted (or ``max_cycles`` is hit).
+    Grants each feature INDEPENDENTLY as its own clean streak ripens. Returns the first granted feature's
+    CertResult (None if nothing granted). The subagent's whole within-day job is this one call.
 
     ``materialize_backfill`` opts into the LIVE-INTRADAY path: before each compare, materialize the group's
     settled-window backfill side on demand (the current day's backfill is NOT pre-materialized — only swept
@@ -261,7 +266,14 @@ def monitor(
     replay_windows = (
         _replay_windows(cert_day, window_minutes, stable_cycles_required) if mode == "replay" else None
     )
-    stable = 0
+    # Per-FEATURE stability: each feature earns its grant on its OWN clean streak, independent of a divergent
+    # sibling in the same group. A long-window feature that irreducibly diverges (live-warmup vs backfill
+    # bar-revision) no longer holds its parity-clean siblings hostage — each feature still must independently
+    # clear its policy min_pass_rate for ``stable_cycles_required`` consecutive cycles. The streak resets per
+    # feature on that feature's own mismatch; granted features are written once and never re-written.
+    feature_streaks: dict[str, int] = {}
+    granted: dict[str, CertResult] = {}
+    first_granted: CertResult | None = None
     cycle = 0
     try:
         while True:
@@ -291,50 +303,74 @@ def monitor(
                 if symbols
                 else pl.DataFrame()
             )
-            clean, results = evaluate_summary(summary, group_name, cert_day, stable + 1, window_minutes, lag)
+            _clean, results = evaluate_summary(summary, group_name, cert_day, 1, window_minutes, lag)
             if not results:
                 logger.info(
                     "cycle %d: no comparable cells (unsettled / capture gap / backfill not yet "
-                    "materialized) — streak held at %d",
+                    "materialized) — per-feature streaks held",
                     cycle,
-                    stable,
-                )
-            elif clean:
-                stable += 1
-                worst = min((r.value_rate or 0.0) for r in results)
-                logger.info(
-                    "cycle %d: CLEAN (%d features, worst value_rate=%.5f) — streak %d/%d",
-                    cycle,
-                    len(results),
-                    worst,
-                    stable,
-                    stable_cycles_required,
                 )
             else:
-                failed = [r.feature for r in results if r.status != "certified"]
-                logger.warning("cycle %d: MISMATCH on %s — streak RESET (was %d)", cycle, failed, stable)
-                stable = 0
-
-            if stable >= stable_cycles_required and results:
+                ripe: list[CertResult] = []
+                for result in results:
+                    feature = result.feature
+                    if feature in granted:
+                        continue
+                    if result.status == "certified":
+                        streak = feature_streaks.get(feature, 0) + 1
+                        feature_streaks[feature] = streak
+                        if streak >= stable_cycles_required:
+                            ripe.append(CertResult(**{**result.__dict__, "stable_cycles": streak}))
+                    else:
+                        feature_streaks[feature] = 0
+                passing = sum(1 for streak in feature_streaks.values() if streak > 0)
+                failing = [r.feature for r in results if r.status != "certified" and r.feature not in granted]
                 logger.info(
-                    "group=%s CERTIFIED (intraday-OK, pending full-day sweep) after %d clean cycles",
-                    group_name,
-                    stable,
+                    "cycle %d: %d/%d comparable features on a clean streak; %d granted; %d still failing %s",
+                    cycle,
+                    passing,
+                    len(results),
+                    len(granted),
+                    len(failing),
+                    failing[:5],
                 )
-                certified = [CertResult(**{**r.__dict__, "stable_cycles": stable}) for r in results]
-                write_certifications(certified, dry_run=dry_run_cert)
+                if ripe:
+                    write_certifications(ripe, dry_run=dry_run_cert)
+                    for result in ripe:
+                        granted[result.feature] = result
+                        first_granted = first_granted or result
+                    logger.info(
+                        "group=%s GRANTED %d feature(s) at streak %d (%d total granted): %s",
+                        group_name,
+                        len(ripe),
+                        stable_cycles_required,
+                        len(granted),
+                        [r.feature for r in ripe],
+                    )
+
+            # The group is fully certified once every comparable feature has been granted. ``results`` is the
+            # current comparable set; if all of them are in ``granted`` (and at least one exists), we are done.
+            if results and all(r.feature in granted for r in results):
+                logger.info(
+                    "group=%s CERTIFIED (all %d comparable features granted, intraday-OK pending full-day "
+                    "sweep)",
+                    group_name,
+                    len(granted),
+                )
                 within_day_assignment.release(group_name, agent_id, dry_run=dry_run_lock)
-                return certified[0]
+                return first_granted
 
             if max_cycles is not None and cycle >= max_cycles:
                 logger.info(
-                    "group=%s reached max_cycles=%d without certifying (streak %d/%d)",
+                    "group=%s reached max_cycles=%d — %d feature(s) granted, %d still un-certified",
                     group_name,
                     max_cycles,
-                    stable,
-                    stable_cycles_required,
+                    len(granted),
+                    sum(1 for streak in feature_streaks.values() if streak < stable_cycles_required),
                 )
-                return None
+                if granted:
+                    within_day_assignment.release(group_name, agent_id, dry_run=dry_run_lock)
+                return first_granted
             if mode == "live":
                 time.sleep(poll_seconds)
     finally:
