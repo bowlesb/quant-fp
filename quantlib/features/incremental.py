@@ -45,6 +45,7 @@ from quantlib.features.declarative import (
     emit_rust_unified,
     resolve_points,
 )
+from quantlib.features.point_ring import PointRing, point_frame_from_ring, point_specs
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
@@ -454,6 +455,15 @@ class IncrementalEngine:
         self.obv_running: dict[
             str, np.ndarray
         ] = {}  # ns -> (n_symbols,) running cumulative for "cumulative" slots
+        # FP_POINT_RING: carry the groups' point/lag columns in an O(1) per-symbol positional ring instead of
+        # the per-minute whole-buffer ``resolve_points`` pass (phase_profile: ~6ms framework overhead). The
+        # specs (the (source, lag) columns to carry) are pure plan metadata, built once. ``point_ring`` is the
+        # held state, seeded alongside ``state`` and folded each minute; OFF by default (resolve_points path).
+        self.point_specs = point_specs(self.groups) if os.environ.get("FP_POINT_RING") == "1" else []
+        # Arm the ring only when the groups actually declare points to carry — an empty-points set has nothing
+        # to ring, and ``_latest_frame`` keeps the resolve_points path (which returns an empty __pt_ frame).
+        self._use_point_ring = bool(self.point_specs)
+        self.point_ring: PointRing | None = None
 
     def _collect_stateful_specs(self) -> dict[str, dict[str, StatefulRegressor]]:
         specs: dict[str, dict[str, StatefulRegressor]] = {}
@@ -700,11 +710,17 @@ class IncrementalEngine:
         self.symbols = sorted(index)
         self.state = WindowedSumState(self.symbols, self.windows, len(self.value_cols))
         self._seed_stateful(buffer_frame)
+        if self._use_point_ring:
+            # Seed the point ring by folding every buffered minute (== resolve_points over the buffer at each
+            # minute, carried), so the live ring state == the backfill points the instant seed returns.
+            self.point_ring = PointRing(self.symbols, self.point_specs)
         for minute in sorted(buffer_frame["minute"].unique()):
             minute_epoch = int(minute.timestamp())
             self._roll_time_origin(minute_epoch)
             self.state.update(minute_epoch, self._matrix_at(buffer_frame, minute, slice_derive=slice_derive))
             self.state.trim()
+            if self.point_ring is not None:
+                self.point_ring.fold(buffer_frame.filter(pl.col("minute") == minute))
         # The internal invariants are cheap (O(windows)) and run by DEFAULT at init — a corrupted fold/expire
         # surfaces immediately, on every seed, not only on the warm-start path. The deep O(buffer) sum-vs-
         # buffer reconstruction is opt-in (FP_INCREMENT_DEEP_CHECK=1) so steady-state throughput is unaffected.
@@ -749,9 +765,7 @@ class IncrementalEngine:
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=slice_derive)
         long = self._running_long()
-        latest_frame = resolve_points(
-            self.groups, frame, latest
-        )  # points resolved over the whole buffer (lag-safe)
+        latest_frame = self._latest_frame(frame, latest)
         return assemble_from_long(
             self.groups, long, latest_frame, latest, self.plan, self.reg_plan, self.centered
         )
@@ -768,8 +782,19 @@ class IncrementalEngine:
             self._roll_time_origin(minute_epoch)
             self.state.update(minute_epoch, self._matrix_at(frame, latest, slice_derive=slice_derive))
             self.state.trim()
+            if self.point_ring is not None:
+                self.point_ring.fold(frame.filter(pl.col("minute") == latest))
         except SymbolSetExpanded:
             self.seed(frame, slice_derive=slice_derive)  # rebuild the index to include the new ticker(s)
+
+    def _latest_frame(self, frame: pl.DataFrame, latest: object) -> pl.DataFrame:
+        """The latest-minute ``__pt_<name>`` point frame ``assemble`` consumes — from the O(1) point ring when
+        ``FP_POINT_RING`` is armed (the carried state was folded in lockstep with the running sums), else the
+        per-minute whole-buffer ``resolve_points`` pass. Byte-identical (tests/test_fp_point_ring.py)."""
+        if self.point_ring is not None:
+            assert self.symbols is not None
+            return point_frame_from_ring(self.groups, self.point_ring, self.symbols, latest)
+        return resolve_points(self.groups, frame, latest)  # points over the whole buffer (lag-safe)
 
     def step_numpy(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
         """NUMPY-EMIT alternative to ``step``: fold the new minute, then assemble features DIRECTLY from the
@@ -780,9 +805,7 @@ class IncrementalEngine:
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=True)
         assert self.state is not None
-        latest_frame = resolve_points(
-            self.groups, frame, latest
-        )  # points resolved over the whole buffer (lag-safe)
+        latest_frame = self._latest_frame(frame, latest)
         return emit_numpy(
             self.groups,
             self.state.corrected(),
@@ -805,9 +828,7 @@ class IncrementalEngine:
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=True)
         assert self.state is not None
-        latest_frame = resolve_points(
-            self.groups, frame, latest
-        )  # points resolved over the whole buffer (lag-safe)
+        latest_frame = self._latest_frame(frame, latest)
         return emit_rust(
             self.groups, self.state.corrected(), self.symbols or [], self.asm_plan, latest_frame, latest
         )
@@ -821,9 +842,7 @@ class IncrementalEngine:
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=True)
         assert self.state is not None
-        latest_frame = resolve_points(
-            self.groups, frame, latest
-        )  # points resolved over the whole buffer (lag-safe)
+        latest_frame = self._latest_frame(frame, latest)
         return emit_rust_unified(
             self.groups, self.state.corrected(), self.symbols or [], self.asm_plan, latest_frame, latest
         )
