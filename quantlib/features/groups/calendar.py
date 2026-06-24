@@ -73,12 +73,29 @@ class CalendarGroup(FeatureGroup):
             minute_of_day.cast(pl.Float64).alias("minute_of_day_et"),
             et.dt.weekday().cast(pl.Float64).alias("day_of_week"),
             (minute_of_day - OPEN_MINUTE).cast(pl.Float64).alias("minutes_since_open"),
-            ((minute_of_day >= OPEN_MINUTE) & (minute_of_day < CLOSE_MINUTE)).cast(pl.Float64).alias(
-                "is_regular_session"
-            ),
+            ((minute_of_day >= OPEN_MINUTE) & (minute_of_day < CLOSE_MINUTE))
+            .cast(pl.Float64)
+            .alias("is_regular_session"),
         ]
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        return ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(self.exprs()).select(
-            ["symbol", "minute", "minute_of_day_et", "day_of_week", "minutes_since_open", "is_regular_session"]
+        return (
+            ctx.frame("minute_agg")
+            .select(["symbol", "minute"])
+            .with_columns(self.exprs())
+            .select(
+                [
+                    "symbol",
+                    "minute",
+                    "minute_of_day_et",
+                    "day_of_week",
+                    "minutes_since_open",
+                    "is_regular_session",
+                ]
+            )
         )
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        # Per-row function of the minute's timestamp — no cross-minute window, so compute ONLY the latest
+        # minute instead of the whole buffer (the default compute_latest). Parity-guarded by test_fp_latest.
+        return self.compute_latest_point_in_time(ctx)

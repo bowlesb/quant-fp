@@ -119,9 +119,13 @@ class FeatureSpec:
     valid_range: tuple[float | None, float | None] | None = None
     nan_policy: str = "none"  # "none" | "warmup" | "sparse"
     tolerance: float = 1e-6  # cell-level RELATIVE tolerance used by parity: |a-b| <= 1e-12 + tol*|b|
-    layer: str = "A"  # data layer (PARITY_PLAYBOOK §2): "A" minute bars | "B" minute tick-agg | "C" sub-minute ticks
+    layer: str = (
+        "A"  # data layer (PARITY_PLAYBOOK §2): "A" minute bars | "B" minute tick-agg | "C" sub-minute ticks
+    )
     parity_method: str = "tolerance"  # "tolerance" (cell rel-tol) | "distributional" (quantile match)
-    storage: str | None = None  # on-disk dtype, e.g. "Float32"|"UInt8"|"Int16"; None = derive (storage_dtype)
+    storage: str | None = (
+        None  # on-disk dtype, e.g. "Float32"|"UInt8"|"Int16"; None = derive (storage_dtype)
+    )
 
 
 # Integer-semantics features whose range/name don't match the flag rule — explicit smallest-int storage.
@@ -265,10 +269,7 @@ class FeatureGroup(ABC):
         (see momentum_run's ``compute_latest``, which derives the per-bar returns over the WHOLE buffer before
         the window slice). The generic parity test guards the dense case; the real-data audit guards the sparse
         case."""
-        sliced = {
-            name: self._slice_to_window(frame, lookback_minutes)
-            for name, frame in ctx.frames.items()
-        }
+        sliced = {name: self._slice_to_window(frame, lookback_minutes) for name, frame in ctx.frames.items()}
         out = self.compute(BatchContext(frames=sliced))
         if out.height == 0:
             return out
@@ -280,7 +281,8 @@ class FeatureGroup(ABC):
         pass through unchanged. A bar-grid frame keyed by ``minute`` slices on that column; a raw-tape frame
         keyed by ``ts`` (the trades feed — no ``minute`` column) slices on the trade timestamp, cutting at
         the START of the minute ``lookback_minutes`` before the last trade's minute so the WHOLE last minute
-        (and every trailing window minute) is kept intact. A frame with neither column passes through whole."""
+        (and every trailing window minute) is kept intact. A frame with neither column passes through whole.
+        """
         if frame.height == 0:
             return frame
         if "minute" in frame.columns:
@@ -293,6 +295,25 @@ class FeatureGroup(ABC):
             cutoff = last_minute - pl.duration(minutes=lookback_minutes)
             return frame.filter(pl.col("ts") >= cutoff)
         return frame
+
+    def compute_latest_point_in_time(self, ctx: BatchContext) -> pl.DataFrame:
+        """Parity-true fast ``compute_latest`` for a POINT-IN-TIME group — one whose ``compute`` is a per-row
+        function of the minute (calendar/session fields, a static reference join, round-number distances): run
+        the IDENTICAL ``compute`` on ``minute_agg`` pre-filtered to the LATEST minute, instead of computing
+        every buffered minute's row and discarding all but the last (the default ``compute_latest``).
+
+        Correct iff the group reads NO cross-minute window (each output row depends only on its own minute's
+        inputs) — then restricting the input to the latest minute cannot change that minute's output. The
+        generic parity test (tests/test_fp_latest.py) guards it: ``compute_latest`` must equal
+        ``compute().filter(last minute)``, so a group that secretly reads history fails loudly. Only
+        ``minute_agg`` is narrowed; static reference frames are passed through whole (they carry no minute).
+        """
+        minute_agg = ctx.frame("minute_agg")
+        latest = minute_agg["minute"].max()
+        scoped = BatchContext(
+            frames={**ctx.frames, "minute_agg": minute_agg.filter(pl.col("minute") == latest)}
+        )
+        return self.compute(scoped)
 
     @property
     def feature_names(self) -> list[str]:
@@ -362,7 +383,8 @@ class FeatureGroup(ABC):
 
         THE APPLIER USES THIS to stay KIND-AGNOSTIC: it swaps the code, then ``if not group.up_to_date(buffer):
         group.rebuild_from_history(buffer)`` — no DIRECT/RESEED/ESCALATE classification. DIRECT = the default True;
-        RESEED = a stateful override returns False → self-rebuild; irreducible = ``rebuild_from_history`` raises."""
+        RESEED = a stateful override returns False → self-rebuild; irreducible = ``rebuild_from_history`` raises.
+        """
         return True
 
     def rebuild_from_history(self, buffer: pl.DataFrame | None) -> None:
