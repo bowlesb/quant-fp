@@ -5,8 +5,6 @@ import type {
   LifecycleState,
   NewsEdgarComposition,
   NewsEdgarStream,
-  StatusGrid,
-  StatusRow,
   StoreGridMatrix,
 } from "./types";
 
@@ -62,26 +60,8 @@ export function fetchNewsEdgarComposition(): Promise<NewsEdgarComposition> {
   return getJson<NewsEdgarComposition>("/api/news-edgar/composition");
 }
 
-// The hourly Status tab. `fetchStatusGrid` reads the hour×workstream Progress/Blockers table (polled);
-// `postReaction` records Ben's reaction to a row (the input box's write path), returning the updated row.
-export function fetchStatusGrid(): Promise<StatusGrid> {
-  return getJson<StatusGrid>("/api/status-grid");
-}
-
 // The Lifecycle tab — the per-group certification-lifecycle state (UNVERIFIED → MONITORING → CERTIFIED →
 // TRUSTED). A short-TTL server cache backs it, so a poll every ~30s tracks the running monitor cheaply.
 export function fetchLifecycleState(): Promise<LifecycleState> {
   return getJson<LifecycleState>("/api/lifecycle-state");
-}
-
-export async function postReaction(hour: string, reaction: string): Promise<StatusRow> {
-  const res = await fetch("/api/status-grid/reaction", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ hour, reaction }),
-  });
-  if (!res.ok) {
-    throw new Error(`/api/status-grid/reaction -> ${res.status} ${res.statusText}`);
-  }
-  return (await res.json()) as StatusRow;
 }

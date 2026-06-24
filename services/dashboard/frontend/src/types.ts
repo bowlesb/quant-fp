@@ -234,30 +234,6 @@ export interface NewsEdgarComposition {
   cache_age_seconds: number;
 }
 
-// Shapes returned by /api/status-grid (services/dashboard/status_grid.py) — the hourly status table the Lead
-// synthesizes from the per-workstream ledgers + Ben's per-row reaction. `cells` maps each workstream column
-// to its concise Progress + Blockers for that hour.
-export interface StatusCell {
-  progress: string;
-  blockers: string;
-}
-
-export interface StatusRow {
-  hour: string; // "YYYY-MM-DDTHH:00Z" — one row per hour
-  created_at: string;
-  updated_at: string;
-  cells: Record<string, StatusCell>;
-  reaction: string;
-  reaction_at: string | null;
-}
-
-export interface StatusGrid {
-  schema_version: number;
-  workstreams: string[]; // the column order (Latency / Parity / Modeller / DataIntegrity / Maintainer / Warehouse / CD / Lead)
-  rows: StatusRow[]; // newest hour first
-  n_rows: number;
-}
-
 // Shapes returned by /api/lifecycle-state (services/dashboard/lifecycle_state.py) — the per-group
 // CERTIFICATION-LIFECYCLE state. Each feature-group's furthest stage on the staged progression
 // UNVERIFIED → MONITORING → CERTIFIED → TRUSTED, read off within_day_assignment + within_day_parity_cert +

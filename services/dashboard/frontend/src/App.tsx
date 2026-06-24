@@ -7,7 +7,6 @@ import { GroupDetailPanel } from "./GroupDetailPanel";
 import { LatencyView } from "./LatencyView";
 import { LifecycleView } from "./LifecycleView";
 import { NewsEdgarView } from "./NewsEdgarView";
-import { StatusView } from "./StatusView";
 
 // The worker rebuilds every 10 min; a 60s meta poll is plenty. The matrix blob is only re-fetched when its
 // generated_at advances.
@@ -15,16 +14,14 @@ const META_POLL_MS = 60_000;
 
 // The top-level views. The coverage grid stays the default; "lifecycle" is the per-group certification-
 // lifecycle state (UNVERIFIED → MONITORING → CERTIFIED → TRUSTED); "latency" is the additive #321 read-side
-// page; "news" is the News & Filings live-rate + store-composition tab; "status" is the Lead-owned hourly
-// status table (hour×workstream Progress/Blockers + Ben's per-row reaction).
-type View = "grid" | "lifecycle" | "latency" | "news" | "status";
+// page; "news" is the News & Filings live-rate + store-composition tab.
+type View = "grid" | "lifecycle" | "latency" | "news";
 
 const VIEW_TITLES: Record<View, string> = {
   grid: "Feature-store coverage",
   lifecycle: "Certification lifecycle",
   latency: "Feature latency expectations",
   news: "News & Filings",
-  status: "Hourly status",
 };
 
 function formatAsOf(generatedAt: string): string {
@@ -244,12 +241,6 @@ export function App() {
           >
             News &amp; Filings
           </button>
-          <button
-            className={`view-tab${view === "status" ? " active" : ""}`}
-            onClick={() => setView("status")}
-          >
-            Status
-          </button>
         </nav>
       </header>
 
@@ -257,8 +248,6 @@ export function App() {
         <LifecycleView />
       ) : view === "latency" ? (
         <LatencyView />
-      ) : view === "status" ? (
-        <StatusView />
       ) : view === "news" ? (
         <NewsEdgarView />
       ) : (
