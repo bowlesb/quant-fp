@@ -46,7 +46,8 @@ from quantlib.features.capture import CaptureState
 from quantlib.features.hot_swap import HotSwapResult
 from quantlib.features.registry import REGISTRY
 from quantlib.features.trust_policy import current_git_commit
-from quantlib.features.within_day_applier import (DeployJob, apply_in_running_loop,
+from quantlib.features.within_day_applier import (DeployJob,
+                                                  apply_in_running_loop,
                                                   apply_job)
 from quantlib.features.within_day_deploy_queue import QueuedJob, claim_next
 from quantlib.features.within_day_scope_guard import GateEvidence
@@ -83,9 +84,7 @@ class LiveSwapConfig:
 
 def _git(tree: str, *args: str) -> str:
     """Run a git command in ``tree`` and return stripped stdout (raises on non-zero — let it surface)."""
-    result = subprocess.run(
-        ["git", "-C", tree, *args], capture_output=True, text=True, check=True
-    )
+    result = subprocess.run(["git", "-C", tree, *args], capture_output=True, text=True, check=True)
     return result.stdout.strip()
 
 
@@ -96,24 +95,30 @@ def live_do_merge(job: DeployJob, config: LiveSwapConfig) -> None:
     if config.dry_run:
         logger.info(
             "DRY-RUN merge job=%d group=%s commit=%s tree=%s (no git)",
-            job.job_id, job.group_name, job.commit_sha, config.feature_tree,
+            job.job_id,
+            job.group_name,
+            job.commit_sha,
+            config.feature_tree,
         )
         return
     _git(config.feature_tree, "fetch", "origin", "--quiet")
     # Fast-forward ONLY — a non-ff (the live tree diverged) must NOT be force-moved silently; let it raise so
     # the applier escalates rather than clobbering a hand-pinned tree.
     _git(config.feature_tree, "merge", "--ff-only", job.commit_sha)
-    logger.info("MERGED job=%d group=%s commit=%s into live tree %s", job.job_id, job.group_name,
-                job.commit_sha, config.feature_tree)
+    logger.info(
+        "MERGED job=%d group=%s commit=%s into live tree %s",
+        job.job_id,
+        job.group_name,
+        job.commit_sha,
+        config.feature_tree,
+    )
 
 
 def live_do_swap(state: CaptureState, group_name: str, config: LiveSwapConfig) -> HotSwapResult:
     """The §3 minute-boundary hot-swap against the RUNNING CaptureState. The caller guarantees this runs
     BETWEEN minutes (the capture loop calls the seam after dispatch, before the next bar minute). Raises
     ``HotSwapError`` to escalate (fingerprint move / reseed-with-no-buffer)."""
-    return apply_in_running_loop(
-        state, group_name, registry=REGISTRY, seed_symbols=config.seed_symbols
-    )
+    return apply_in_running_loop(state, group_name, registry=REGISTRY, seed_symbols=config.seed_symbols)
 
 
 def live_confirm_tripwire(group_name: str, config: LiveSwapConfig) -> bool:
@@ -133,7 +138,9 @@ def live_confirm_tripwire(group_name: str, config: LiveSwapConfig) -> bool:
     )
 
 
-def live_rollback_swap(state: CaptureState, group_name: str, config: LiveSwapConfig, prior_commit: str) -> None:
+def live_rollback_swap(
+    state: CaptureState, group_name: str, config: LiveSwapConfig, prior_commit: str
+) -> None:
     """Symmetric single-group revert: fast-forward/reset the live tree back to ``prior_commit`` and re-swap
     the group so the registry holds the prior compute again. Contained to one group (§5.4 case 2)."""
     if config.dry_run:
@@ -206,22 +213,48 @@ def poll_and_apply_at_boundary(state: CaptureState, config: LiveSwapConfig) -> l
     prior_commit = current_git_commit() or "HEAD"
     outcomes: list[str] = []
     for _ in range(max(1, config.max_jobs_per_boundary)):
-        job = claim_next(dry_run=config.dry_run)
+        try:
+            job = claim_next(dry_run=config.dry_run)
+        except Exception as error:  # noqa: BLE001 — fail-safe: a claim error must never break capture
+            logger.error("BOUNDARY-APPLY claim_next failed (capture continues): %s", error)
+            outcomes.append(f"error: claim_next failed: {error}")
+            break
         if job is None:
             break
-        evidence = gather_live_evidence(job, config)
-        deploy_job = DeployJob(
-            job_id=job.job_id, group_name=job.group_name, agent_id=job.agent_id, commit_sha=job.commit_sha
-        )
-        outcome = apply_job(
-            deploy_job,
-            evidence=evidence,
-            do_swap=lambda group: live_do_swap(state, group, config),
-            do_merge=lambda dep_job: live_do_merge(dep_job, config),
-            confirm_tripwire=lambda group: live_confirm_tripwire(group, config),
-            rollback_swap=lambda group: live_rollback_swap(state, group, config, prior_commit),
-        )
-        within_day_deploy_run.record_outcome(outcome, job, dry_run=config.dry_run)
-        outcomes.append(f"job={job.job_id} group={job.group_name} -> {outcome.status} ({outcome.detail})")
-        logger.info("BOUNDARY-APPLY %s", outcomes[-1])
+        # ⭐ FAIL-SAFE: contain ANY exception from applying THIS job to the job. The seam runs INSIDE the
+        # capture loop (crypto_capture.on_bar / the equity process_bars boundary); an exception that escapes
+        # here reaches the capture stream and breaks it — the exact gap the zero-gap seam exists to prevent.
+        # So a bad job (a diverged tree, a transient DB error in the evidence/record path, an unexpected
+        # callback failure) is logged + recorded escalated and the loop moves on; capture is NEVER interrupted
+        # by a deploy attempt. ``apply_job`` already escalates the EXPECTED failures (merge fail, hot-swap
+        # refused, tripwire fail); this is defence-in-depth for the unexpected.
+        try:
+            evidence = gather_live_evidence(job, config)
+            deploy_job = DeployJob(
+                job_id=job.job_id,
+                group_name=job.group_name,
+                agent_id=job.agent_id,
+                commit_sha=job.commit_sha,
+            )
+            outcome = apply_job(
+                deploy_job,
+                evidence=evidence,
+                do_swap=lambda group: live_do_swap(state, group, config),
+                do_merge=lambda dep_job: live_do_merge(dep_job, config),
+                confirm_tripwire=lambda group: live_confirm_tripwire(group, config),
+                rollback_swap=lambda group: live_rollback_swap(state, group, config, prior_commit),
+            )
+            within_day_deploy_run.record_outcome(outcome, job, dry_run=config.dry_run)
+            outcomes.append(
+                f"job={job.job_id} group={job.group_name} -> {outcome.status} ({outcome.detail})"
+            )
+            logger.info("BOUNDARY-APPLY %s", outcomes[-1])
+        except Exception as error:  # noqa: BLE001 — fail-safe: a deploy attempt must never break capture
+            logger.error(
+                "BOUNDARY-APPLY job=%d group=%s unexpected error (capture continues): %s",
+                job.job_id,
+                job.group_name,
+                error,
+            )
+            outcomes.append(f"job={job.job_id} group={job.group_name} -> error: {error}")
     return outcomes
