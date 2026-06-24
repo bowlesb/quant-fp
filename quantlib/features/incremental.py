@@ -45,10 +45,53 @@ from quantlib.features.declarative import (
     emit_rust_unified,
     resolve_points,
 )
+from quantlib.features.metrics import record_emit_numpy_parity
 from quantlib.features.point_ring import PointRing, point_frame_from_ring, point_specs
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
+
+_EMIT_NUMPY_ABS_TOL = 1e-12
+
+
+def _record_emit_numpy_parity(
+    numpy_out: dict[str, pl.DataFrame], truth_out: dict[str, pl.DataFrame]
+) -> None:
+    """The FP_EMIT_NUMPY_PARITY shadow comparison (monitoring-only): compare the served ``emit_numpy`` output
+    to the polars ``assemble_from_long`` TRUTH, per group's feature frame, with a NULL-MASK-AWARE verdict.
+
+    The null-vs-NaN divergence the ``fill_nan(None)`` fix addresses is INVISIBLE to a value-only compare (a
+    NaN-tolerant ``abs(a-b)`` treats null and NaN as equal), so the verdict checks BOTH, per feature column:
+    (a) the ``is_null`` masks are EQUAL, AND (b) ``abs(a-b) <= 1e-12`` on ``fill_null(0)``. A breach is EITHER
+    a null-mask mismatch OR a value mismatch — this is a DIFFERENT verdict from FP_POINT_RING_PARITY's (there
+    exact value + symbol-coverage sufficed; here the null mask is the load-bearing check). Never raises (a
+    shadow must never crash capture); records the worst abs diff + a breach flag."""
+    breached = False
+    max_abs_diff = 0.0
+    for name, served in numpy_out.items():
+        truth = truth_out.get(name)
+        if truth is None:
+            breached = True
+            max_abs_diff = float("inf")
+            continue
+        a = served.sort("symbol")
+        b = truth.sort("symbol").select(a.columns)
+        for col in a.columns:
+            if col in ("symbol", "minute") or a.schema[col] != pl.Float64:
+                continue
+            a_null = a[col].is_null().to_numpy()
+            b_null = b[col].is_null().to_numpy()
+            if not np.array_equal(a_null, b_null):  # the null-vs-NaN check the value compare would miss
+                breached = True
+                max_abs_diff = float("inf")
+                continue
+            diff = a[col].fill_null(0.0).to_numpy() - b[col].fill_null(0.0).to_numpy()
+            if diff.size:
+                col_max = float(np.abs(diff).max())
+                max_abs_diff = max(max_abs_diff, col_max)
+                if col_max > _EMIT_NUMPY_ABS_TOL:
+                    breached = True
+    record_emit_numpy_parity(max_abs_diff, breached=breached)
 
 
 class IncrementUnderfilled(Exception):
@@ -464,6 +507,16 @@ class IncrementalEngine:
         # to ring, and ``_latest_frame`` keeps the resolve_points path (which returns an empty __pt_ frame).
         self._use_point_ring = bool(self.point_specs)
         self.point_ring: PointRing | None = None
+        # FP_EMIT_NUMPY: assemble from the running-sum numpy array (emit_numpy) instead of the per-group polars
+        # pivot loop (assemble_from_long). Same fold + same latest_frame; only the assemble representation
+        # differs — byte-identical (tests/test_fp_incremental_emit.py). OFF by default (polars assemble path).
+        self._use_emit_numpy = os.environ.get("FP_EMIT_NUMPY") == "1"
+        # FP_EMIT_NUMPY_PARITY: MONITORING-ONLY self-check (NOT a gate), default OFF, only when emit_numpy is
+        # served. Also run the polars assemble_from_long TRUTH each minute and record the divergence — with a
+        # NULL-MASK-AWARE verdict (the null-vs-NaN bug fill_nan(None) fixes is invisible to a value-only
+        # compare). The served output stays emit_numpy's; the revert on a sustained breach is an ops action off
+        # the metric. A DISTINCT shadow from FP_POINT_RING_PARITY (different verdict, own metric).
+        self._emit_numpy_parity = self._use_emit_numpy and os.environ.get("FP_EMIT_NUMPY_PARITY") == "1"
 
     def _collect_stateful_specs(self) -> dict[str, dict[str, StatefulRegressor]]:
         specs: dict[str, dict[str, StatefulRegressor]] = {}
@@ -764,8 +817,41 @@ class IncrementalEngine:
         resolved)."""
         latest = frame["minute"].max()
         self._fold_latest(frame, latest, slice_derive=slice_derive)
-        long = self._running_long()
         latest_frame = self._latest_frame(frame, latest)
+        if self._use_emit_numpy:
+            # FP_EMIT_NUMPY: assemble the canonical/OLS columns DIRECTLY from the running-sum numpy array
+            # (emit_numpy) instead of the per-group polars pivot loop (assemble_from_long over _running_long).
+            # Parity-true by construction — emit_numpy uses the IDENTICAL canonical/OLS algebra (guarded
+            # cell-for-cell by tests/test_fp_incremental_emit.py + the engine on-vs-off test). Both paths share
+            # the SAME _fold_latest above and the SAME latest_frame, so only the assemble representation changes.
+            assert self.state is not None
+            numpy_out = emit_numpy(
+                self.groups,
+                self.state.corrected(),
+                self.symbols or [],
+                self.windows,
+                self.col_index,
+                latest_frame,
+                latest,
+                self.plan,
+                self.reg_plan,
+                self.centered,
+            )
+            if self._emit_numpy_parity:
+                # MONITORING-ONLY shadow: compare emit_numpy to the polars assemble_from_long truth, null-mask
+                # aware. The served value is STILL numpy_out — this never alters it.
+                truth = assemble_from_long(
+                    self.groups,
+                    self._running_long(),
+                    latest_frame,
+                    latest,
+                    self.plan,
+                    self.reg_plan,
+                    self.centered,
+                )
+                _record_emit_numpy_parity(numpy_out, truth)
+            return numpy_out
+        long = self._running_long()
         return assemble_from_long(
             self.groups, long, latest_frame, latest, self.plan, self.reg_plan, self.centered
         )

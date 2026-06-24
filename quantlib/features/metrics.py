@@ -8,7 +8,7 @@ the prior Edgar system's FEATURE_GROUP_DURATION histogram.
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 # Buckets span 0.5ms .. 2.5s — the range a per-group live compute can plausibly take at shard scale.
 GROUP_COMPUTE_SECONDS = Histogram(
@@ -137,6 +137,17 @@ INCREMENTAL_PARITY_BREACH = Counter(
     ["reduce_input"],
 )
 
+EMIT_NUMPY_BREACH = Counter(
+    "feature_emit_numpy_breach_total",
+    "Minutes where the emit_numpy assemble diverged from the polars assemble_from_long truth "
+    "(FP_EMIT_NUMPY_PARITY self-check) — either a NULL-MASK mismatch (the null-vs-NaN bug, invisible to a "
+    "value-only compare) or a value mismatch beyond 1e-12 absolute, per feature column",
+)
+EMIT_NUMPY_MAX_ABS_DIFF = Gauge(
+    "feature_emit_numpy_max_abs_diff",
+    "Worst per-minute absolute feature-cell divergence between emit_numpy and assemble_from_long (0.0 clean)",
+)
+
 
 # Ingestion-rate counters, incremented in the READER process per message off the websocket and exposed on
 # the reader's own /metrics port, so `rate(feature_*_ingested_total[1m])` gives bars/trades/quotes per
@@ -153,6 +164,15 @@ def record_incremental_parity(reduce_input: str, tol_ratio: float, breached: boo
     INCREMENTAL_PARITY_TOL_RATIO.labels(reduce_input=reduce_input).observe(tol_ratio)
     if breached:
         INCREMENTAL_PARITY_BREACH.labels(reduce_input=reduce_input).inc()
+
+
+def record_emit_numpy_parity(max_abs_diff: float, breached: bool) -> None:
+    """Observe one minute's emit_numpy-vs-assemble_from_long self-check (FP_EMIT_NUMPY_PARITY): the worst
+    absolute feature-cell divergence, and whether it breached (a NULL-MASK mismatch OR a value > 1e-12).
+    MONITORING-ONLY — the served output is still emit_numpy's."""
+    EMIT_NUMPY_MAX_ABS_DIFF.set(max_abs_diff)
+    if breached:
+        EMIT_NUMPY_BREACH.inc()
 
 
 def record_group_timings(timings: dict[str, float]) -> None:
