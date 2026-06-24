@@ -202,9 +202,7 @@ class SectorBetaGroup(FeatureGroup):
         time-based window, same power-sum algebra)."""
         paired = self._paired(ctx)
         base = (
-            paired.filter(pl.col("minute") == latest)
-            .select(["symbol", "minute", "_sector"])
-            .sort("symbol")
+            paired.filter(pl.col("minute") == latest).select(["symbol", "minute", "_sector"]).sort("symbol")
         )
         is_unknown = pl.col("_sector") == UNKNOWN_SECTOR
         for window in WINDOWS:
@@ -224,7 +222,12 @@ class SectorBetaGroup(FeatureGroup):
                 )
             )
             beta_raw, corr_raw = self._ols_from_sums(
-                pl.col("__n"), pl.col("__sx"), pl.col("__sy"), pl.col("__sxx"), pl.col("__syy"), pl.col("__sxy")
+                pl.col("__n"),
+                pl.col("__sx"),
+                pl.col("__sy"),
+                pl.col("__sxx"),
+                pl.col("__syy"),
+                pl.col("__sxy"),
             )
             piece = sums.select(
                 "symbol",
@@ -279,9 +282,10 @@ class SectorBetaGroup(FeatureGroup):
         return self._assemble(ctx, minute_keys)
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE gather. The OLS at T reads only the trailing ``window`` minutes of paired returns,
-        so running the identical rolling form over the whole buffer and emitting T's row is parity-true; the
-        window slice is left to compute_latest_on_window callers. Here we emit T's rows from the same
-        _assemble (parity-guarded == compute().last by tests/test_fp_latest)."""
-        latest = ctx.frame("minute_agg")["minute"].max()
-        return self._assemble_latest(ctx, latest)
+        """LATEST-MINUTE gather. The OLS at T reads only the trailing ``window`` minutes of paired returns (+
+        the one prior bar each one-minute return needs at the window's start), so slice the buffer to that
+        trailing window and run the SAME rolling form (compute_latest_on_window) instead of running it over the
+        WHOLE buffer and emitting only T's row. The ``reference`` sector map (no ``minute`` column) passes
+        through the slice whole. Slices to the SAME depth ``reduce_buffer_minutes`` declares
+        (``max(WINDOWS) + WARMUP_SLACK``). Parity-true by construction + generic-guarded (tests/test_fp_latest)."""
+        return self.compute_latest_on_window(ctx, max(WINDOWS) + WARMUP_SLACK)

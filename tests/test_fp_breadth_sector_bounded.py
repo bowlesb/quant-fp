@@ -21,6 +21,10 @@ import polars as pl
 from quantlib.features.base import BatchContext
 from quantlib.features.groups.breadth import MINUTE_WINDOWS as BREADTH_WINDOWS
 from quantlib.features.groups.breadth import BreadthGroup
+from quantlib.features.groups.market_turbulence import ABSRET_WINDOWS as TURB_WINDOWS
+from quantlib.features.groups.market_turbulence import MarketTurbulenceGroup
+from quantlib.features.groups.sector_beta import WINDOWS as SECTOR_BETA_WINDOWS
+from quantlib.features.groups.sector_beta import SectorBetaGroup
 from quantlib.features.groups.sector_return import MINUTE_WINDOWS as SECTOR_WINDOWS
 from quantlib.features.groups.sector_return import SectorReturnGroup
 
@@ -113,3 +117,20 @@ def test_sector_return_bounded_equals_whole_buffer_sparse() -> None:
     group = SectorReturnGroup()
     _assert_equal(_whole_buffer_latest(group, ctx), group.compute_latest(ctx), "sector_return")
     assert max(SECTOR_WINDOWS) + 1 >= max(SECTOR_WINDOWS)
+
+
+def test_sector_beta_bounded_equals_whole_buffer_sparse() -> None:
+    stream = _sparse_minute_agg(n_sym=40, n_min=160, gap_period=7, gap_fraction=0.4, seed=17)
+    symbols = sorted(stream["symbol"].unique().to_list())
+    ctx = BatchContext(frames={"minute_agg": stream, "reference": _reference(symbols)})
+    group = SectorBetaGroup()
+    _assert_equal(_whole_buffer_latest(group, ctx), group.compute_latest(ctx), "sector_beta")
+    assert max(SECTOR_BETA_WINDOWS) + 1 >= max(SECTOR_BETA_WINDOWS)
+
+
+def test_market_turbulence_bounded_equals_whole_buffer_sparse() -> None:
+    stream = _sparse_minute_agg(n_sym=40, n_min=160, gap_period=7, gap_fraction=0.4, seed=19)
+    ctx = BatchContext(frames={"minute_agg": stream})
+    group = MarketTurbulenceGroup()
+    _assert_equal(_whole_buffer_latest(group, ctx), group.compute_latest(ctx), "market_turbulence")
+    assert max(TURB_WINDOWS) + 1 >= max(TURB_WINDOWS)
