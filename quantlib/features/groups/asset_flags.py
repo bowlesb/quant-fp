@@ -35,7 +35,9 @@ class AssetFlagsGroup(FeatureGroup):
     type = FeatureType.REFERENCE
     inputs = (
         InputSpec(name="minute_agg", columns=("symbol", "minute")),
-        InputSpec(name="reference", columns=("symbol", "shortable", "easy_to_borrow", "marginable", "fractionable")),
+        InputSpec(
+            name="reference", columns=("symbol", "shortable", "easy_to_borrow", "marginable", "fractionable")
+        ),
     )
 
     def declare(self) -> list[FeatureSpec]:
@@ -46,8 +48,14 @@ class AssetFlagsGroup(FeatureGroup):
             "is_fractionable": "1.0 when the broker supports fractional-share trading of the symbol, else 0.0.",
         }
         return [
-            FeatureSpec(name=feature, description=descriptions[feature], dtype="Float64",
-                        valid_range=(-0.01, 1.01), nan_policy="sparse", layer="A")
+            FeatureSpec(
+                name=feature,
+                description=descriptions[feature],
+                dtype="Float64",
+                valid_range=(-0.01, 1.01),
+                nan_policy="sparse",
+                layer="A",
+            )
             for feature, _ in FLAGS
         ]
 
@@ -66,3 +74,9 @@ class AssetFlagsGroup(FeatureGroup):
         joined = minutes.join(self.reference_flags(ctx), on="symbol", how="left")
         names = [feature for feature, _ in FLAGS]
         return joined.with_columns(self.exprs()).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        # A static reference join per minute (the asset flags are fixed all day) — no cross-minute window, so
+        # compute ONLY the latest minute instead of the whole buffer. The reference frame (no ``minute``)
+        # passes through whole. Parity-guarded by test_fp_latest.
+        return self.compute_latest_point_in_time(ctx)
