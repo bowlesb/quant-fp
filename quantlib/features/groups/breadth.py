@@ -82,42 +82,60 @@ class BreadthGroup(FeatureGroup):
                 FeatureSpec(
                     name=f"breadth_up_{tag}",
                     description=f"Fraction of the universe whose return over {tag} is up (> +1bp dead-band); a market-wide scalar broadcast to every ticker.",
-                    dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="sparse", layer="A",
+                    dtype="Float64",
+                    valid_range=(-0.01, 1.01),
+                    nan_policy="sparse",
+                    layer="A",
                 )
             )
             specs.append(
                 FeatureSpec(
                     name=f"breadth_down_{tag}",
                     description=f"Fraction of the universe whose return over {tag} is down (< -1bp dead-band); a market-wide scalar broadcast to every ticker.",
-                    dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="sparse", layer="A",
+                    dtype="Float64",
+                    valid_range=(-0.01, 1.01),
+                    nan_policy="sparse",
+                    layer="A",
                 )
             )
             specs.append(
                 FeatureSpec(
                     name=f"breadth_net_{tag}",
                     description=f"Net market breadth over {tag}: up fraction minus down fraction of the universe, broadcast to every ticker (positive = more up than down).",
-                    dtype="Float64", valid_range=(-1.01, 1.01), nan_policy="sparse", layer="A",
+                    dtype="Float64",
+                    valid_range=(-1.01, 1.01),
+                    nan_policy="sparse",
+                    layer="A",
                 )
             )
             specs.append(
                 FeatureSpec(
                     name=f"sector_breadth_up_{tag}",
                     description=f"Fraction of THIS ticker's sector whose return over {tag} is up (> +1bp dead-band), joined onto the ticker by its sector.",
-                    dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="sparse", layer="A",
+                    dtype="Float64",
+                    valid_range=(-0.01, 1.01),
+                    nan_policy="sparse",
+                    layer="A",
                 )
             )
             specs.append(
                 FeatureSpec(
                     name=f"sector_breadth_down_{tag}",
                     description=f"Fraction of THIS ticker's sector whose return over {tag} is down (< -1bp dead-band), joined onto the ticker by its sector.",
-                    dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="sparse", layer="A",
+                    dtype="Float64",
+                    valid_range=(-0.01, 1.01),
+                    nan_policy="sparse",
+                    layer="A",
                 )
             )
             specs.append(
                 FeatureSpec(
                     name=f"sector_breadth_net_{tag}",
                     description=f"Net breadth within THIS ticker's sector over {tag}: up fraction minus down fraction of the sector, joined onto the ticker by its sector.",
-                    dtype="Float64", valid_range=(-1.01, 1.01), nan_policy="sparse", layer="A",
+                    dtype="Float64",
+                    valid_range=(-1.01, 1.01),
+                    nan_policy="sparse",
+                    layer="A",
                 )
             )
         return specs
@@ -134,15 +152,18 @@ class BreadthGroup(FeatureGroup):
 
     def _sector_map(self, ctx: BatchContext) -> pl.DataFrame:
         """Per-symbol normalized sector, with null/blank → the UNKNOWN bucket (never dropped)."""
-        norm = (
-            pl.col("sector").str.to_lowercase().str.replace_all(" ", "_")
+        norm = pl.col("sector").str.to_lowercase().str.replace_all(" ", "_")
+        return (
+            ctx.frame("reference")
+            .select(["symbol", "sector"])
+            .with_columns(
+                pl.when(pl.col("sector").is_null() | (pl.col("sector").str.strip_chars() == ""))
+                .then(pl.lit(UNKNOWN_SECTOR))
+                .otherwise(norm)
+                .alias("_sector")
+            )
+            .select(["symbol", "_sector"])
         )
-        return ctx.frame("reference").select(["symbol", "sector"]).with_columns(
-            pl.when(pl.col("sector").is_null() | (pl.col("sector").str.strip_chars() == ""))
-            .then(pl.lit(UNKNOWN_SECTOR))
-            .otherwise(norm)
-            .alias("_sector")
-        ).select(["symbol", "_sector"])
 
     def _pin_universe(self, ctx: BatchContext, returns: pl.DataFrame) -> pl.DataFrame:
         """Pin the per-(symbol, minute, window) returns to the day's universe membership when provided,
@@ -162,7 +183,10 @@ class BreadthGroup(FeatureGroup):
             frame = lagged(frame, "close", window, f"_lag{window}")
         frame = frame.sort(["symbol", "minute"])
         return frame.with_columns(
-            [(pl.col("close") / pl.col(f"_lag{window}") - 1.0).alias(f"_ret_{_window_tag(window, False)}") for window in MINUTE_WINDOWS]
+            [
+                (pl.col("close") / pl.col(f"_lag{window}") - 1.0).alias(f"_ret_{_window_tag(window, False)}")
+                for window in MINUTE_WINDOWS
+            ]
         ).select(["symbol", "minute", *[f"_ret_{_window_tag(w, False)}" for w in MINUTE_WINDOWS]])
 
     def _daily_returns(self, ctx: BatchContext) -> pl.DataFrame:
@@ -183,10 +207,17 @@ class BreadthGroup(FeatureGroup):
         daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
         return daily.with_columns(
-            [(pl.col("_asof") / pl.col("_asof").shift(window).over("symbol") - 1.0).alias(f"_ret_{_window_tag(window, True)}") for window in DAY_WINDOWS]
+            [
+                (pl.col("_asof") / pl.col("_asof").shift(window).over("symbol") - 1.0).alias(
+                    f"_ret_{_window_tag(window, True)}"
+                )
+                for window in DAY_WINDOWS
+            ]
         ).select(["symbol", "date", *[f"_ret_{_window_tag(w, True)}" for w in DAY_WINDOWS]])
 
-    def _reduce(self, returns: pl.DataFrame, sector_map: pl.DataFrame, tags: list[str]) -> tuple[pl.DataFrame, pl.DataFrame]:
+    def _reduce(
+        self, returns: pl.DataFrame, sector_map: pl.DataFrame, tags: list[str]
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
         """The GATHER: from per-(symbol, minute) returns, compute the market scalar per (minute, tag) and
         the sector scalar per (minute, sector, tag). Each ``up``/``down`` is a mean of the dead-band sign
         over names with a VALID return that minute (nulls auto-excluded by polars mean). Returns
@@ -205,10 +236,18 @@ class BreadthGroup(FeatureGroup):
         market = with_sector.group_by("minute").agg(market_aggs)
         sector = with_sector.group_by(["minute", "_sector"]).agg(sector_aggs)
         market = market.with_columns(
-            [(pl.col(f"breadth_up_{tag}") - pl.col(f"breadth_down_{tag}")).alias(f"breadth_net_{tag}") for tag in tags]
+            [
+                (pl.col(f"breadth_up_{tag}") - pl.col(f"breadth_down_{tag}")).alias(f"breadth_net_{tag}")
+                for tag in tags
+            ]
         )
         sector = sector.with_columns(
-            [(pl.col(f"sector_breadth_up_{tag}") - pl.col(f"sector_breadth_down_{tag}")).alias(f"sector_breadth_net_{tag}") for tag in tags]
+            [
+                (pl.col(f"sector_breadth_up_{tag}") - pl.col(f"sector_breadth_down_{tag}")).alias(
+                    f"sector_breadth_net_{tag}"
+                )
+                for tag in tags
+            ]
         )
         return market, sector
 
@@ -248,10 +287,10 @@ class BreadthGroup(FeatureGroup):
         return self._assemble(ctx, minute_keys)
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE gather: the breadth at minute T depends only on THAT minute's per-symbol returns,
-        so the reduce is identical to compute() — we just emit only the latest minute's rows. The minute
-        returns are still built over the buffer (lagged join), then the reduce + broadcast run unchanged,
-        so compute_latest == compute().last by construction (parity-guarded by tests/test_fp_latest)."""
-        minute_keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = minute_keys["minute"].max()
-        return self._assemble(ctx, minute_keys.filter(pl.col("minute") == latest))
+        """LATEST-MINUTE gather: the breadth at minute T depends only on THAT minute's cross-section, and the
+        intraday returns feeding it read at most ``max(MINUTE_WINDOWS)`` minutes back — so slice the buffer to
+        that trailing window and run the SAME reduce (compute_latest_on_window) instead of building returns
+        over the WHOLE buffer and discarding all but the latest minute. The daily horizons read the
+        session-cached daily snapshot (keyed by ``date``, no ``minute`` column), which passes through the slice
+        whole. Parity-true by construction + generic-guarded (tests/test_fp_latest)."""
+        return self.compute_latest_on_window(ctx, max(MINUTE_WINDOWS) + 1)
