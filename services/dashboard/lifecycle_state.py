@@ -33,12 +33,27 @@ import psycopg
 
 from feature_grid import _catalog_by_group  # registry feature -> group map (read-side helper)
 
-# The four lifecycle stages, lowest -> highest. A group's reported stage is the highest it has reached.
+# The lifecycle stages, MOST-outstanding -> most-advanced. A group's reported stage is the furthest it has
+# reached, EXCEPT a still-broken idle group is held at DIVERGENT (it failed a clean-day parity check and no
+# owner/cert has lifted it since) so the panel separates "broken, needs a fix-it owner" from "never started".
+STAGE_DIVERGENT = "divergent"
 STAGE_UNVERIFIED = "unverified"
 STAGE_MONITORING = "monitoring"
 STAGE_CERTIFIED = "certified"
 STAGE_TRUSTED = "trusted"
-STAGE_ORDER: list[str] = [STAGE_UNVERIFIED, STAGE_MONITORING, STAGE_CERTIFIED, STAGE_TRUSTED]
+STAGE_ORDER: list[str] = [
+    STAGE_DIVERGENT,
+    STAGE_UNVERIFIED,
+    STAGE_MONITORING,
+    STAGE_CERTIFIED,
+    STAGE_TRUSTED,
+]
+
+# feature_trust.lifecycle_state values the nightly clean-day sweep writes (quantlib/features/trust_lifecycle).
+# DIVERGENT = the feature failed a clean-day parity check; this is the one we surface as a distinct stage so a
+# broken-but-idle group stops hiding inside UNVERIFIED. The others are progress states the trust_state grant
+# (read separately) already reflects, so we need only the DIVERGENT set here.
+LIFECYCLE_DIVERGENT = "DIVERGENT"
 
 # An assignment lock older than this with no heartbeat is treated as stale (matches the lifecycle's own
 # dead-agent reclaim intent in db/init/14); we still show it, flagged stale, rather than as live MONITORING.
@@ -89,6 +104,7 @@ class GroupLifecycle:
     stage: str
     n_features: int
     n_trusted: int
+    n_divergent: int  # features that failed a clean-day parity check (lifecycle_state DIVERGENT)
     fully_trusted: bool
     # MONITORING evidence (the active assignment lock), if any.
     owner: str | None
@@ -214,6 +230,14 @@ def read_trusted_features(conn: psycopg.Connection) -> set[str]:
         return {str(row[0]) for row in cur.fetchall()}
 
 
+def read_divergent_features(conn: psycopg.Connection) -> set[str]:
+    """{feature} that FAILED a clean-day parity check (feature_trust.lifecycle_state = 'DIVERGENT') — broken,
+    waiting on a fix. Surfaced so a stalled-and-divergent group is told apart from a never-started one."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT feature FROM feature_trust WHERE lifecycle_state = %s", (LIFECYCLE_DIVERGENT,))
+        return {str(row[0]) for row in cur.fetchall()}
+
+
 def _active_owner(assignment: AssignmentRow | None) -> bool:
     """An assignment counts as a LIVE MONITORING owner only when it is ``active`` and not stale."""
     return assignment is not None and assignment.status == "active" and not assignment.stale
@@ -224,10 +248,12 @@ def build_group_lifecycles(
     assignments: list[AssignmentRow],
     certs: dict[str, CertRow],
     trusted_features: set[str],
+    divergent_features: set[str] | None = None,
 ) -> list[GroupLifecycle]:
     """Assemble each registry group's furthest lifecycle STAGE + the evidence behind it. Pure (no DB), so the
     staged-progression logic is unit-tested without a database. Groups are returned trusted-last (the
     progression order: most work outstanding first), then alphabetically within a stage."""
+    divergent_features = divergent_features or set()
     # Keep only the freshest assignment per group (read_assignments is newest-first).
     assignment_by_group: dict[str, AssignmentRow] = {}
     for assignment in assignments:
@@ -239,19 +265,24 @@ def build_group_lifecycles(
         feature_names = [str(record["feature"]) for record in features]
         n_features = len(feature_names)
         n_trusted = sum(1 for name in feature_names if name in trusted_features)
+        n_divergent = sum(1 for name in feature_names if name in divergent_features)
         fully_trusted = n_features > 0 and n_trusted == n_features
 
         assignment = assignment_by_group.get(group)
         cert = certs.get(group)
 
         # The stage is the FURTHEST point reached. TRUSTED is terminal; else CERTIFIED if the latest within-day
-        # verdict is certified; else MONITORING if a live owner holds the lock; else UNVERIFIED.
+        # verdict is certified; else MONITORING if a live owner holds the lock; else DIVERGENT if the group has
+        # a feature that failed a clean-day parity check and nothing has lifted it since (broken-and-idle, not
+        # never-started); else UNVERIFIED.
         if fully_trusted:
             stage = STAGE_TRUSTED
         elif cert is not None and cert.status == "certified":
             stage = STAGE_CERTIFIED
         elif _active_owner(assignment):
             stage = STAGE_MONITORING
+        elif n_divergent > 0:
+            stage = STAGE_DIVERGENT
         else:
             stage = STAGE_UNVERIFIED
 
@@ -261,6 +292,7 @@ def build_group_lifecycles(
                 stage=stage,
                 n_features=n_features,
                 n_trusted=n_trusted,
+                n_divergent=n_divergent,
                 fully_trusted=fully_trusted,
                 owner=assignment.agent_id if assignment is not None else None,
                 owner_status=assignment.status if assignment is not None else None,
@@ -292,9 +324,13 @@ def _build_snapshot() -> dict[str, object]:
         assignments = read_assignments(conn)
         certs = read_latest_certs(conn)
         trusted_features = read_trusted_features(conn)
-    groups = build_group_lifecycles(catalog_by_group, assignments, certs, trusted_features)
+        divergent_features = read_divergent_features(conn)
+    groups = build_group_lifecycles(
+        catalog_by_group, assignments, certs, trusted_features, divergent_features
+    )
     total_features = sum(group.n_features for group in groups)
     total_trusted = sum(group.n_trusted for group in groups)
+    total_divergent = sum(group.n_divergent for group in groups)
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "stage_order": STAGE_ORDER,
@@ -302,6 +338,7 @@ def _build_snapshot() -> dict[str, object]:
         "n_groups": len(groups),
         "n_features": total_features,
         "n_trusted_features": total_trusted,
+        "n_divergent_features": total_divergent,
         "active_owners": [
             asdict(assignment) for assignment in assignments if _active_owner(assignment)
         ],

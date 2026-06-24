@@ -14,6 +14,7 @@ import type { LifecycleGroup, LifecycleStage, LifecycleState } from "./types";
 const LIFECYCLE_POLL_MS = 30_000;
 
 const STAGE_LABEL: Record<LifecycleStage, string> = {
+  divergent: "Divergent",
   unverified: "Unverified",
   monitoring: "Monitoring",
   certified: "Certified (intraday)",
@@ -22,6 +23,7 @@ const STAGE_LABEL: Record<LifecycleStage, string> = {
 
 // A one-line "what this stage means" the header chips carry as a title (the staged story in plain words).
 const STAGE_BLURB: Record<LifecycleStage, string> = {
+  divergent: "a feature failed a clean-day parity check and nothing has lifted it since — needs a fix-it owner",
   unverified: "no owner, no within-day cert yet",
   monitoring: "a subagent owns the lock and is comparing live==backfill on the settled window",
   certified: "the within-day intraday window matched, held stable — pending a full clean day",
@@ -51,16 +53,17 @@ function formatAgo(iso: string | null): string {
 const STAGE_SEQUENCE: LifecycleStage[] = ["unverified", "monitoring", "certified", "trusted"];
 
 function StagePipeline({ stage }: { stage: LifecycleStage }) {
-  const reached = STAGE_SEQUENCE.indexOf(stage);
+  // DIVERGENT is not a progress step on the linear path — it is a broken state sitting at the unverified
+  // depth. Render its first dot in a distinct "broken" style and light no further dots.
+  const divergent = stage === "divergent";
+  const reached = divergent ? 0 : STAGE_SEQUENCE.indexOf(stage);
   return (
     <div className="lc-pipeline" title={`${STAGE_LABEL[stage]} — ${STAGE_BLURB[stage]}`}>
-      {STAGE_SEQUENCE.map((step, idx) => (
-        <span
-          key={step}
-          className={`lc-dot lc-dot-${step}${idx <= reached ? " on" : ""}`}
-          title={STAGE_LABEL[step]}
-        />
-      ))}
+      {STAGE_SEQUENCE.map((step, idx) => {
+        const broken = divergent && idx === 0;
+        const cls = broken ? "lc-dot lc-dot-divergent on" : `lc-dot lc-dot-${step}${idx <= reached ? " on" : ""}`;
+        return <span key={step} className={cls} title={broken ? STAGE_LABEL.divergent : STAGE_LABEL[step]} />;
+      })}
     </div>
   );
 }
@@ -110,6 +113,14 @@ function GroupRow({ group }: { group: LifecycleGroup }) {
             {group.n_trusted}/{group.n_features}
           </span>
         </div>
+        {group.n_divergent > 0 && (
+          <span
+            className="lc-divergent-tag"
+            title={`${group.n_divergent} of this group's features failed a clean-day parity check (broken, waiting on a fix)`}
+          >
+            {group.n_divergent} divergent
+          </span>
+        )}
       </td>
     </tr>
   );
@@ -174,6 +185,9 @@ export function LifecycleView() {
         </div>
         <div className="lc-submeta">
           {data.n_groups} groups · {data.n_trusted_features}/{data.n_features} features trusted ·{" "}
+          {data.n_divergent_features > 0 && (
+            <span className="lc-submeta-divergent">{data.n_divergent_features} divergent · </span>
+          )}
           {data.active_owners.length} active owner{data.active_owners.length === 1 ? "" : "s"} · as of{" "}
           {formatAgo(data.generated_at)}
         </div>
