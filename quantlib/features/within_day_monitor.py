@@ -85,7 +85,12 @@ def evaluate_summary(
 
     A cycle is CLEAN iff there is at least one comparable feature and EVERY feature is at/above its policy
     ``min_pass_rate`` (deterministic features must match exactly). ``stable_cycles`` is carried onto each
-    CertResult as the evidence the certify call will persist. No DB, no store — unit-testable offline."""
+    CertResult as the evidence the certify call will persist. No DB, no store — unit-testable offline.
+
+    A feature with ``n_compared == 0`` is NOT comparable this cycle (live cells exist but the backfill side
+    has no overlapping settled cell yet, or vice-versa) — it is SKIPPED, neither certified nor counted as a
+    defect. A coverage gap is not a divergence: it must not reset the stability streak. When NO feature is
+    comparable the result is empty (the monitor holds the streak, same as ``summary.height == 0``)."""
     if summary.height == 0:
         return False, []
     policy_of = feature_policy_map()
@@ -94,6 +99,8 @@ def evaluate_summary(
     for row in summary.iter_rows(named=True):
         feature = row["feature"]
         if feature not in policy_of:
+            continue
+        if int(row["n_compared"]) == 0:
             continue
         _version, pol = policy_of[feature]
         min_pass_rate = 1.0 if pol.deterministic else pol.min_pass_rate
@@ -285,9 +292,10 @@ def monitor(
                 else pl.DataFrame()
             )
             clean, results = evaluate_summary(summary, group_name, cert_day, stable + 1, window_minutes, lag)
-            if summary.height == 0:
+            if not results:
                 logger.info(
-                    "cycle %d: no comparable cells (unsettled / capture gap) — streak held at %d",
+                    "cycle %d: no comparable cells (unsettled / capture gap / backfill not yet "
+                    "materialized) — streak held at %d",
                     cycle,
                     stable,
                 )

@@ -54,6 +54,37 @@ def test_one_feature_below_bar_breaks_the_cycle() -> None:
     assert any(r.status != "certified" for r in results)
 
 
+def test_no_comparable_cells_holds_streak_not_a_mismatch() -> None:
+    # Live cells exist but the settled-window backfill side has no overlapping cell yet (all extra_live →
+    # n_compared==0, value_rate=None). This is a COVERAGE GAP, not a divergence: every feature is skipped,
+    # results is empty, and the monitor holds the streak (same signal as an empty summary) — it must NOT be
+    # graded as a defect that resets stability.
+    summary = _summary(
+        [
+            {"feature": "up_ratio_3m", "value_rate": None, "n_compared": 0},
+            {"feature": "mean_abs_ret_3m", "value_rate": None, "n_compared": 0},
+        ]
+    )
+    clean, results = evaluate_summary(summary, "momentum", dt.date(2026, 6, 18), 1, 20, 20.0)
+    assert clean is False
+    assert results == []
+
+
+def test_partial_comparability_grades_only_the_comparable_features() -> None:
+    # One feature has settled overlap (graded), the other is a coverage gap (skipped). The graded feature
+    # passes → the cycle is clean on the comparable evidence; the non-comparable feature does not defect it.
+    summary = _summary(
+        [
+            {"feature": "up_ratio_3m", "value_rate": 1.0, "n_compared": 400},
+            {"feature": "mean_abs_ret_3m", "value_rate": None, "n_compared": 0},
+        ]
+    )
+    clean, results = evaluate_summary(summary, "momentum", dt.date(2026, 6, 18), 2, 20, 20.0)
+    assert clean is True
+    assert [r.feature for r in results] == ["up_ratio_3m"]
+    assert all(r.status == "certified" for r in results)
+
+
 def test_replay_windows_are_contiguous_and_sized() -> None:
     windows = _replay_windows(dt.date(2026, 6, 18), window_minutes=20, n_windows=5)
     assert len(windows) == 5
