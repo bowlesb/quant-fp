@@ -31,7 +31,11 @@ def test_cross_sectional_group_is_not_sample_materializable() -> None:
     assert count == 0
 
 
-def test_bar_only_group_routes_to_bar_materialize(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bar_only_group_with_raw_present_routes_to_raw_materialize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A PAST swept day has the raw bar tape on disk -> read it (the download-once from-raw path).
+    monkeypatch.setattr(wim, "_raw_bars_present", lambda *a, **k: True)
     routed: dict[str, object] = {}
     monkeypatch.setattr(
         wim,
@@ -40,11 +44,36 @@ def test_bar_only_group_routes_to_bar_materialize(monkeypatch: pytest.MonkeyPatc
     )
     monkeypatch.setattr(
         wim,
+        "materialize_alpaca_bar_groups",
+        lambda *a, **k: routed.update(kind="alpaca") or 0,
+    )
+    monkeypatch.setattr(
+        wim,
         "materialize_from_raw_groups",
         lambda *a, **k: routed.update(kind="tick") or 0,
     )
-    count = wim.materialize_settled_window("/store", "/store/raw", "momentum", DAY, SYMS, dry_run=False)
-    assert routed["kind"] == "bar"  # momentum needs only bars
+    count = wim.materialize_settled_window("/store", "/store", "momentum", DAY, SYMS, dry_run=False)
+    assert routed["kind"] == "bar"  # momentum needs only bars; raw present -> from-raw
+    assert routed["groups"] == ["momentum"]
+    assert count == len(SYMS)
+
+
+def test_bar_only_group_intraday_no_raw_routes_to_alpaca(monkeypatch: pytest.MonkeyPatch) -> None:
+    # On the CURRENT day the raw bar tape is not yet acquired -> fetch from Alpaca (the live-intraday source).
+    monkeypatch.setattr(wim, "_raw_bars_present", lambda *a, **k: False)
+    routed: dict[str, object] = {}
+    monkeypatch.setattr(
+        wim,
+        "materialize_alpaca_bar_groups",
+        lambda root, day, syms, groups: routed.update(kind="alpaca", groups=groups) or len(syms),
+    )
+    monkeypatch.setattr(
+        wim,
+        "materialize_from_raw_bar_groups",
+        lambda *a, **k: routed.update(kind="bar") or 0,
+    )
+    count = wim.materialize_settled_window("/store", "/store", "momentum", DAY, SYMS, dry_run=False)
+    assert routed["kind"] == "alpaca"  # raw absent intraday -> Alpaca source
     assert routed["groups"] == ["momentum"]
     assert count == len(SYMS)
 
@@ -81,6 +110,8 @@ def test_empty_symbols_is_noop() -> None:
 
 
 def test_ensure_inputs_first_runs_before_materialize(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ensure_inputs patches the RAW source, so it only applies on the from-raw path (raw present).
+    monkeypatch.setattr(wim, "_raw_bars_present", lambda *a, **k: True)
     order: list[str] = []
     monkeypatch.setattr(
         wim,
@@ -93,7 +124,7 @@ def test_ensure_inputs_first_runs_before_materialize(monkeypatch: pytest.MonkeyP
         lambda *a, **k: order.append("materialize") or len(SYMS),
     )
     wim.materialize_settled_window(
-        "/store", "/store/raw", "momentum", DAY, SYMS, ensure_inputs_first=True, dry_run=False
+        "/store", "/store", "momentum", DAY, SYMS, ensure_inputs_first=True, dry_run=False
     )
     assert order == ["ensure", "materialize"]  # source patched BEFORE the compute
 
@@ -101,9 +132,10 @@ def test_ensure_inputs_first_runs_before_materialize(monkeypatch: pytest.MonkeyP
 def test_ensure_inputs_lock_held_raises_under_live(monkeypatch: pytest.MonkeyPatch) -> None:
     # If ensure_inputs leaves a layer locked (source not present) a LIVE materialize must NOT compute off a
     # partial tape -> it raises so a parity 'mismatch' is never a missing-download artifact.
+    monkeypatch.setattr(wim, "_raw_bars_present", lambda *a, **k: True)
     monkeypatch.setattr(wim, "ensure_window_inputs", lambda *a, **k: False)
     monkeypatch.setattr(wim, "materialize_from_raw_bar_groups", lambda *a, **k: 1)
     with pytest.raises(RuntimeError, match="source not present"):
         wim.materialize_settled_window(
-            "/store", "/store/raw", "momentum", DAY, SYMS, ensure_inputs_first=True, dry_run=False
+            "/store", "/store", "momentum", DAY, SYMS, ensure_inputs_first=True, dry_run=False
         )

@@ -144,6 +144,29 @@ def materialize_from_raw_bar_groups(
     return _write_all(root, day, "backfill", frames, only_groups=only_groups)
 
 
+def materialize_alpaca_bar_groups(
+    root: str, day: str, symbols: list[str], only_groups: list[str]
+) -> int:
+    """Bar-only Alpaca materialize for ``only_groups`` over ALL ``symbols`` in a SINGLE compute.
+
+    The Alpaca-sourced twin of :func:`materialize_from_raw_bar_groups`: it fetches the day's minute bars
+    straight from Alpaca (:func:`backfill_bars`) instead of reading ``/store/raw/bars``. This is the
+    LIVE-INTRADAY backfill source — on the CURRENT day the ``/store/raw`` minute tape is NOT yet acquired
+    (raw bars are downloaded by the nightly acquisition, not intraday), so a from-raw materialize would find
+    empty partitions and write nothing. Alpaca already serves the day's SETTLED minute bars intraday, and
+    those bars are cell-identical in schema to the from-raw path's, so a within-day match against an
+    Alpaca-materialized backfill == a nightly match by construction. Bars-only (close/volume) — no tick read.
+    Returns the symbol count materialized."""
+    frames = {
+        "minute_agg": backfill_bars(day, symbols),
+        "daily": backfill_daily(day, symbols),
+        "reference": load_reference(),
+        "filings": load_filings(day),
+        "news": load_news_features(day),
+    }
+    return _write_all(root, day, "backfill", frames, only_groups=only_groups)
+
+
 def materialize_from_raw_groups(
     root: str,
     raw_root: str,
