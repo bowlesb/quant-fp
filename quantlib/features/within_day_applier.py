@@ -18,6 +18,7 @@ in the canary test; NEVER the real fc here).
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
@@ -94,7 +95,16 @@ def apply_job(
         )
         return ApplyOutcome(job.job_id, job.group_name, "escalated", "; ".join(gate.violations))
 
-    do_merge(job)  # auto-merge the in-scope commit (disjoint scope -> never conflicts)
+    # Auto-merge the in-scope commit (disjoint scope -> never conflicts). A merge that FAILS is the
+    # documented diverged-tree case (``live_do_merge``'s ``--ff-only`` raises rather than clobbering a pinned
+    # tree): ESCALATE the job with NO swap — the merge runs before the swap, so a failed merge means the FIXED
+    # source never reached the tree and the swap must not proceed. The failure must NOT propagate: it would
+    # reach the capture loop and break the stream (the gap the seam exists to prevent).
+    try:
+        do_merge(job)
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("job %d group=%s ESCALATE (merge failed): %s", job.job_id, job.group_name, error)
+        return ApplyOutcome(job.job_id, job.group_name, "escalated", f"merge failed: {error}")
 
     try:
         result = do_swap(job.group_name)
