@@ -52,13 +52,15 @@ class MarketBetaGroup(ReductionGroup):
     owner = "modeller"
     type = FeatureType.CROSS_SECTIONAL
     inputs = (InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),)
-    # The OLS regressor x is SPY's one-minute return broadcast onto every symbol. On a gappy symbol the few
-    # in-window paired bars give a near-constant x, so the corr denominator b·Σx²−(Σx)² is a difference of
-    # float-noise that incremental's running sum rounds differently from the batch fresh sum, straddling the
-    # corr defined-guard — incremental emits market_corr=±1 / idio_vol=0 where batch NULLs (real 06-18 gappy
-    # A/B: MO/SLB). Same conditioning class as the gated correlation groups; routed LIVE to the batch path.
-    # (Smooth-synthetic gappy sweep missed it: no SPY symbol -> _mret all-null -> corr-denom unexercised.)
-    incremental_safe = False
+    # The OLS regressor x is SPY's one-minute return broadcast onto every symbol; its corr denom x-side is
+    # conditioned by the shared variance-scale guard (_OLS_DENOM_X_CENTERED_REL_EPS, #416). The last residual
+    # breach was the SAME SHARED-ENGINE artifact as return_dynamics: a co-resident price_volume obv time
+    # regression made the per-minute rebase_time_axis realize the Neumaier compensation across the whole value
+    # array, perturbing a flat-name market_corr cell into a spurious ±1 where batch NULLs (real-soak 2026-06-17:
+    # 1/779 min, ONLY under FP_RUST_REDUCE with price_volume armed). FIXED in WindowedSumState.rebase_time_axis
+    # (realize only the time-OLS columns it shifts) — engine==batch CLEAN on the real-tape soak at BOTH FR=0 and
+    # FR=1 (worst tol-ratio 0.00). Now SAFE for the incremental fast path.
+    incremental_safe = True
 
     def declare(self) -> list[FeatureSpec]:
         specs = []
