@@ -11,6 +11,7 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
+    BatchContext,
     FeatureSpec,
     FeatureType,
     InputSpec,
@@ -47,7 +48,7 @@ class MultiDayVwapGroup(DailySnapshotGroup):
             )
         return specs
 
-    def daily_snapshot(self, source: pl.DataFrame) -> pl.DataFrame:
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
         """Per-(symbol, date) daily VWAP-distance features."""
         daily = source.select(["symbol", "date", "close", "volume", "vwap"]).sort(["symbol", "date"])
         # shift by 1 so the rolling windows end at the PRIOR completed day (never today's incomplete bar)

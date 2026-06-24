@@ -56,13 +56,18 @@ class DailySnapshotGroup(FeatureGroup):
     minute_input: str = "minute_agg"
 
     @abstractmethod
-    def daily_snapshot(self, source: pl.DataFrame) -> pl.DataFrame:
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
         """The group's per-(symbol, date) feature columns from the daily snapshot ``source`` — the ONLY
         method a Class-A group writes. Returns a frame keyed by ``(symbol, date)`` with exactly one column
         per declared feature. Computed ONCE per session (cached on the snapshot content witness) and
-        broadcast across the session's minutes by the base."""
+        broadcast across the session's minutes by the base.
 
-    def _snapshot_witness(self, source: pl.DataFrame) -> object:
+        ``ctx`` is provided for the (rare) group whose snapshot reads a SECOND per-session-constant input
+        beyond the ``daily`` frame (e.g. universe membership for a cross-sectional rank's denominator); the
+        common single-input group ignores it. Any extra input read here must be per-session-INVARIANT and its
+        witness paired into ``_snapshot_witness`` so a change re-runs this (never a stale cache serve)."""
+
+    def _snapshot_witness(self, source: pl.DataFrame, ctx: BatchContext) -> object:
         """The content witness the per-session cache keys on. Default = the daily-snapshot token (id +
         height + last date + close-sum). A group whose snapshot depends on an EXTRA per-session input
         (e.g. universe membership) overrides this to pair the token with that dependency's witness, so a
@@ -73,7 +78,7 @@ class DailySnapshotGroup(FeatureGroup):
         source = ctx.frame(self.snapshot_input)
         names = self.feature_names
         result = self.session_cache.get(
-            self._snapshot_witness(source), lambda: self.daily_snapshot(source)
+            self._snapshot_witness(source, ctx), lambda: self.daily_snapshot(source, ctx)
         )
         return result, names
 

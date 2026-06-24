@@ -27,12 +27,12 @@ import polars as pl
 
 from quantlib.features.base import (
     BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
     daily_snapshot_token,
 )
+from quantlib.features.daily_snapshot_group import DailySnapshotGroup
 from quantlib.features.registry import register
 
 ADV_WINDOW = 20
@@ -40,7 +40,7 @@ MIN_DAYS = 10
 
 
 @register
-class LiquidityRankGroup(FeatureGroup):
+class LiquidityRankGroup(DailySnapshotGroup):
     name = "liquidity_rank"
     version = "1.0.0"
     owner = "modeller"
@@ -70,23 +70,24 @@ class LiquidityRankGroup(FeatureGroup):
             ),
         ]
 
-    def _daily_features(self, ctx: BatchContext) -> pl.DataFrame:
-        """Per (symbol, date) trailing-20d ADV + its cross-sectional liquidity rank. Cached on the
-        (daily-snapshot, universe-membership) identity so the (identical-all-day) daily features are
-        computed once, not per minute."""
-        source = ctx.frame("daily")
+    def _members(self, ctx: BatchContext) -> pl.DataFrame | None:
+        """The universe membership (the rank denominator), or None when no universe frame is supplied."""
         universe = ctx.frames["universe"] if "universe" in ctx.frames else None
-        # The rank DENOMINATOR depends on the universe membership, so the cache key pairs the daily-snapshot
-        # token with a universe witness — a changed membership re-keys and recomputes (never a stale rank).
+        return universe.select("symbol").unique() if universe is not None else None
+
+    def _snapshot_witness(self, source: pl.DataFrame, ctx: BatchContext) -> object:
+        """The rank DENOMINATOR depends on the universe membership, so the cache key pairs the daily-snapshot
+        token with a universe witness — a changed membership re-keys and recomputes (never a stale rank)."""
+        universe = ctx.frames["universe"] if "universe" in ctx.frames else None
         universe_witness: tuple[object, ...] = (
             (id(universe), universe.height) if universe is not None else (None, 0)
         )
-        token = (*daily_snapshot_token(source), *universe_witness)
-        members = universe.select("symbol").unique() if universe is not None else None
-        return self.session_cache.get(token, lambda: self._compute_daily_features(source, members))
+        return (*daily_snapshot_token(source), *universe_witness)
 
-    def _compute_daily_features(self, source: pl.DataFrame, members: pl.DataFrame | None) -> pl.DataFrame:
-        """The actual per-(symbol, date) daily feature computation (the cached body)."""
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
+        """Per (symbol, date) trailing-20d ADV + its cross-sectional liquidity rank (within the day's
+        universe). Reads the per-session-constant universe membership from ``ctx`` for the rank denominator."""
+        members = self._members(ctx)
         daily = source.select(["symbol", "date", "close", "volume"]).sort(["symbol", "date"])
         daily = daily.with_columns((pl.col("close") * pl.col("volume")).alias("_dvol"))
         daily = daily.with_columns(
@@ -107,26 +108,3 @@ class LiquidityRankGroup(FeatureGroup):
             .otherwise(None)
             .alias("liquidity_rank"),
         ).select(["symbol", "date", "adv_dollar_log_20d", "liquidity_rank"])
-
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        names = [spec.name for spec in self.declare()]
-        minutes = (
-            ctx.frame("minute_agg")
-            .select(["symbol", "minute"])
-            .with_columns(pl.col("minute").dt.date().alias("date"))
-        )
-        joined = minutes.join(
-            self._daily_features(ctx), on=["symbol", "date"], how="left"
-        )
-        return joined.select(["symbol", "minute", *names])
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        minute_agg = ctx.frame("minute_agg")
-        latest = minute_agg["minute"].max()
-        sub = BatchContext(
-            frames={
-                **ctx.frames,
-                "minute_agg": minute_agg.filter(pl.col("minute") == latest),
-            }
-        )
-        return self.compute(sub)

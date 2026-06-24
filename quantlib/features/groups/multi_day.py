@@ -10,6 +10,7 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
+    BatchContext,
     FeatureSpec,
     FeatureType,
     InputSpec,
@@ -73,7 +74,7 @@ class MultiDayReturnGroup(DailySnapshotGroup):
             )
         return specs
 
-    def daily_snapshot(self, source: pl.DataFrame) -> pl.DataFrame:
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
         daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
         daily = daily.with_columns((pl.col("_asof") / pl.col("_asof").shift(1).over("symbol") - 1.0).alias("_dret"))

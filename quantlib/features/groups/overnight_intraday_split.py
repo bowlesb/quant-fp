@@ -24,17 +24,16 @@ import polars as pl
 
 from quantlib.features.base import (
     BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    daily_snapshot_token,
 )
+from quantlib.features.daily_snapshot_group import DailySnapshotGroup
 from quantlib.features.registry import register
 
 
 @register
-class OvernightIntradaySplitGroup(FeatureGroup):
+class OvernightIntradaySplitGroup(DailySnapshotGroup):
     name = "overnight_intraday_split"
     version = "1.0.0"
     owner = "modeller"
@@ -71,15 +70,8 @@ class OvernightIntradaySplitGroup(FeatureGroup):
             ),
         ]
 
-    def _daily_features(self, ctx: BatchContext) -> pl.DataFrame:
-        """Per (symbol, date) overnight/intraday split features from the daily bar. Cached on the daily-
-        snapshot identity so the (identical-all-day) daily features are computed once, not per minute."""
-        source = ctx.frame("daily")
-        return self.session_cache.get(
-            daily_snapshot_token(source), lambda: self._compute_daily_features(source)
-        )
-
-    def _compute_daily_features(self, source: pl.DataFrame) -> pl.DataFrame:
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
+        """Per (symbol, date) overnight/intraday split features from the daily bar."""
         daily = source.select(self.inputs[0].columns).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("prev_close"))
         overnight = pl.col("open") / pl.col("prev_close") - 1.0
@@ -90,19 +82,3 @@ class OvernightIntradaySplitGroup(FeatureGroup):
             (overnight - intraday).alias("overnight_minus_intraday"),
             pl.when(abs_total > 0).then(overnight.abs() / abs_total).otherwise(None).alias("overnight_share"),
         ).select(["symbol", "date", "intraday_ret", "overnight_minus_intraday", "overnight_share"])
-
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        names = [spec.name for spec in self.declare()]
-        minutes = ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(
-            pl.col("minute").dt.date().alias("date")
-        )
-        joined = minutes.join(self._daily_features(ctx), on=["symbol", "date"], how="left")
-        return joined.select(["symbol", "minute", *names])
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Same code on a minute_agg restricted to the latest minute — the daily computation is identical;
-        only the broadcast shrinks from all minutes to one (parity-true by construction)."""
-        minute_agg = ctx.frame("minute_agg")
-        latest = minute_agg["minute"].max()
-        sub = BatchContext(frames={**ctx.frames, "minute_agg": minute_agg.filter(pl.col("minute") == latest)})
-        return self.compute(sub)
