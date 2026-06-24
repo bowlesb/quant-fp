@@ -238,7 +238,7 @@ export interface NewsEdgarComposition {
 // CERTIFICATION-LIFECYCLE state. Each feature-group's furthest stage on the staged progression
 // UNVERIFIED → MONITORING → CERTIFIED → TRUSTED, read off within_day_assignment + within_day_parity_cert +
 // feature_trust. Makes the now-running within-day parity lifecycle legible.
-export type LifecycleStage = "unverified" | "monitoring" | "certified" | "trusted";
+export type LifecycleStage = "divergent" | "unverified" | "monitoring" | "certified" | "trusted";
 
 // One active assignment lock — a subagent currently MONITORING a group's live==backfill match.
 export interface LifecycleOwner {
@@ -257,6 +257,7 @@ export interface LifecycleGroup {
   stage: LifecycleStage;
   n_features: number;
   n_trusted: number;
+  n_divergent: number; // features that failed a clean-day parity check (broken, waiting on a fix)
   fully_trusted: boolean;
   // MONITORING evidence (the assignment lock), if any.
   owner: string | null;
@@ -278,6 +279,7 @@ export interface LifecycleState {
   n_groups: number;
   n_features: number;
   n_trusted_features: number;
+  n_divergent_features: number; // features that failed a clean-day parity check across all groups
   active_owners: LifecycleOwner[];
   groups: LifecycleGroup[];
 }

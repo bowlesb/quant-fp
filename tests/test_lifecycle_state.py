@@ -72,7 +72,43 @@ def test_unverified_when_no_owner_cert_or_trust() -> None:
     assert groups[0].stage == ls.STAGE_UNVERIFIED
     assert groups[0].n_features == 2
     assert groups[0].n_trusted == 0
+    assert groups[0].n_divergent == 0
     assert groups[0].fully_trusted is False
+
+
+def test_divergent_when_a_feature_failed_clean_day_and_idle() -> None:
+    # A group with a feature that failed a clean-day parity check, no owner/cert/trust, is DIVERGENT
+    # (broken-and-idle) — NOT collapsed into the never-started UNVERIFIED bucket.
+    catalog = _catalog({"alpha": ["a1", "a2"]})
+    groups = ls.build_group_lifecycles(catalog, [], {}, set(), {"a1"})
+    assert groups[0].stage == ls.STAGE_DIVERGENT
+    assert groups[0].n_divergent == 1
+
+
+def test_active_owner_outranks_divergent() -> None:
+    # A live monitoring owner lifts a group above DIVERGENT (a fix-it agent is on it) — DIVERGENT only holds
+    # when the group is otherwise idle. The divergent count is still carried for visibility.
+    catalog = _catalog({"alpha": ["a1"]})
+    groups = ls.build_group_lifecycles(catalog, [_assignment("alpha")], {}, set(), {"a1"})
+    assert groups[0].stage == ls.STAGE_MONITORING
+    assert groups[0].n_divergent == 1
+
+
+def test_trusted_outranks_divergent() -> None:
+    # The terminal TRUSTED grant wins even when a feature has a historical clean-day DIVERGENT mark.
+    catalog = _catalog({"alpha": ["a1", "a2"]})
+    groups = ls.build_group_lifecycles(catalog, [], {}, {"a1", "a2"}, {"a1"})
+    assert groups[0].stage == ls.STAGE_TRUSTED
+    assert groups[0].n_divergent == 1
+
+
+def test_summarize_counts_divergent_stage() -> None:
+    catalog = _catalog({"a": ["d1"], "b": ["u1"]})
+    groups = ls.build_group_lifecycles(catalog, [], {}, set(), {"d1"})
+    summary = ls.summarize(groups)
+    assert summary[ls.STAGE_DIVERGENT] == 1
+    assert summary[ls.STAGE_UNVERIFIED] == 1
+    assert sum(summary.values()) == 2
 
 
 def test_monitoring_with_active_lock() -> None:
@@ -157,10 +193,11 @@ def test_empty_group_is_not_fully_trusted() -> None:
 _SNAPSHOT = {
     "generated_at": "2026-06-21T03:00:00Z",
     "stage_order": ls.STAGE_ORDER,
-    "summary": {"unverified": 1, "monitoring": 0, "certified": 0, "trusted": 1},
+    "summary": {"divergent": 0, "unverified": 1, "monitoring": 0, "certified": 0, "trusted": 1},
     "n_groups": 2,
     "n_features": 3,
     "n_trusted_features": 1,
+    "n_divergent_features": 0,
     "active_owners": [],
     "groups": [],
 }

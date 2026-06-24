@@ -827,6 +827,9 @@ body {
 .lat-incr {
   font-weight: 600;
 }
+.lat-incr-armed {
+  color: var(--trusted);
+}
 .lat-incr-ready {
   color: var(--trusted);
 }
@@ -1184,8 +1187,14 @@ body {
   color: var(--text-dim);
   margin-top: 2px;
 }
-/* The stage palette: a cool-to-committed ramp — grey (unverified) -> accent (monitoring) -> mid blue
-   (certified, intraday-only) -> deep trusted blue (trusted). */
+/* The stage palette: divergent (broken, red) sits before the cool-to-committed ramp — grey (unverified) ->
+   accent (monitoring) -> mid blue (certified, intraday-only) -> deep trusted blue (trusted). */
+.lc-chip-divergent {
+  border-color: #c0392b;
+}
+.lc-chip-divergent .lc-chip-count {
+  color: #c0392b;
+}
 .lc-chip-unverified {
   border-color: var(--border);
 }
@@ -1276,6 +1285,9 @@ body {
 .lc-row-trusted {
   background: #fafcff;
 }
+.lc-row-divergent {
+  background: #fff6f5;
+}
 .lc-cell-group {
   display: flex;
   align-items: center;
@@ -1294,6 +1306,9 @@ body {
   font-weight: 600;
   color: #fff;
   white-space: nowrap;
+}
+.lc-stage-divergent {
+  background: #c0392b;
 }
 .lc-stage-unverified {
   background: var(--muted);
@@ -1319,6 +1334,10 @@ body {
   border-radius: 50%;
   background: var(--panel-alt);
   border: 1px solid var(--border);
+}
+.lc-dot.on.lc-dot-divergent {
+  background: #c0392b;
+  border-color: #c0392b;
 }
 .lc-dot.on.lc-dot-unverified {
   background: var(--muted);
@@ -1408,4 +1427,20 @@ body {
   font-family: var(--mono);
   color: var(--text);
   mix-blend-mode: normal;
+}
+.lc-divergent-tag {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  border: 1px solid #c0392b;
+  background: #fdecea;
+  color: #c0392b;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.lc-submeta-divergent {
+  color: #c0392b;
+  font-weight: 600;
 }
