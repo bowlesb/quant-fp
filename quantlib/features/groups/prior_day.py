@@ -14,19 +14,18 @@ import polars as pl
 
 from quantlib.features.base import (
     BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    daily_snapshot_token,
 )
+from quantlib.features.daily_snapshot_group import DailySnapshotGroup
 from quantlib.features.registry import register
 
 PIVOTS = ("p", "r1", "s1", "r2", "s2")
 
 
 @register
-class PriorDayGroup(FeatureGroup):
+class PriorDayGroup(DailySnapshotGroup):
     name = "prior_day"
     version = "1.0.0"
     owner = "modeller"
@@ -35,6 +34,9 @@ class PriorDayGroup(FeatureGroup):
         InputSpec(name="daily", columns=("symbol", "date", "open", "high", "low", "close")),
         InputSpec(name="minute_agg", columns=("symbol", "minute", "close")),
     )
+    # A.2: the snapshot holds prior-day LEVELS; the features mix a level with the at-T minute close, so carry
+    # ``close`` into the broadcast and derive the close-relative distances via ``broadcast_exprs``.
+    minute_columns = ("close",)
 
     def declare(self) -> list[FeatureSpec]:
         specs = [
@@ -57,16 +59,9 @@ class PriorDayGroup(FeatureGroup):
             )
         return specs
 
-    def _daily_levels(self, ctx: BatchContext) -> pl.DataFrame:
-        """Per-(symbol, date) prior-day levels (gap, prior H/L/C, pivots) — depend only on the daily
-        snapshot, so cache them on its identity (constant all day); the close-relative distances are
-        applied per minute in compute()."""
-        source = ctx.frame("daily")
-        return self.session_cache.get(
-            daily_snapshot_token(source), lambda: self._compute_daily_levels(source)
-        )
-
-    def _compute_daily_levels(self, source: pl.DataFrame) -> pl.DataFrame:
+    def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
+        """Per-(symbol, date) prior-day LEVELS (gap, prior H/L/C, pivots) — depend only on the daily snapshot.
+        The close-relative distances are applied per minute by ``broadcast_exprs`` (A.2)."""
         daily = source.select(["symbol", "date", "open", "high", "low", "close"]).sort(["symbol", "date"])
         prev_high = pl.col("high").shift(1).over("symbol")
         prev_low = pl.col("low").shift(1).over("symbol")
@@ -89,9 +84,10 @@ class PriorDayGroup(FeatureGroup):
         level_cols = ["_gap_open", "_prev_high", "_prev_low", "_prev_close", *[f"_{p}" for p in PIVOTS]]
         return daily.select(["symbol", "date", *level_cols])
 
-    def exprs(self) -> list[pl.Expr]:
-        """The close-relative feature expressions over the joined prior-day level columns (post daily
-        broadcast join). Shared by compute() and the consolidated daily-broadcast emit."""
+    def broadcast_exprs(self) -> list[pl.Expr]:
+        """The close-relative feature expressions over the broadcast frame (prior-day levels joined onto each
+        minute + the at-T ``close``). The SAME exprs run for all minutes (backfill) and the latest minute
+        (live), so live == backfill by construction."""
         exprs = [
             pl.col("_gap_open").cast(pl.Float64).alias("gap_open"),
             (pl.col("close") / pl.col("_prev_high") - 1.0).cast(pl.Float64).alias("dist_from_prior_high"),
@@ -102,19 +98,3 @@ class PriorDayGroup(FeatureGroup):
         for pivot_name in PIVOTS:
             exprs.append((pl.col("close") / pl.col(f"_{pivot_name}") - 1.0).cast(pl.Float64).alias(f"dist_from_pivot_{pivot_name}"))
         return exprs
-
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        minutes = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).with_columns(
-            pl.col("minute").dt.date().alias("date")
-        )
-        joined = minutes.join(self._daily_levels(ctx), on=["symbol", "date"], how="left")
-        names = [spec.name for spec in self.declare()]
-        return joined.with_columns(self.exprs()).select(["symbol", "minute", *names])
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Same code as compute(), run on a minute_agg restricted to the latest minute — the daily
-        computation is identical; only the broadcast shrinks from all minutes to one."""
-        minute_agg = ctx.frame("minute_agg")
-        latest = minute_agg["minute"].max()
-        sub = BatchContext(frames={**ctx.frames, "minute_agg": minute_agg.filter(pl.col("minute") == latest)})
-        return self.compute(sub)
