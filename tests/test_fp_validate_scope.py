@@ -112,3 +112,47 @@ def test_unscoped_validate_includes_all_universe_symbols(tmp_path, monkeypatch) 
     validate_mod.validate(feature_root, DAY, val_root, allow_today=False, symbols=None)
     cell = validation_store.read_cell(val_root, DAY)
     assert set(cell["symbol"].to_list()) == {"AAA", "BBB", "CCC"}  # full universe when unscoped
+
+
+def _sorted(frame: pl.DataFrame) -> pl.DataFrame:
+    """Canonical ordering so two results built in different symbol-batch orders compare equal."""
+    if frame.height == 0:
+        return frame
+    keys = [col for col in ("feature", "symbol", "minute", "tier") if col in frame.columns]
+    return frame.sort(keys).select(sorted(frame.columns))
+
+
+def test_symbol_sub_batching_is_value_identical(tmp_path, monkeypatch) -> None:
+    """The PASS-2 OOM fix: compare_groups sub-batches the symbol scope to bound the per-minute join peak.
+    Prove it changes only memory, not the verdict — comparing all symbols at once (symbol_batch_size=None)
+    yields byte-identical cell / feature_day / exceptions to forcing one symbol per batch (size=1)."""
+    feature_root = str(tmp_path / "store")
+    _write_store(feature_root)
+    monkeypatch.setattr(validate_mod, "load_tiers", lambda day: _tiers())
+
+    scope = ["AAA", "BBB", "CCC"]
+    _, tiers = validate_mod.scoped_tiers(DAY, scope)
+
+    whole = validate_mod.compare_groups(feature_root, DAY, scope, tiers, symbol_batch_size=None)
+    batched = validate_mod.compare_groups(feature_root, DAY, scope, tiers, symbol_batch_size=1)
+
+    # Every symbol is still compared (CCC across a batch boundary is not dropped).
+    assert set(batched.cell["symbol"].to_list()) == {"AAA", "BBB", "CCC"}
+    # The three durable frames are identical regardless of batching.
+    assert _sorted(batched.cell).equals(_sorted(whole.cell))
+    assert _sorted(batched.exceptions).equals(_sorted(whole.exceptions))
+    assert _sorted(batched.feature_day).equals(_sorted(whole.feature_day))
+    # And the planted BBB mismatch survives the batch boundary as exactly one exception.
+    assert set(batched.exceptions["symbol"].to_list()) == {"BBB"}
+    assert batched.exceptions.height == 1
+    # feature_day must hold exactly one row per feature even though 3 batches contributed.
+    assert batched.feature_day.height == batched.feature_day["feature"].n_unique()
+
+
+def test_scope_batches_splits_and_preserves_order() -> None:
+    """The batcher: a None/0/oversized limit is one whole-scope batch; a smaller limit splits in order."""
+    symbols = ["A", "B", "C", "D", "E"]
+    assert validate_mod._scope_batches(symbols, None) == [symbols]
+    assert validate_mod._scope_batches(symbols, 0) == [symbols]
+    assert validate_mod._scope_batches(symbols, 10) == [symbols]
+    assert validate_mod._scope_batches(symbols, 2) == [["A", "B"], ["C", "D"], ["E"]]

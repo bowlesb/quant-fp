@@ -267,9 +267,17 @@ def _stub_split_validation(monkeypatch, compare_calls: list[dict]) -> None:
         return scope, pl.DataFrame({"symbol": scope})
 
     def _compare(
-        feature_root, day, scope_symbols, tiers, groups=None, tolerance_of=None
+        feature_root,
+        day,
+        scope_symbols,
+        tiers,
+        groups=None,
+        tolerance_of=None,
+        symbol_batch_size=validation_sweep.validate_mod.DEFAULT_SYMBOL_BATCH_SIZE,
     ):  # noqa: ANN001,ANN202
-        compare_calls.append({"scope": list(scope_symbols), "groups": groups})
+        compare_calls.append(
+            {"scope": list(scope_symbols), "groups": groups, "symbol_batch_size": symbol_batch_size}
+        )
         return validation_sweep.validate_mod.CompareResult(pl.DataFrame(), pl.DataFrame(), pl.DataFrame())
 
     monkeypatch.setattr(validation_sweep.validate_mod, "scoped_tiers", _scoped_tiers)
@@ -439,9 +447,13 @@ def test_sweep_grades_only_the_clean_gradable_set(monkeypatch) -> None:
     xsec_groups = validation_sweep.cross_sectional_groups()
     xsec_call = next(call for call in compare_calls if call["groups"] == xsec_groups)
     assert set(discovered).issubset(xsec_call["scope"])
-    # The per-symbol compare is scoped to the gradable subset (plus the pinned market reference).
+    # The universe-reduce grade is NOT symbol-sub-batched — it must reduce over every symbol in one compute.
+    assert xsec_call["symbol_batch_size"] is None
+    # The per-symbol compare is scoped to the gradable subset (plus the pinned market reference)...
     per_symbol_call = next(call for call in compare_calls if call is not xsec_call)
     assert set(per_symbol_call["scope"]) - set(MARKET_TICKERS) == set(clean)
+    # ...and IS symbol-sub-batched (the PASS-2 OOM fix: bound the per-minute join peak per symbol batch).
+    assert per_symbol_call["symbol_batch_size"] == validation_sweep.validate_mod.DEFAULT_SYMBOL_BATCH_SIZE
 
 
 def test_sweep_skips_full_pass_on_too_contaminated_day(monkeypatch) -> None:

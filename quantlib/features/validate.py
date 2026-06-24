@@ -295,6 +295,74 @@ def scoped_tiers(day: str, symbols: list[str] | None = None) -> tuple[list[str],
     return tiers["symbol"].to_list(), tiers
 
 
+# Per-group memory peak is the per-minute stream+backfill JOIN over the whole symbol scope, plus the long
+# verdict frame (one vertical block per tolerance feature) built from it — roughly n_symbols x 390 minutes x
+# n_features cells held at once. On a settled day's full gradable set (~thousands of symbols) that PASS-2 peak
+# is what OOM-killed the sweep at 48 GiB. Sub-batching the SYMBOL scope inside the per-group compare bounds
+# that peak to n_batch_symbols x 390 x n_features: only the compact per-(feature, symbol, tier) cell rollup
+# and the (rare) exception rows accumulate across batches, while the heavy per-minute join/long frames are
+# freed each batch. The cell rollup keys on symbol, so per-batch cells are symbol-disjoint and union cleanly;
+# the durable per-(feature, day) trust rollup is rebuilt ONCE from the unioned cell (never per batch), so no
+# feature is double-counted. Distributional features are NOT sub-batched — their per-tier dist_score must see
+# the full tier at once (a partial symbol batch would change the score), and there are only a handful, so they
+# add negligible memory; they are evaluated over the full scope in a single pass.
+DEFAULT_SYMBOL_BATCH_SIZE = 400
+
+
+def _scope_batches(scope_symbols: list[str], batch_size: int | None) -> list[list[str]]:
+    """Split ``scope_symbols`` into sub-batches of at most ``batch_size`` (None / non-positive = one batch
+    = the whole scope = the original full-universe behavior, used for the cross-sectional grade)."""
+    if batch_size is None or batch_size <= 0 or len(scope_symbols) <= batch_size:
+        return [scope_symbols]
+    return [scope_symbols[i : i + batch_size] for i in range(0, len(scope_symbols), batch_size)]
+
+
+def _compare_group_scope(
+    feature_root: str,
+    day: str,
+    scope_symbols: list[str],
+    tiers: pl.DataFrame,
+    group: object,
+    feats: list[str],
+    tol_feats: list[str],
+    dist_feats: list[str],
+    specs: dict,
+    version_of: dict,
+    nan_policy_of: dict,
+    start: datetime,
+    end: datetime,
+) -> tuple[pl.DataFrame, pl.DataFrame, list[dict]]:
+    """Compare one group's stream vs backfill over ``scope_symbols`` — the per-minute join + verdicts whose
+    peak memory the symbol sub-batching bounds. Returns ``(cell, exceptions, dist_rows)``; the durable
+    per-(feature, day) tolerance rollup is rebuilt by the caller from the unioned cell. ``dist_feats`` are
+    only ever passed for the FULL-scope pass (the caller suppresses them on sub-batches)."""
+    backfill = store.get_features(feats, scope_symbols, start, end, feature_root, source="backfill")
+    if backfill.height == 0:
+        return pl.DataFrame(), pl.DataFrame(), []  # no settled backfill for this group/day -> skip
+    live = store.get_features(feats, scope_symbols, start, end, feature_root, source="stream")
+    if live.height == 0:
+        live = backfill.select(KEY_COLUMNS).clear()  # nothing captured live -> all missing_live
+    joined = (
+        live.join(backfill, on=list(KEY_COLUMNS), how="full", suffix="_bk", coalesce=True)
+        .join(tiers, on="symbol", how="left")
+        .with_columns(pl.col("tier").fill_null(3))
+        .filter(rth_mask(pl.col("minute")))  # bet/validate only during RTH — warmup stays out of the grade
+    )
+    cell = pl.DataFrame()
+    exceptions = pl.DataFrame()
+    if tol_feats:
+        long = _long_verdicts(joined, tol_feats, specs)
+        cell = _cell_rollup(long)
+        exceptions = _exceptions(long, day)
+    dist_rows = [
+        _feature_day_distributional(
+            joined, feature, specs[feature].tolerance, version_of[feature], nan_policy_of[feature], day
+        )
+        for feature in dist_feats
+    ]
+    return cell, exceptions, dist_rows
+
+
 def compare_groups(
     feature_root: str,
     day: str,
@@ -302,6 +370,7 @@ def compare_groups(
     tiers: pl.DataFrame,
     groups: list[str] | None = None,
     tolerance_of: dict[str, float] | None = None,
+    symbol_batch_size: int | None = DEFAULT_SYMBOL_BATCH_SIZE,
 ) -> CompareResult:
     """Compare stream vs backfill for ``groups`` (None = all registered groups) over ``scope_symbols``,
     returning the durable rollup/cell/exceptions frames WITHOUT persisting them.
@@ -313,7 +382,16 @@ def compare_groups(
 
     ``tolerance_of`` (feature -> relative tolerance) overrides each spec's cell tolerance, so the per-type
     trust policy (docs/TRUST_REDESIGN.md) drives the comparison: a windowed feature's legitimate
-    float-order noise isn't counted as a mismatch at the engine-default 1e-6. None = use spec tolerances."""
+    float-order noise isn't counted as a mismatch at the engine-default 1e-6. None = use spec tolerances.
+
+    ``symbol_batch_size`` bounds peak memory: each group's stream+backfill per-minute JOIN is computed over
+    one symbol sub-batch at a time (default ``DEFAULT_SYMBOL_BATCH_SIZE``), not the whole scope at once — the
+    PASS-2 OOM fix (the full gradable set OOM-killed at 48 GiB; see ``_scope_batches``). Only the compact
+    per-(feature, symbol, tier) cell rollup + exceptions accumulate; the heavy join/long frames are freed per
+    batch. Pass ``None`` (or 0) to disable batching and compare the whole scope at once — the CROSS-SECTIONAL
+    grade MUST do this, since a universe-reduce feature's value depends on every symbol being present in the
+    same compute (the caller passes ``symbol_batch_size=None`` for it). Distributional features are always
+    evaluated over the full scope (their per-tier score must see the whole tier), independent of batching."""
     specs = {spec.name: spec for _, spec in REGISTRY.feature_specs()}
     if tolerance_of:
         specs = {
@@ -325,42 +403,63 @@ def compare_groups(
     start = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), tzinfo=timezone.utc)
     end = datetime(int(day[:4]), int(day[5:7]), int(day[8:10]), 23, 59, 59, tzinfo=timezone.utc)
 
-    feature_day_rows: list[pl.DataFrame] = []
     dist_rows: list[dict] = []
     cell_blocks: list[pl.DataFrame] = []
     exception_blocks: list[pl.DataFrame] = []
+    batches = _scope_batches(scope_symbols, symbol_batch_size)
     for group in REGISTRY.groups():
         if groups is not None and group.name not in groups:
             continue
         feats = [spec.name for spec in group.declare()]
-        backfill = store.get_features(feats, scope_symbols, start, end, feature_root, source="backfill")
-        if backfill.height == 0:
-            continue  # no settled backfill for this group/day -> unvalidated, skip (per-group settled check)
-        live = store.get_features(feats, scope_symbols, start, end, feature_root, source="stream")
-        if live.height == 0:
-            live = backfill.select(KEY_COLUMNS).clear()  # nothing captured live -> all missing_live
-        joined = (
-            live.join(backfill, on=list(KEY_COLUMNS), how="full", suffix="_bk", coalesce=True)
-            .join(tiers, on="symbol", how="left")
-            .with_columns(pl.col("tier").fill_null(3))
-            .filter(rth_mask(pl.col("minute")))  # bet/validate only during RTH — warmup stays out of the grade
-        )
         tol_feats = [f for f in feats if specs[f].parity_method != "distributional"]
         dist_feats = [f for f in feats if specs[f].parity_method == "distributional"]
-        if tol_feats:
-            long = _long_verdicts(joined, tol_feats, specs)
-            cell = _cell_rollup(long)
-            cell_blocks.append(cell)
-            exception_blocks.append(_exceptions(long, day))
-            feature_day_rows.append(_feature_day_tolerance(cell, version_of, nan_policy_of, day))
-        for feature in dist_feats:
-            dist_rows.append(
-                _feature_day_distributional(joined, feature, specs[feature].tolerance,
-                                            version_of[feature], nan_policy_of[feature], day)
+        # Distributional features must see the full tier at once, so evaluate them on the FULL scope in a
+        # single pass (not sub-batched); tolerance features are sub-batched to bound the per-minute join peak.
+        if dist_feats:
+            _, _, full_dist = _compare_group_scope(
+                feature_root,
+                day,
+                scope_symbols,
+                tiers,
+                group,
+                feats,
+                [],
+                dist_feats,
+                specs,
+                version_of,
+                nan_policy_of,
+                start,
+                end,
             )
+            dist_rows.extend(full_dist)
+        if not tol_feats:
+            continue
+        for batch in batches:
+            cell, exceptions, _ = _compare_group_scope(
+                feature_root,
+                day,
+                batch,
+                tiers,
+                group,
+                feats,
+                tol_feats,
+                [],
+                specs,
+                version_of,
+                nan_policy_of,
+                start,
+                end,
+            )
+            if cell.height:
+                cell_blocks.append(cell)
+            if exceptions.height:
+                exception_blocks.append(exceptions)
 
-    feature_day = _assemble_feature_day(feature_day_rows, dist_rows)
     cell = pl.concat(cell_blocks) if cell_blocks else pl.DataFrame()
+    # Rebuild the per-(feature, day) tolerance rollup ONCE from the unioned cell — never per batch — so each
+    # feature has exactly one feature_day row regardless of how many symbol sub-batches contributed to it.
+    feature_day_rows = [_feature_day_tolerance(cell, version_of, nan_policy_of, day)] if cell.height else []
+    feature_day = _assemble_feature_day(feature_day_rows, dist_rows)
     non_empty_exc = [block for block in exception_blocks if block.height]
     exceptions = pl.concat(non_empty_exc) if non_empty_exc else pl.DataFrame()
     return CompareResult(feature_day=feature_day, cell=cell, exceptions=exceptions)
