@@ -124,6 +124,8 @@ class PeerRelativeReturnGroup(FeatureGroup):
         return self._assemble(ctx, ctx.frame("minute_agg").select(["symbol", "minute"]))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = keys["minute"].max()
-        return self._assemble(ctx, keys.filter(pl.col("minute") == latest))
+        """Slice the minute buffer to the deepest peer-return window before the lag + per-minute peer demean,
+        then emit T's row — the dropped older minutes cannot influence a window ending at T (the static
+        ``reference`` cluster map has no ``minute`` column, so it passes through whole). Parity-true by
+        ``compute_latest_on_window`` semantics (guarded == ``compute().last`` by tests/test_fp_latest)."""
+        return self.compute_latest_on_window(ctx, max(PEER_WINDOWS))

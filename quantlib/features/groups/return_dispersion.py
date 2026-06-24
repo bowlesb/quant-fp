@@ -162,8 +162,14 @@ class ReturnDispersionGroup(FeatureGroup):
         return self._assemble(ctx, ctx.frame("minute_agg").select(["symbol", "minute"]))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE gather: the reduce runs over the FULL buffer (windowed returns intact); only the
-        output keys are filtered to the latest minute, so compute_latest == compute().last (parity-guarded)."""
-        keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = keys["minute"].max()
-        return self._assemble(ctx, keys.filter(pl.col("minute") == latest))
+        """LATEST-MINUTE gather. Slice ONLY the ``minute_agg`` input to the deepest intraday window before the
+        per-minute lag + cross-sectional dispersion reduce — the dropped older minutes cannot influence a
+        window ending at T, and the reduce is ``group_by("minute")`` so only T's cross-section matters. The
+        ``daily`` frame is NOT sliced (the daily dispersion is session-cached + date-keyed, independent of the
+        minute window). Then emit only the latest minute's output keys, so compute_latest == compute().last."""
+        minute_agg = ctx.frame("minute_agg")
+        sliced = self._slice_to_window(minute_agg, max(MINUTE_WINDOWS))
+        sub = BatchContext(frames={**ctx.frames, "minute_agg": sliced})
+        latest = minute_agg["minute"].max()
+        keys = minute_agg.select(["symbol", "minute"]).filter(pl.col("minute") == latest)
+        return self._assemble(sub, keys)
