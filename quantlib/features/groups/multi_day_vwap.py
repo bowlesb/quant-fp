@@ -11,20 +11,18 @@ from __future__ import annotations
 import polars as pl
 
 from quantlib.features.base import (
-    BatchContext,
-    FeatureGroup,
     FeatureSpec,
     FeatureType,
     InputSpec,
-    daily_snapshot_token,
 )
+from quantlib.features.daily_snapshot_group import DailySnapshotGroup
 from quantlib.features.registry import register
 
 VWAP_DAYS: tuple[int, ...] = (5, 10, 20, 60, 120)  # ~week, 2wk, month, quarter, half-year
 
 
 @register
-class MultiDayVwapGroup(FeatureGroup):
+class MultiDayVwapGroup(DailySnapshotGroup):
     name = "multi_day_vwap"
     version = "1.0.0"
     owner = "modeller"
@@ -49,16 +47,8 @@ class MultiDayVwapGroup(FeatureGroup):
             )
         return specs
 
-    def _daily(self, ctx: BatchContext) -> tuple[pl.DataFrame, list[str]]:
-        """Per-(symbol, date) daily VWAP-distance features, cached on the daily-snapshot identity."""
-        source = ctx.frame("daily")
-        names = [spec.name for spec in self.declare()]
-        result = self.session_cache.get(
-            daily_snapshot_token(source), lambda: self._compute_daily(source, names)
-        )
-        return result, names
-
-    def _compute_daily(self, source: pl.DataFrame, names: list[str]) -> pl.DataFrame:
+    def daily_snapshot(self, source: pl.DataFrame) -> pl.DataFrame:
+        """Per-(symbol, date) daily VWAP-distance features."""
         daily = source.select(["symbol", "date", "close", "volume", "vwap"]).sort(["symbol", "date"])
         # shift by 1 so the rolling windows end at the PRIOR completed day (never today's incomplete bar)
         daily = daily.with_columns(
@@ -75,17 +65,4 @@ class MultiDayVwapGroup(FeatureGroup):
             vwap_n = sum_pv / sum_vol
             exprs.append((pl.col("_pc") / vwap_n - 1.0).cast(pl.Float64).alias(f"dist_from_vwap_{days}d"))
             exprs.append((pl.col("_pc") > vwap_n).cast(pl.Float64).alias(f"above_vwap_{days}d"))
-        return daily.with_columns(exprs).select(["symbol", "date", *names])
-
-    def compute(self, ctx: BatchContext) -> pl.DataFrame:
-        daily, names = self._daily(ctx)
-        minutes = ctx.frame("minute_agg").select(["symbol", "minute"]).with_columns(pl.col("minute").dt.date().alias("date"))
-        return minutes.join(daily, on=["symbol", "date"], how="left").select(["symbol", "minute", *names])
-
-    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """Same code as compute(), run on a minute_agg restricted to the latest minute (broadcast to one
-        minute, not all 390)."""
-        minute_agg = ctx.frame("minute_agg")
-        latest = minute_agg["minute"].max()
-        sub = BatchContext(frames={**ctx.frames, "minute_agg": minute_agg.filter(pl.col("minute") == latest)})
-        return self.compute(sub)
+        return daily.with_columns(exprs).select(["symbol", "date", *self.feature_names])
