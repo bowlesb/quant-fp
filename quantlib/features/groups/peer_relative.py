@@ -71,11 +71,7 @@ class PeerRelativeReturnGroup(FeatureGroup):
         return max(PEER_WINDOWS)
 
     def _returns(self, ctx: BatchContext) -> pl.DataFrame:
-        frame = (
-            ctx.frame("minute_agg")
-            .select(["symbol", "minute", "close"])
-            .sort(["symbol", "minute"])
-        )
+        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"]).sort(["symbol", "minute"])
         for window in PEER_WINDOWS:
             frame = lagged(frame, "close", window, f"_lag{window}")
         return frame.with_columns(
@@ -99,10 +95,7 @@ class PeerRelativeReturnGroup(FeatureGroup):
         returns = self._returns(ctx).join(clusters, on="symbol", how="left")
 
         peer_mean_exprs = [
-            pl.col(f"_ret_{w}")
-            .mean()
-            .over(["cluster_id", "minute"])
-            .alias(f"_peer_{w}")
+            pl.col(f"_ret_{w}").mean().over(["cluster_id", "minute"]).alias(f"_peer_{w}")
             for w in PEER_WINDOWS
         ]
         with_peer = returns.with_columns(peer_mean_exprs)
@@ -116,14 +109,14 @@ class PeerRelativeReturnGroup(FeatureGroup):
             ]
         ).select(["symbol", "minute", *names])
 
-        return out_keys.join(feat, on=["symbol", "minute"], how="left").select(
-            ["symbol", "minute", *names]
-        )
+        return out_keys.join(feat, on=["symbol", "minute"], how="left").select(["symbol", "minute", *names])
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         return self._assemble(ctx, ctx.frame("minute_agg").select(["symbol", "minute"]))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = keys["minute"].max()
-        return self._assemble(ctx, keys.filter(pl.col("minute") == latest))
+        # The peer-demean only needs the LATEST minute's cross-section, and the windowed returns feeding it
+        # read at most ``max(PEER_WINDOWS)`` minutes back — so slice the buffer to that trailing window before
+        # running the SAME reduce (compute_latest_on_window) instead of re-deriving returns over the WHOLE
+        # buffer and discarding all but the latest minute. Parity-true by construction + generic-guarded.
+        return self.compute_latest_on_window(ctx, max(PEER_WINDOWS) + 1)

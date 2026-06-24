@@ -105,7 +105,10 @@ class ReturnDispersionGroup(FeatureGroup):
             frame = lagged(frame, "close", window, f"_lag{window}")
         frame = frame.sort(["symbol", "minute"])
         return frame.with_columns(
-            [(pl.col("close") / pl.col(f"_lag{w}") - 1.0).alias(f"_ret_{_tag(w, False)}") for w in MINUTE_WINDOWS]
+            [
+                (pl.col("close") / pl.col(f"_lag{w}") - 1.0).alias(f"_ret_{_tag(w, False)}")
+                for w in MINUTE_WINDOWS
+            ]
         ).select(["symbol", "minute", *[f"_ret_{_tag(w, False)}" for w in MINUTE_WINDOWS]])
 
     def _daily_returns(self, ctx: BatchContext) -> pl.DataFrame:
@@ -118,7 +121,12 @@ class ReturnDispersionGroup(FeatureGroup):
         daily = source.select(["symbol", "date", "close"]).sort(["symbol", "date"])
         daily = daily.with_columns(pl.col("close").shift(1).over("symbol").alias("_asof"))
         return daily.with_columns(
-            [(pl.col("_asof") / pl.col("_asof").shift(w).over("symbol") - 1.0).alias(f"_ret_{_tag(w, True)}") for w in DAY_WINDOWS]
+            [
+                (pl.col("_asof") / pl.col("_asof").shift(w).over("symbol") - 1.0).alias(
+                    f"_ret_{_tag(w, True)}"
+                )
+                for w in DAY_WINDOWS
+            ]
         ).select(["symbol", "date", *[f"_ret_{_tag(w, True)}" for w in DAY_WINDOWS]])
 
     def _market_by_minute(self, returns: pl.DataFrame, tags: list[str]) -> pl.DataFrame:
@@ -128,9 +136,7 @@ class ReturnDispersionGroup(FeatureGroup):
         for tag in tags:
             col = pl.col(f"_ret_{tag}")
             aggs.append(col.std().alias(f"return_dispersion_std_{tag}"))
-            aggs.append(
-                (col.quantile(0.75) - col.quantile(0.25)).alias(f"return_dispersion_iqr_{tag}")
-            )
+            aggs.append((col.quantile(0.75) - col.quantile(0.25)).alias(f"return_dispersion_iqr_{tag}"))
         return returns.group_by("minute").agg(aggs)
 
     def _assemble(self, ctx: BatchContext, out_keys: pl.DataFrame) -> pl.DataFrame:
@@ -148,7 +154,9 @@ class ReturnDispersionGroup(FeatureGroup):
         for tag in day_tags:
             col = pl.col(f"_ret_{tag}")
             daily_aggs.append(col.std().alias(f"return_dispersion_std_{tag}"))
-            daily_aggs.append((col.quantile(0.75) - col.quantile(0.25)).alias(f"return_dispersion_iqr_{tag}"))
+            daily_aggs.append(
+                (col.quantile(0.75) - col.quantile(0.25)).alias(f"return_dispersion_iqr_{tag}")
+            )
         daily_disp = daily_ret.group_by("date").agg(daily_aggs)
 
         keys = out_keys.with_columns(pl.col("minute").dt.date().alias("date"))
@@ -162,8 +170,9 @@ class ReturnDispersionGroup(FeatureGroup):
         return self._assemble(ctx, ctx.frame("minute_agg").select(["symbol", "minute"]))
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE gather: the reduce runs over the FULL buffer (windowed returns intact); only the
-        output keys are filtered to the latest minute, so compute_latest == compute().last (parity-guarded)."""
-        keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = keys["minute"].max()
-        return self._assemble(ctx, keys.filter(pl.col("minute") == latest))
+        """LATEST-MINUTE gather: the dispersion is over the latest minute's cross-section and the windowed
+        minute-returns read at most ``max(MINUTE_WINDOWS)`` back — so slice the buffer to that trailing window
+        and run the SAME reduce (compute_latest_on_window) instead of re-deriving returns over the WHOLE buffer
+        and discarding all but the latest minute. The daily frame (keyed by ``date``, the session-cached daily
+        returns) passes through the slice whole. Parity-true by construction + generic-guarded."""
+        return self.compute_latest_on_window(ctx, max(MINUTE_WINDOWS) + 1)
