@@ -15,6 +15,8 @@ own test here, since the standard frames carry no universe.
 """
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+
 import polars as pl
 
 import pytest
@@ -23,15 +25,17 @@ from quantlib.features import BatchContext, REGISTRY
 from quantlib.features.base import FeatureSpec, FeatureType
 from quantlib.features.daily_snapshot_group import DailySnapshotGroup
 from quantlib.features.groups.liquidity_rank import LiquidityRankGroup
+from quantlib.features.groups.prior_day import PriorDayGroup
 from quantlib.features.profile import build_frames
 
 MIGRATED_SNAPSHOT_GROUPS = [
-    "multi_day_returns",
-    "multi_day_vwap",
-    "daily_beta",
-    "overnight_beta",
-    "overnight_intraday_split",
-    "liquidity_rank",
+    "multi_day_returns",  # A.1 pure-broadcast
+    "multi_day_vwap",  # A.1
+    "daily_beta",  # A.1
+    "overnight_beta",  # A.1
+    "overnight_intraday_split",  # A.1
+    "liquidity_rank",  # A.1 + universe-witness override
+    "prior_day",  # A.2 snapshot-levels + at-T close via broadcast_exprs
 ]
 
 
@@ -105,6 +109,43 @@ def test_liquidity_rank_universe_witness_path(ctx: BatchContext) -> None:
     first, _ = instance._daily(ctx_full)
     second, _ = instance._daily(ctx_half)
     assert not first.sort(["symbol", "date"]).equals(second.sort(["symbol", "date"]))
+
+
+def test_prior_day_a2_broadcast_exprs_path() -> None:
+    """prior_day is the A.2 sub-shape: the snapshot holds per-(symbol,date) LEVELS and the features mix a level
+    with the at-T minute close (dist_from_prior_close = close/prev_close - 1) via broadcast_exprs +
+    minute_columns. On a hand-built frame with a real prior-day bar (the standard synthetic frames null these),
+    assert the at-T close flows into the close-relative feature while the pure-level gap_open does not."""
+    group = PriorDayGroup()
+    assert group.broadcast_exprs() is not None  # A.2 hook live
+    assert group.minute_columns == ("close",)  # at-T close carried into the broadcast
+
+    # D-1 sets the prior-day levels (prev_close=100); D carries two intraday minutes at different closes.
+    daily = pl.DataFrame(
+        {
+            "symbol": ["AAA", "AAA"],
+            "date": [date(2026, 6, 11), date(2026, 6, 12)],
+            "open": [99.0, 102.0],
+            "high": [101.0, 103.0],
+            "low": [98.0, 101.0],
+            "close": [100.0, 102.5],
+        }
+    )
+    minute_agg = pl.DataFrame(
+        {
+            "symbol": ["AAA", "AAA"],
+            "minute": [
+                datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc),
+                datetime(2026, 6, 12, 14, 1, tzinfo=timezone.utc),
+            ],
+            "close": [110.0, 121.0],  # two different at-T closes on day D
+        }
+    )
+    out = group.compute(BatchContext(frames={"daily": daily, "minute_agg": minute_agg})).sort("minute")
+    # dist_from_prior_close = close/prev_close - 1, prev_close=100 -> 0.10 then 0.21 (tracks the at-T close).
+    assert out["dist_from_prior_close"].to_list() == pytest.approx([0.10, 0.21])
+    # gap_open = open[D]/close[D-1] - 1 = 102/100 - 1 = 0.02, a pure LEVEL, identical at both minutes.
+    assert out["gap_open"].to_list() == pytest.approx([0.02, 0.02])
 
 
 class _ProbeSnapshotGroup(DailySnapshotGroup):

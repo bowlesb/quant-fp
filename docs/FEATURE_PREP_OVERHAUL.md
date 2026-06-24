@@ -78,12 +78,18 @@ problems — they are (at most) THREE patterns implemented in overlapping ways:
   cache wrapper + `compute` broadcast + `compute_latest` latest-broadcast), and only the FIRST method differs
   between them. The cache primitive is shared; the *usage* is copy-pasted 9×. (Quantified in §4; this is the POC
   target.)
-- **#3 vs #4-reduction.** `WindowedSumState` (incremental.py) and `ReductionFoldState` (stateful.py) are BOTH
-  running-Σ folds over windowed columns. `ReductionFoldState` exists so a `StatefulGroup` (technical's RSI/SMA)
-  can fold reductions *next to* its EMAs — but it is a second implementation of the same additive-window kind
-  the `ReductionGroup` tier already owns. One additive-window primitive should serve both tiers.
-- **#5 vs #3.** `CumulativeState` (running min/max/first, no expiry) is the **degenerate, infinite-window** case
-  of the additive/extrema kinds — a separate class for "the window is the whole session."
+- **#3 vs #4-reduction — CORRECTION (verified 2026-06-24): NOT a duplicate.** `ReductionFoldState` (stateful.py)
+  does NOT reimplement `WindowedSumState` — it **HOLDS** one (`self.state = WindowedSumState(...)`) and wraps it
+  with the per-symbol time-based prior-close + value-row construction a `StatefulGroup` needs to fold reductions
+  next to its EMAs. It is a thin composition over the one additive primitive, not a second fold. **No B1
+  consolidation to do.** (The earlier "second running-sum fold" framing was wrong — the code already shares the
+  primitive.)
+- **#5 vs #3 — CORRECTION (verified 2026-06-24): a justified distinct kind, not redundancy.** `CumulativeState`
+  is the session-cumulative reduce (min/max/sum/first) with a **session-rollover reset** — folding a
+  `WindowedSumState` with `window=session` would NOT capture min/max/first or the per-session reset, and it is
+  already O(symbols)/minute (the minimum). The 3-group live redundancy it could have had (3× tz-conversion + 3×
+  session-filter + 3× group_by) was ALREADY consolidated into ONE shared memoized pass by
+  `session_cumulative_agg` (#266/#267/#269/#284). **No B2 consolidation to do.**
 - **#6 is un-declared B/C.** ~33 groups override `compute_latest` to slice a bounded window and recompute
   (`compute_latest_on_window`, or a bespoke pass). This is correct and bounded, but it is a THIRD way to express
   "this feature only needs the last W minutes" — neither a declared reduction (#3) nor a declared stateful kind
@@ -162,10 +168,10 @@ two running-sum folds (#3, #4-reduction) and the cumulative class (#5) should co
 | consolidation | from | to | LOC reclaimed (est.) |
 |---|---|---|---|
 | **A1** Class-A daily-snapshot dance → `DailySnapshotGroup` base | 9 groups × 4-method boilerplate | 1 base (POC, ~100 LOC) + 9 groups writing 1 method each | ~250–350 |
-| **A2** the 5 pure-ts reference filters → trivially A (declare-only) | bespoke `compute()`+`compute_latest()` | a 1-method `daily_snapshot` (or a `ReferenceGroup` sibling) | ~80 |
-| **B1** `ReductionFoldState` (stateful.py) → reuse `WindowedSumState` | the second running-sum fold | the one additive-window primitive | ~120 |
-| **B2** `CumulativeState`/#5 → infinite-window additive/extrema kind | a separate class + `session_cumulative_agg` | a `window=session` flag on the existing kinds | ~100 |
-| **B3** #6 bounded-window `compute_latest` overrides → declared reduction kind | ~33 bespoke `compute_latest` | `reduce_buffer_minutes()` + declared windows; engine generates the slice | ~400–600 (incremental) |
+| ~~**A2** the 5 pure-ts reference filters~~ | — | **NO-OP** (already minimal: 1 `compute()` + inherited default `compute_latest`, no cache/override boilerplate — nothing to collapse) | 0 |
+| ~~**B1** `ReductionFoldState` → reuse `WindowedSumState`~~ | — | **ALREADY DONE** (it HOLDS a `WindowedSumState`, not a second fold — verified 2026-06-24) | 0 |
+| ~~**B2** `CumulativeState` → infinite-window kind~~ | — | **NO-OP** (justified distinct session-reset kind; its 3-group live redundancy already consolidated by `session_cumulative_agg` #284) | 0 |
+| **B3** #6 bounded-window `compute_latest` — the WHOLE-BUFFER ones | 3 cross-sectional gathers lagged/sorted the full buffer in `compute_latest` | bounded `compute_latest_on_window` / minute-slice (Stage 2a, #442) | 3 whole-buffer passes/min |
 | **C1** point-in-time groups → declared last-k / at-T | bespoke `compute_latest` | `LastKState` kind or no state | (subset of B3) |
 
 **Realistic reclaim of the ~4,743-LOC core + the group-level boilerplate: on the order of 1,000–1,500 LOC of
@@ -199,11 +205,25 @@ byte-identical (fp unchanged).
   (§3): `prior_day` (A.2, needs a `broadcast_exprs` hook) deferred to **Stage 1b**; `return_dispersion` +
   `breadth` (A.3 hybrids) correctly left as-is. Generalized the base's `daily_snapshot(source, ctx)` +
   `_snapshot_witness(source, ctx)` to support the one multi-input group (`liquidity_rank`'s universe witness).
-- **Stage 1b — Pattern A.2 + reference filters.** Add the optional `broadcast_exprs` hook, migrate `prior_day`;
-  migrate the 5 pure-ts reference filters. Each cell-identity-gated.
-- **Stage 2 — collapse the B duplicates (B1+B2).** Point `ReductionFoldState` at `WindowedSumState`; fold
-  `CumulativeState` into an infinite-window kind. Gated by `test_fp_stateful` + `test_fp_incremental` parity.
-  (~220 LOC out.) Independent of the FP_INCREMENTAL live flip (that's an activation lever, not this refactor).
+- **Stage 1b — Pattern A.2 (DONE, this PR).** Added the optional `broadcast_exprs` + `minute_columns` hooks to
+  the base; migrated `prior_day` (120 → 100 LOC) — its snapshot returns prior-day LEVELS and `broadcast_exprs`
+  derives the close-relative features from the levels + the at-T close after the broadcast. Cell-identical to
+  origin/main; surface-hash unchanged. **FINDING — the 5 reference filters need NO migration:** `sector`,
+  `calendar`, `asset_flags`, `round_levels`, `calendar_events` have ZERO `compute_latest` overrides and ZERO
+  cache boilerplate (a single `compute()` + the inherited default `compute_latest`). They have nothing to
+  collapse — forcing them onto a base would ADD abstraction, not remove it. Confirms #381's "pure-ts filters,
+  ~0 marginal cost." Left as-is by design. **Pattern A is now fully migrated** (the A.3 hybrids stay correctly
+  as A-cache + B-gather).
+- **Stage 2a — bound the whole-buffer cross-sectional gathers (DONE, #442).** The exhaustive group audit found
+  3 groups (`peer_relative`, `cross_sectional_rank`, `return_dispersion`) whose `compute_latest` lagged / sorted
+  / reduced the WHOLE minute buffer then kept only T. Rewrote each to a bounded `compute_latest_on_window` /
+  minute-only slice — cell-identical to `compute().filter(T)` incl a sparse symbol, surface-hash unchanged. This
+  is the real B3 win at the group level (the 3 whole-buffer offenders); the rest of the ~33 bounded-window
+  groups already slice correctly (audit-confirmed CLEAN).
+- **Stage 2b — collapse the B duplicates: CANCELLED (not real).** Verified 2026-06-24: `ReductionFoldState`
+  already HOLDS a `WindowedSumState` (no second fold to merge); `CumulativeState` is a justified distinct
+  session-reset kind whose 3-group live redundancy was already consolidated by `session_cumulative_agg` (#284).
+  No churn-only refactor — the B mechanisms are already minimal. (Corrects the original §4 over-count.)
 - **Stage 3 — declare the bounded-window groups (B3/C1).** Convert the ~33 bespoke `compute_latest` overrides
   to declared windows/kinds so the engine generates the slice — **this is the same surface CriticalProfiler's
   resolve_points carried-state work lands on** (the per-minute whole-buffer point/lag reads), measured at 107×
@@ -236,5 +256,12 @@ deploy (no fingerprint change) — they deploy on the normal feature-computer re
 - **Suite:** `test_fp_latest.py` + `test_fp_new_families.py` + `test_daily_beta.py` + `test_daily_snapshot_group.py`
   = 124 passed, 1 skipped.
 
-Remaining Pattern-A work: `prior_day` (A.2, Stage 1b) + the 5 reference filters. The A.3 hybrids
-(`return_dispersion`, `breadth`) stay as-is by design.
+### Stage 1b (this PR)
+- Added `broadcast_exprs()` + `minute_columns` to the base; migrated `prior_day` (A.2, 120 → 100 LOC) —
+  cell-identical to origin/main, surface-hash unchanged.
+- The 5 reference filters are a **NO-OP** (already minimal, no boilerplate — see §5). **Pattern A is now fully
+  migrated**; the A.3 hybrids (`return_dispersion`, `breadth`) stay as-is by design.
+- Suite: 127 passed, 1 skipped.
+
+**Pattern A complete.** Next: Stage 2 (collapse the B duplicates) and Stage 3 (the joint resolve_points surface
+with CriticalProfiler).

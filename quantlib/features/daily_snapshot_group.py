@@ -54,18 +54,33 @@ class DailySnapshotGroup(FeatureGroup):
 
     snapshot_input: str = "daily"
     minute_input: str = "minute_agg"
+    minute_columns: tuple[str, ...] = ()  # extra at-T minute_agg cols to carry into broadcast_exprs (A.2)
 
     @abstractmethod
     def daily_snapshot(self, source: pl.DataFrame, ctx: BatchContext) -> pl.DataFrame:
-        """The group's per-(symbol, date) feature columns from the daily snapshot ``source`` — the ONLY
-        method a Class-A group writes. Returns a frame keyed by ``(symbol, date)`` with exactly one column
-        per declared feature. Computed ONCE per session (cached on the snapshot content witness) and
-        broadcast across the session's minutes by the base.
+        """The per-(symbol, date) snapshot the group's features derive from — the ONLY method most Class-A
+        groups write. Returns a frame keyed by ``(symbol, date)``. Computed ONCE per session (cached on the
+        snapshot content witness) and broadcast across the session's minutes by the base.
+
+        For the common (A.1) group the returned columns ARE the declared features (one per output, broadcast
+        verbatim). For an A.2 group that mixes the snapshot with the at-T minute value (e.g. ``prior_day``'s
+        ``close/prev_high − 1``), this returns the per-(symbol, date) LEVELS and the group overrides
+        ``broadcast_exprs`` to derive the final features from the levels + the at-T ``minute_columns`` after
+        the broadcast join.
 
         ``ctx`` is provided for the (rare) group whose snapshot reads a SECOND per-session-constant input
         beyond the ``daily`` frame (e.g. universe membership for a cross-sectional rank's denominator); the
         common single-input group ignores it. Any extra input read here must be per-session-INVARIANT and its
         witness paired into ``_snapshot_witness`` so a change re-runs this (never a stale cache serve)."""
+
+    def broadcast_exprs(self) -> list[pl.Expr] | None:
+        """The final feature expressions for an A.2 group, evaluated over the broadcast frame (the snapshot
+        LEVELS joined onto each minute, plus the at-T ``minute_columns``). Default ``None``: the snapshot
+        columns ARE the features (A.1, no per-minute step). When overridden, the snapshot returns level columns
+        and these exprs (each aliased to a declared feature name, reading the levels + at-T close) produce the
+        outputs — the SAME exprs run in ``compute`` (all minutes) and ``compute_latest`` (latest minute), so
+        live == backfill by construction."""
+        return None
 
     def _snapshot_witness(self, source: pl.DataFrame, ctx: BatchContext) -> object:
         """The content witness the per-session cache keys on. Default = the daily-snapshot token (id +
@@ -83,12 +98,16 @@ class DailySnapshotGroup(FeatureGroup):
         return result, names
 
     def _broadcast(self, minutes: pl.DataFrame, daily: pl.DataFrame, names: list[str]) -> pl.DataFrame:
-        minutes = minutes.select(["symbol", "minute"]).with_columns(
+        minutes = minutes.select(["symbol", "minute", *self.minute_columns]).with_columns(
             pl.col("minute").dt.date().alias("date")
         )
-        return minutes.join(daily, on=["symbol", "date"], how="left").select(
-            ["symbol", "minute", *names]
-        )
+        joined = minutes.join(daily, on=["symbol", "date"], how="left")
+        exprs = self.broadcast_exprs()
+        if exprs is None:
+            # A.1: the snapshot columns ARE the features — broadcast verbatim.
+            return joined.select(["symbol", "minute", *names])
+        # A.2: derive the features from the broadcast levels + the at-T minute columns.
+        return joined.with_columns(exprs).select(["symbol", "minute", *names])
 
     def compute(self, ctx: BatchContext) -> pl.DataFrame:
         """BACKFILL form: broadcast the cached daily features across ALL minutes of the session."""
@@ -99,7 +118,7 @@ class DailySnapshotGroup(FeatureGroup):
         """LIVE form: broadcast the cached daily features onto ONLY the latest minute's rows. Value-identical
         to ``compute`` filtered to T — the daily computation and the broadcast join are the SAME; only the
         minute set shrinks from all 390 to one."""
-        minutes = ctx.frame(self.minute_input).select(["symbol", "minute"])
+        minutes = ctx.frame(self.minute_input).select(["symbol", "minute", *self.minute_columns])
         latest = minutes["minute"].max()
         daily, names = self._daily(ctx)
         return self._broadcast(minutes.filter(pl.col("minute") == latest), daily, names)
