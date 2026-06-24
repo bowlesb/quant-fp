@@ -418,3 +418,27 @@ for the Lead: `cargo build` + rebuild the fp-dev image with the new `quant_tick`
 if `FP_RUST_ASSEMBLE` is also on; the polars `step` path needs no wheel change) → `FP_RUST_REDUCE=1` →
 relaunch.
 
+**✅ UPDATE 2026-06-24 — both groups PROMOTED (`incremental_safe` flipped to an FR-gated property), proven on the
+CO-RESIDENT real soak.** The earlier "PROMOTABLE" gate above force-promoted ONLY the 3 time-axis groups in
+isolation. The authoritative gate is now the FULL co-resident soak — `incremental_realdata_soak.py 2026-06-17`
+with `FP_RUST_REDUCE=1`, trend_quality + clean_momentum riding their property alongside `price_volume` (which is
+itself FR-gated and only joins the shared engine at FR=1) and the other 19 safe groups. Findings:
+
+- **trend_quality** — CLEAN as the doc projected (worst tol-ratio 0.4× → 0 breaches/779 min co-resident; the
+  y-anchor + the `assemble()` r²-pin on flat-but-slope-defined windows close it). **fp-NEUTRAL** (no version
+  bump). Promoted via the FR-gated `incremental_safe` property (mirrors price_volume).
+- **clean_momentum** — the y-anchor makes the CONTINUOUS `clean_momentum_score_*` parity-clean (worst 0.02×), but
+  the doc's "620×→0.2×, value-identical" was INCOMPLETE: co-resident with price_volume the group still breached
+  at **one cell** (`momentum_quality_flag_5m`, BAC 16:24, batch flag 0 vs incremental 1, score agreeing to
+  8.86e-13). Root cause = the **sign-at-threshold trap**, NOT a conditioning gap: the flag is a hard-thresholded
+  binary `(|slope|>2e-4)&(r2>0.7)&(resid_std<0.3)` whose inputs differ by ~1e-12 across the fresh-sum/running-sum
+  boundary, so a knife-edge cell rounds to opposite sides of a threshold. No conditioning makes a discrete output
+  bit-identical across two summation orders. FIX = snap the flag's `>/<` inputs to `FLAG_SNAP_DP=6` decimals
+  under FP_RUST_REDUCE (the sub-grid divergence can no longer straddle a threshold). Real soak with the snap:
+  **0 flips, 21/21 ALL-GO, worst overall 0.01×**. This changes the flag on float-noise-ambiguous boundary cells →
+  **version bump 1.1.0 → 1.2.0** (fingerprint `2328254235086533487` → `12384537794099517348`, 737 features both,
+  names unchanged → by-name resolution non-breaking; coordinated deploy + re-trust on the new version).
+
+So the relaunch un-parks BOTH: trend_quality fp-neutrally, clean_momentum on the same coordinated fingerprint
+deploy as #417 (return_dynamics/market_beta).
+

@@ -248,3 +248,56 @@ def test_centering_conditions_breach_and_on_path_is_clean() -> None:
     assert (
         worst_on <= _BREACH_RATIO
     ), f"FP_RUST_REDUCE ON path must be clean (no breach/flip); worst_on={worst_on}"
+
+
+@pytest.mark.parametrize("group_name", ANCHORED_GROUPS)
+def test_incremental_safe_is_fp_rust_reduce_gated(group_name: str) -> None:
+    """The y-centered groups ride the incremental running sums ONLY when FP_RUST_REDUCE is on — their
+    ``incremental_safe`` is a property that follows ``declarative._USE_RUST_REDUCE`` in lockstep (the close
+    anchor / flag-snap that make them parity-true arm with the same flag). OFF (the default) keeps them PARKED
+    on the byte-identical batch path; the prod flip is the Lead's relaunch. Mirrors price_volume's gate."""
+    group = _group(group_name)
+    with _flag(False):
+        assert group.incremental_safe is False
+    with _flag(True):
+        assert group.incremental_safe is True
+
+
+def test_quality_flag_snap_is_threshold_deterministic() -> None:
+    """momentum_quality_flag is a hard-threshold conjunction ((r2>0.7)&(|slope|>2e-4)&(resid_std<0.3)); a cell
+    whose r2/|slope|/resid_std sits on a knife-edge has the batch fresh-sum and incremental running-sum round
+    the ~13th sig-digit to OPPOSITE sides of a threshold -> a 0<->1 flip (the sign-at-threshold trap that gated
+    clean_momentum from FP_INCREMENTAL even after the score's y-anchor made it parity-clean). Under
+    FP_RUST_REDUCE the compares snap their inputs to FLAG_SNAP_DP decimals so the sub-grid divergence can no
+    longer straddle a threshold: two inputs agreeing to 1e-12 round to the SAME side. Verified directly on the
+    near-perfect synthetic fit (the documented authority is the real-tape soak: 0 flips co-resident with
+    price_volume)."""
+    frame = _near_perfect_frame(n_sym=12, n_min=90, present_p=0.6, seed=3)
+    cm = [g for g in runnable({"minute_agg": frame}) if g.name == "clean_momentum"]
+    assert cm, "clean_momentum must be runnable (close anchor attached)"
+    minutes = sorted(frame["minute"].unique())
+
+    def flag_flips(flag_on: bool) -> int:
+        with _flag(flag_on):
+            engine = IncrementalEngine(cm)
+            flips = 0
+            for ti, minute in enumerate(minutes):
+                buffer = frame.filter(pl.col("minute") <= minute)
+                inc = engine.step(buffer, slice_derive=True)
+                if ti < 30:
+                    continue
+                ctx = BatchContext(frames={"minute_agg": buffer})
+                batch = compute_reduction_batch(cm, ctx)
+                flag_cols = [
+                    c for c in batch["clean_momentum"].columns if c.startswith("momentum_quality_flag")
+                ]
+                joined = batch["clean_momentum"].join(
+                    inc["clean_momentum"], on="symbol", how="inner", suffix="__i"
+                )
+                for col in flag_cols:
+                    a, b = pl.col(col), pl.col(f"{col}__i")
+                    flips += joined.filter((a.is_null() == b.is_null()) & (a != b)).height
+            return flips
+
+    # the snap (ON) must not introduce flips; it is what makes the binary flag parity-deterministic.
+    assert flag_flips(True) == 0, "FP_RUST_REDUCE flag-snap must leave momentum_quality_flag flip-free"
