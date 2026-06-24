@@ -149,6 +149,24 @@ def is_deployed_version_trusted(group: FeatureGroup, *, dry_run: bool = True) ->
     )
 
 
+def is_group_untrusted(group_name: str, *, dry_run: bool = True) -> bool:
+    """True iff NO feature of ``group_name`` is currently TRUSTED — the §7 safety predicate the hot-swap
+    scope-guard reads (an untrusted feature is never consumed by a live strategy, so an in-flight value change
+    from a swap can't affect a trade). Conservative + fail-closed for the swap: dry_run returns True (the
+    build/test path has no trust table → treat as untrusted, the SAFE direction for a swap that only deploys
+    untrusted fixes). A group not registered → True (nothing trusted)."""
+    if dry_run:
+        logger.info("DRY-RUN is_group_untrusted group=%s → True (no DB read)", group_name)
+        return True
+    group = group_by_name(group_name)
+    if group is None:
+        return True
+    features = _features_of(group)
+    with psycopg.connect(**DB_KWARGS) as conn, conn.cursor() as cur:
+        cur.execute(_SELECT_TRUST, {"features": features})
+        return not any(row[2] == "TRUSTED" for row in cur.fetchall())
+
+
 def reset_trust_on_content_change(group: FeatureGroup, *, dry_run: bool = True) -> list[str]:
     """RESET trust for every feature of ``group`` whose grant was earned on a DIFFERENT content hash than the
     one now live — i.e. the deployed code changed (a hot-swap landed) so the old grant no longer applies; the

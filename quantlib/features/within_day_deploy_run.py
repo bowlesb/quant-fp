@@ -100,6 +100,20 @@ def process_one(
         rollback_swap=actions["rollback_swap"],
     )
 
+    record_outcome(outcome, job, dry_run=dry_run)
+    return outcome
+
+
+def record_outcome(outcome: ApplyOutcome, job: QueuedJob, *, dry_run: bool = True) -> None:
+    """Record a pipeline ApplyOutcome into the FIFO queue's terminal state + (on apply) fire the version
+    reset. Extracted from :func:`process_one` so the LIVE capture-loop seam
+    (:mod:`within_day_live_wiring`) records its outcomes through the SAME mapping — there is exactly one
+    place that maps an ``ApplyOutcome.status`` to a queue terminal state + the trust reset.
+
+      * 'applied'     → mark_applied  + reset_trust_on_content_change (the swapped code changed → re-earn)
+      * 'rolled_back' → mark_rolled_back (the swap was reverted; trust untouched — the old code is back)
+      * 'escalated'   → mark_escalated  (scope-guard refused / hot-swap refused)
+    """
     if outcome.status == "applied":
         queue.mark_applied(job.job_id, outcome.detail, dry_run=dry_run)
         _reset_trust_after_swap(job.group_name, dry_run=dry_run)
@@ -109,7 +123,6 @@ def process_one(
         queue.mark_escalated(job.job_id, outcome.detail, dry_run=dry_run)
     else:
         raise ValueError(f"unexpected ApplyOutcome.status {outcome.status!r}")
-    return outcome
 
 
 def _reset_trust_after_swap(group_name: str, *, dry_run: bool) -> None:
