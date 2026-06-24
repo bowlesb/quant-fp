@@ -48,21 +48,35 @@ class SectorOneHotGroup(FeatureGroup):
 
     def declare(self) -> list[FeatureSpec]:
         specs = [
-            FeatureSpec(name=f"sector_is_{sector}", description=f"1.0 when the symbol's GICS-aligned sector is {sector.replace('_', ' ')}, else 0.0 (one-hot, broadcast across the day).",
-                        dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="none", layer="A")
+            FeatureSpec(
+                name=f"sector_is_{sector}",
+                description=f"1.0 when the symbol's GICS-aligned sector is {sector.replace('_', ' ')}, else 0.0 (one-hot, broadcast across the day).",
+                dtype="Float64",
+                valid_range=(-0.01, 1.01),
+                nan_policy="none",
+                layer="A",
+            )
             for sector in SECTORS
         ]
         specs.append(
-            FeatureSpec(name="sector_is_unknown", description="1.0 when the symbol has no mapped sector (unlisted in the sector map or FMP could not classify it), else 0.0.",
-                        dtype="Float64", valid_range=(-0.01, 1.01), nan_policy="none", layer="A")
+            FeatureSpec(
+                name="sector_is_unknown",
+                description="1.0 when the symbol has no mapped sector (unlisted in the sector map or FMP could not classify it), else 0.0.",
+                dtype="Float64",
+                valid_range=(-0.01, 1.01),
+                nan_policy="none",
+                layer="A",
+            )
         )
         return specs
 
     def reference_norm(self, ctx: BatchContext) -> pl.DataFrame:
         """The per-symbol reference frame with the normalized ``_norm`` sector column the feature
         expressions read. Shared by compute() and the consolidated point-in-time emit."""
-        return ctx.frame("reference").select(["symbol", "sector"]).with_columns(
-            pl.col("sector").str.to_lowercase().str.replace_all(" ", "_").alias("_norm")
+        return (
+            ctx.frame("reference")
+            .select(["symbol", "sector"])
+            .with_columns(pl.col("sector").str.to_lowercase().str.replace_all(" ", "_").alias("_norm"))
         )
 
     def exprs(self) -> list[pl.Expr]:
@@ -72,7 +86,11 @@ class SectorOneHotGroup(FeatureGroup):
             for sector in SECTORS
         ]
         exprs.append(
-            pl.when(pl.col("_norm").is_in(SECTORS)).then(0.0).otherwise(1.0).cast(pl.Float64).alias("sector_is_unknown")
+            pl.when(pl.col("_norm").is_in(SECTORS))
+            .then(0.0)
+            .otherwise(1.0)
+            .cast(pl.Float64)
+            .alias("sector_is_unknown")
         )
         return exprs
 
@@ -81,3 +99,9 @@ class SectorOneHotGroup(FeatureGroup):
         joined = minutes.join(self.reference_norm(ctx), on="symbol", how="left")
         names = [spec.name for spec in self.declare()]
         return joined.with_columns(self.exprs()).select(["symbol", "minute", *names])
+
+    def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
+        # A static reference join per minute (the sector one-hot is fixed all day) — no cross-minute window,
+        # so compute ONLY the latest minute instead of the whole buffer. The reference frame (no ``minute``)
+        # passes through whole. Parity-guarded by test_fp_latest.
+        return self.compute_latest_point_in_time(ctx)
