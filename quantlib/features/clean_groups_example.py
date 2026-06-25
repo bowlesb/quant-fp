@@ -259,43 +259,91 @@ class CandlestickClean:
         return out
 
 
+_BREADTH_MINUTE_WINDOWS: tuple[int, ...] = (5, 30, 60)
+_BREADTH_DAY_WINDOWS: tuple[int, ...] = (1, 5)
+_BREADTH_EPS = 1e-4  # dead-band half-width (1 bp) on the return sign — the parity trick
+_BREADTH_UNKNOWN = -1  # the unmapped-sector bucket sentinel
+
+
+def _breadth_fractions(ret: np.ndarray, valid: np.ndarray) -> tuple[float, float]:
+    """Market-wide up/down fractions over the VALID returns, dead-banded: up = ret > +EPS, down = ret < −EPS;
+    a return within ±EPS is FLAT (in the denominator, neither up nor down). NaN denom when no valid return.
+    """
+    n = int(valid.sum())
+    if n == 0:
+        return np.nan, np.nan
+    up = ((ret > _BREADTH_EPS) & valid).sum() / n
+    down = ((ret < -_BREADTH_EPS) & valid).sum() / n
+    return float(up), float(down)
+
+
 class BreadthClean:
-    """CROSS-SECTIONAL: what fraction of the universe is moving up/down over each window. A reduce over the
-    SYMBOL axis (not a per-symbol window) — a market-wide scalar broadcast to every ticker. Proves the
-    interface covers the cross-sectional "fork" kind: ``compute`` already sees all symbols' matrices, so the
-    reduce is a numpy ``mean`` over axis 0. (The sector-grouped variant uses ``window.static['sector']``.)"""
+    """CROSS_SECTIONAL gather: what fraction of the universe (and of each ticker's SECTOR) is moving up/down
+    over each horizon — market-wide + sector scalars broadcast to every present ticker. Intraday horizons
+    (5m/30m/60m) use STRICT time-lag returns (close[T]/close[T−w]−1, NULL if the T−w bar is absent); daily
+    horizons (1d/5d) use the prior-completed-day return from the daily snapshot. Dead-banded sign (±1bp = FLAT,
+    the parity trick). present()-gated (an absent name carries a stale close → excluded). Legacy:
+    ``BreadthGroup`` (FeatureGroup). Reads ``window.static['sector']`` + ``window.session['daily_close']``.
+    """
 
     name = "breadth"
     input_cols = ("close",)
-    feature_names = tuple(f"breadth_{d}_{w}" for w in (5, 10, 30) for d in ("up", "down", "net"))
+    _TAGS = tuple(f"{w}m" for w in _BREADTH_MINUTE_WINDOWS) + tuple(f"{w}d" for w in _BREADTH_DAY_WINDOWS)
+    feature_names = tuple(
+        f"{prefix}_{side}_{tag}"
+        for tag in _TAGS
+        for prefix in ("breadth", "sector_breadth")
+        for side in ("up", "down", "net")
+    )
+
+    def _ret_for_tag(self, window: Window, tag: str) -> np.ndarray:
+        """The per-symbol return over a horizon tag. Intraday ({w}m): strict time-lag close[T]/close[T−w]−1
+        (NULL if no bar at exactly T−w). Daily ({w}d): _asof/_asof[−w]−1 where _asof = prior-completed-day
+        close (daily_close[:, −2]; today is [:, −1]), so 1d = daily[−2]/daily[−3]−1, 5d = daily[−2]/daily[−7]−1.
+        """
+        if tag.endswith("m"):
+            w = int(tag[:-1])
+            close = window.trailing("close")
+            minute = window.trailing_minute()
+            lag_close = _close_at_lag(close, minute, window.minute_epoch, w)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                return window.latest("close") / lag_close - 1.0
+        w = int(tag[:-1])
+        daily_close = window.session.get("daily_close")
+        n_sym = window.n
+        if daily_close is None or daily_close.shape[1] < w + 2:
+            return np.full(n_sym, np.nan)
+        asof = daily_close[:, -2]  # prior COMPLETED day (today = [:, -1] is excluded)
+        ref = daily_close[:, -(2 + w)]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return asof / ref - 1.0
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
-        close = window.trailing("close")
-        present = (
-            window.present()
-        )  # the REAL delivery mask — an absent symbol must NOT enter the denominator
+        present = window.present()
+        n_sym = window.n
+        sector = window.static.get("sector")
+        if sector is None:
+            sector = np.full(n_sym, _BREADTH_UNKNOWN)
         out: dict[str, np.ndarray] = {}
-        for w in (5, 10, 30):
-            cw = _trailing_window(close, w)
-            # per-symbol return over the window (newest / oldest-present − 1)
-            newest = cw[:, -1]
-            oldest = cw[:, 0]
-            with np.errstate(invalid="ignore", divide="ignore"):
-                ret = newest / oldest - 1.0
-            # gate on present(): a symbol that delivered no bar this minute has a finite trailing return from
-            # its CARRIED close, so isfinite(ret) alone wrongly counts it. Breadth is "fraction of the universe
-            # moving up RIGHT NOW" — only symbols present this minute participate.
-            valid = np.isfinite(ret) & present
-            band = 1e-4  # dead-band: a name within ±band is neither up nor down (robust count, breadth.py)
-            up = (ret > band) & valid
-            down = (ret < -band) & valid
-            n = max(int(valid.sum()), 1)
-            frac_up = float(up.sum()) / n  # market-wide scalar
-            frac_down = float(down.sum()) / n
-            full = np.full(window.n, np.nan)  # broadcast the scalar to every symbol
-            out[f"breadth_up_{w}"] = np.where(valid, frac_up, np.nan) if valid.any() else full
-            out[f"breadth_down_{w}"] = np.where(valid, frac_down, np.nan) if valid.any() else full
-            out[f"breadth_net_{w}"] = np.where(valid, frac_up - frac_down, np.nan) if valid.any() else full
+        for tag in self._TAGS:
+            ret = self._ret_for_tag(window, tag)
+            valid = np.isfinite(ret) & present  # a valid return that delivered this minute
+            up_m, down_m = _breadth_fractions(ret, valid)
+            # per-sector fractions broadcast onto each member; unmapped → UNKNOWN bucket (never dropped).
+            sec_up = np.full(n_sym, np.nan)
+            sec_down = np.full(n_sym, np.nan)
+            for sec in np.unique(sector):
+                rows = sector == sec
+                u, d = _breadth_fractions(ret, valid & rows)
+                sec_up[rows] = u
+                sec_down[rows] = d
+            # emit the market scalar + the ticker's sector scalar, broadcast to every present symbol.
+            out[f"breadth_up_{tag}"] = np.where(present, up_m, np.nan)
+            out[f"breadth_down_{tag}"] = np.where(present, down_m, np.nan)
+            out[f"breadth_net_{tag}"] = np.where(present, up_m - down_m, np.nan)
+            out[f"sector_breadth_up_{tag}"] = np.where(present, sec_up, np.nan)
+            out[f"sector_breadth_down_{tag}"] = np.where(present, sec_down, np.nan)
+            out[f"sector_breadth_net_{tag}"] = np.where(present, sec_up - sec_down, np.nan)
         return out
 
 
