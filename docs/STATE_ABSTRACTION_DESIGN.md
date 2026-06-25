@@ -233,6 +233,35 @@ The order (lowest-risk first, each green before the next, confirmed against the 
 Each step re-runs #451 before the next; green means values survived, red means stop and fix. No feature output
 changes at any step, and the fingerprint is unchanged throughout.
 
+## How we'll know it worked — and how latency work gets easy afterward
+
+The point of this isn't a number going down; it's, in Ben's words, *"consolidation, good design, reducing
+duplication, and being able to quickly profile and improve latency with a minimal amount of code that needs to be
+improved"* — and not having *"latencies super high because of a web of unneeded complexity no one can follow."*
+So success is measured as: **how many mechanisms we consolidated, how much duplication we removed, and whether a
+person can follow where the time goes.** The 42× headroom isn't the goal — it's *why* we can afford to do this
+right instead of firefighting.
+
+The second half of that goal — "quickly profile and improve latency" — is something we already have the tools
+for, and the consolidation is what makes them *useful*. Two profilers stay as the **permanent scoreboard**:
+
+- **`live_throughput.py`** — the one-command, honest, full-universe number. It times the *real* live path
+  (`process_bars`, the actual per-minute compute every group does), at any scale, and reports the universe
+  per-minute latency as the slowest shard's steady-state time. This is the **no-regress floor**: run it before
+  and after each migration step; the number must not get worse.
+- **`phase_profile.py`** — the micro-profiler that opens one group's minute into its handful of phases (the
+  buffer derive, the actual fold arithmetic, the point/lag pass, the assemble) and shows where the time really
+  is. This is the tool that proved the live cost is ~1% arithmetic and ~86% polars-shuffling — i.e. the time is
+  in the *plumbing*, not the math.
+
+Here is the payoff, stated plainly: **today**, that plumbing is smeared across two engines × four `step*` twins ×
+a per-kind wrapper each — so "why is this slow?" means tracing a path through a web no one fully holds in their
+head (exactly Ben's complaint). **After** the consolidation, there is one container drive loop and a few folds —
+so improving latency becomes: *run `live_throughput` to see the universe number → run `phase_profile` to see
+which of the few phases dominates → fix that one place.* The consolidated codebase is the "minimal amount of code
+that needs to be improved"; the two profilers are the "quickly profile" half. That capability — not a ms target
+— is the deliverable.
+
 ## What this is NOT
 
 - **NOT a speed project.** At sim scale the full bar→vector is 277ms/min and compute is ~89ms (~32%) of it; at
