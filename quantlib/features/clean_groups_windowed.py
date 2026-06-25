@@ -303,6 +303,57 @@ def _time_ols_slope_r2_resid(
     return slope, r2, resid_std, mean_y, n
 
 
+def _time_ols_resid_skew(x_mat: np.ndarray, y_mat: np.ndarray) -> np.ndarray:
+    """Window-LOCAL standardized 3rd residual moment (m3/m2^1.5) of a y-on-x OLS over a pre-masked (n,k) TIME
+    window — legacy ``momentum_run._residual_skew_from_lists``. x = window-relative minutes (centered on the
+    window mean); residuals r = y_c − slope·x_c with slope = sxy_c/sxx_c; m2 = mean(r²), m3 = mean(r³). NULL
+    where n < 4, sxx_c == 0, or m2 ≤ (1e-6·mean_y)² (the near-linear residual-floor that stops m3/m2^1.5 blowing
+    up on float-noise variance)."""
+    mask = np.isfinite(x_mat) & np.isfinite(y_mat)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, x_mat, 0.0)
+    yf = np.where(mask, y_mat, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean_x = xf.sum(axis=1) / n
+        mean_y = yf.sum(axis=1) / n
+        xc = np.where(mask, x_mat - mean_x[:, None], 0.0)
+        yc = np.where(mask, y_mat - mean_y[:, None], 0.0)
+        sxx_c = (xc * xc).sum(axis=1)
+        sxy_c = (xc * yc).sum(axis=1)
+        slope = sxy_c / sxx_c
+        resid = np.where(mask, yc - slope[:, None] * xc, 0.0)
+        m2 = (resid * resid).sum(axis=1) / n
+        m3 = (resid * resid * resid).sum(axis=1) / n
+        resid_floor = (_RESID_REL_FLOOR * mean_y) ** 2
+        defined = (n >= _RESID_MIN_POINTS) & (sxx_c > 0.0) & (m2 > resid_floor)
+        skew = m3 / np.clip(m2, 0.0, None) ** 1.5
+    return np.where(defined, skew, np.nan)
+
+
+def _global_run_length(ret: np.ndarray) -> np.ndarray:
+    """Per-bar GLOBAL run length of consecutive same-direction nonzero returns over the trailing return matrix
+    (NaN where ret absent). At each present bar: how many bars the same-sign run has reached (0 on a zero
+    return — a flat bar breaks the run). The legacy ``_global_run_length`` over present-return rows; here over
+    the per-symbol buffer (absent bars don't break a run — they're simply not present-return rows)."""
+    n_sym, k = ret.shape
+    sign = np.where(ret > 0.0, 1, np.where(ret < 0.0, -1, 0))
+    present = np.isfinite(ret)
+    run = np.zeros((n_sym, k), dtype=np.int64)
+    prev_sign = np.zeros(n_sym, dtype=np.int64)
+    prev_run = np.zeros(n_sym, dtype=np.int64)
+    for t in range(k):
+        col_present = present[:, t]
+        col_sign = sign[:, t]
+        # continue the run iff this present bar's sign equals the prior present bar's sign and is nonzero.
+        same = col_present & (col_sign != 0) & (col_sign == prev_sign)
+        new_run = np.where(same, prev_run + 1, np.where(col_present & (col_sign != 0), 1, 0))
+        run[:, t] = np.where(col_present, new_run, 0)
+        # carry the run state forward only across PRESENT bars (an absent bar leaves prev_* unchanged).
+        prev_sign = np.where(col_present, col_sign, prev_sign)
+        prev_run = np.where(col_present, new_run, prev_run)
+    return run
+
+
 _RANGE_REL_EPS = 1e-9
 
 
@@ -1080,4 +1131,49 @@ class CleanMomentumClean:
             resid_undefined = ~np.isfinite(resid_std)
             out[f"clean_momentum_score_{w}m"] = np.where(resid_undefined, np.nan, score)
             out[f"momentum_quality_flag_{w}m"] = np.where(resid_undefined, np.nan, flag.astype(np.float64))
+        return out
+
+
+def _windowed_longest_streak(rl: np.ndarray, ret: np.ndarray, in_window: np.ndarray, w: int) -> np.ndarray:
+    """longest_streak_{w}m = max over the in-window present-return bars of min(run_length, position_in_window),
+    normalized by w; NULL when fewer than 2 returns in the window. The position cap stops a run that started
+    BEFORE the window from counting its pre-window bars. ``rl`` is the global run length per bar; a present-
+    return in-window bar is one with a finite return AND in the time window."""
+    n_sym, k = ret.shape
+    bar_in = in_window & np.isfinite(ret)  # the present-return bars inside the time window
+    position = np.cumsum(
+        bar_in, axis=1
+    )  # 1-based position among in-window present-return bars (0 where not)
+    capped = np.where(bar_in, np.minimum(rl, position), 0)
+    streak = capped.max(axis=1).astype(np.float64)
+    n_ret = bar_in.sum(axis=1)
+    return np.where(n_ret >= 2, streak / float(w), np.nan)
+
+
+class MomentumRunClean:
+    """TREND_QUALITY: residual_skew_{w}m = window-local standardized 3rd moment of the close-on-time OLS
+    residuals (asymmetry of the deviations); longest_streak_{w}m = longest run of consecutive same-direction
+    1m returns over the window, capped to the window and normalized by w. Legacy: ``MomentumRunGroup``
+    (FeatureGroup). The skew uses a window-LOCAL fit on the rebased-minute axis; the streak is a run-length path
+    statistic (global run length capped by in-window position)."""
+
+    name = "momentum_run"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
+    feature_names = tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("residual_skew", "longest_streak")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        time_axis = _rebased_minute_axis(window.trailing_minute())
+        ret = _returns(close)
+        rl = _global_run_length(ret)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("close", w))
+            x = np.where(in_window, time_axis, np.nan)
+            y = np.where(in_window, close, np.nan)
+            out[f"residual_skew_{w}m"] = _time_ols_resid_skew(x, y)
+            out[f"longest_streak_{w}m"] = _windowed_longest_streak(rl, ret, in_window, w)
         return out
