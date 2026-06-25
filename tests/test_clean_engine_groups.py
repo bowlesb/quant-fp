@@ -3016,6 +3016,56 @@ def test_multi_day_vwap_overnight_beta_shared_session_matches_legacy() -> None:
                     )
 
 
+def test_daily_groups_share_one_matrix_convention_vs_legacy() -> None:
+    """CROSS-GROUP convention gate (#68 (a), the one-shared-matrix mandate): feed ONE daily matrix in the
+    [-1]=today convention to MULTIPLE daily-snapshot groups at once and assert EACH matches its real legacy
+    compute() on that SAME matrix. The per-group goldens each fed the matrix in their OWN convention → they
+    could NOT catch a cross-group one-day-shift drift (the test-in-isolation blind spot ArchOverhaul named).
+    This closes it: multi_day_returns (28 feats, _asof=[:,-2]=D-1) + overnight_intraday_split (3 feats, today
+    reads = [:,-1], prev_close = [:,-2]) BOTH reconcile to legacy under ONE [-1]=today matrix → they share the
+    convention (the escalated 'conflict' was a stale pre-#68 read). 70-day warmed fixture (tests/
+    daily_shared_in.json) so the long windows are defined; golden from real compute() (tests/
+    daily_shared_golden.json)."""
+    import json  # noqa: PLC0415
+
+    daily_in = json.load(open(os.path.join(os.path.dirname(__file__), "daily_shared_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "daily_shared_golden.json")))
+    syms = ["A", "B"]
+    daily_close = np.vstack([np.array(daily_in[s]["close"]) for s in syms])
+    daily_open = np.vstack([np.array(daily_in[s]["open"]) for s in syms])
+    session = {"daily_close": daily_close, "daily_open": daily_open,
+               "daily_high": daily_close + 1, "daily_low": daily_close - 1,
+               "daily_volume": np.full_like(daily_close, 1e6), "daily_vwap": daily_close}
+
+    for gname, cls in (("multi_day_returns", MultiDayClean),
+                       ("overnight_intraday_split", OvernightIntradaySplitClean)):
+        eng = CleanEngine([cls()], syms, WINDOW)
+        eng.set_session(session)
+        out = eng.step({"symbol": np.array(syms), "close": daily_close[:, -1], "volume": np.zeros(2),
+                        "minute_epoch": np.array([570 * 60], dtype=np.int64)})[gname]
+        gold = golden[gname]  # probed for symbol A
+        assert set(out) == set(gold), f"{gname} feature set != legacy compute()"
+        for fname, gv in gold.items():
+            cv = float(out[fname][0])  # symbol A = index 0
+            if gv is None:
+                assert np.isnan(cv), f"{gname}.{fname}: legacy NULL, clean {cv}"
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"{gname}.{fname}: legacy {gv} clean {cv}"
+
+
+@pytest.mark.xfail(strict=True, reason="daily_vol partial-window gap: legacy rolling_std(window_size=w) has no "
+                                       "min_samples → NULL until w returns exist; clean _daily_vol computes on a "
+                                       "partial window (never fires live @370-day backfill; ArchOverhaul to add "
+                                       "the min_samples=w guard)")
+def test_daily_vol_short_matrix_warmup_nulls_like_legacy() -> None:
+    """WARMUP-BOUNDARY gate (the divergence the warmed 70-day goldens missed): on a matrix SHORTER than the
+    vol window, legacy daily_vol_Wd is NULL (polars rolling_std(window_size=W) with no min_samples requires the
+    full W) — but clean _daily_vol computes a value off the partial window. Pin the legacy NULL so the gap is
+    tracked + a fix flips this to a real pass. 8 daily days, w=10 → must be NaN."""
+    short = (100.0 + np.cumsum(np.random.default_rng(1).standard_normal(8))).reshape(1, -1)  # 8 days < 10
+    assert np.isnan(_daily_vol(short, 10)[0]), "daily_vol_10d on 8 days must be NULL (legacy full-window warmup)"
+
+
 @pytest.mark.xfail(strict=True, reason="#69 NOT wired: no live producer pivots backfill_daily into the clean "
                                        "session (set_session is called only by tests) → daily groups all-NaN live")
 def test_live_daily_session_is_populated_from_backfill_daily() -> None:
