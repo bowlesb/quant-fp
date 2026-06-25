@@ -84,7 +84,10 @@ def _daily_vol(daily_close: np.ndarray, w: int) -> np.ndarray:
     with np.errstate(invalid="ignore", divide="ignore"):
         var = (sum_x2 - sum_x * sum_x / n) / (n - 1.0)
         std = np.sqrt(np.clip(var, 0.0, None))
-    return np.where(n > 1.0, std, np.nan)
+    # Legacy rolling_std(window_size=w) defaults to min_samples=w → a partial window (<w finite returns) is
+    # NULL, not a small-sample std. Require the FULL w-return window (a new listing with <w days of history
+    # gets NaN, matching legacy), not merely n>1.
+    return np.where(n >= float(w), std, np.nan)
 
 
 def _dist_from_high(daily_close: np.ndarray, w: int) -> np.ndarray:
