@@ -45,8 +45,7 @@ The machinery is mostly LIVE or migration-gated, NOT orphaned dead code. The bre
 | **truly dead** (0 importers) | **602** — `parity_audit.py` (the standing live==backfill byte-verifier Ben dropped) | **DELETED tonight** (committed `9682b7f`). |
 | **migration-gated engines/wrappers** | **3,182** — `declarative.py` 1187 + `incremental.py` 1067 + `stateful.py` 928 (two engines + `step*` twins + per-kind wrappers) | **delete as the 24 declarative / 7 stateful groups migrate onto `CleanEngine.compute`** — group-by-group, not free tonight. |
 | **engine building-blocks** | **894** — `reduction_anchor` 199 / `point_ring` 223 / `state_spine` 135 / `slice_derive` 160 / `speculative` 177 | **ABSORBED** into the 265-LOC engine (rewritten, not pure-deleted). |
-| **byte-parity (retire-able)** | **135** — `parity.py` only | retire-able with the engine; the rest of "parity" is trust-load-bearing (next row). |
-| **trust-load-bearing — KEEP** | **~1,827** — `compare.py` 174 / `validation_sweep.py` 809 / `validate.py` 581 / `crypto_validation_sweep` 263 | **HARD KEEP** — the live `within_day` certifier grades via `compare.cell_verdict`; `trust_random_check` uses `validation_sweep.sweep_day`. NOT byte-parity. |
+| **trust-load-bearing — KEEP** | **~1,962** — `compare.py` 174 / `validation_sweep.py` 809 / `validate.py` 581 / `crypto_validation_sweep` 263 / `parity.py` 135 | **HARD KEEP** — the live `within_day` certifier grades via `compare.cell_verdict`; `trust_random_check` uses `validation_sweep.sweep_day`; `parity.py` is the live `make parity` T+1 settled-day cornerstone — it catches input/settled-reality divergence (live provisional bars vs settled revised bars) the backfill==replay invariant does NOT address, and only its compute-form-drift half is obsoleted. NOT byte-parity-between-forms. |
 | **sim/profile (dev)** | **~2,233** — `stream_sim` 858 / `profile_sim` 361 / `profile` 246 / `bench_stream` 164 / `phase_profile` 175 / `live_throughput` 135 / `latency_drilldown` 107 / `mem_bench` 84 / `no_raw_grid` 103 | **dev-only, removable at your discretion** — `phase_profile`/`live_throughput` are your standing latency tools; flagged for your AM call, not cut overnight. |
 | **artifacts** | 0 PR-LOC | `__pycache__`/`.pyc`/`.so` already gitignored+untracked — nothing for a PR to delete; not counted. |
 | **rest** (capture trio, trust family, store, loaders, feature_worker, materialize…) | — | LIVE or trust-load-bearing — **KEEP.** |
@@ -68,8 +67,10 @@ the same** — this distinction is load-bearing:
 - the second engine + the four `step*` twins
 - the per-kind state wrappers (`stateful.py`: EMA/Cumulative/LastK/Extrema/ReductionFold) + the
   `WindowedSumState`/`PointRing`/`ValueInputRing` constellation
-- `parity_audit.py`, the **#451 value-parity demolition gate**, the `FP_*_PARITY` shadow flags, `parity.py`
+- `parity_audit.py`, the **#451 value-parity demolition gate**, the `FP_*_PARITY` shadow flags
 - dead code, `__pycache__`, stale compiled artifacts
+
+(NOT `parity.py` — see HARD KEEP below; it's the live `make parity` settled-day check, not a between-forms gate.)
 
 These existed ONLY to chase fast-live-vs-backfill divergence between two compute forms. The backfill=replay
 invariant makes the two forms the **same** form → this machinery is genuinely obsolete. **The honest Ben
@@ -78,6 +79,11 @@ framing: dropped because the design removes what it guarded, not because we stop
 ## What REMAINS (HARD KEEP — production, NOT sprawl)
 
 - the ~67 group-math files (the actual features)
+- **`parity.py` (135) — HARD KEEP:** the live `make parity` T+1 settled-day cornerstone check
+  (FEATURE_PLATFORM.md §3.5). `parity_stored()` diffs captured-live (source=stream) vs backfill (source=settled),
+  so it catches BOTH compute-form drift AND **input/settled-reality divergence** (live provisional bars vs
+  settled revised bars). backfill==replay obsoletes only the compute-form half; the input-divergence half is
+  real, live, and unaddressed by the invariant. Plus it's a live ops entry point. NOT a between-forms gate.
 - **the live TRUST / CERT system — HARD KEEP, NOT byte-parity:** `compare.py`, `validate.py`,
   `validation_sweep.py`, `within_day_*` (the certifier), `trust_lifecycle`, the trust-grading the strategies
   trade on. These answer a **DIFFERENT question** — "is the live feature trustworthy vs *settled reality*,
