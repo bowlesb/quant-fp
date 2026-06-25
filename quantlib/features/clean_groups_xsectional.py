@@ -160,13 +160,16 @@ def _sector_equal_weight_returns(ret_mat: np.ndarray, sector: np.ndarray) -> np.
     return out
 
 
-def _windowed_sector_ols(own_ret: np.ndarray, sec_ret: np.ndarray, w: int) -> tuple[np.ndarray, np.ndarray]:
-    """sector_beta's windowed OLS of own return (y) on sector return (x) over the trailing ``w`` minutes,
-    paired where BOTH finite. Matches legacy ``_ols_from_sums`` EXACTLY: cov=sxy−sx·sy/n, var=sxx−sx²/n;
-    defined = n≥MIN_PAIRS(5) & var_x>0 & var_y>0; beta NULL when |beta|>BETA_MAX(15); corr clipped to [-1,1].
-    """
-    xw = _trailing_window(sec_ret, w)
-    yw = _trailing_window(own_ret, w)
+def _windowed_sector_ols(
+    own_ret: np.ndarray, sec_ret: np.ndarray, w: int | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """sector_beta's OLS of own return (y=``own_ret``) on sector return (x=``sec_ret``), paired where BOTH
+    finite. Matches legacy ``_ols_from_sums`` EXACTLY: cov=sxy−sx·sy/n, var=sxx−sx²/n; defined = n≥MIN_PAIRS(5)
+    & var_x>0 & var_y>0; beta NULL when |beta|>BETA_MAX(15); corr clipped to [-1,1]. ``w`` (legacy positional
+    slice, kept for the helper's unit tests) takes the last ``w`` columns; if ``None`` the inputs are already
+    TIME-windowed (the group masks bars outside the Δminute window to NaN) and the whole matrix is summed."""
+    yw = _trailing_window(own_ret, w) if w is not None else own_ret
+    xw = _trailing_window(sec_ret, w) if w is not None else sec_ret
     mask = np.isfinite(xw) & np.isfinite(yw)
     n = mask.sum(axis=1).astype(np.float64)
     xf = np.where(mask, xw, 0.0)
@@ -307,7 +310,12 @@ class SectorBetaClean:
         is_unknown = sector == self._UNKNOWN
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            beta, corr = _windowed_sector_ols(own_ret, sec_ret, w)
+            # TIME window (legacy rolling_sum_by('minute','Wm') over the OLS): keep only the paired returns
+            # whose minute is within the last W minutes (mask from the close time-window), the rest NaN.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            yw = np.where(in_window, own_ret, np.nan)  # y = own return
+            xw = np.where(in_window, sec_ret, np.nan)  # x = sector return
+            beta, corr = _windowed_sector_ols(yw, xw)
             # unmapped-sector names → NULL (no sector series to regress on)
             out[f"sector_beta_{w}m"] = np.where(is_unknown, np.nan, beta)
             out[f"sector_corr_{w}m"] = np.where(is_unknown, np.nan, corr)
