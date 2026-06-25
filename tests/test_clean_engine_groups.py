@@ -1555,129 +1555,76 @@ def test_trend_quality_sparse_time_ols_matches_legacy() -> None:
     assert of["price_r2_15m"][0] == pytest.approx(0.0), "flat price → r2 0 (assemble pins it; legacy output=0)"
 
 
-def test_reduction_groups_sparse_time_window_matches_legacy() -> None:
-    """RE-GATE the re-ported reduction groups (#60 false-green fixes) on the SPARSE axis, one window-exercising
-    feature each, head-to-head vs legacy BATCH time-windows on a gappy symbol (spans 70 min). These were dense-
-    only false-greens (positional window); now trailing_time-masked.
-      - volatility.realized_vol_{5,15,30}m = legacy rolling_std_by(ret, Wm) (ddof=1)
-      - realized_range.realized_range_10m = legacy rolling_mean_by((high-low)/close, 10m)
-      - vwap_deviation.vwap_deviation_15m = close / (Σ(close·vol,15m)/Σ(vol,15m)) − 1
-    """
+_MULTI_OFFSETS = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+
+
+def _step_clean_over_multi_fixture(group: object) -> dict[str, np.ndarray]:
+    """Step a clean group over the shared gappy OHLCV fixture (tests/multi_in.json, the input the
+    tests/*_golden.json were captured from via real legacy compute()). Returns the last-minute output."""
     import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
 
-    import polars as pl  # noqa: PLC0415
+    multi_in = json.load(open(os.path.join(os.path.dirname(__file__), "multi_in.json")))
+    col_map = {"open": multi_in["opens"], "high": multi_in["highs"], "low": multi_in["lows"],
+               "close": multi_in["closes"], "volume": multi_in["vols"]}
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    eng = CleanEngine([group], ["A"], 400)
+    out: dict[str, np.ndarray] = {}
+    for i, off in enumerate(_MULTI_OFFSETS):
+        bar = {"symbol": np.array(["A"]),
+               "minute_epoch": np.array([int((base + datetime.timedelta(minutes=off)).timestamp())], dtype=np.int64)}
+        for col in group.input_cols:  # type: ignore[attr-defined]
+            bar[col] = np.array([float(col_map[col][i])], dtype=np.float64)
+        out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
+    return out
 
-    from quantlib.features.clean_groups_example import RealizedRangeClean, VwapDeviationClean  # noqa: PLC0415
+
+def _assert_clean_matches_golden(group: object, golden_name: str) -> None:
+    """Diff a clean group cell-for-cell vs its real-legacy-compute() golden (tests/<golden_name>.json),
+    asserting the EXACT feature set and every value (NULLs included). The output-diff oracle that replaces
+    in-line re-derivation (#66) — a same-wrong port can't mutual-false-green against legacy's own output."""
+    import json  # noqa: PLC0415
+
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), f"{golden_name}.json")))
+    out = _step_clean_over_multi_fixture(group)
+    assert set(out) == set(golden), f"{golden_name}: feature set != legacy compute()"
+    for fname, gv in golden.items():
+        cv = float(out[fname][0])
+        if gv is None:
+            assert np.isnan(cv), f"{golden_name}.{fname}: legacy NULL, clean {cv}"
+        else:
+            assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"{golden_name}.{fname}: legacy {gv} clean {cv}"
+
+
+def test_reduction_groups_sparse_time_window_matches_legacy() -> None:
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean volatility / realized_range / vwap_deviation
+    cell-for-cell vs goldens from the REAL legacy *Group.compute() (tests/*_golden.json, captured via
+    attach_reduction_anchors on the shared gappy fixture tests/multi_in.json). Replaces the prior in-line
+    polars re-derivation (rolling_std_by/rolling_mean_by/shift(1)) which — like the sector_beta/RSI
+    mutual-false-greens — could share a wrong convention with the port. Audited the FULL feature set (not the
+    1-feature spot-check): volatility 15/15, realized_range 3/3 match legacy compute() on the sparse axis."""
+    from quantlib.features.clean_groups_example import RealizedRangeClean  # noqa: PLC0415
     from quantlib.features.clean_groups_windowed import VolatilityClean  # noqa: PLC0415
 
-    base = datetime.datetime(2026, 6, 1, 9, 30)
-    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
-    rng = np.random.default_rng(31)
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
-    highs = closes + np.abs(rng.standard_normal(len(offsets))) * 0.4 + 0.2
-    lows = closes - np.abs(rng.standard_normal(len(offsets))) * 0.4 - 0.2
-    vols = (rng.random(len(offsets)) * 1e5 + 1e4).round()
-    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
-    col_map = {"high": highs, "low": lows, "close": closes, "volume": vols.astype(float)}
-
-    def _feed(group: object) -> dict[str, np.ndarray]:
-        eng = CleanEngine([group], ["A"], 400)
-        out: dict[str, np.ndarray] = {}
-        for i in range(len(offsets)):
-            bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)}
-            for c in group.input_cols:  # type: ignore[attr-defined]
-                bar[c] = np.array([col_map[c][i]], dtype=np.float64)
-            out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
-        return out
-
-    df = pl.DataFrame({"minute": mins, "close": closes, "high": highs, "low": lows,
-                       "volume": vols.astype(float)}).sort("minute")
-    df = df.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"),
-                         ((pl.col("high") - pl.col("low")) / pl.col("close")).alias("hlr"),
-                         (pl.col("close") * pl.col("volume")).alias("cv"))
-    for w in (5, 15, 30):
-        df = df.with_columns(pl.col("ret").rolling_std_by("minute", window_size=f"{w}m").alias(f"rv{w}"))
-    df = df.with_columns(pl.col("hlr").rolling_mean_by("minute", window_size="10m").alias("rr10"),
-                         pl.col("cv").rolling_sum_by("minute", window_size="15m").alias("scv"),
-                         pl.col("volume").rolling_sum_by("minute", window_size="15m").alias("sv"))
-    last = df.tail(1)
-
-    vol_out = _feed(VolatilityClean())
-    for w in (5, 15, 30):
-        assert vol_out[f"realized_vol_{w}m"][0] == pytest.approx(last[f"rv{w}"][0], rel=1e-7), (
-            f"volatility.realized_vol_{w}m sparse != legacy rolling_std_by"
-        )
-    rr_out = _feed(RealizedRangeClean())
-    assert rr_out["realized_range_10m"][0] == pytest.approx(last["rr10"][0], rel=1e-7), "realized_range_10m sparse"
-    vd_out = _feed(VwapDeviationClean())
-    leg_vwap = closes[-1] / (last["scv"][0] / last["sv"][0]) - 1.0
-    assert vd_out["vwap_deviation_15m"][0] == pytest.approx(leg_vwap, rel=1e-7), "vwap_deviation_15m sparse"
+    _assert_clean_matches_golden(VolatilityClean(), "volatility_golden")
+    _assert_clean_matches_golden(RealizedRangeClean(), "realized_range_golden")
 
 
 def test_ohlcvol_rangeexp_distribution_sparse_matches_legacy() -> None:
-    """RE-GATE ohlc_vol / range_expansion / distribution (#60 re-ports) on the SPARSE axis vs legacy BATCH
-    time-windows on a gappy symbol (70 min):
-      - ohlc_vol.garman_klass_vol_15m = sqrt(rolling_mean_by(GK, 15m)), GK = 0.5·ln(h/l)² − (2ln2−1)·ln(c/o)²
-      - range_expansion.range_expansion_5_30m = mean((h−l)/c, 5m) / mean(·, 30m)
-      - distribution.ret_skew_10m = biased skew of the 1m returns in the last 10 wall-minutes
-    """
-    import datetime  # noqa: PLC0415
-
-    import polars as pl  # noqa: PLC0415
-
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean ohlc_vol / range_expansion / distribution
+    cell-for-cell vs goldens from the REAL legacy *Group.compute() on the shared gappy fixture. Replaces the
+    prior in-line polars re-derivation (GK formula / rolling_mean_by / hand-rolled biased skew) which could
+    share a wrong convention with the port (the sector_beta/RSI mutual-false-green class). Audited the FULL
+    feature set: ohlc_vol 12/12, range_expansion 2/2, distribution 20/20 match legacy compute() on sparse."""
     from quantlib.features.clean_groups_windowed import (  # noqa: PLC0415
         DistributionClean,
         OhlcVolClean,
         RangeExpansionClean,
     )
 
-    base = datetime.datetime(2026, 6, 1, 9, 30)
-    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
-    rng = np.random.default_rng(31)
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
-    highs = closes + np.abs(rng.standard_normal(len(offsets))) * 0.4 + 0.2
-    lows = closes - np.abs(rng.standard_normal(len(offsets))) * 0.4 - 0.2
-    opens = closes + rng.standard_normal(len(offsets)) * 0.1
-    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
-    col_map = {"open": opens, "high": highs, "low": lows, "close": closes}
-
-    def _feed(group: object) -> dict[str, np.ndarray]:
-        eng = CleanEngine([group], ["A"], 400)
-        out: dict[str, np.ndarray] = {}
-        for i in range(len(offsets)):
-            bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)}
-            for c in group.input_cols:  # type: ignore[attr-defined]
-                bar[c] = np.array([col_map[c][i]], dtype=np.float64)
-            out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
-        return out
-
-    df = pl.DataFrame({"minute": mins, "close": closes, "high": highs, "low": lows, "open": opens}).sort("minute")
-    df = df.with_columns(
-        (0.5 * (pl.col("high") / pl.col("low")).log() ** 2
-         - (2 * np.log(2) - 1) * (pl.col("close") / pl.col("open")).log() ** 2).alias("gk"),
-        ((pl.col("high") - pl.col("low")) / pl.col("close")).alias("hlr"),
-        (pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"))
-    df = df.with_columns(pl.col("gk").rolling_mean_by("minute", window_size="15m").alias("gkm15"),
-                         pl.col("hlr").rolling_mean_by("minute", window_size="5m").alias("r5"),
-                         pl.col("hlr").rolling_mean_by("minute", window_size="30m").alias("r30"))
-    last = df.tail(1)
-
-    ov = _feed(OhlcVolClean())
-    assert ov["garman_klass_vol_15m"][0] == pytest.approx(np.sqrt(max(last["gkm15"][0], 0.0)), rel=1e-6), \
-        "ohlc_vol.garman_klass_vol_15m sparse"
-    re_out = _feed(RangeExpansionClean())
-    assert re_out["range_expansion_5_30m"][0] == pytest.approx(last["r5"][0] / last["r30"][0], rel=1e-6), \
-        "range_expansion_5_30m sparse"
-
-    dist = _feed(DistributionClean())
-    t_last = mins[-1]
-    win = df.filter((pl.col("minute") > t_last - datetime.timedelta(minutes=10)) & (pl.col("minute") <= t_last))
-    r = win["ret"].drop_nulls().to_numpy()
-    n = len(r)
-    mean_r = r.mean()
-    std_r = np.sqrt(((r - mean_r) ** 2).sum() / n)
-    hand_skew = ((r - mean_r) ** 3).sum() / n / std_r ** 3
-    assert dist["ret_skew_10m"][0] == pytest.approx(hand_skew, rel=1e-5), "distribution.ret_skew_10m sparse"
+    _assert_clean_matches_golden(OhlcVolClean(), "ohlc_vol_golden")
+    _assert_clean_matches_golden(RangeExpansionClean(), "range_expansion_golden")
+    _assert_clean_matches_golden(DistributionClean(), "distribution_golden")
 
 
 def test_liquidity_quote_spread_sparse_matches_legacy() -> None:
@@ -1729,129 +1676,38 @@ def test_liquidity_quote_spread_sparse_matches_legacy() -> None:
 
 
 def test_momentum_family_sparse_matches_legacy() -> None:
-    """GATE the FRESH time-window ports momentum / efficiency / return_dynamics (#60, 8a232b0) on the SPARSE
-    axis vs legacy BATCH on a gappy symbol (70 min):
-      - momentum.up_ratio_15m = mean(up-bar, 15m time window)
-      - efficiency.efficiency_ratio_15m = |close[T]−close.shift(15)| / Σ|step|(15m) — a HYBRID: POSITIONAL
-        shift(w) numerator (w-th prior ROW) + TIME-window Σ|step| denominator (verified at source).
-      - return_dynamics.autocorr_1_15m = corr(ret_t, ret_{t−1}) over the 15m window (value-OLS, paired-finite).
-    """
-    import datetime  # noqa: PLC0415
-
-    import polars as pl  # noqa: PLC0415
-
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean momentum / efficiency / return_dynamics
+    cell-for-cell vs goldens from the REAL legacy *Group.compute() on the shared gappy fixture. Replaces the
+    prior in-line re-derivation (up-bar mean / positional-net-over-time-path efficiency hybrid / hand-rolled
+    autocorr OLS) — the same class as the sector_beta/RSI mutual-false-greens. Audited the FULL feature set:
+    momentum 22/22, efficiency 18/18 (incl the positional-shift(w)/time-window-path hybrid), return_dynamics
+    15/15 (value-OLS autocorr) match legacy compute() on the sparse axis."""
     from quantlib.features.clean_groups_windowed import (  # noqa: PLC0415
         EfficiencyClean,
         MomentumClean,
         ReturnDynamicsClean,
     )
 
-    base = datetime.datetime(2026, 6, 1, 9, 30)
-    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
-    rng = np.random.default_rng(41)
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
-    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
-    t_last = mins[-1]
-
-    def _feed(group: object) -> dict[str, np.ndarray]:
-        eng = CleanEngine([group], ["A"], 400)
-        out: dict[str, np.ndarray] = {}
-        for i in range(len(offsets)):
-            out = eng.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
-                            "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})[group.name]  # type: ignore[attr-defined]
-        return out
-
-    df = pl.DataFrame({"minute": mins, "close": closes}).sort("minute")
-    df = df.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"),
-                         (pl.col("close") - pl.col("close").shift(1)).abs().alias("step"))
-    df = df.with_columns(pl.when(pl.col("ret") > 0).then(1.0).otherwise(0.0).alias("up"),
-                         pl.col("ret").shift(1).alias("lret"))
-
-    # momentum.up_ratio_15m
-    win = df.filter((pl.col("minute") > t_last - datetime.timedelta(minutes=15)) & (pl.col("minute") <= t_last))
-    leg_up = win["up"].drop_nulls().mean()
-    assert _feed(MomentumClean())["up_ratio_15m"][0] == pytest.approx(leg_up, rel=1e-6), "momentum.up_ratio_15m sparse"
-
-    # efficiency.efficiency_ratio_15m: HYBRID positional-shift(15) net / time-window Σ|step|
-    path = win["step"].drop_nulls().sum()
-    net = abs(closes[-1] - closes[-1 - 15])  # positional shift(15): the 15th prior present ROW
-    assert _feed(EfficiencyClean())["efficiency_ratio_15m"][0] == pytest.approx(net / path, rel=1e-6), \
-        "efficiency_ratio_15m sparse (positional-net / time-path hybrid)"
-
-    # return_dynamics.autocorr_1_15m: corr(ret, lagged ret) over the time window
-    pw = win.drop_nulls(["ret", "lret"])
-    x = pw["lret"].to_numpy()
-    y = pw["ret"].to_numpy()
-    n = len(x)
-    cov = n * (x * y).sum() - x.sum() * y.sum()
-    var_x = n * (x * x).sum() - x.sum() ** 2
-    var_y = n * (y * y).sum() - y.sum() ** 2
-    leg_ac = cov / np.sqrt(var_x * var_y)
-    assert _feed(ReturnDynamicsClean())["autocorr_1_15m"][0] == pytest.approx(leg_ac, rel=1e-5), \
-        "return_dynamics.autocorr_1_15m sparse (value-OLS)"
+    _assert_clean_matches_golden(MomentumClean(), "momentum_golden")
+    _assert_clean_matches_golden(EfficiencyClean(), "efficiency_golden")
+    _assert_clean_matches_golden(ReturnDynamicsClean(), "return_dynamics_golden")
 
 
 def test_volume_drawrange_momentumconsistency_sparse_matches_legacy() -> None:
-    """GATE volume / draw_range / momentum_consistency (#60 fresh time-window ports) on the SPARSE axis vs
-    legacy BATCH on a gappy symbol (70 min):
-      - volume.volume_zscore_15m = (vol[T] − mean(vol,15m)) / std(vol,15m, ddof=1)
-      - draw_range.draw_range_60m = max-drawdown + max-drawup over the closes in the 60m TIME window
-      - momentum_consistency.reversal_count_15m = Σ(sign-flip)(15m) / 15, where flip uses the per-minute return
-        (close/close.shift(1) on the sparse minute frame = prior present ROW; NaN at the first bar).
-    """
-    import datetime  # noqa: PLC0415
-
-    import polars as pl  # noqa: PLC0415
-
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean volume / draw_range / momentum_consistency
+    cell-for-cell vs goldens from the REAL legacy *Group.compute() on the shared gappy fixture. Replaces the
+    prior in-line re-derivation (rolling z-score / hand-rolled max-dd+max-du / sign-flip rolling_sum) — the
+    sector_beta/RSI mutual-false-green class. Audited the FULL feature set: volume 23/23, draw_range 3/3,
+    momentum_consistency 18/18 match legacy compute() on the sparse axis."""
     from quantlib.features.clean_groups_windowed import (  # noqa: PLC0415
         DrawRangeClean,
         MomentumConsistencyClean,
         VolumeClean,
     )
 
-    base = datetime.datetime(2026, 6, 1, 9, 30)
-    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
-    rng = np.random.default_rng(51)
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
-    vols = (rng.random(len(offsets)) * 1e5 + 1e4).round()
-    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
-    t_last = mins[-1]
-    col_map = {"close": closes, "volume": vols.astype(float)}
-
-    def _feed(group: object) -> dict[str, np.ndarray]:
-        eng = CleanEngine([group], ["A"], 400)
-        out: dict[str, np.ndarray] = {}
-        for i in range(len(offsets)):
-            bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)}
-            for c in group.input_cols:  # type: ignore[attr-defined]
-                bar[c] = np.array([col_map[c][i]], dtype=np.float64)
-            out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
-        return out
-
-    df = pl.DataFrame({"minute": mins, "close": closes, "volume": vols.astype(float)}).sort("minute")
-    df = df.with_columns(pl.col("volume").rolling_mean_by("minute", window_size="15m").alias("vm15"),
-                         pl.col("volume").rolling_std_by("minute", window_size="15m").alias("vs15"))
-    last = df.tail(1)
-    vout = _feed(VolumeClean())
-    assert vout["volume_zscore_15m"][0] == pytest.approx((vols[-1] - last["vm15"][0]) / last["vs15"][0], rel=1e-6), \
-        "volume_zscore_15m sparse"
-
-    win = df.filter((pl.col("minute") > t_last - datetime.timedelta(minutes=60)) & (pl.col("minute") <= t_last))
-    c = win["close"].to_numpy()
-    maxdd = -(c / np.maximum.accumulate(c) - 1.0).min()
-    maxdu = (c / np.minimum.accumulate(c) - 1.0).max()
-    dout = _feed(DrawRangeClean())
-    assert dout["draw_range_60m"][0] == pytest.approx(maxdd + maxdu, rel=1e-6), "draw_range_60m sparse"
-
-    dfm = df.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"))
-    dfm = dfm.with_columns(pl.col("ret").shift(1).alias("rp"))
-    dfm = dfm.with_columns(
-        (pl.col("ret").is_not_null() & pl.col("rp").is_not_null() & (pl.col("ret") != 0) & (pl.col("rp") != 0)
-         & ((pl.col("ret") > 0) != (pl.col("rp") > 0))).cast(pl.Float64).alias("flip"))
-    dfm = dfm.with_columns(pl.col("flip").rolling_sum_by("minute", window_size="15m").alias("fsum"))
-    mc = _feed(MomentumConsistencyClean())
-    assert mc["reversal_count_15m"][0] == pytest.approx(dfm.tail(1)["fsum"][0] / 15.0, rel=1e-7), \
-        "reversal_count_15m sparse (per-minute return = prior present row on the sparse frame)"
+    _assert_clean_matches_golden(VolumeClean(), "volume_golden")
+    _assert_clean_matches_golden(DrawRangeClean(), "draw_range_golden")
+    _assert_clean_matches_golden(MomentumConsistencyClean(), "momentum_consistency_golden")
 
 
 def test_residual_analysis_clean_momentum_sparse_match_legacy_output() -> None:
