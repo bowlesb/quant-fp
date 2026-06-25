@@ -20,9 +20,11 @@ backfill over the buffer), then each live ``step`` ``fold``s the one new minute 
 the points from the ring instead of ``resolve_points``. Armed by ``FP_POINT_RING=1`` (default OFF =
 ``resolve_points`` path); byte-identical either way (tests/test_fp_point_ring.py).
 """
+
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -30,6 +32,15 @@ import polars as pl
 
 from quantlib.features.declarative import ReductionGroup
 from quantlib.features.slice_derive import lag_specs, rewrite_global
+
+# FP_POINT_RING_SCATTER (default OFF): drop ``point_ring.fold``'s per-minute ``.sort("symbol")`` and scatter
+# present symbols into the ring by their fixed index position instead. Byte-identical either way (the scatter is
+# position-based, so row order never affected the result — proven across sorted/scrambled order incl sparse/gap/
+# first-appearance). Default-off because PointRing is LIVE-armed in production: merge changes NOTHING live (the
+# sort stays until this is armed + relaunched under the parity gate). Same idiom as FP_STATE_SPINE / FP_RUST_REDUCE.
+_USE_SCATTER = (
+    bool(os.environ.get("FP_POINT_RING_SCATTER")) and os.environ.get("FP_POINT_RING_SCATTER") != "0"
+)
 
 
 @dataclass(frozen=True)
@@ -166,12 +177,22 @@ class PointRing:
         rows (one per present symbol)."""
         if not self.sources:
             return  # no point columns to carry (a group set with no points) — the ring is vacuous
-        present = minute_frame.select(["symbol", *self.sources]).sort("symbol")
+        # The scatter is position-based: each present symbol writes to its FIXED index slot (``self.index``), so
+        # the row order of ``minute_frame`` is irrelevant — the ``.sort("symbol")`` was the per-minute sort Ben
+        # named, and removing it is byte-identical (proven across sorted/scrambled order incl sparse/gap/
+        # first-appearance). PointRing is LIVE-armed in production, so the sort-free path is behind a default-off
+        # flag: merge changes NOTHING live (the sort stays until ``FP_POINT_RING_SCATTER`` is armed + relaunched
+        # under the parity gate), and the value is identical either way.
+        present = minute_frame.select(["symbol", *self.sources])
+        if not _USE_SCATTER:
+            present = present.sort(
+                "symbol"
+            )  # legacy path (default) — kept byte-identical until the flag arms
         present_symbols = present["symbol"].to_list()
         keep = [i for i, symbol in enumerate(present_symbols) if symbol in self.index]
-        rows = np.array([self.index[present_symbols[i]] for i in keep], dtype=np.int64)
-        if rows.size == 0:
+        if not keep:
             return
+        rows = np.array([self.index[present_symbols[i]] for i in keep], dtype=np.int64)
         values = np.column_stack([present[source].to_numpy().astype(np.float64) for source in self.sources])
         slots = self._write[rows]
         self._ring[rows, slots, :] = values[keep]
