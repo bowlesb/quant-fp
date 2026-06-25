@@ -1438,3 +1438,88 @@ def test_windowed_corr_near_constant_y_matches_batch_not_anchored() -> None:
     # and it is a finite value here (the non-anchored floor passes), proving clean does NOT over-reject like
     # the anchored 1e-9·b·syy floor would (which is incremental-only, not the batch truth the clean engine is).
     assert np.isfinite(clean)
+
+
+# ========================================================================================================= #
+# CROSS-SECTIONAL — batch 2a: cross_sectional_rank (present()-gated symbol-axis rank, the breadth-bug family).
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_xsectional import (  # noqa: E402
+    CrossSectionalRankClean,
+    _average_rank,
+    _cross_sectional_percentile,
+)
+
+
+def _vbar(present_map, epoch):
+    """present_map: {symbol: (close, volume)}; symbols not in the map are OMITTED (absent this minute)."""
+    syms = list(present_map.keys())
+    return {"symbol": np.array(syms),
+            "close": np.array([present_map[s][0] for s in syms], dtype=np.float64),
+            "volume": np.array([present_map[s][1] for s in syms], dtype=np.float64),
+            "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+
+def test_average_rank_ties_match_polars() -> None:
+    """ties share the mean of their span — matches polars rank(method='average'): [3,1,2,2] → [4,1,2.5,2.5]."""
+    r = _average_rank(np.array([3.0, 1.0, 2.0, 2.0]))
+    np.testing.assert_allclose(r, [4.0, 1.0, 2.5, 2.5])
+
+
+def test_cross_sectional_percentile_known() -> None:
+    """percentile = (rank−1)/(n−1). 3 present values 10/20/30 → 0.0/0.5/1.0."""
+    p = _cross_sectional_percentile(np.array([10.0, 20.0, 30.0]), np.array([True, True, True]))
+    np.testing.assert_allclose(p, [0.0, 0.5, 1.0])
+
+
+def test_xrank_sparse_present_only_denominator() -> None:
+    """THE BREADTH-BUG CHECK: A,B,C present (vol 1500/2500/3500), D ABSENT (omitted). The rank is over the 3
+    PRESENT names → A=0.0, C=1.0, denominator n=3 — the absent D (carrying a stale value) must NOT enter the
+    rank set (which would compress everyone to n=4). D itself → NaN (not present)."""
+    syms = ["A", "B", "C", "D"]
+    eng = CleanEngine([CrossSectionalRankClean()], syms, WINDOW)
+    # seed all 4 present, then a minute where only A,B,C deliver (D omitted)
+    eng.step(_vbar({"A": (100.0, 9999.0), "B": (100.0, 9999.0), "C": (100.0, 9999.0), "D": (100.0, 9999.0)}, 60))
+    out = eng.step(_vbar({"A": (100.0, 1500.0), "B": (100.0, 2500.0), "C": (100.0, 3500.0)}, 120))[
+        "cross_sectional_rank"]
+    # volume_rank over the 3 PRESENT names: 1500→0.0, 2500→0.5, 3500→1.0 (n=3, not n=4)
+    assert out["volume_rank_1m"][0] == pytest.approx(0.0)   # A
+    assert out["volume_rank_1m"][1] == pytest.approx(0.5)   # B
+    assert out["volume_rank_1m"][2] == pytest.approx(1.0)   # C
+    assert np.isnan(out["volume_rank_1m"][3])               # D absent → NaN (not in the rank set)
+
+
+def test_xrank_n_less_than_2_is_nan() -> None:
+    """Only 1 symbol present → no rank over 1 → NaN."""
+    eng = CleanEngine([CrossSectionalRankClean()], ["A", "B"], WINDOW)
+    out = eng.step(_vbar({"A": (100.0, 1000.0)}, 60))["cross_sectional_rank"]
+    assert np.isnan(out["volume_rank_1m"][0])
+
+
+def test_xrank_absent_value_does_not_shift_present_ranks() -> None:
+    """Adversarial: an absent name carrying an EXTREME stale value must NOT shift the present names' ranks.
+    D carried a huge volume; when D is absent, A/B/C rank exactly as if D never existed (n=3, 0.0/0.5/1.0)."""
+    syms = ["A", "B", "C", "D"]
+    eng = CleanEngine([CrossSectionalRankClean()], syms, WINDOW)
+    eng.step(_vbar({"A": (100.0, 1.0), "B": (100.0, 2.0), "C": (100.0, 3.0), "D": (100.0, 1e9)}, 60))  # D huge
+    out = eng.step(_vbar({"A": (100.0, 1500.0), "B": (100.0, 2500.0), "C": (100.0, 3500.0)}, 120))[
+        "cross_sectional_rank"]
+    # if D's stale 1e9 leaked into the rank set, A/B/C would all be < 1.0; with present()-gating C==1.0.
+    assert out["volume_rank_1m"][2] == pytest.approx(1.0), "absent D's stale value leaked into the rank set"
+
+
+def test_xrank_contract() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.cross_sectional_rank import CrossSectionalRankGroup  # type: ignore  # noqa: PLC0415,E501
+
+    rng = np.random.default_rng(20)
+    syms = [f"S{i}" for i in range(8)]
+    eng = CleanEngine([CrossSectionalRankClean()], syms, WINDOW)
+    out = {}
+    for ep in range(70):
+        present = {s: (100.0 + rng.standard_normal(), 1000.0 + rng.random() * 4000) for s in syms
+                   if rng.random() > 0.2}  # ~20% absent each minute (sparse)
+        if present:
+            out = eng.step(_vbar(present, 60 + ep * 60))["cross_sectional_rank"]
+    _assert_feature_spec_contract(out, CrossSectionalRankGroup().declare(), "cross_sectional_rank ")
