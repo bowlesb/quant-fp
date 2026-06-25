@@ -37,14 +37,26 @@ Three things, instead of the 90-file machinery sprawl:
 layer collapses — the feature MATH stays (it's the actual features, just ported to the new interface).
 CodeAudit's locked baseline:
 
-| layer | BEFORE | what happens |
-|---|---|---|
-| **machinery** (the sprawl) | **89 files / 22,275 LOC** — two engines + `step*` twins + per-kind wrappers + the ring/building-block constellation | **collapses** toward: the **265-LOC engine** + ~894 LOC of absorbed building-blocks + the trust/capture that STAYS. The ~3,182-LOC engine-collapse lands group-by-group as the port proceeds. |
-| **feature math** | **67 files / 9,885 LOC** | **STAYS** — these are the features. Each group ports to the one `compute(window)` interface (its math is unchanged, just re-expressed). |
-| **total** | **156 files / 32,160 LOC** | machinery shrinks; math stays; trust/capture stays. |
+**Baseline (CodeAudit, import-graph-verified):** `quantlib/features` = 89 machinery `.py` + 67 group-math `.py`.
+The machinery is mostly LIVE or migration-gated, NOT orphaned dead code. The breakdown by fate:
 
-**Tonight's actual delete = 602 LOC** (`parity_audit.py`, grep-clean). The ~3,182-LOC engine-collapse is the
-**migration headline** that accrues group-by-group once Ben approves the approach — it is NOT a tonight number,
+| machinery bucket | LOC | fate |
+|---|---|---|
+| **truly dead** (0 importers) | **602** — `parity_audit.py` (the standing live==backfill byte-verifier Ben dropped) | **DELETED tonight** (committed `9682b7f`). |
+| **migration-gated engines/wrappers** | **3,182** — `declarative.py` 1187 + `incremental.py` 1067 + `stateful.py` 928 (two engines + `step*` twins + per-kind wrappers) | **delete as the 24 declarative / 7 stateful groups migrate onto `CleanEngine.compute`** — group-by-group, not free tonight. |
+| **engine building-blocks** | **894** — `reduction_anchor` 199 / `point_ring` 223 / `state_spine` 135 / `slice_derive` 160 / `speculative` 177 | **ABSORBED** into the 265-LOC engine (rewritten, not pure-deleted). |
+| **byte-parity (retire-able)** | **135** — `parity.py` only | retire-able with the engine; the rest of "parity" is trust-load-bearing (next row). |
+| **trust-load-bearing — KEEP** | **~1,827** — `compare.py` 174 / `validation_sweep.py` 809 / `validate.py` 581 / `crypto_validation_sweep` 263 | **HARD KEEP** — the live `within_day` certifier grades via `compare.cell_verdict`; `trust_random_check` uses `validation_sweep.sweep_day`. NOT byte-parity. |
+| **sim/profile (dev)** | **~2,233** — `stream_sim` 858 / `profile_sim` 361 / `profile` 246 / `bench_stream` 164 / `phase_profile` 175 / `live_throughput` 135 / `latency_drilldown` 107 / `mem_bench` 84 / `no_raw_grid` 103 | **dev-only, removable at your discretion** — `phase_profile`/`live_throughput` are your standing latency tools; flagged for your AM call, not cut overnight. |
+| **artifacts** | 0 PR-LOC | `__pycache__`/`.pyc`/`.so` already gitignored+untracked — nothing for a PR to delete; not counted. |
+| **rest** (capture trio, trust family, store, loaders, feature_worker, materialize…) | — | LIVE or trust-load-bearing — **KEEP.** |
+
+| feature math | LOC | fate |
+|---|---|---|
+| 67 group-math files | **9,885** | **STAYS** — the actual features; each ports to the one `compute(window)`, math unchanged. |
+
+**Tonight's actual delete = 602 LOC** (`parity_audit.py`, grep-clean, committed). The ~3,182-LOC engine-collapse is
+the **migration headline** that accrues group-by-group once Ben approves the approach — it is NOT a tonight number,
 and we do not claim it as one.
 
 ## What's DELETED (compute-engine sprawl — proposals on the branch, for your approval)
