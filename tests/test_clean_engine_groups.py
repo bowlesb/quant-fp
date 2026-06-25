@@ -3256,6 +3256,55 @@ def test_live_event_tape_session_csr_is_populated_from_loaders() -> None:
     assert edgar["payload"][int(edgar["off"][b])] == pytest.approx(float(_EDGAR_FORM_CODE["10-Q"])), "edgar 10-Q code"
 
 
+@pytest.mark.xfail(strict=True, reason="#78 condition-B CRASH: a streamed symbol first appearing mid-session "
+                                       "(not in _session_symbols) → clean_engine._marshal KeyError. GO-LIVE "
+                                       "BLOCKER (a crash > a value diff); ArchOverhaul to skip-not-KeyError.")
+def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
+    """#76 canary condition-B (Lead's flagged crash-risk, confirmed). The clean engine's ring.index is built
+    ONCE per session from _session_symbols (snapshot union + the first minute's floor). A symbol that FIRST
+    streams in a LATER minute is absent from ring.index → clean_engine._marshal (clean_engine.py:260,
+    pos=[ring.index[s] for s in syms]) KeyErrors = a live SHARD CRASH, not a value divergence — worse than any
+    diff. The OLD path handles it gracefully (emits the late symbol with its 1-bar warm-up values).
+
+    Drive the REAL process_bars clean branch (FP_CLEAN_ENGINE=1): warm 8 minutes over {AAA,BBB,CCC}, then a 9th
+    minute where ZZZ first appears. INTENDED post-fix behavior (this asserts it, xfail-strict until #78 lands):
+    no crash, and ZZZ gets a row whose feature set matches the OLD path's late-symbol row (short windows finite,
+    long windows warm-up NaN). Harness /tmp/canary_crash.py."""
+    import datetime as dt  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.capture import CaptureState, process_bars  # noqa: PLC0415
+
+    base = dt.datetime(2026, 6, 18, 14, 0, tzinfo=dt.timezone.utc)
+
+    def _bars(minute: dt.datetime, extra: str | None = None) -> list[dict]:
+        syms = ["AAA", "BBB", "CCC"] + ([extra] if extra else [])
+        rows = []
+        for off, s in enumerate(syms):
+            i = int((minute - base).total_seconds() // 60)
+            close = 100.0 + off * 2.0 + i * 0.02
+            rows.append({"S": s, "o": close * 0.999, "c": close, "h": close * 1.002,
+                         "l": close * 0.998, "v": 900.0, "t": minute.isoformat()})
+        return rows
+
+    os.environ["FP_CLEAN_ENGINE"] = "1"
+    try:
+        state = CaptureState()
+        for mi in range(8):  # engine's ring.index built over {AAA,BBB,CCC} at the first call
+            process_bars(state, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cc78", "mock",
+                         "2026-06-18", 120, accumulate=True, write=False)
+        # minute 8: ZZZ first appears — must NOT crash the marshal
+        process_bars(state, _bars(base + dt.timedelta(minutes=8), extra="ZZZ"), "/tmp/cc78", "mock",
+                     "2026-06-18", 120, accumulate=True, write=False)
+    finally:
+        os.environ.pop("FP_CLEAN_ENGINE", None)
+    # post-fix: ZZZ is present in a windowed group's output (matching the OLD path's graceful late-symbol row)
+    pv = state.accumulated["price_volume"]
+    assert pv.filter(pl.col("symbol") == "ZZZ").height >= 1, "late symbol ZZZ must get a row (not crash/drop)"
+
+
 def test_news_sentiment_lookahead_boundary_matches_legacy_compute() -> None:
     """#75 LAYER B — the NON-NEGOTIABLE LOOK-AHEAD gate (Lead: a leak = future info in a live feature). Drive
     clean NewsSentimentClean over a minute grid STRADDLING an article's available_at (T), with the session built
