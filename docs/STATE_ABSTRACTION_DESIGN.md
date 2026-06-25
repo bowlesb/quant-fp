@@ -23,19 +23,37 @@ throughput as a floor we must not regress, not a target):
 Ben's earlier system (`automated-day-trading`) already reached for the core of this shape, and it's worth saying
 so plainly because the design below is the same instinct, finished:
 
-- **One uniform entry for a minute bar.** There, a bar is a `MinuteBar`/`BufferModel`
-  (`scode/runner/server/minute_bar.py`) with a fixed ordered field list and a single
-  `to_buffer_row()` → flat `np.ndarray`. Every feature reads from that one flat buffer
-  (`scode/features/feature_vector.py:get_final_feature_vector` operates on plain numpy close/volume/… arrays) —
-  not a bespoke per-feature frame. That is exactly the "ONE way to pass a minute bar to a group" Ben wants, and
-  the design keeps it: the container's fold takes one ordered minute row per symbol.
-- **State as a carried buffer, read by cheap numpy.** The streaming path carried a flat buffer and the features
-  were numpy reductions over it — the same "carry a little, fold cheap, read at T" loop this design generalizes
-  to a per-symbol container.
+We read `automated-day-trading` and his approach is clear and good — and two of its ideas are *already*
+load-bearing in our design, which is the strongest sign we're on the right track:
 
-The honest difference: Ben found a fully-clean single design *hard* (his words), and our current system grew
-seven mechanisms solving the same loop seven ways. This design takes his uniform-buffer instinct and makes it
-*the one* way, with the minimum set of fold-kinds the data actually requires.
+- **One uniform entry + flat numpy reads.** A bar is a `MinuteBar`/`BufferModel`
+  (`scode/runner/server/minute_bar.py`) → a fixed ordered `np.ndarray` row; every feature reads from that one
+  flat buffer (`scode/features/feature_vector.py:get_final_feature_vector` calls each family's getter on plain
+  numpy `close`/`volume`/… arrays). That *is* "one way to pass a minute bar to a group." Kept.
+
+- **Gaps handled by ONE mask — the idea we independently re-derived.** His getters all take an `interpolate`
+  mask: a per-row flag for "was this minute real or filled". Gap/churn handling is **centralized as a mask**, not
+  re-solved per feature. That is exactly our **absent-as-zero / bar-presence churn rule** — the single most
+  important thing the unified container owns, and the one our prior code got wrong in seven different places. Ben
+  solved it once; we adopt that, and generalize it to the per-symbol case.
+
+- **One read-surface knob.** His getters take `last_row_only` — compute-just-the-latest vs the whole series, one
+  parameter. That is our **read-surface knob** (scalar-at-T vs materialize-tail). Same idea.
+
+**Where his design stops, and what we add (honestly).** His state lives *inside each per-family numpy function*,
+driven by a Spark per-ticker partition (`scode/job/ema_features.py`: `add_feature_wrapper(fn, schema,
+need_columns, agg_cols=("ticker",))`). So volume, EMA, chunk, candlestick each carry their own buffer and their
+own loop — the **per-family duplication is exactly the thing Ben now wants reduced.** He did *not* have one
+shared lifecycle/seed/rebuild, the proof that the positional kinds are one structure, or the explicit "minimum
+fold-set" taxonomy. Those are our generalization — his per-family approach, **consolidated** onto one container
+with one churn-mask (his idea), one lifecycle, and the few fold-kinds the data actually needs.
+
+So this is **not** a greenfield invention and **not** a mirror of his repo: it is his per-family numpy approach
+with the duplication removed — and his two best ideas (the gap-mask, the read knob) promoted from per-family
+conventions to container guarantees. He found the fully-clean version *hard* (his words); the honest reason is
+that EMA and Cumulative genuinely don't reduce to the same structure as the windowed/ring families — so the
+clean answer isn't "one thing", it's "one container + the minimum folds." That matches what he found, and what
+we proved.
 
 ## The problem, in one sentence
 
