@@ -2973,7 +2973,6 @@ from quantlib.features.clean_groups_daily import (  # noqa: E402
     OvernightBetaClean,
     OvernightIntradaySplitClean,
     _daily_return,
-    _daily_vol,
     _dist_from_high,
 )
 
@@ -3053,17 +3052,73 @@ def test_daily_groups_share_one_matrix_convention_vs_legacy() -> None:
                 assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"{gname}.{fname}: legacy {gv} clean {cv}"
 
 
-@pytest.mark.xfail(strict=True, reason="daily_vol partial-window gap: legacy rolling_std(window_size=w) has no "
-                                       "min_samples → NULL until w returns exist; clean _daily_vol computes on a "
-                                       "partial window (never fires live @370-day backfill; ArchOverhaul to add "
-                                       "the min_samples=w guard)")
-def test_daily_vol_short_matrix_warmup_nulls_like_legacy() -> None:
-    """WARMUP-BOUNDARY gate (the divergence the warmed 70-day goldens missed): on a matrix SHORTER than the
-    vol window, legacy daily_vol_Wd is NULL (polars rolling_std(window_size=W) with no min_samples requires the
-    full W) — but clean _daily_vol computes a value off the partial window. Pin the legacy NULL so the gap is
-    tracked + a fix flips this to a real pass. 8 daily days, w=10 → must be NaN."""
-    short = (100.0 + np.cumsum(np.random.default_rng(1).standard_normal(8))).reshape(1, -1)  # 8 days < 10
-    assert np.isnan(_daily_vol(short, 10)[0]), "daily_vol_10d on 8 days must be NULL (legacy full-window warmup)"
+# The KNOWN warmup-class gap (#77): features where legacy NULLs a partial window (rolling op, no min_samples)
+# but the clean group computes on it. As ArchOverhaul adds the min_samples=w guard, REMOVE entries here — each
+# removed entry becomes a hard clean==legacy assertion. (daily_vol guards n>1, not n>=w like _dist_from_high.)
+_WARMUP_PARTIAL_WINDOW_GAP = {f"daily_vol_{w}d" for w in (10, 20, 30, 60)}
+
+
+def _build_warmup_short_session() -> tuple[dict[str, np.ndarray], list[str]]:
+    """The SHORT (8-day) daily session matrices behind tests/daily_warmup_golden.json (legacy compute() on the
+    same 8-day frame, where windows > 8 days are NULL)."""
+    import json  # noqa: PLC0415
+
+    dw_in = json.load(open(os.path.join(os.path.dirname(__file__), "daily_warmup_in.json")))
+    syms = ["A", "B", "SPY"]
+    daily_close = np.vstack([np.array(dw_in[s]["close"]) for s in syms])
+    session = {
+        "daily_close": daily_close,
+        "daily_open": np.vstack([np.array(dw_in[s]["open"]) for s in syms]),
+        "daily_high": daily_close + 1, "daily_low": daily_close - 1,
+        "daily_volume": np.vstack([np.array(dw_in[s]["volume"]) for s in syms]),
+        "daily_vwap": np.vstack([np.array(dw_in[s]["vwap"]) for s in syms]),
+    }
+    return session, syms
+
+
+_WARMUP_SWEEP_GROUPS = [("multi_day_returns", "MultiDayClean"), ("multi_day_vwap", "MultiDayVwapClean")]
+
+
+@pytest.mark.parametrize("group_name,clean_cls_name", _WARMUP_SWEEP_GROUPS)
+def test_daily_warmup_sweep_matches_legacy_nulls(group_name: str, clean_cls_name: str) -> None:
+    """WARMUP-CLASS SWEEP (#77, Lead): legacy rolling ops with NO min_samples NULL a partial window; a clean
+    group that computes on the partial window DIVERGES on a SHORT matrix — and a NEWLY-LISTED symbol with < w
+    trading days hits exactly that LIVE (so the guards are go-live-required, not academic). Feed an 8-day matrix
+    to every daily group and assert clean == legacy compute() on EVERY feature (clean must NULL the partial
+    windows too). Catches the whole class: a new/regressed group computing a partial window fails loud here. The
+    KNOWN gap (daily_vol_{10,20,30,60}d, guarded n>1 not n>=w) is asserted-divergent below so a FIX is detected;
+    everything else (daily_return shift-based, dist_from_high/multi_day_vwap which already guard n>=w) must
+    already match. Golden tests/daily_warmup_golden.json from real compute() on the 8-day frame."""
+    import importlib  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "daily_warmup_golden.json")))[group_name]
+    clean_cls = getattr(importlib.import_module("quantlib.features.clean_groups_daily"), clean_cls_name)
+    session, syms = _build_warmup_short_session()
+
+    eng = CleanEngine([clean_cls()], syms, WINDOW)
+    eng.set_session(session)
+    out = eng.step({"symbol": np.array(syms), "close": session["daily_close"][:, -1], "volume": np.zeros(3),
+                    "minute_epoch": np.array([570 * 60], dtype=np.int64)})[group_name]
+
+    assert set(out) == set(golden), f"{group_name} feature set != legacy compute()"
+    matched_known_gap = []
+    for fname, gv in golden.items():
+        cv = float(out[fname][0])  # symbol A
+        agrees = (gv is None and np.isnan(cv)) or (gv is not None and cv == pytest.approx(gv, rel=1e-6, abs=1e-9))
+        if fname in _WARMUP_PARTIAL_WINDOW_GAP:
+            # KNOWN gap: legacy NULL, clean computes a partial-window value → must currently DIVERGE. If this
+            # starts agreeing, the guard landed — drop the name from _WARMUP_PARTIAL_WINDOW_GAP (this fails to
+            # force that).
+            assert gv is None, f"{group_name}.{fname}: golden expected NULL (legacy warmup) but is {gv}"
+            if agrees:
+                matched_known_gap.append(fname)
+        else:
+            assert agrees, f"{group_name}.{fname}: clean {cv} != legacy {gv} (warmup-class regression on a short matrix)"
+    assert not matched_known_gap, (
+        f"{group_name}: the warmup guard landed for {matched_known_gap} — remove them from "
+        f"_WARMUP_PARTIAL_WINDOW_GAP so this becomes a hard clean==legacy assertion (#77)"
+    )
 
 
 def test_live_daily_session_is_populated_from_backfill_daily() -> None:
