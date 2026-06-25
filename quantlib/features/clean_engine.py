@@ -122,6 +122,7 @@ class Window:
         state: dict[str, np.ndarray] | None = None,
         static: dict[str, np.ndarray] | None = None,
         minute_epoch: int = 0,
+        session: dict[str, np.ndarray] | None = None,
     ) -> None:
         self._ring = ring
         self.symbols = ring.symbols
@@ -137,6 +138,10 @@ class Window:
         # cross-sectional groups that reduce/group over the symbol axis (breadth by sector, sector_beta).
         self.static = static or {}
         self.minute_epoch = minute_epoch  # for session-reset / time-of-day groups (cumulative, seasonality)
+        # ``session`` is the engine's per-session memo for the DAILY-SNAPSHOT (Class-A intraday-invariant)
+        # groups — prior-day levels, the sector map — computed once per session and broadcast. The engine
+        # populates it at the session boundary; a snapshot group reads it instead of the rolling window.
+        self.session = session if session is not None else {}
 
     def trailing(self, col: str) -> np.ndarray:
         return self._ring.trailing(col)
@@ -175,6 +180,14 @@ class CleanEngine:
         self._group_state: dict[str, dict[str, np.ndarray]] = {g.name: {} for g in self.groups}
         # Static per-symbol labels for the cross-sectional groups (sector id, etc.), constant intraday.
         self.static = static or {}
+        # The per-session memo the daily-snapshot groups read (prior-day levels, sector map) — populated once
+        # per session via ``set_session``; a snapshot group reads ``window.session`` instead of the ring.
+        self.session: dict[str, np.ndarray] = {}
+
+    def set_session(self, session: dict[str, np.ndarray]) -> None:
+        """Set the per-session snapshot memo (prior-day levels, etc.) — called once at each session boundary.
+        Daily-snapshot groups read it via ``window.session``; everything else ignores it."""
+        self.session = dict(session)
 
     def _marshal(self, minute_bars: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Turn the current minute's bars (``{col: (n_present,) array}`` + a ``symbol`` array) into the
@@ -189,12 +202,16 @@ class CleanEngine:
         """Fold ONE minute into the carried buffer, then read every group's features for it. Each group sees its
         OWN carried state + the static labels; a fork-kind group (EMA / cumulative / swing) reads and updates
         ``window.state`` in place. Returns ``{group_name: {feature_name: (n_symbols,) array}}``."""
-        minute_epoch = int(minute_bars["minute_epoch"]) if "minute_epoch" in minute_bars else 0
+        minute_epoch = (
+            int(np.asarray(minute_bars["minute_epoch"]).flat[0]) if "minute_epoch" in minute_bars else 0
+        )
         rows, pos = self._marshal(minute_bars)
         self.ring.append(rows, pos)
         out: dict[str, dict[str, np.ndarray]] = {}
         for group in self.groups:
-            window = Window(self.ring, self._group_state[group.name], self.static, minute_epoch)
+            window = Window(
+                self.ring, self._group_state[group.name], self.static, minute_epoch, self.session
+            )
             out[group.name] = group.compute(window)
         return out
 

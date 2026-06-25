@@ -244,3 +244,117 @@ class MacdClean:
             "macd_signal": signal,
             "macd_histogram": macd_line - signal,
         }
+
+
+class IntradaySeasonalityClean:
+    """CUMULATIVE / session-reset: volume vs the symbol's running since-open mean volume. A carried running
+    sum + count per symbol, RESET at the session open (``minute_epoch`` crossing a new day). Lives in
+    ``window.state`` like the EMA, but the carry is a running mean that resets — proving the cumulative kind.
+    """
+
+    name = "intraday_seasonality"
+    input_cols = ("volume",)
+    feature_names = ("volume_vs_session_mean",)
+    _SESSION_SECONDS = 86400  # day bucket for the reset (a real impl uses the exchange session boundary)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        volume = window.latest("volume")
+        present = np.isfinite(volume)
+        state = window.state
+        day = window.minute_epoch // self._SESSION_SECONDS
+        # reset the running sum/count when the session day changes
+        if state.get("day") is None or int(state["day"][0]) != day:
+            state["sum"] = np.zeros(window.n)
+            state["cnt"] = np.zeros(window.n)
+            state["day"] = np.full(window.n, day, dtype=np.float64)
+        state["sum"] = np.where(present, state["sum"] + np.where(present, volume, 0.0), state["sum"])
+        state["cnt"] = np.where(present, state["cnt"] + 1.0, state["cnt"])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            session_mean = state["sum"] / state["cnt"]
+            ratio = volume / session_mean
+        return {"volume_vs_session_mean": np.where(present & (state["cnt"] > 0), ratio, np.nan)}
+
+
+class SwingClean:
+    """STATEFUL / swing: a ZigZag leg-state machine per symbol — the current leg direction + running extreme,
+    a pivot when price reverses by >= theta from the leg extreme. O(1) per bar, carried in ``window.state``
+    (no buffer re-scan) — proving the small-per-symbol-state-machine kind. (Simplified single-leg ZigZag; the
+    production group adds the Fibonacci leg sequence, same carried-state shape.)"""
+
+    name = "swing"
+    input_cols = ("close",)
+    feature_names = ("swing_direction", "swing_leg_return", "swing_pivot")
+    _THETA = 0.01  # 1% reversal confirms a pivot
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.latest("close")
+        present = np.isfinite(close)
+        state = window.state
+        n = window.n
+        if state.get("extreme") is None:
+            state["extreme"] = np.where(present, close, np.nan)  # the running leg extreme
+            state["dir"] = np.zeros(n)  # +1 up-leg, -1 down-leg, 0 undecided
+            state["leg_start"] = np.where(present, close, np.nan)
+        extreme = state["extreme"]
+        direction = state["dir"]
+        pivot = np.zeros(n)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            up_move = (close - extreme) / extreme  # vs the current extreme
+        # up-leg: extreme tracks the high; a fall of >= theta from it confirms a down pivot (and vice versa).
+        new_extreme = extreme.copy()
+        new_dir = direction.copy()
+        new_leg_start = state["leg_start"].copy()
+        for i in range(n):
+            if not present[i] or not np.isfinite(extreme[i]):
+                if present[i] and not np.isfinite(extreme[i]):
+                    new_extreme[i] = close[i]
+                    new_leg_start[i] = close[i]
+                continue
+            d = direction[i]
+            mv = up_move[i]
+            if d >= 0 and close[i] >= extreme[i]:
+                new_extreme[i] = close[i]  # extending the up-leg's high
+                new_dir[i] = 1
+            elif d <= 0 and close[i] <= extreme[i]:
+                new_extreme[i] = close[i]  # extending the down-leg's low
+                new_dir[i] = -1
+            elif d == 1 and mv <= -self._THETA:  # up-leg reversed down by theta → down pivot
+                pivot[i] = 1.0
+                new_dir[i] = -1
+                new_leg_start[i] = extreme[i]
+                new_extreme[i] = close[i]
+            elif d == -1 and mv >= self._THETA:  # down-leg reversed up by theta → up pivot
+                pivot[i] = 1.0
+                new_dir[i] = 1
+                new_leg_start[i] = extreme[i]
+                new_extreme[i] = close[i]
+        state["extreme"] = new_extreme
+        state["dir"] = new_dir
+        state["leg_start"] = new_leg_start
+        with np.errstate(invalid="ignore", divide="ignore"):
+            leg_return = close / new_leg_start - 1.0
+        return {
+            "swing_direction": np.where(present, new_dir, np.nan),
+            "swing_leg_return": np.where(present, leg_return, np.nan),
+            "swing_pivot": np.where(present, pivot, np.nan),
+        }
+
+
+class PriorDayClean:
+    """DAILY-SNAPSHOT: intraday-invariant prior-day reference levels (prior close), computed ONCE per session
+    and broadcast to every minute. Reads ``window.session`` (the engine's per-session memo) instead of the
+    rolling window — proving the snapshot kind. ``gap_from_prior_close`` = today's latest / prior_close − 1.
+    """
+
+    name = "prior_day"
+    input_cols = ("close",)
+    feature_names = ("gap_from_prior_close",)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        prior_close = window.session.get("prior_close")
+        close = window.latest("close")
+        if prior_close is None:
+            return {"gap_from_prior_close": np.full(window.n, np.nan)}
+        with np.errstate(invalid="ignore", divide="ignore"):
+            gap = close / prior_close - 1.0
+        return {"gap_from_prior_close": np.where(np.isfinite(close), gap, np.nan)}
