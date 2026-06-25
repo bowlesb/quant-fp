@@ -2677,11 +2677,12 @@ def test_sector_return_output_gate_absent_row_nan() -> None:
     syms = ["A", "B", "C"]
     eng = CleanEngine([SectorReturnClean()], syms, WINDOW)
     eng.static = {"sector": np.array([0, 0, 0])}
-    # 10 minutes all present, then a minute where only A,B deliver (C absent)
+    # 11 consecutive minutes on the 60s grid (so the #65 strict exact-minute lag has a bar at T−5m), the last
+    # of which only A,B deliver (C absent).
     for ep in range(10):
         eng.step(_sec_bar({"A": 100.0 + ep, "B": 101.0 + ep, "C": 99.0 + ep}, 60 + ep * 60))
-    out = eng.step(_sec_bar({"A": 111.0, "B": 112.0}, 700))["sector_return"]
-    assert np.isfinite(out["sector_return_5m"][0])  # A present → computes
+    out = eng.step(_sec_bar({"A": 111.0, "B": 112.0}, 60 + 10 * 60))["sector_return"]  # minute 11, grid-aligned
+    assert np.isfinite(out["sector_return_5m"][0])  # A present, T−5m bar exists → computes
     assert np.isfinite(out["sector_return_5m"][1])  # B present → computes
     assert np.isnan(out["sector_return_5m"][2])     # C ABSENT → output-gated NaN
 
@@ -3188,11 +3189,11 @@ def test_multi_day_contract_and_no_session_is_nan() -> None:
     eng = CleanEngine([MultiDayClean()], syms, WINDOW)
     eng.set_session({"daily_close": daily_close})
     out = eng.step({"symbol": np.array(syms), "close": np.array([102.0, 50.0]),
-                    "volume": np.zeros(2), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day"]
+                    "volume": np.zeros(2), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day_returns"]
     _assert_feature_spec_contract(out, MultiDayReturnGroup().declare(), "multi_day ")
     eng2 = CleanEngine([MultiDayClean()], syms, WINDOW)  # no session → all-NaN, no crash
     out2 = eng2.step({"symbol": np.array(syms), "close": np.array([102.0, 50.0]),
-                      "volume": np.zeros(2), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day"]
+                      "volume": np.zeros(2), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day_returns"]
     assert all(np.all(np.isnan(arr)) for arr in out2.values()), "no daily snapshot → all-NaN"
 
 
@@ -3204,9 +3205,9 @@ def test_multi_day_broadcasts_same_value_across_minutes() -> None:
     eng = CleanEngine([MultiDayClean()], syms, WINDOW)
     eng.set_session({"daily_close": daily_close})
     first = eng.step({"symbol": np.array(syms), "close": np.array([103.0, 52.0, 198.0]),
-                      "volume": np.zeros(3), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day"]
+                      "volume": np.zeros(3), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day_returns"]
     later = eng.step({"symbol": np.array(syms), "close": np.array([104.0, 53.0, 197.0]),
-                      "volume": np.zeros(3), "minute_epoch": np.array([120], dtype=np.int64)})["multi_day"]
+                      "volume": np.zeros(3), "minute_epoch": np.array([120], dtype=np.int64)})["multi_day_returns"]
     for fname in first:
         np.testing.assert_allclose(np.nan_to_num(first[fname]), np.nan_to_num(later[fname]), rtol=1e-12,
                                    err_msg=f"multi_day.{fname} drifted across minutes (must be intraday-invariant)")
@@ -3583,7 +3584,7 @@ _LEGACY_GROUP_OF = {
     "sector_return": ("sector_return", "SectorReturnGroup"),
     "peer_relative": ("peer_relative", "PeerRelativeReturnGroup"),
     "calendar": ("calendar", "CalendarGroup"),
-    "multi_day": ("multi_day", "MultiDayReturnGroup"),
+    "multi_day_returns": ("multi_day", "MultiDayReturnGroup"),
     "daily_beta": ("daily_beta", "DailyBetaGroup"),
     "overnight_intraday_split": ("overnight_intraday_split", "OvernightIntradaySplitGroup"),
     "liquidity_rank": ("liquidity_rank", "LiquidityRankGroup"),
@@ -3600,6 +3601,10 @@ _LEGACY_GROUP_OF = {
     "clean_momentum": ("clean_momentum", "CleanMomentumScoreGroup"),
     "momentum_run": ("momentum_run", "MomentumRunGroup"),
     "market_beta": ("market_beta", "MarketBetaGroup"),
+    "count_fano": ("count_fano", "CountFanoGroup"),
+    "signed_trade_ratio": ("signed_trade_ratio", "SignedTradeRatioGroup"),
+    "trade_flow": ("trade_flow", "TradeFlowGroup"),
+    "trade_freq_z": ("trade_freq_z", "TradeFreqZGroup"),
     # STUBS (clean declares fewer than legacy) — xfailed below until filled:
     "breadth": ("breadth", "BreadthGroup"),
     "prior_day": ("prior_day", "PriorDayGroup"),
