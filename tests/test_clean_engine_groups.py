@@ -19,7 +19,14 @@ import numpy as np
 import pytest
 
 from quantlib.features.clean_engine import CleanEngine
-from quantlib.features.clean_groups_example import TrendQualityClean, VwapDeviationClean
+from quantlib.features.clean_groups_example import (
+    BreadthClean,
+    CandlestickClean,
+    MacdClean,
+    RealizedRangeClean,
+    TrendQualityClean,
+    VwapDeviationClean,
+)
 
 WINDOW = 60
 
@@ -194,3 +201,229 @@ def test_no_all_nan_or_all_zero_over_varied_fixture() -> None:
             assert not np.all(np.isnan(arr)), f"{gname}.{fname} all-NaN"
             finite = arr[np.isfinite(arr)]
             assert finite.size == 0 or not np.all(finite == 0.0), f"{gname}.{fname} all-zero"
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# realized_range: trailing mean of (high-low)/close over short windows.
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def _ohlc(symbols, o, h, low, c):
+    return {
+        "symbol": np.array(symbols),
+        "open": np.array(o, dtype=np.float64),
+        "high": np.array(h, dtype=np.float64),
+        "low": np.array(low, dtype=np.float64),
+        "close": np.array(c, dtype=np.float64),
+    }
+
+
+def test_realized_range_known_constant_value() -> None:
+    """Every bar has high-low = 2, close = 100 → range fraction 0.02 each bar → trailing mean = 0.02."""
+    engine = CleanEngine([RealizedRangeClean()], ["A"], WINDOW)
+    for _ in range(6):
+        engine.step({"symbol": np.array(["A"]), "high": np.array([101.0]),
+                     "low": np.array([99.0]), "close": np.array([100.0])})
+    out = engine.step({"symbol": np.array(["A"]), "high": np.array([101.0]),
+                       "low": np.array([99.0]), "close": np.array([100.0])})["realized_range"]
+    for w in (3, 5, 10):
+        assert out[f"realized_range_{w}m"][0] == pytest.approx(2.0 / 100.0)
+
+
+def test_realized_range_nonnegative_and_mean_of_known() -> None:
+    """A known two-value range series averages correctly and is always >= 0."""
+    engine = CleanEngine([RealizedRangeClean()], ["A"], WINDOW)
+    # bar 1: range 4 (h104,l100,c100 → 0.04); bar 2: range 2 (h102,l100,c100 → 0.02). mean over 2 = 0.03
+    engine.step({"symbol": np.array(["A"]), "high": np.array([104.0]), "low": np.array([100.0]), "close": np.array([100.0])})
+    out = engine.step({"symbol": np.array(["A"]), "high": np.array([102.0]), "low": np.array([100.0]), "close": np.array([100.0])})["realized_range"]
+    assert out["realized_range_3m"][0] == pytest.approx((0.04 + 0.02) / 2)
+    assert out["realized_range_3m"][0] >= 0.0
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# candlestick: per-bar geometry + the 2-candle engulfing pattern.
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def test_candlestick_body_and_shadow_ratios_known() -> None:
+    """A bar o=100 h=110 l=90 c=105: range 20, body |105-100|=5 → 0.25; upper (110-105)/20=0.25;
+    lower (100-90)/20=0.50. Ratios sum to 1 (body+upper+lower)."""
+    out = CleanEngine([CandlestickClean()], ["A"], WINDOW).step(
+        _ohlc(["A"], [100.0], [110.0], [90.0], [105.0])
+    )["candlestick"]
+    assert out["body_ratio"][0] == pytest.approx(0.25)
+    assert out["upper_shadow_ratio"][0] == pytest.approx(0.25)
+    assert out["lower_shadow_ratio"][0] == pytest.approx(0.50)
+
+
+def test_candlestick_doji_flag() -> None:
+    """A near-zero body (o≈c) → is_doji 1; a large body → is_doji 0."""
+    doji = CleanEngine([CandlestickClean()], ["A"], WINDOW).step(_ohlc(["A"], [100.0], [105.0], [95.0], [100.2]))["candlestick"]
+    big = CleanEngine([CandlestickClean()], ["A"], WINDOW).step(_ohlc(["A"], [100.0], [110.0], [90.0], [109.0]))["candlestick"]
+    assert doji["is_doji"][0] == 1.0
+    assert big["is_doji"][0] == 0.0
+
+
+def test_candlestick_bullish_engulfing() -> None:
+    """Prior bar bearish (o102 c98), this bar bullish engulfing (o97 c103, body covers prior) → flag 1."""
+    engine = CleanEngine([CandlestickClean()], ["A"], WINDOW)
+    engine.step(_ohlc(["A"], [102.0], [103.0], [97.0], [98.0]))   # prior: bearish (c<o)
+    out = engine.step(_ohlc(["A"], [97.0], [104.0], [96.0], [103.0]))["candlestick"]  # this: bullish, engulfs
+    assert out["pattern_engulfing_bullish"][0] == 1.0
+
+
+def test_candlestick_no_engulfing_when_prior_bullish() -> None:
+    """Prior bar bullish → not a bullish-engulfing setup → flag 0."""
+    engine = CleanEngine([CandlestickClean()], ["A"], WINDOW)
+    engine.step(_ohlc(["A"], [98.0], [103.0], [97.0], [102.0]))   # prior: bullish
+    out = engine.step(_ohlc(["A"], [97.0], [104.0], [96.0], [103.0]))["candlestick"]
+    assert out["pattern_engulfing_bullish"][0] == 0.0
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# breadth: CROSS-SECTIONAL — fraction of the universe up/down. Validated HARD on the FULL symbol axis.
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def test_breadth_fraction_up_known_full_axis() -> None:
+    """6 symbols: 4 trend up, 2 trend down over the window → breadth_up = 4/6, breadth_down = 2/6,
+    net = 2/6. The scalar is broadcast to EVERY symbol (cross-sectional), so assert on the whole axis."""
+    syms = [f"S{i}" for i in range(6)]
+    # up names: +k; down names: -k. 5-min window.
+    closes = {}
+    for i, s in enumerate(syms):
+        slope = 1.0 if i < 4 else -1.0
+        closes[s] = [100.0 + slope * k for k in range(6)]
+    out = _run([BreadthClean()], syms, closes)["breadth"]
+    # broadcast to every symbol identically
+    assert np.allclose(out["breadth_up_5"], 4.0 / 6.0)
+    assert np.allclose(out["breadth_down_5"], 2.0 / 6.0)
+    assert np.allclose(out["breadth_net_5"], 4.0 / 6.0 - 2.0 / 6.0)
+
+
+def test_breadth_all_up_is_one() -> None:
+    """Every symbol up → breadth_up == 1.0, breadth_down == 0.0 on the full axis."""
+    syms = [f"S{i}" for i in range(5)]
+    closes = {s: [100.0 + k for k in range(6)] for s in syms}
+    out = _run([BreadthClean()], syms, closes)["breadth"]
+    assert np.allclose(out["breadth_up_5"], 1.0)
+    assert np.allclose(out["breadth_down_5"], 0.0)
+
+
+def test_breadth_deadband_flat_is_neither() -> None:
+    """Flat names (within ±1e-4) count as neither up nor down → breadth_up == breadth_down == 0."""
+    syms = [f"S{i}" for i in range(4)]
+    closes = {s: [100.0] * 6 for s in syms}
+    out = _run([BreadthClean()], syms, closes)["breadth"]
+    assert np.allclose(out["breadth_up_5"], 0.0)
+    assert np.allclose(out["breadth_down_5"], 0.0)
+
+
+def test_breadth_in_unit_range() -> None:
+    """SANITY: up/down fractions ∈ [0,1], net ∈ [-1,1] over a varied fixture, on the full axis."""
+    rng = np.random.default_rng(3)
+    syms = [f"S{i}" for i in range(8)]
+    closes = {s: list(100.0 + np.cumsum(rng.standard_normal(20))) for s in syms}
+    out = _run([BreadthClean()], syms, closes)["breadth"]
+    for w in (5, 10):
+        assert np.all((out[f"breadth_up_{w}"] >= 0) & (out[f"breadth_up_{w}"] <= 1))
+        assert np.all((out[f"breadth_net_{w}"] >= -1) & (out[f"breadth_net_{w}"] <= 1))
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# macd: EMA / RECURSIVE — carried per-group state, decay on PRESENCE not clock. Validated HARD on sparsity.
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def _ema_ref(values: list[float], span: int) -> float:
+    """Reference EMA seeded to the first value, v = (1-a)v + a*x — the macd group's exact recurrence."""
+    alpha = 2.0 / (span + 1.0)
+    v = values[0]
+    for x in values[1:]:
+        v = (1.0 - alpha) * v + alpha * x
+    return v
+
+
+def test_macd_line_matches_ema_recurrence() -> None:
+    """macd_line = EMA12(close) − EMA26(close), each seeded to the first close and decayed per bar. Drive a
+    known close series and assert against the hand-rolled EMA recurrence."""
+    closes = [100.0, 101.0, 103.0, 102.0, 105.0, 107.0, 106.0, 110.0]
+    engine = CleanEngine([MacdClean()], ["A"], WINDOW)
+    out = {}
+    for c in closes:
+        out = engine.step({"symbol": np.array(["A"]), "close": np.array([c])})["macd"]
+    expected = _ema_ref(closes, 12) - _ema_ref(closes, 26)
+    assert out["macd_line"][0] == pytest.approx(expected, rel=1e-9)
+
+
+def test_macd_histogram_is_line_minus_signal() -> None:
+    """histogram == macd_line − macd_signal, by definition, every bar."""
+    engine = CleanEngine([MacdClean()], ["A"], WINDOW)
+    out = {}
+    for c in [100.0, 102.0, 101.0, 104.0, 103.0]:
+        out = engine.step({"symbol": np.array(["A"]), "close": np.array([c])})["macd"]
+    assert out["macd_histogram"][0] == pytest.approx(out["macd_line"][0] - out["macd_signal"][0])
+
+
+@pytest.mark.xfail(
+    reason="INTERFACE GAP (reported to ArchOverhaul): MacdClean infers presence from "
+    "window.latest('close') being finite, but latest() returns a symbol's CARRIED last close on an absent "
+    "minute → present is wrongly True → the EMA re-decays on every gap. Window has no per-minute presence "
+    "accessor; the EMA fork kind cannot express presence-decay correctly until one is added.",
+    strict=True,
+)
+def test_macd_decays_on_presence_not_clock() -> None:
+    """THE hard EMA property: a symbol absent for minutes must HOLD its EMA (decay on bar presence, not wall
+    clock), and resume from the held value. A present every-bar series and a sparse series with the SAME
+    present closes (just gaps between) must yield the IDENTICAL EMA — gaps don't decay it."""
+    dense_closes = [100.0, 102.0, 104.0, 106.0]
+    # dense: A present every minute
+    dense_engine = CleanEngine([MacdClean()], ["A"], WINDOW)
+    dense_out = {}
+    for c in dense_closes:
+        dense_out = dense_engine.step({"symbol": np.array(["A"]), "close": np.array([c])})["macd"]
+    # sparse: A present only on the SAME 4 close-bars, with empty (A-absent) minutes interleaved
+    sparse_engine = CleanEngine([MacdClean()], ["A"], WINDOW)
+    sparse_out = {}
+    for i, c in enumerate(dense_closes):
+        sparse_out = sparse_engine.step({"symbol": np.array(["A"]), "close": np.array([c])})["macd"]
+        if i < len(dense_closes) - 1:
+            sparse_engine.step({"symbol": np.array([], dtype="<U4"), "close": np.array([])})  # A absent
+    assert sparse_out["macd_line"][0] == pytest.approx(dense_out["macd_line"][0], rel=1e-9), \
+        "EMA must decay on PRESENCE not clock — gaps changed the value"
+
+
+def test_macd_seeds_to_first_present_value() -> None:
+    """First bar: both EMAs seed to the close → macd_line == 0 on the first bar."""
+    out = CleanEngine([MacdClean()], ["A"], WINDOW).step(
+        {"symbol": np.array(["A"]), "close": np.array([100.0])}
+    )["macd"]
+    assert out["macd_line"][0] == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# All six groups in ONE shared pass — the live multi-group shape, every kind at once.
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def test_all_six_groups_one_pass() -> None:
+    """The engine runs windowed (trend_quality, vwap_deviation, realized_range), per-bar (candlestick),
+    cross-sectional (breadth), and EMA (macd) groups in ONE step — every kind, one shared pass."""
+    rng = np.random.default_rng(5)
+    syms = [f"S{i}" for i in range(5)]
+    groups = [TrendQualityClean(), VwapDeviationClean(), RealizedRangeClean(),
+              CandlestickClean(), BreadthClean(), MacdClean()]
+    engine = CleanEngine(groups, syms, WINDOW)
+    out = {}
+    for _ in range(30):
+        c = 100.0 + rng.standard_normal(5).cumsum()
+        bars = {"symbol": np.array(syms), "open": c * 0.999, "high": c * 1.003,
+                "low": c * 0.997, "close": c, "volume": 1000.0 + rng.random(5) * 3000}
+        out = engine.step(bars)
+    assert set(out) == {g.name for g in groups}
+    for group in groups:
+        feats = out[group.name]
+        assert set(feats) == set(group.feature_names), f"{group.name} feature set"
+        for fname, arr in feats.items():
+            assert arr.shape == (5,), f"{group.name}.{fname} not full symbol axis"
+            assert not np.all(np.isnan(arr)), f"{group.name}.{fname} all-NaN"
