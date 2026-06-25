@@ -427,8 +427,10 @@ declares its own condition — windowed-sum = window filled, EMA = warmup span, 
    value-gate-proven** — the `regression_y_anchor` centering the volume regressand plus the x-side
    `_OLS_DENOM_X_CENTERED_REL_EPS` variance guard (`declarative.py`, #402/#416/#418), exercised on the degenerate
    flat-`Σxx≈0` cell by the co-resident test. So the windowed-sum payload **inherits** the conditioning, it does
-   not reinvent it; the other parked groups (`clean_momentum`/`trend_quality`/`residual_analysis` = Class-A,
-   `range_expansion` = Class-B, `market_beta` = Class-A) ride the same proven route.
+   not reinvent it; the other four parked groups (`clean_momentum`/`trend_quality`/`residual_analysis` = Class-A,
+   `range_expansion` = Class-B) ride the same proven route. (`market_beta` is **not** in this set — it is already
+   armed/incremental-safe, un-parked by the same `rebase_time_axis` fix as its corr-denom twin `return_dynamics`;
+   the parked set is the **five** above, not six.)
 
    **Two distinct proofs, do not conflate them.** The 122 → 14ms spike proves the *fold half* (O(1) arithmetic +
    the conditioning, value-identical). It does **not** yet prove the polars-free half: phase-profiling that same
