@@ -924,6 +924,16 @@ class IncrementalEngine:
         sparse symbols, so it is cell-for-cell identical to the whole-buffer derive (the OPEN PARITY CONSTRAINT,
         resolved)."""
         latest = frame["minute"].max()
+        # FP_STATE_SPINE (price_volume): assemble through the polars-free numpy emit too, not just the numpy
+        # _matrix_at derive. Without this the step still runs assemble_from_long's per-stat pivot+join (the
+        # ASSEMBLE half of the tax) — so the whole-step claim is "matrix_at deleted" only. Routing the spine
+        # step through emit_numpy (the proven byte-identical read surface, test_fp_incremental_emit / #44) makes
+        # the per-minute COMPUTE fully polars-free (collect→0, the keystone's ~2ms), which is the demonstration
+        # Ben asked for. step_numpy is self-contained (its own lazy seed + _fold_latest, so the numpy
+        # _matrix_at_spine derive runs); emit_numpy uses the IDENTICAL canonical/OLS algebra as
+        # assemble_from_long — value-true.
+        if spine_active({g.name for g in self.groups}):
+            return self.step_numpy(frame)
         self._fold_latest(frame, latest, slice_derive=slice_derive)
         long = self._running_long()
         latest_frame = self._latest_frame(frame, latest)
