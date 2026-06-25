@@ -10,9 +10,11 @@ from __future__ import annotations
 import datetime as dt
 
 import polars as pl
+import pytest
 
+from quantlib.features import within_day_monitor
 from quantlib.features.within_day_monitor import (_replay_windows,
-                                                  evaluate_summary)
+                                                  evaluate_summary, monitor)
 
 
 def _summary(rows: list[dict[str, object]]) -> pl.DataFrame:
@@ -83,6 +85,85 @@ def test_partial_comparability_grades_only_the_comparable_features() -> None:
     assert clean is True
     assert [r.feature for r in results] == ["up_ratio_3m"]
     assert all(r.status == "certified" for r in results)
+
+
+def test_monitor_grants_clean_feature_independently_of_divergent_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The structural fix: a parity-clean feature earns its grant on its OWN streak, even though a sibling in
+    # the same group irreducibly diverges every cycle. up_ratio_3m always passes (vr=1.0); mean_abs_ret_3m
+    # always fails (vr=0.5). With stable_cycles=2, up_ratio_3m must grant (once) by cycle 2; mean_abs_ret_3m
+    # must NEVER grant; the run ends at max_cycles having granted exactly the clean feature.
+    summary = _summary(
+        [
+            {"feature": "up_ratio_3m", "value_rate": 1.0, "n_compared": 400},
+            {"feature": "mean_abs_ret_3m", "value_rate": 0.5, "n_compared": 400},
+        ]
+    )
+    granted_calls: list[list[str]] = []
+
+    monkeypatch.setattr(within_day_monitor, "sample_symbols", lambda *a, **k: ["AAA", "BBB"])
+    monkeypatch.setattr(within_day_monitor, "compare_window", lambda *a, **k: summary)
+    monkeypatch.setattr(within_day_monitor.within_day_assignment, "claim", lambda *a, **k: True)
+    monkeypatch.setattr(within_day_monitor.within_day_assignment, "heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(within_day_monitor.within_day_assignment, "release", lambda *a, **k: True)
+
+    def fake_write(results: list, dry_run: bool = True) -> dict[str, int]:
+        granted_calls.append([r.feature for r in results])
+        return {"granted": len(results)}
+
+    monkeypatch.setattr(within_day_monitor, "write_certifications", fake_write)
+
+    result = monitor(
+        "/store",
+        "momentum",
+        "agent-test",
+        mode="replay",
+        day=dt.date(2026, 6, 18),
+        stable_cycles_required=2,
+        max_cycles=4,
+        materialize_backfill=False,
+    )
+
+    # up_ratio_3m granted exactly once (at its 2nd clean cycle); mean_abs_ret_3m never granted.
+    all_granted = [feature for call in granted_calls for feature in call]
+    assert all_granted == ["up_ratio_3m"], all_granted
+    assert result is not None and result.feature == "up_ratio_3m"
+
+
+def test_monitor_grants_each_feature_at_its_own_streak(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Both features are parity-clean and both must grant (each on its own streak) — the all-clean group still
+    # certifies under the per-feature path, granting every comparable feature exactly once.
+    summary = _summary(
+        [
+            {"feature": "up_ratio_3m", "value_rate": 1.0, "n_compared": 400},
+            {"feature": "mean_abs_ret_3m", "value_rate": 1.0, "n_compared": 400},
+        ]
+    )
+    granted_calls: list[list[str]] = []
+    monkeypatch.setattr(within_day_monitor, "sample_symbols", lambda *a, **k: ["AAA"])
+    monkeypatch.setattr(within_day_monitor, "compare_window", lambda *a, **k: summary)
+    monkeypatch.setattr(within_day_monitor.within_day_assignment, "claim", lambda *a, **k: True)
+    monkeypatch.setattr(within_day_monitor.within_day_assignment, "heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(within_day_monitor.within_day_assignment, "release", lambda *a, **k: True)
+    monkeypatch.setattr(
+        within_day_monitor,
+        "write_certifications",
+        lambda results, dry_run=True: granted_calls.append([r.feature for r in results]) or {},
+    )
+
+    result = monitor(
+        "/store",
+        "momentum",
+        "agent-test",
+        mode="replay",
+        day=dt.date(2026, 6, 18),
+        stable_cycles_required=2,
+        max_cycles=4,
+    )
+    all_granted = sorted(feature for call in granted_calls for feature in call)
+    assert all_granted == ["mean_abs_ret_3m", "up_ratio_3m"]
+    assert result is not None  # certified once both granted
 
 
 def test_replay_windows_are_contiguous_and_sized() -> None:
