@@ -1737,6 +1737,75 @@ def test_count_fano_sparse_matches_legacy_compute_golden() -> None:
             assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"count_fano.{fname}: legacy {gv} clean {cv}"
 
 
+def test_tick_tape_windowed_groups_decomposition_matches_legacy() -> None:
+    """#63 GROUP-MATH decomposition gate for the 3 windowed trade-TAPE ports (print_hhi / subminute_gap_fano /
+    size_entropy). These read DERIVED BAR COLUMNS the enrich step produces from the raw tape, so this gate feeds
+    the per-minute primitives computed the SAME way legacy does — _hhi (within-minute notional Herfindahl
+    _sumsq/_sum²), _gap_fano (var/mean of microsecond inter-trade gaps, ddof=1), _sz_c0.._sz_c5 (floor(log10
+    size) clipped [0,5] bin counts) — to the clean groups, and diffs vs the REAL legacy *Group.compute() on the
+    raw trades. Validates the FAITHFUL decomposition independent of the enrich wiring: print_hhi/gap_fano =
+    per-minute scalar → trailing-NANMEAN; size_entropy = 6 LINEAR bin counts → windowed-SUM → entropy assemble
+    (the moment-mean-of-per-minute-entropy would DIVERGE — pinning the window-summed form is the point). 5/5
+    match on a gappy 70-min multi-print-per-minute fixture (tests/ticktape_math_*.json).
+
+    NOTE: the 8 tick groups are NOT yet in ALL_CLEAN_GROUPS and the enrich step does not yet emit _hhi/_gap_fano/
+    _sz_c* — so this gates the group MATH; the full live-path tick gate (registry + enrich + capture) follows
+    when ArchOverhaul wires those (flagged)."""
+    import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_tick import (  # noqa: PLC0415
+        PrintHHIClean,
+        SizeEntropyClean,
+        SubminuteGapFanoClean,
+    )
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    ser = json.load(open(os.path.join(os.path.dirname(__file__), "ticktape_math_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "ticktape_math_golden.json")))
+
+    def _us(mo: int) -> float:
+        return (base + datetime.timedelta(minutes=mo)).replace(tzinfo=datetime.timezone.utc).timestamp() * 1e6
+
+    # per-minute derived primitives, computed exactly as legacy does internally
+    per_min: dict[int, dict[str, float]] = {}
+    for mo in offsets:
+        in_min = sorted(((r["ts_us"], r["price"], r["size"]) for r in ser if _us(mo) <= r["ts_us"] < _us(mo + 1)),
+                        key=lambda t: t[0])
+        notional = [p * s for _, p, s in in_min]
+        ssum, sumsq = sum(notional), sum(x * x for x in notional)
+        hhi = (sumsq / (ssum ** 2)) if ssum > 0 else np.nan
+        gaps = [in_min[k][0] - in_min[k - 1][0] for k in range(1, len(in_min))]
+        if len(gaps) >= 2:
+            gmean = sum(gaps) / len(gaps)
+            gvar = sum((g - gmean) ** 2 for g in gaps) / (len(gaps) - 1)
+            gap_fano = gvar / gmean if gmean > 0 else np.nan
+        else:
+            gap_fano = np.nan
+        bins = [0.0] * 6
+        for _, _, size in in_min:
+            bins[int(np.clip(np.floor(np.log10(size)), 0, 5))] += 1.0
+        per_min[mo] = {"_hhi": hhi, "_gap_fano": gap_fano, **{f"_sz_c{b}": bins[b] for b in range(6)}}
+
+    eng = CleanEngine([PrintHHIClean(), SubminuteGapFanoClean(), SizeEntropyClean()], ["A"], 400)
+    out: dict[str, dict[str, np.ndarray]] = {}
+    for mo in offsets:
+        bar = {"symbol": np.array(["A"]),
+               "minute_epoch": np.array([int((base + datetime.timedelta(minutes=mo)).timestamp())], dtype=np.int64)}
+        for col, val in per_min[mo].items():
+            bar[col] = np.array([val], dtype=np.float64)
+        out = eng.step(bar)
+    for gname in ("print_hhi", "subminute_gap_fano", "size_entropy"):
+        assert set(out[gname]) == set(golden[gname]), f"{gname} feature set != legacy compute()"
+        for fname, gv in golden[gname].items():
+            cv = float(out[gname][fname][0])
+            if gv is None:
+                assert np.isnan(cv), f"{gname}.{fname}: legacy NULL, clean {cv}"
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"{gname}.{fname}: legacy {gv} clean {cv}"
+
+
 def test_residual_analysis_clean_momentum_sparse_match_legacy_output() -> None:
     """GATE residual_analysis + clean_momentum (#60 FRESH time-OLS ports w/ rebased-minute axis) on the SPARSE
     axis. Both are close-vs-TIME OLS (frame-relative minute axis = trend_quality's), so the rebased-minute axis
