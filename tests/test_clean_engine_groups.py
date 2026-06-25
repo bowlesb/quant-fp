@@ -3206,6 +3206,55 @@ def test_news_sentiment_lookahead_boundary_matches_legacy_compute() -> None:
     )
 
 
+def test_edgar_filing_lookahead_boundary_matches_legacy_compute() -> None:
+    """#75 LAYER B (edgar) — the same NON-NEGOTIABLE LOOK-AHEAD axis for EdgarFilingFrequencyClean, DAY-scale
+    windows (7/30/90d). A filing for A at available_at=T; grid {T-1min, T, T+1day, T+8day}, session built by the
+    REAL clean_session.build_event_tape. Every (symbol,minute) cell diffed vs real legacy
+    EdgarFilingFrequencyGroup.compute() (80/80 match). The <= boundary witness: edgar_filing_count_7d =
+    [0, 1, 1, 0] — ABSENT at T-1min (no leak), PRESENT at EXACTLY T (the inclusive <= edge), held through 7d,
+    DROPPED at T+8day. edgar_minutes_since_last_8k is NULL before T then the unbounded since-last (still finite
+    at T+8d, unlike the windowed count). Plus the EMPTY-TAPE symbol B. tests/et_edgar_*."""
+    import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_reference import EdgarFilingFrequencyClean, _EDGAR_FORM_CODE  # noqa: PLC0415,E501
+    from quantlib.features.clean_session import build_event_tape  # noqa: PLC0415
+
+    edg_in = json.load(open(os.path.join(os.path.dirname(__file__), "et_edgar_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "et_edgar_golden.json")))
+    syms = ["A", "B"]
+    filing_at = datetime.datetime.fromtimestamp(edg_in["T_epoch"], tz=datetime.timezone.utc)
+    filings = pl.DataFrame(
+        {"symbol": ["A"], "form_type": [edg_in["form"]], "available_at": [filing_at]},
+        schema={"symbol": pl.String, "form_type": pl.String, "available_at": pl.Datetime("us", "UTC")})
+    tape = build_event_tape(filings, syms, "form_type", payload_fn=_EDGAR_FORM_CODE.__getitem__)
+    session = {"edgar_at": tape["at"], "edgar_off": tape["off"], "edgar_form": tape["payload"]}
+
+    eng = CleanEngine([EdgarFilingFrequencyClean()], syms, 400)
+    eng.set_session(session)
+    captured: dict[str, dict[str, float]] = {}
+    for mi, epoch in enumerate(edg_in["grid_epochs"]):
+        out = eng.step({"symbol": np.array(syms),
+                        "minute_epoch": np.array([epoch], dtype=np.int64)})["edgar_filing_frequency"]
+        for s in syms:
+            captured[f"{s}@{mi}"] = {k: float(out[k][syms.index(s)]) for k in out}
+
+    assert set(captured) == set(golden), "edgar (sym,minute) cell set != legacy compute()"
+    for cell_key, feats in golden.items():
+        for fname, gv in feats.items():
+            cv = captured[cell_key][fname]
+            if gv is None:
+                assert np.isnan(cv), f"edgar {cell_key}.{fname}: legacy NULL, clean {cv}"
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"edgar {cell_key}.{fname}: legacy {gv} clean {cv}"
+    counts = [captured[f"A@{mi}"]["edgar_filing_count_7d"] for mi in range(len(edg_in["grid_epochs"]))]
+    assert counts == [0.0, 1.0, 1.0, 0.0], (
+        f"look-ahead boundary: edgar_filing_count_7d must be [0,1,1,0] across (T-1min,T,T+1d,T+8d), got {counts}"
+    )
+
+
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
     """RE-ANCHORED (#66 + #68): diff clean multi_day_returns cell-for-cell vs a golden from the REAL legacy
     MultiDayReturnGroup.compute() on a 70-day fixture (tests/md_in.json). This CAUGHT the #68 stale-convention
