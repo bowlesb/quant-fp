@@ -40,6 +40,8 @@ from store_grid_cache import read_drill as read_grid_drill
 from store_grid_cache import read_grid_gzip
 from store_grid_cache import read_meta as read_grid_meta
 from ticker_coverage_route import ticker_coverage_snapshot
+from underrep_cache import read_meta as read_underrep_meta
+from underrep_cache import read_report as read_underrep_report
 
 app = FastAPI(title="Quant Coverage Grid")
 
@@ -211,6 +213,35 @@ def ticker_coverage(symbol: str, with_trust: bool = False) -> JSONResponse:
             status_code=503,
         )
     return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/underrepresented-tickers")
+def underrepresented_tickers() -> JSONResponse:
+    """FLEET under-represented-ticker view (#464) — symbols settled in BACKFILL but absent from the live STREAM,
+    ranked across the whole universe (the FP_TICK_SYMBOLS gap at fleet level), plus a per-group leak tally.
+
+    Served from the last-good MongoDB document the underrep-worker writes on a SLOW (daily) cadence — the
+    ~7000-symbol full-universe walk is NEVER on the request path (it would be a latency footgun), so this read
+    is one indexed Mongo lookup. ``?meta=1`` returns just the small staleness header. Returns 503 ``booting``
+    until the worker's first write lands (the store-grid first-boot convention), never a recurring "warming".
+    """
+    report = read_underrep_report()
+    if report is None:
+        return JSONResponse(
+            {"booting": True, "detail": "under-rep report not built yet (first worker boot)"},
+            status_code=503,
+        )
+    return JSONResponse(report, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/underrepresented-tickers/meta")
+def underrepresented_tickers_meta() -> JSONResponse:
+    """The small staleness header (generated_at + the symbol counts) for the under-rep view's "as of" line.
+    ``booting`` until the worker's first write lands."""
+    meta = read_underrep_meta()
+    if meta is None:
+        return JSONResponse({"booting": True}, status_code=503)
+    return JSONResponse(meta, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/healthz")

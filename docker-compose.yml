@@ -214,6 +214,36 @@ services:
       mongo:
         condition: service_healthy
 
+  underrep-worker:
+    # Background worker for the FLEET under-represented-ticker view (symbols settled in backfill but absent from
+    # the live stream — the FP_TICK_SYMBOLS gap, ranked universe-wide). Reuses the dashboard IMAGE but runs the
+    # under-rep loop instead of the web server. UNLIKE store-grid-worker this is a SLOW, DAILY cadence: the gap
+    # moves only as the stream tier / backfill coverage changes (days, not minutes), and a frequent full-universe
+    # walk would contend with the live pipeline. The walk is bounded (a few recent backfill dates + the recent
+    # stream window, sampled files) and the dashboard always serves the last-good document. Read-only w.r.t. the
+    # feature store; no trust/DB needed for this report; no fingerprint/schema risk.
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+    container_name: underrep-worker
+    <<: *common
+    command: ["python3", "-m", "underrep_cache"]
+    environment:
+      STORE_ROOT: /store
+      UNDERREP_MONGO_URL: "mongodb://quant-mongo:27017"
+      # DAILY refresh — slow by design (box load + a full-universe walk). Build, write to Mongo, wait 24h.
+      UNDERREP_INTERVAL_SECONDS: "86400"
+      # Off-peak guard: hold the first build a short while after a (re)start so it never fires the walk during a
+      # peak/contended window. 0 = build on boot; raise to push the first walk to a quiet stretch.
+      UNDERREP_STARTUP_DELAY_SECONDS: "0"
+    volumes:
+      # Feature store, READ-ONLY: the worker reads partition dates + per-date symbol sets. RO so it can never
+      # write the store the feature pipeline owns.
+      - fp_store_real:/store:ro
+    depends_on:
+      mongo:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:latest
     <<: *common

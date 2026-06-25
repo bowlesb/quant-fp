@@ -58,9 +58,11 @@ WHEEL_TOP_LEVEL = "quant_tick"
 # but on disk they are elsewhere in the repo. {import-name -> repo source path}. The closure walk must treat
 # these as first-party (resolve to their source, walk their imports) — exactly as the interpreter will in the
 # image — instead of mis-reading them as undeclared third-party packages.
-# COPY ops/ticker_coverage.py ./ticker_coverage.py — the per-ticker coverage route's engine-free reader.
+# The Dockerfile COPYs these engine-free coverage readers from ops/ (used by the dashboard routes/workers):
+# ``COPY ops/ticker_coverage.py`` and ``COPY ops/underrepresented_tickers.py``.
 IMAGE_EXTRA_MODULES: dict[str, Path] = {
     "ticker_coverage": REPO_ROOT / "ops" / "ticker_coverage.py",
+    "underrepresented_tickers": REPO_ROOT / "ops" / "underrepresented_tickers.py",
 }
 
 # Import-name -> requirements distribution-name, for the cases where they differ. Most packages

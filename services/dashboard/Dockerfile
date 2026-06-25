@@ -42,6 +42,10 @@ COPY services/dashboard/*.py ./
 # from ops/ticker_coverage.py. It is self-contained (stdlib + polars + a LAZY quantlib import used only on the
 # optional trust path), so copy just that one file alongside the dashboard modules — NOT the whole ops/ tree.
 COPY ops/ticker_coverage.py ./ticker_coverage.py
+# The fleet under-rep worker + route (underrep_cache.py) imports the engine-free aggregation from
+# ops/underrepresented_tickers.py (which imports ticker_coverage above). Self-contained (stdlib + polars), so
+# copy just this one file too — again NOT the whole ops/ tree.
+COPY ops/underrepresented_tickers.py ./underrepresented_tickers.py
 
 # The curated feature-group guide the worker reads at build time (group_guide.py looks here by default).
 COPY docs/feature_group_guide.yaml ./feature_group_guide.yaml
