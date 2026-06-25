@@ -139,3 +139,64 @@ def test_intraday_seasonality_cumulative_reset() -> None:
         {"symbol": np.array(["A"]), "volume": np.array([50.0]), "minute_epoch": np.array([86400])}
     )
     assert abs(out2["intraday_seasonality"]["volume_vs_session_mean"][0] - 1.0) < 1e-9
+
+
+def test_idempotent_on_duplicate_minute() -> None:
+    """The C4 footgun guard: a re-delivered minute (epoch <= watermark) does NOT double-advance carried state —
+    not the cumulative sum, the EMA, or the swing leg. The engine owns idempotency once for every kind."""
+    eng = CleanEngine([ex.IntradaySeasonalityClean(), ex.MacdClean()], ["A"], 60)
+    eng.step(
+        {
+            "symbol": np.array(["A"]),
+            "volume": np.array([10.0]),
+            "close": np.array([100.0]),
+            "minute_epoch": np.array([0]),
+        }
+    )
+    eng.step(
+        {
+            "symbol": np.array(["A"]),
+            "volume": np.array([20.0]),
+            "close": np.array([110.0]),
+            "minute_epoch": np.array([60]),
+        }
+    )
+    sum_before = float(eng._group_state["intraday_seasonality"]["sum"][0])
+    ema_before = float(eng._group_state["macd"]["ema12"][0])
+    # RE-DELIVER minute 60 — must be a no-op on all carried state
+    eng.step(
+        {
+            "symbol": np.array(["A"]),
+            "volume": np.array([20.0]),
+            "close": np.array([110.0]),
+            "minute_epoch": np.array([60]),
+        }
+    )
+    assert float(eng._group_state["intraday_seasonality"]["sum"][0]) == sum_before
+    assert float(eng._group_state["macd"]["ema12"][0]) == ema_before
+
+
+def test_seed_replay_carried_state_bit_identical() -> None:
+    """VERIFY (not assume) the unification: seeding N minutes via replay builds carried state BIT-IDENTICAL to
+    feeding the same N minutes live one-at-a-time — for the EMA accumulator, the cumulative sum, AND the swing
+    leg state. If replay-warmup diverged from live accumulation, the live==backfill unification would be broken.
+    """
+
+    def bars(t: int) -> dict[str, np.ndarray]:
+        return {
+            "symbol": np.array(["A"]),
+            "close": np.array([100.0 + np.sin(t) * 5]),
+            "volume": np.array([10.0 + t]),
+            "minute_epoch": np.array([t * 60]),
+        }
+
+    live = CleanEngine([ex.MacdClean(), ex.IntradaySeasonalityClean(), ex.SwingClean()], ["A"], 60)
+    for t in range(20):
+        live.step(bars(t))
+    seeded = CleanEngine([ex.MacdClean(), ex.IntradaySeasonalityClean(), ex.SwingClean()], ["A"], 60)
+    seeded.seed([bars(t) for t in range(20)])
+    for group in live._group_state:
+        for key in live._group_state[group]:
+            assert np.allclose(
+                live._group_state[group][key], seeded._group_state[group][key], equal_nan=True
+            ), f"carried state {group}.{key} diverged between live accumulation and seed-replay"

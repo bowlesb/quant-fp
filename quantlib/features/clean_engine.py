@@ -183,6 +183,14 @@ class CleanEngine:
         # The per-session memo the daily-snapshot groups read (prior-day levels, sector map) — populated once
         # per session via ``set_session``; a snapshot group reads ``window.session`` instead of the ring.
         self.session: dict[str, np.ndarray] = {}
+        # The absorbed-minute watermark (idempotency, the engine owns it ONCE for every carried-state kind): the
+        # latest minute_epoch already folded. A re-delivered or out-of-order minute (epoch <= watermark) is a
+        # NO-OP — it does not re-append the bar or re-advance any EMA / cumulative / swing state. Without this a
+        # duplicate minute double-counts the carried sums (the C4 footgun). 0 = nothing absorbed yet.
+        self._watermark = 0
+        self._last_out: dict[str, dict[str, np.ndarray]] = (
+            {}
+        )  # cached output, returned on a stale re-delivery
 
     def set_session(self, session: dict[str, np.ndarray]) -> None:
         """Set the per-session snapshot memo (prior-day levels, etc.) — called once at each session boundary.
@@ -205,14 +213,25 @@ class CleanEngine:
         minute_epoch = (
             int(np.asarray(minute_bars["minute_epoch"]).flat[0]) if "minute_epoch" in minute_bars else 0
         )
+        # Idempotency (the engine owns it once for every carried-state kind): a re-delivered / stale minute
+        # (epoch <= the watermark) is a NO-OP. We do NOT re-append the bar and do NOT call any group's
+        # ``compute`` — because a fork-kind ``compute`` mutates its carried state in place, calling it twice for
+        # the same minute would double-advance the EMA / cumulative sum / swing leg (the C4 footgun). Instead we
+        # return the cached output from when that minute was first folded. (No minute_epoch supplied — the
+        # simple/test path — folds every step.)
+        if minute_epoch and minute_epoch <= self._watermark:
+            return self._last_out
         rows, pos = self._marshal(minute_bars)
         self.ring.append(rows, pos)
+        if minute_epoch:
+            self._watermark = minute_epoch
         out: dict[str, dict[str, np.ndarray]] = {}
         for group in self.groups:
             window = Window(
                 self.ring, self._group_state[group.name], self.static, minute_epoch, self.session
             )
             out[group.name] = group.compute(window)
+        self._last_out = out
         return out
 
     def seed(self, history: list[dict[str, np.ndarray]]) -> None:
