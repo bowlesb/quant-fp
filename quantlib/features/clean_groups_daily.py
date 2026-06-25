@@ -17,6 +17,8 @@ SESSION SCHEMA (the shared plumbing — built once, read by every daily-snapshot
   ``session["daily_high"]``  : ``(n_symbols, n_days)`` daily highs (for N-day-high distances), same convention.
   ``session["daily_open"]``  : ``(n_symbols, n_days)`` daily opens (today's open = ``[:, -1]`` for gap_open).
   ``session["daily_volume"]``: ``(n_symbols, n_days)`` daily volumes (for ADV / dollar-volume).
+  ``session["daily_vwap"]``  : ``(n_symbols, n_days)`` daily volume-weighted average prices (for multi-day VWAP),
+      same convention. Only ``multi_day_vwap`` reads it; absent → that group emits NaN.
 A group derives its features from these matrices exactly as a windowed group derives from the trailing buffer.
 """
 
@@ -132,6 +134,56 @@ class MultiDayClean:
         return out
 
 
+_VWAP_DAYS: tuple[int, ...] = (5, 10, 20, 60, 120)  # ~week, 2wk, month, quarter, half-year
+
+
+def _ndays_vwap(daily_vwap: np.ndarray, daily_volume: np.ndarray, w: int) -> np.ndarray:
+    """The ``w``-day volume-weighted average price ending at the prior COMPLETED day (D-1):
+    ``sum(vwap·volume over the last w completed days) / sum(volume over the same)``. Legacy shifts pv/vol by 1
+    (prior completed day) then ``rolling_sum(window=w)`` whose default ``min_periods==w`` NULLs a short or
+    gappy window — so the sum requires ALL ``w`` completed days finite (a NaN anywhere → NaN, like polars'
+    null-in-window propagation). Computed over the today-excluded series ``[:, :-1]``."""
+    pv = _completed(daily_vwap) * _completed(daily_volume)  # (n_sym, n_completed)
+    vol = _completed(daily_volume)
+    pv_win = _daily_window(pv, w)
+    vol_win = _daily_window(vol, w)
+    full = (np.isfinite(pv_win).sum(axis=1) >= w) & (np.isfinite(vol_win).sum(axis=1) >= w)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        vwap_n = pv_win.sum(axis=1) / vol_win.sum(axis=1)
+    return np.where(full, vwap_n, np.nan)
+
+
+class MultiDayVwapClean:
+    """DAILY-SNAPSHOT: where the prior close sits versus the volume-weighted average price over the last
+    week / 2wk / month / quarter / half-year. dist_from_vwap_{w}d = _pc/vwap_{w}d − 1; above_vwap_{w}d =
+    (_pc > vwap_{w}d). The N-day VWAP is point-in-time as of the prior close (never today's incomplete bar).
+    Reads ``window.session['daily_vwap'/'daily_volume'/'daily_close']``. Legacy: ``MultiDayVwapGroup``."""
+
+    name = "multi_day_vwap"
+    input_cols = ()
+    feature_names = tuple(
+        col for days in _VWAP_DAYS for col in (f"dist_from_vwap_{days}d", f"above_vwap_{days}d")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        daily_close = window.session.get("daily_close")
+        daily_volume = window.session.get("daily_volume")
+        daily_vwap = window.session.get("daily_vwap")
+        if daily_close is None or daily_volume is None or daily_vwap is None:
+            return {name: np.full(n, np.nan) for name in self.feature_names}
+        prior_close = _asof(daily_close)  # _pc = close.shift(1) = D-1
+        out: dict[str, np.ndarray] = {}
+        for days in _VWAP_DAYS:
+            vwap_n = _ndays_vwap(daily_vwap, daily_volume, days)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                dist = prior_close / vwap_n - 1.0
+            out[f"dist_from_vwap_{days}d"] = dist
+            above = np.where(np.isfinite(dist), (prior_close > vwap_n).astype(np.float64), np.nan)
+            out[f"above_vwap_{days}d"] = above
+        return out
+
+
 def _daily_return_matrix(daily_close: np.ndarray) -> np.ndarray:
     """Per-symbol daily-return matrix from the daily-close matrix: ``close[d]/close[d-1] − 1``, (n_sym,
     n_days-1)."""
@@ -188,6 +240,66 @@ class DailyBetaClean:
             "daily_beta_60d": np.where(defined, beta, np.nan),
             "daily_corr_60d": np.where(defined_corr, np.clip(corr, -1.0, 1.0), np.nan),
             "daily_idio_vol_60d": np.where(defined_corr, idio, np.nan),
+        }
+
+
+def _leg_beta(name_rets: np.ndarray, mkt_rets: np.ndarray, w: int, min_pairs: int) -> np.ndarray:
+    """Rolling-``w``-day OLS beta of ``name_rets`` (n_sym, n) on the 1-D market leg ``mkt_rets`` (n,):
+    ``cov(name, mkt) / var(mkt)`` over the trailing ``w`` days where BOTH are finite. NaN where <``min_pairs``
+    finite pairs or the market-leg variance is 0 (beta undefined). ddof matches polars rolling_var/cov
+    (sample, divide by n−1)."""
+    name_w = name_rets[:, -w:]
+    mkt_w = np.broadcast_to(mkt_rets[-w:], name_w.shape)
+    mask = np.isfinite(name_w) & np.isfinite(mkt_w)
+    npairs = mask.sum(axis=1).astype(np.float64)
+    x = np.where(mask, mkt_w, 0.0)  # market (regressor)
+    y = np.where(mask, name_w, 0.0)  # name (regressand)
+    sx, sy = x.sum(axis=1), y.sum(axis=1)
+    sxx, sxy = (x * x).sum(axis=1), (x * y).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = (sxy - sx * sy / npairs) / (npairs - 1.0)
+        var_x = (sxx - sx * sx / npairs) / (npairs - 1.0)
+        beta = cov / var_x
+    defined = (npairs >= min_pairs) & (var_x > 0.0)
+    return np.where(defined, beta, np.nan)
+
+
+class OvernightBetaClean:
+    """DAILY-SNAPSHOT: the W11 overnight/intraday beta asymmetry. overnight_beta_60d = rolling-60d OLS beta of
+    the name's OVERNIGHT return (open/prev_close − 1) on SPY's overnight return; intraday_beta_60d = same for
+    the INTRADAY return (close/open − 1); beta_overnight_minus_intraday = the difference (the W11 asymmetry).
+    NaN if <20 finite pairs or the SPY-leg variance is 0. Reads ``window.session['daily_open'/'daily_close']``
+    + the SPY row from ``window.static['spy_row']``. Legacy: ``OvernightBetaGroup``."""
+
+    name = "overnight_beta"
+    input_cols = ()
+    feature_names = ("overnight_beta_60d", "intraday_beta_60d", "beta_overnight_minus_intraday")
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        nan = np.full(n, np.nan)
+        daily_open = window.session.get("daily_open")
+        daily_close = window.session.get("daily_close")
+        spy_row = window.static.get("spy_row")
+        if daily_open is None or daily_close is None or spy_row is None or daily_close.shape[1] < 2:
+            return {name: nan for name in self.feature_names}
+        spy_idx = int(np.asarray(spy_row).flat[0])
+        # Build both legs over the FULL daily series (one return per day, like legacy's per-row columns): the
+        # OVERNIGHT leg needs the prior close so day 0 is NaN (no prev_close); the INTRADAY leg (close/open) is
+        # valid on day 0 too. Keeping day 0 in the intraday leg matters near warmup — it is one extra finite
+        # pair the overnight leg lacks, so the two legs legitimately regress over different sample counts.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            on_ret = np.full_like(daily_close, np.nan)
+            on_ret[:, 1:] = (
+                daily_open[:, 1:] / daily_close[:, :-1] - 1.0
+            )  # open / prev_close − 1 (day 0 = NaN)
+            id_ret = daily_close / daily_open - 1.0  # close / open − 1 (valid every day, incl day 0)
+        overnight = _leg_beta(on_ret, on_ret[spy_idx], _DAILY_BETA_WINDOW, _DAILY_BETA_MIN_PAIRS)
+        intraday = _leg_beta(id_ret, id_ret[spy_idx], _DAILY_BETA_WINDOW, _DAILY_BETA_MIN_PAIRS)
+        return {
+            "overnight_beta_60d": overnight,
+            "intraday_beta_60d": intraday,
+            "beta_overnight_minus_intraday": overnight - intraday,
         }
 
 
