@@ -1834,6 +1834,44 @@ def test_volume_drawrange_momentumconsistency_sparse_matches_legacy() -> None:
         "reversal_count_15m sparse (per-minute return = prior present row on the sparse frame)"
 
 
+def test_residual_analysis_clean_momentum_sparse_match_legacy_output() -> None:
+    """GATE residual_analysis + clean_momentum (#60 FRESH time-OLS ports w/ rebased-minute axis) on the SPARSE
+    axis. Both are close-vs-TIME OLS (frame-relative minute axis = trend_quality's), so the rebased-minute axis
+    applies — verified by a full cell-for-cell diff vs the AUTHORITATIVE legacy compute() OUTPUT on this exact
+    gappy frame (residual_analysis 6/6, clean_momentum 12/12 incl the binary momentum_quality_flag, run
+    out-of-band with attach_reduction_anchors). The expected values below ARE that legacy output (seed=61,
+    sparse offsets) — pinned so a regression in the time-OLS / rebase / blend is caught."""
+    import datetime  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_windowed import CleanMomentumClean, ResidualAnalysisClean  # noqa: PLC0415,E501
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    rng = np.random.default_rng(61)
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
+    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
+
+    def _feed(group: object) -> dict[str, np.ndarray]:
+        eng = CleanEngine([group], ["A"], 400)
+        out: dict[str, np.ndarray] = {}
+        for i in range(len(offsets)):
+            out = eng.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
+                            "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})[group.name]  # type: ignore[attr-defined]
+        return out
+
+    ra = _feed(ResidualAnalysisClean())
+    # legacy compute() output (residual_std = OLS-residual std as % of mean price, over the time window):
+    assert ra["residual_std_15m"][0] == pytest.approx(0.12889800547444194, rel=1e-6)
+    assert ra["residual_std_30m"][0] == pytest.approx(0.25808006665765837, rel=1e-6)
+
+    cm = _feed(CleanMomentumClean())
+    # legacy compute() output (score = the slope/r2/low-residual blend; flag = binary quality gate):
+    assert cm["clean_momentum_score_15m"][0] == pytest.approx(0.44679822581044715, rel=1e-6)
+    assert cm["clean_momentum_score_30m"][0] == pytest.approx(0.5044289836325836, rel=1e-6)
+    assert cm["momentum_quality_flag_15m"][0] == pytest.approx(0.0)
+    assert cm["momentum_quality_flag_30m"][0] == pytest.approx(0.0)
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
