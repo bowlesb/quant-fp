@@ -100,9 +100,9 @@ framing: dropped because the design removes what it guarded, not because we stop
   step(m)` produces byte-identical output to a continuous `step` over the whole `H+m` sequence — across
   windowed / cross-sectional / recursive-EMA / cumulative / swing kinds in one multi-group engine. This
   **proves the design's central claim** — live and backfill are the *same replay*, so they cannot diverge —
-  which is exactly what makes the legacy second-form + the entire parity machinery unnecessary. (57 tests pass:
-  11 keystone + 46 group, including 2 production-marshaled omit-absence pins; CP validated independently — see
-  the status table below.)
+  which is exactly what makes the legacy second-form + the entire parity machinery unnecessary. (58 tests pass:
+  11 keystone + 47 group, including 2 production-marshaled omit-absence pins + the Lead's 3 adversarial
+  presence/seed==live checks; CP validated independently — see the status table below.)
 - **Formula/unit tests** per group: synthetic inputs with a known answer → assert the math (trend OLS r²=1 on a
   line; breadth K/N cross-sectional; macd EMA presence-decay — an absent symbol HOLDS its EMA; swing pivot;
   cumulative reset; ring gap-safe window).
@@ -111,8 +111,9 @@ framing: dropped because the design removes what it guarded, not because we stop
   feature VALID (2+ unique values; binary both 0/1; events real).
 ### CP independent validation — all 6 kinds GREEN
 
-CP (separate agent, its own adversarial sparse/gap shapes, NOT my tests) validated the engine: **57 pass / 0
-xfail** (46 group + 11 keystone, including CP's 2 production-marshaled omit-absence pins), every kind green, no
+CP (separate agent, its own adversarial sparse/gap shapes, NOT my tests) validated the engine: **58 pass / 0
+xfail** (47 group + 11 keystone, including CP's 2 production-marshaled omit-absence pins + the Lead's 3
+adversarial presence/seed==live checks), every kind green, no
 regression. Per kind:
 
 | kind | group | what CP checked | result |
