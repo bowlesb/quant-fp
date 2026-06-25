@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { BootingError, fetchLifecycleState } from "./api";
-import type { LifecycleGroup, LifecycleStage, LifecycleState } from "./types";
+import { BootingError, fetchLifecycleState, fetchLifecycleTrend } from "./api";
+import type {
+  LifecycleGroup,
+  LifecycleStage,
+  LifecycleState,
+  LifecycleTrend,
+  LifecycleTrendDay,
+} from "./types";
 
 // The CERTIFICATION-LIFECYCLE tab (docs/WITHIN_DAY_PARITY_CERTIFICATION.md) — makes the now-running within-day
 // parity lifecycle legible. Each feature-group's FURTHEST stage on the staged progression Ben described:
@@ -126,6 +132,87 @@ function GroupRow({ group }: { group: LifecycleGroup }) {
   );
 }
 
+const TREND_POLL_MS = 120_000;
+
+function dayLabel(iso: string): string {
+  // The day strings arrive as ISO dates (YYYY-MM-DD); show MM-DD compactly.
+  return iso.length >= 10 ? iso.slice(5, 10) : iso;
+}
+
+// A compact per-day history strip: how trust ADVANCED over time (the snapshot above shows only where it
+// stands today). Each day = a column with a cert-activity bar (certified within-day) and a trust-grant bar,
+// each scaled to the busiest day in the window; the cumulative-trusted total rides above as a label so the
+// advancing frontier reads at a glance. Pure presentation of the read-only /api/lifecycle-trend payload.
+function LifecycleTrendStrip() {
+  const [trend, setTrend] = useState<LifecycleTrend | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const payload = await fetchLifecycleTrend();
+        if (!cancelled) {
+          setTrend(payload);
+          setError(null);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        // A booting trust DB just hides the strip (the snapshot panel already shows the booting note).
+        if (!(err instanceof BootingError)) setError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    load();
+    const id = window.setInterval(load, TREND_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const days = useMemo<LifecycleTrendDay[]>(() => trend?.trend ?? [], [trend]);
+  const maxCert = useMemo(() => Math.max(1, ...days.map((d) => d.certs_total)), [days]);
+  const maxGrant = useMemo(() => Math.max(1, ...days.map((d) => d.trust_grants)), [days]);
+
+  if (error) return null; // never break the page on the trend; the snapshot stands on its own
+  if (!trend || days.length === 0) return null;
+
+  return (
+    <div className="lc-trend">
+      <div className="lc-trend-head">
+        <span className="lc-trend-title">Trust over time</span>
+        <span className="lc-trend-legend">
+          <span className="lc-trend-key lc-trend-key-cert" /> within-day certified
+          <span className="lc-trend-key lc-trend-key-grant" /> trust grants
+          <span className="lc-trend-cum">· {trend.trusted_now} trusted now</span>
+        </span>
+      </div>
+      <div className="lc-trend-bars">
+        {days.map((day) => {
+          const certH = Math.round((100 * day.certs_certified) / maxCert);
+          const grantH = Math.round((100 * day.trust_grants) / maxGrant);
+          const title =
+            `${day.day}: ${day.certs_certified}/${day.certs_total} certified across ${day.cert_groups} group(s); ` +
+            `+${day.trust_grants} trust grants` +
+            (day.untrust_events > 0 ? `, −${day.untrust_events} un-trusted` : "") +
+            `; ${day.cumulative_trusted} cumulative`;
+          return (
+            <div key={day.day} className="lc-trend-col" title={title}>
+              <span className="lc-trend-cum-label">{day.cumulative_trusted}</span>
+              <div className="lc-trend-stack">
+                <span className="lc-trend-bar lc-trend-bar-cert" style={{ height: `${certH}%` }} />
+                <span className="lc-trend-bar lc-trend-bar-grant" style={{ height: `${grantH}%` }} />
+              </div>
+              {day.untrust_events > 0 && <span className="lc-trend-untrust">−{day.untrust_events}</span>}
+              <span className="lc-trend-day">{dayLabel(day.day)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function LifecycleView() {
   const [data, setData] = useState<LifecycleState | null>(null);
   const [booting, setBooting] = useState(false);
@@ -192,6 +279,8 @@ export function LifecycleView() {
           {formatAgo(data.generated_at)}
         </div>
       </div>
+
+      <LifecycleTrendStrip />
 
       {data.active_owners.length > 0 && (
         <div className="lc-owners-strip">

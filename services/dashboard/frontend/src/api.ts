@@ -3,6 +3,7 @@ import type {
   GridMeta,
   LatencyExpectations,
   LifecycleState,
+  LifecycleTrend,
   NewsEdgarComposition,
   NewsEdgarStream,
   StoreGridMatrix,
@@ -64,4 +65,10 @@ export function fetchNewsEdgarComposition(): Promise<NewsEdgarComposition> {
 // TRUSTED). A short-TTL server cache backs it, so a poll every ~30s tracks the running monitor cheaply.
 export function fetchLifecycleState(): Promise<LifecycleState> {
   return getJson<LifecycleState>("/api/lifecycle-state");
+}
+
+// The lifecycle TREND strip on the Lifecycle tab — per-day history of how trust advanced (cert activity +
+// trust grants + the cumulative line). Backed by a longer server cache (history moves only nightly).
+export function fetchLifecycleTrend(): Promise<LifecycleTrend> {
+  return getJson<LifecycleTrend>("/api/lifecycle-trend");
 }

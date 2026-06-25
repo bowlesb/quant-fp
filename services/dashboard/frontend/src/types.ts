@@ -283,3 +283,21 @@ export interface LifecycleState {
   active_owners: LifecycleOwner[];
   groups: LifecycleGroup[];
 }
+
+// Shapes returned by /api/lifecycle-trend (lifecycle_state.build_lifecycle_trend) — the per-day HISTORY behind
+// the snapshot: how trust advanced over time, not just where it stands today.
+export interface LifecycleTrendDay {
+  day: string;
+  certs_total: number; // within-day cert stamps written that day
+  certs_certified: number; // of those, how many reached 'certified'
+  cert_groups: number; // distinct groups stamped that day
+  trust_grants: number; // currently-trusted features whose trusted_day == this day
+  untrust_events: number; // features un-trusted that day
+  cumulative_trusted: number; // running total of trust_grants up to and including this day
+}
+
+export interface LifecycleTrend {
+  generated_at: string;
+  trusted_now: number; // live TRUSTED count (may exceed the cumulative line — grants predating trusted_day)
+  trend: LifecycleTrendDay[];
+}

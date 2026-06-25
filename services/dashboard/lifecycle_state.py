@@ -65,6 +65,11 @@ _CACHE_TTL_SECONDS = 20.0
 _cache: dict[str, object] = {}
 _cache_at: float = 0.0
 
+# The trend reads only nightly-cadence history (trusted_day, cert_day), so a longer TTL is plenty.
+_TREND_CACHE_TTL_SECONDS = 120.0
+_trend_cache: dict[str, object] = {}
+_trend_cache_at: float = 0.0
+
 
 @dataclass
 class AssignmentRow:
@@ -223,6 +228,98 @@ def read_latest_certs(conn: psycopg.Connection) -> dict[str, CertRow]:
     return by_group
 
 
+@dataclass
+class TrendDay:
+    """One calendar day on the lifecycle trend: the within-day cert activity and the trust grants that landed
+    that day, plus the running cumulative trusted count so the advancing trust frontier reads as a line."""
+
+    day: str
+    certs_total: int  # within_day_parity_cert stamps written on this cert_day
+    certs_certified: int  # of those, how many reached 'certified'
+    cert_groups: int  # distinct feature-groups certified-or-stamped that day
+    trust_grants: int  # currently-TRUSTED features whose trusted_day == this day (the new frontier)
+    untrust_events: int  # features un-trusted on this day (untrusted_at::date) — keeps the line honest
+    cumulative_trusted: int  # running total of trust_grants up to and including this day
+
+
+def read_cert_events_by_day(conn: psycopg.Connection) -> dict[str, tuple[int, int, int]]:
+    """Per cert_day: (total stamps, certified stamps, distinct groups). The within-day certification activity
+    timeline — one indexed GROUP BY over within_day_parity_cert, no wide scan."""
+    by_day: dict[str, tuple[int, int, int]] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT cert_day, count(*), count(*) FILTER (WHERE status = 'certified'), "
+            "count(DISTINCT group_name) "
+            "FROM within_day_parity_cert GROUP BY cert_day"
+        )
+        for cert_day, total, certified, groups in cur.fetchall():
+            day = _iso(cert_day)
+            if day is not None:
+                by_day[day] = (int(total), int(certified), int(groups))
+    return by_day
+
+
+def read_trust_grants_by_day(conn: psycopg.Connection) -> dict[str, int]:
+    """Per day: how many CURRENTLY-TRUSTED features earned the grant that day (trusted_day). The advancing
+    trust frontier — counts only features still in trust_state='TRUSTED' (a later untrust drops out of the
+    line; untrust events are reported separately so the cumulative count never implies impossible growth)."""
+    by_day: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT trusted_day, count(*) FROM feature_trust "
+            "WHERE trust_state = 'TRUSTED' AND trusted_day IS NOT NULL GROUP BY trusted_day"
+        )
+        for trusted_day, count in cur.fetchall():
+            day = _iso(trusted_day)
+            if day is not None:
+                by_day[day] = int(count)
+    return by_day
+
+
+def read_untrust_events_by_day(conn: psycopg.Connection) -> dict[str, int]:
+    """Per day: how many features were UN-trusted (untrusted_at). Surfaced so a flat/declining frontier is
+    explained on the trend rather than looking like a stall."""
+    by_day: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT (untrusted_at AT TIME ZONE 'UTC')::date, count(*) FROM feature_trust "
+            "WHERE untrusted_at IS NOT NULL GROUP BY 1"
+        )
+        for day_value, count in cur.fetchall():
+            day = _iso(day_value)
+            if day is not None:
+                by_day[day] = int(count)
+    return by_day
+
+
+def build_lifecycle_trend(
+    cert_events: dict[str, tuple[int, int, int]],
+    trust_grants: dict[str, int],
+    untrust_events: dict[str, int],
+) -> list[TrendDay]:
+    """Merge the three per-day series into one chronologically-ordered trend, carrying a running cumulative
+    trusted total. Pure (no DB) so the cumulative/merge logic is unit-tested without a database."""
+    all_days = sorted(set(cert_events) | set(trust_grants) | set(untrust_events))
+    trend: list[TrendDay] = []
+    running = 0
+    for day in all_days:
+        total, certified, groups = cert_events.get(day, (0, 0, 0))
+        grants = trust_grants.get(day, 0)
+        running += grants
+        trend.append(
+            TrendDay(
+                day=day,
+                certs_total=total,
+                certs_certified=certified,
+                cert_groups=groups,
+                trust_grants=grants,
+                untrust_events=untrust_events.get(day, 0),
+                cumulative_trusted=running,
+            )
+        )
+    return trend
+
+
 def read_trusted_features(conn: psycopg.Connection) -> set[str]:
     """{feature} that have earned the permanent binary TRUSTED grant (the terminal lifecycle stage)."""
     with conn.cursor() as cur:
@@ -356,4 +453,34 @@ def lifecycle_snapshot() -> dict[str, object]:
     snapshot = _build_snapshot()
     _cache = snapshot
     _cache_at = now
+    return snapshot
+
+
+def _build_trend_snapshot() -> dict[str, object]:
+    with _connect() as conn:
+        cert_events = read_cert_events_by_day(conn)
+        trust_grants = read_trust_grants_by_day(conn)
+        untrust_events = read_untrust_events_by_day(conn)
+        trusted_now = len(read_trusted_features(conn))
+    trend = build_lifecycle_trend(cert_events, trust_grants, untrust_events)
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # trusted_now is the live TRUSTED count; cumulative_trusted on the last day sums only the grants that
+        # carried a trusted_day, so the two can differ (some grants predate the trusted_day column) — surfacing
+        # both keeps the trend honest about what the line does and does not capture.
+        "trusted_now": trusted_now,
+        "trend": [asdict(day) for day in trend],
+    }
+
+
+def lifecycle_trend() -> dict[str, object]:
+    """The lifecycle TREND the ``/api/lifecycle-trend`` route serves: per-day within-day cert activity + trust
+    grants + the running cumulative trusted line. Longer-TTL cached (history moves only on the nightly sweep)."""
+    global _trend_cache, _trend_cache_at
+    now = time.monotonic()
+    if _trend_cache and (now - _trend_cache_at) < _TREND_CACHE_TTL_SECONDS:
+        return dict(_trend_cache)
+    snapshot = _build_trend_snapshot()
+    _trend_cache = snapshot
+    _trend_cache_at = now
     return snapshot
