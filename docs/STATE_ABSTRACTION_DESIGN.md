@@ -72,9 +72,9 @@ those to reach for. That's the overhead. The state itself is simple; the number 
 
 ### What exists today (the count Ben is reacting to)
 
-The state/engine code spans ~4,000 lines across 10 files, of which the **state/engine *core* — the part this
-design replaces — is ~1,700 lines** (the two engines + the kind classes; the rest is feature math and glue that
-stays). Inside that core:
+The state/engine code spans **~3,500 lines across 10 files** — two engines, seven state mechanisms, and four
+`step*` variants. The *duplication* in that (the two engines + the four twins + the per-kind wrappers) is the
+part this design removes; the per-kind math stays. Inside it:
 
 - **7 state mechanisms:** `SessionCache`, `WindowedSumState`, `ReductionFoldState`, `CumulativeState`,
   `PointRing`/`ValueInputRing`, the `StatefulEngine` kinds (`EMAState` / `LastKState` / `ExtremaState`), and the
@@ -83,8 +83,8 @@ stays). Inside that core:
   — each with its own seed loop, its own "advance one minute", its own churn handling.
 - **4 parallel "do one minute" methods** on `IncrementalEngine` alone: `step` / `step_numpy` / `step_rust` /
   `step_rust_unified` (incremental.py:818/865/888/902) — the same operation written four ways.
-- **65 feature groups across 4 base classes** (`ReductionGroup`×23, `StatefulGroup`×4, `DailySnapshotGroup`×7,
-  raw `FeatureGroup`×31) — each base wiring state a slightly different way.
+- **64 feature groups across 4 base classes** (`ReductionGroup`×23, `StatefulGroup`×4, `DailySnapshotGroup`×7,
+  raw `FeatureGroup`×30) — each base wiring state a slightly different way.
 
 That is the complexity to remove.
 
@@ -129,8 +129,8 @@ Four things must behave *identically* for every group, so they live in the conta
 3. **Idempotency (a minute is absorbed once).** Each container carries the epoch of the last minute it absorbed;
    a fold of a minute it's already seen is skipped. This makes a reconnect/replay safe **by construction** — and
    it closes two real silent bugs we found: `WindowedSumState.update` re-adds a re-delivered minute
-   (incremental.py:120) and `CumulativeState`'s running sum double-counts it (stateful.py:173). One check in one
-   place fixes both, for every kind.
+   (incremental.py:174, the unconditional buffer append at :180) and `CumulativeState`'s running sum
+   double-counts it (stateful.py:173). One check in one place fixes both, for every kind.
 
 4. **Variable-height rebuild on churn.** When some symbols are present and some aren't, the container carries a
    per-symbol count + the minute each row belongs to, and reconstructs exactly the rows that are really there —
@@ -178,35 +178,39 @@ These are **measured** line counts against the current tree (merged main), and w
 deletes** (the duplicated drive/seed/churn machinery — the real win) from **what stays but moves** (the per-kind
 math, which keeps doing the same arithmetic, just plugged into one container instead of carrying its own loop).
 
-**What DELETES — the duplication (≈900 lines):**
+**What DELETES — the duplication:**
 
 | today | measured LOC | becomes |
 |---|---|---|
-| `IncrementalEngine` + `StatefulEngine` (two engines doing the SAME seed/fold/emit lifecycle on different payloads) | **787** (543 + 244) | **ONE container drive loop** (seed + fold + read; churn + idempotency in one place) |
-| the 4 `step*` twins + emit drive (`step`/`step_numpy`/`step_rust`/`step_rust_unified` + `_fold_latest`/`_latest_frame`/`_running_long`) | **~107** | **ONE read-surface dispatch** (numpy default, Rust where it pays — one path, not four) |
-| `StatefulEngine`'s churn wrapper (`_fold_minute` / `_prepared_latest` / the stable-set assert `stateful.py:733` / the per-kind seed branches) | (part of the 244) | **deleted** — churn + seed handled once by the spine (the C3 win) |
+| `IncrementalEngine` + `StatefulEngine` (two engines doing the SAME seed/fold/emit lifecycle on different payloads) | **~755** (555 + 200) | **ONE container drive loop** (seed + fold + read; churn + idempotency in one place) |
+| the 4 `step*` twins + emit drive (`step`/`step_numpy`/`step_rust`/`step_rust_unified` + the latest-frame helpers) | **~67** | **ONE read-surface dispatch** (numpy default, Rust where it pays — one path, not four) |
+| `StatefulEngine`'s churn wrapper (`_fold_minute` / `_prepared_latest` / the stable-set assert `stateful.py:733` / the per-kind seed branches) | (part of the ~200) | **deleted** — churn + seed handled once by the spine (the C3 win) |
+| `ReductionFoldState` (already just a `WindowedSumState` wrapper) | **75** | folds into the windowed-sum payload — nothing new |
 
-**What STAYS but plugs into the container — the per-kind math (≈524 lines, loses its wrappers, keeps its arithmetic):**
+**What STAYS but plugs into the container — the per-kind math (the (state, fold) a group declares; keeps its arithmetic, loses its wrappers):**
 
 | today (a "state mechanism") | measured LOC | becomes a container PAYLOAD |
 |---|---|---|
-| `PointRing` + `ValueInputRing` (positional) | ~202 (+ValueInputRing on #454) | **row-ring** payload; reads `{scalar-at-lag, materialize-tail}` — proven one base (#26) |
+| `PointRing` + `ValueInputRing` (positional) | ~65 (+~80 `ValueInputRing` on #454) | **row-ring** payload; reads `{scalar-at-lag, materialize-tail}` — proven one base (#26) |
 | `WindowedSumState` (additive Σ + expire) | **232** | **time-windowed row-buffer** payload; the sum is a *read* over the in-window rows (carries the Class-A/B conditioning the parked groups need) |
-| `ReductionFoldState` | 75 | folds into WindowedSum (it already *is* a `WindowedSumState` wrapper) |
 | `CumulativeState` (session reduce) + `ExtremaState` | 69 + 63 | **accumulator-reduce** payload (fold = reduce, reset-on-key) |
 | `EMAState` (recursive) | 50 | **recursive** payload (`v = α·new + (1−α)·v`; decay gated on bar-presence) |
 | `LastKState` (time-lag) | 35 | **time-keyed read** of the row-ring (+ `fill_nan(None)`) |
-| `SessionCache` (snapshot) | 43 | **snapshot** payload (state = today's snapshot; fold = no-op; read = broadcast) — already minimal |
+| `SessionCache` (snapshot) | 31 | **snapshot** payload (state = today's snapshot; fold = no-op; read = broadcast) — already minimal |
 | `swing` `_SymbolLeg` (state machine) | — | **opaque state-machine** payload (`advance(value, minute) → row`) — already implements the lifecycle |
 
-**Net (measured):** the demolition target is **~1,700 lines of state/engine core**. Of that, the **~900 lines of
-duplicated drive/seed/churn/dispatch** (the two engines + the four `step*` twins + the churn wrappers) **collapse
-to one container drive loop + one dispatch** — that is the real deletion. The **~524 lines of per-kind math stay**
-(same arithmetic) but lose their bespoke seed/churn/lifecycle wrappers and become payloads behind one interface.
-So the honest claim is **not** "delete 1,000+ lines of features" — it's "**remove ~900 lines of duplicated
-plumbing and the seven-way fork**, and reduce the per-kind code to declared payloads." The win Ben cares about is
-the **count of concepts**: a feature author declares `{state, fold, read}` and never touches a drive loop, a
-churn rule, a seed path, or a `step` variant — *one* way to hold state instead of seven.
+**Net (measured).** The state/engine code is ~3,500 lines across 10 files. The genuinely-DELETED part is the
+**duplication**: the two engines collapse to one container drive loop (~500 lines gone), the four `step*` twins
+to one dispatch (~40), `ReductionFoldState` disappears (it's already a `WindowedSumState` wrapper, ~75), and the
+churn wrappers + stable-set assert + per-kind seed branches go (~40). That is **~700–900 lines of duplicated
+drive/seed/churn/dispatch removed.** The per-kind math (~900 lines: the windowed-sum, the accumulators, the EMA,
+the rings) **stays** — it's the `(state, fold)` each group declares, now behind one interface instead of seven.
+
+But the honest headline is **not the line count — it's the count of concepts.** Seven ways to hold state, two
+engines, and four `step*` variants become **one container + a handful of declared folds.** A feature author
+writes `{state, fold, read}` and never touches a drive loop, a churn rule, a seed path, or a `step` variant.
+*That* is what "no more implementations than we actually need" and "complexity no one can follow → complexity
+anyone can" mean in practice. The lines are a side effect; the followability is the point.
 
 ## How we migrate safely — the value gate makes the teardown fearless
 
@@ -222,7 +226,9 @@ The order (lowest-risk first, each green before the next, confirmed against the 
    channel + watermark + the existing `RunningState` lifecycle. Port `PointRing` + `ValueInputRing` onto it first
    — convergence already proven (#26), two consumers, lowest risk.
 2. **WindowedSum payload onto the spine** (the big one). Re-point the incremental reductions; carry the Class-A/B
-   conditioning; gate the co-resident case (the straddle the gate covers).
+   conditioning. The one shared-engine hazard (the straddle where `price_volume` can perturb `return_dynamics`)
+   lives *entirely inside this step* — both groups are windowed-sum — so there's no co-residency constraint that
+   crosses steps; this step just migrates its groups together and stays co-resident-gated by #451 internally.
 3. **EMA / Lag / Extrema / Cumulative payloads.** Port the `StatefulEngine` kinds and **delete the stable-set
    assert + the `_prepared_latest` wrapper** — the two churn riders (fill-null, presence-gated decay) bake into
    the container fold here.
