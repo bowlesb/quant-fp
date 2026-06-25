@@ -2557,50 +2557,41 @@ def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
     for k, v in legacy.items():
         assert out[k][b] == pytest.approx(v, rel=1e-5), f"sector_beta.{k}[B]: clean {out[k][b]} vs legacy {v}"
 
-def test_technical_sparse_time_window_matches_legacy() -> None:
-    """GATE the re-ported technical (RSI/Bollinger/sma_dist now use trailing_time, #60) on the SPARSE axis.
-    On a gappy symbol the 14m RSI / 20m Bollinger / 5m sma_dist must use the TIME window (legacy
-    rolling_mean_by/rolling_std_by over minute), not the last-N positional bars. macd is recursive
-    (present-decay, separately validated) — confirmed finite here. Non-vacuous RSI (mixed up/down)."""
+def test_technical_sparse_matches_legacy_compute_golden() -> None:
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean technical cell-for-cell vs a golden from the
+    REAL legacy TechnicalGroup.compute() (tests/tech_golden.json, built via attach_reduction_anchors on the
+    gappy fixture in tests/tech_in.json). The prior in-line test was a MUTUAL FALSE-GREEN (the sector_beta
+    class): it re-derived RSI gain/loss with pl.col('close').shift(1) — POSITIONAL prior-bar — matching the
+    port's then-positional diff, and asserted rsi_14m > 0. But legacy RSI uses lagged(close, 1) = the EXACT
+    prior-MINUTE close (base.lagged is a time-self-join, NULL across a gap); on this 70-min gappy tape every
+    consecutive present bar is >1 min apart, so legacy's per-bar diff is all-NULL → rolling_mean_by → NULL →
+    rsi_14m = NULL. The port now gates the diff on (minute[i]-minute[i-1]==60) and emits NULL too; all 14
+    features (rsi_14m NULL included) match the real compute() output. Legacy is the authoritative tie-breaker."""
     import datetime  # noqa: PLC0415
-
-    import polars as pl  # noqa: PLC0415
+    import json  # noqa: PLC0415
 
     from quantlib.features.clean_groups_stateful import TechnicalClean  # noqa: PLC0415
 
     base = datetime.datetime(2026, 6, 1, 9, 30)
     offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]  # spans 70m
-    rng = np.random.default_rng(13)
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.5)
-    minutes = [base + datetime.timedelta(minutes=o) for o in offsets]
-    df = pl.DataFrame({"minute": minutes, "close": closes}).sort("minute").with_columns(
-        pl.col("close").shift(1).alias("_prev"))
-    diff = pl.col("close") - pl.col("_prev")
-    gain = pl.when(diff > 0).then(diff).otherwise(0.0)
-    loss = pl.when(diff < 0).then(-diff).otherwise(0.0)
-    ag = gain.rolling_mean_by("minute", window_size="14m")
-    al = loss.rolling_mean_by("minute", window_size="14m")
-    total = ag + al
-    rsi = pl.when(total > 0).then((100.0 * ag / total).clip(0.0, 100.0)).otherwise(None)
-    df = df.with_columns(rsi.alias("rsi"),
-                         pl.col("close").rolling_mean_by("minute", window_size="20m").alias("sma20"),
-                         pl.col("close").rolling_std_by("minute", window_size="20m").alias("std20"),
-                         pl.col("close").rolling_mean_by("minute", window_size="5m").alias("sma5"))
-    last = df.tail(1)
-    cl = closes[-1]
-    rsi_leg, sma20_leg, std20_leg, sma5_leg = last["rsi"][0], last["sma20"][0], last["std20"][0], last["sma5"][0]
+    tech_in = json.load(open(os.path.join(os.path.dirname(__file__), "tech_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "tech_golden.json")))
+    closes = tech_in["closes"]
 
     eng = CleanEngine([TechnicalClean()], ["A"], 400)
     out = {}
-    for o, c in zip(offsets, closes):
-        out = eng.step({"symbol": np.array(["A"]), "close": np.array([c]),
+    for i, o in enumerate(offsets):
+        out = eng.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
                         "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
                                                  dtype=np.int64)})["technical"]
-    assert rsi_leg > 0.0, "fixture must yield a non-vacuous RSI"
-    assert out["rsi_14m"][0] == pytest.approx(rsi_leg), "sparse 14m RSI != legacy rolling_mean_by"
-    assert out["bb_position_20m"][0] == pytest.approx((cl - sma20_leg) / (2.0 * std20_leg)), "sparse bb_position"
-    assert out["sma_dist_5m"][0] == pytest.approx(cl / sma5_leg - 1.0), "sparse 5m sma_dist != legacy"
-    assert np.isfinite(out["macd_line"][0]), "macd (recursive, present-decay) computes"
+    assert set(out) == set(golden), "technical feature set != legacy compute()"
+    assert golden["rsi_14m"] is None, "fixture must pin the exact-minute-lag NULL (the false-green tie-breaker)"
+    for fname, gv in golden.items():
+        cv = float(out[fname][0])
+        if gv is None:
+            assert np.isnan(cv), f"technical.{fname}: legacy NULL, clean {cv}"
+        else:
+            assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"technical.{fname}: legacy {gv} clean {cv}"
 
 
 def test_technical_contract() -> None:
