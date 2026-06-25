@@ -209,6 +209,18 @@ def _rebased_minute_axis(minute: np.ndarray) -> np.ndarray:
     return np.where(minute >= 0, (minute - origin) / 60.0, np.nan)
 
 
+def _row_cov(x_mat: np.ndarray, y_mat: np.ndarray) -> np.ndarray:
+    """Sample covariance ``Σxy/n − (Σx/n)(Σy/n)`` over a full ``(n, k)`` matrix where BOTH finite — the
+    TIME-windowed twin of ``_windowed_cov`` (caller pre-masks to the (T−w, T] window). NaN where n<2."""
+    mask = np.isfinite(x_mat) & np.isfinite(y_mat)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, x_mat, 0.0)
+    yf = np.where(mask, y_mat, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = (xf * yf).sum(axis=1) / n - (xf.sum(axis=1) / n) * (yf.sum(axis=1) / n)
+    return np.where(n >= 2.0, cov, np.nan)
+
+
 def _row_ols_slope(x_mat: np.ndarray, y_mat: np.ndarray) -> np.ndarray:
     """OLS slope of ``y`` on ``x`` over a full ``(n, k)`` matrix where BOTH finite — the TIME-windowed twin of
     ``_windowed_ols_slope`` (the caller has already masked the matrix to the (T−w, T] minutes; every finite cell
@@ -296,11 +308,27 @@ _FOUR_LN2 = 2.772588722239781
 _MOMENT_MIN_VAR = 1e-12
 
 
+def _close_at_lag(close: np.ndarray, minute: np.ndarray, now_epoch: int, w: int) -> np.ndarray:
+    """The per-symbol close at EXACTLY ``now_epoch − w`` minutes — the legacy ``LagSpec(minutes=w)`` strict
+    TIME-lag (== ``base.lagged``): NaN where no bar is stamped at that exact minute (NOT the nearest / w-th
+    prior PRESENT bar). ``close``/``minute`` are the rolled trailing matrices (oldest→newest; empty slots -1).
+    """
+    target = now_epoch - w * 60
+    match = minute == target
+    n_sym = close.shape[0]
+    out = np.full(n_sym, np.nan)
+    has = match.any(axis=1)
+    if has.any():
+        idx = np.argmax(match, axis=1)  # the one slot per symbol carrying the lagged minute
+        out[has] = close[np.arange(n_sym)[has], idx[has]]
+    return out
+
+
 class PriceReturnsClean:
-    """PRICE: simple + log close-to-close return over each trailing window — ret_{w}m = close/close_{-w} − 1,
-    log_ret_{w}m = ln(close/close_{-w}). The lag is POSITIONAL (the w-th prior present bar in the carried
-    buffer), matching the engine's gap-safe trailing semantics. NaN until w+1 present bars (warm-up). Legacy:
-    ``PriceReturnGroup`` (a StatefulGroup whose math is plain positional-lag returns, not a state machine).
+    """PRICE: simple + log close-to-close return over each window — ret_{w}m = close/close_{-w} − 1,
+    log_ret_{w}m = ln(close/close_{-w}). The lag is a STRICT TIME-lag (legacy ``LagSpec(minutes=w)`` ==
+    ``base.lagged``): close as of EXACTLY T − w minutes, NULL when that exact minute is absent — NOT the w-th
+    prior PRESENT bar (which a sparse symbol would diverge on). Legacy: ``PriceReturnGroup`` (StatefulGroup).
     """
 
     name = "price_returns"
@@ -310,15 +338,12 @@ class PriceReturnsClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")
+        minute = window.trailing_minute()
         latest = window.latest("close")
-        n_sym = close.shape[0]
+        now_epoch = window.minute_epoch
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            # the w-th prior present bar is buffer column -(w+1); NaN if the symbol has < w+1 present bars.
-            if close.shape[1] > w:
-                prior = close[:, -(w + 1)]
-            else:
-                prior = np.full(n_sym, np.nan)
+            prior = _close_at_lag(close, minute, now_epoch, w)  # strict time-lag: close at exactly T−w
             with np.errstate(invalid="ignore", divide="ignore"):
                 ratio = latest / prior
                 out[f"ret_{w}m"] = ratio - 1.0
@@ -348,7 +373,11 @@ class DistributionClean:
         up2 = np.where(ret > 0.0, ret * ret, 0.0)
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            rw = _trailing_window(ret, w)
+            # TIME window (legacy sum_ = rolling_sum_by("minute")): the central-moment power sums are over the
+            # return bars in the last w minutes, not the last w positional slots. The moments are non-linear but
+            # built from LINEAR power sums (s1..s4) over the time window — the faithful decomposition.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            rw = np.where(in_window, ret, np.nan)
             mask = np.isfinite(rw)
             n = mask.sum(axis=1).astype(np.float64)
             rf = np.where(mask, rw, 0.0)
@@ -364,8 +393,8 @@ class DistributionClean:
                 defined = (n >= 3.0) & (m2 > _MOMENT_MIN_VAR)
                 out[f"ret_skew_{w}m"] = np.where(defined, m3 / m2**1.5, np.nan)
                 out[f"ret_kurt_{w}m"] = np.where(defined, m4 / (m2 * m2) - 3.0, np.nan)
-                dn2_w = _windowed_sum(dn2, w)
-                up2_w = _windowed_sum(up2, w)
+                dn2_w = _row_sum(np.where(in_window, dn2, np.nan))
+                up2_w = _row_sum(np.where(in_window, up2, np.nan))
                 out[f"downside_vol_{w}m"] = np.where(
                     n >= 2.0, np.sqrt(np.clip(dn2_w / n, 0.0, None)), np.nan
                 )
@@ -483,10 +512,14 @@ class VolatilityClean:
         out: dict[str, np.ndarray] = {
             "high_low_range_1m": (latest_high - latest_low) / latest_close,
         }
+        # TIME windows (legacy std_/mean_ = rolling_*_by("minute")): reduce over the bars in the last w minutes,
+        # not the last w positional slots — a sparse symbol diverges otherwise.
         for w in self._VOL_WINDOWS:
-            out[f"realized_vol_{w}m"] = _masked_std(ret, w)
+            in_window = np.isfinite(window.trailing_time("close", w))
+            out[f"realized_vol_{w}m"] = _row_std(np.where(in_window, ret, np.nan))
         for w in self._RANGE_WINDOWS:
-            mean_hl2, _ = _masked_mean(hl2, w)
+            in_window = np.isfinite(window.trailing_time("close", w))
+            mean_hl2, _ = _row_mean(np.where(in_window, hl2, np.nan))
             with np.errstate(invalid="ignore"):
                 out[f"parkinson_vol_{w}m"] = np.sqrt(np.clip(mean_hl2 / _FOUR_LN2, 0.0, None))
         return out
@@ -522,13 +555,20 @@ class LiquidityClean:
             amihud = np.where(dollar > 0.0, np.abs(ret_full) / dollar, np.nan)
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            out[f"amihud_illiq_{w}m"], _ = _masked_mean(amihud, w)
-            cov = _windowed_cov(dp, dp_lag, w)
+            # TIME window (legacy mean_/sum_ = rolling_*_by("minute")): the last w minutes, not w slots.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            out[f"amihud_illiq_{w}m"], _ = _row_mean(np.where(in_window, amihud, np.nan))
+            cov = _row_cov(np.where(in_window, dp, np.nan), np.where(in_window, dp_lag, np.nan))
             with np.errstate(invalid="ignore"):
-                roll = np.where(cov < 0.0, 2.0 * np.sqrt(-cov) / latest_close, 0.0)
-            # cov NaN (warm-up, <2 pairs) -> NaN; cov>=0 -> 0.0 (Roll defined as 0 on non-negative autocov).
-            out[f"roll_spread_{w}m"] = np.where(np.isnan(cov), np.nan, roll)
-            out[f"kyle_lambda_{w}m"] = _windowed_ols_slope(signed_volume, dp, w)
+                # Roll = 0 unless the autocov is strictly negative. Legacy polars: cov is null when n<2, and
+                # ``when(null < 0)`` is null → falls to ``.otherwise(0.0)`` — so a too-short window emits 0.0,
+                # NOT NaN (roll_spread is never NaN once a row exists; nan_policy=warmup only drops empty rows).
+                out[f"roll_spread_{w}m"] = np.where(
+                    cov < 0.0, 2.0 * np.sqrt(-np.where(cov < 0.0, cov, 0.0)) / latest_close, 0.0
+                )
+            out[f"kyle_lambda_{w}m"] = _row_ols_slope(
+                np.where(in_window, signed_volume, np.nan), np.where(in_window, dp, np.nan)
+            )
         return out
 
 
@@ -557,8 +597,11 @@ class QuoteSpreadClean:
             "book_depth_1m": bid_size + ask_size,
         }
         for w in self._WINDOWS:
-            out[f"spread_bps_{w}m"], _ = _masked_mean(spread, w)
-            out[f"quote_imbalance_{w}m"], _ = _masked_mean(imbalance, w)
+            # TIME window (legacy mean_ = rolling_mean_by("minute")): the last w minutes of quote bars. Mask on
+            # the spread column's own presence (a quote-minute is present iff it has a spread reading).
+            in_window = np.isfinite(window.trailing_time("mean_spread_bps", w))
+            out[f"spread_bps_{w}m"], _ = _row_mean(np.where(in_window, spread, np.nan))
+            out[f"quote_imbalance_{w}m"], _ = _row_mean(np.where(in_window, imbalance, np.nan))
         return out
 
 
@@ -593,8 +636,10 @@ class OhlcVolClean:
         rs_var = ln_hc * ln_ho + ln_lc * ln_lo
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            gk_mean, _ = _masked_mean(gk_var, w)
-            rs_mean, _ = _masked_mean(rs_var, w)
+            # TIME window (legacy mean_ = rolling_mean_by("minute")): the last w minutes, not w positional slots.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            gk_mean, _ = _row_mean(np.where(in_window, gk_var, np.nan))
+            rs_mean, _ = _row_mean(np.where(in_window, rs_var, np.nan))
             with np.errstate(invalid="ignore"):
                 out[f"garman_klass_vol_{w}m"] = np.sqrt(np.clip(gk_mean, 0.0, None))
                 out[f"rogers_satchell_vol_{w}m"] = np.sqrt(np.clip(rs_mean, 0.0, None))
@@ -621,8 +666,9 @@ class RangeExpansionClean:
             rng = np.where(close > 0.0, (high - low) / close, np.nan)
         out: dict[str, np.ndarray] = {}
         for recent, trailing in self._WINDOW_PAIRS:
-            num, _ = _masked_mean(rng, recent)
-            denom, _ = _masked_mean(rng, trailing)
+            # TIME windows (legacy mean_ = rolling_mean_by("minute")): the last recent / trailing minutes.
+            num, _ = _row_mean(np.where(np.isfinite(window.trailing_time("close", recent)), rng, np.nan))
+            denom, _ = _row_mean(np.where(np.isfinite(window.trailing_time("close", trailing)), rng, np.nan))
             # Guard 2: denom is a mean of non-negative terms — sign-robust, denom>0 is sufficient. A
             # flat/zero-range trailing window -> NaN. is_finite backstop folds any stray non-finite to NaN.
             with np.errstate(invalid="ignore", divide="ignore"):
