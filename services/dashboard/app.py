@@ -31,7 +31,7 @@ from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from latency_expectations import load_latency_expectations
-from lifecycle_state import lifecycle_snapshot
+from lifecycle_state import lifecycle_snapshot, lifecycle_trend
 from news_edgar import composition_snapshot, stream_snapshot
 from pydantic import BaseModel, Field
 from status_grid import append_reaction
@@ -161,6 +161,22 @@ def lifecycle_state() -> JSONResponse:
     (mirrors the grid's first-boot state) rather than 500-ing the page."""
     try:
         return JSONResponse(lifecycle_snapshot(), headers={"Cache-Control": "no-store"})
+    except psycopg.OperationalError as exc:
+        return JSONResponse(
+            {"booting": True, "detail": f"trust DB unreachable: {exc}"},
+            status_code=503,
+        )
+
+
+@app.get("/api/lifecycle-trend")
+def lifecycle_trend_route() -> JSONResponse:
+    """The lifecycle TREND over time — the snapshot panel (``/api/lifecycle-state``) shows the CURRENT stage
+    distribution; this shows how trust got there. Per-day within-day cert activity (``within_day_parity_cert``
+    by ``cert_day``), trust grants (``feature_trust.trusted_day``), un-trust events, and the running cumulative
+    trusted line. Three small indexed GROUP BYs, longer-TTL cached (history moves only on the nightly sweep).
+    Returns 503 ``booting`` if the trust DB is unreachable, like the snapshot route."""
+    try:
+        return JSONResponse(lifecycle_trend(), headers={"Cache-Control": "no-store"})
     except psycopg.OperationalError as exc:
         return JSONResponse(
             {"booting": True, "detail": f"trust DB unreachable: {exc}"},

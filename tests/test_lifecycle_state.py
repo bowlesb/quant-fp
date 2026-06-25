@@ -203,6 +203,76 @@ _SNAPSHOT = {
 }
 
 
+def test_build_trend_merges_series_and_carries_cumulative() -> None:
+    # Three independent per-day series merge into one chronological trend; the cumulative line is the running
+    # sum of trust_grants, and a day present in only one series fills the others with zeros.
+    cert_events = {"2026-06-18": (4, 4, 1), "2026-06-24": (91, 91, 10)}
+    trust_grants = {"2026-06-15": 68, "2026-06-18": 9, "2026-06-24": 82}
+    untrust = {"2026-06-22": 18}
+    trend = ls.build_lifecycle_trend(cert_events, trust_grants, untrust)
+    days = [d.day for d in trend]
+    assert days == ["2026-06-15", "2026-06-18", "2026-06-22", "2026-06-24"]
+    cumulative = {d.day: d.cumulative_trusted for d in trend}
+    assert cumulative == {
+        "2026-06-15": 68,
+        "2026-06-18": 77,
+        "2026-06-22": 77,  # an untrust-only day does not advance the grant line
+        "2026-06-24": 159,
+    }
+    by_day = {d.day: d for d in trend}
+    assert by_day["2026-06-18"].certs_certified == 4 and by_day["2026-06-18"].cert_groups == 1
+    assert by_day["2026-06-22"].untrust_events == 18 and by_day["2026-06-22"].trust_grants == 0
+    assert by_day["2026-06-24"].certs_total == 91 and by_day["2026-06-24"].trust_grants == 82
+
+
+def test_build_trend_empty_is_empty() -> None:
+    assert ls.build_lifecycle_trend({}, {}, {}) == []
+
+
+_TREND = {
+    "generated_at": "2026-06-25T07:00:00Z",
+    "trusted_now": 210,
+    "trend": [
+        {
+            "day": "2026-06-15",
+            "certs_total": 0,
+            "certs_certified": 0,
+            "cert_groups": 0,
+            "trust_grants": 68,
+            "untrust_events": 0,
+            "cumulative_trusted": 68,
+        }
+    ],
+}
+
+
+def test_trend_route_serves_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app as dashboard_app  # noqa: E402  (path inserted above)
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(dashboard_app, "lifecycle_trend", lambda: _TREND)
+    client = TestClient(dashboard_app.app)
+    resp = client.get("/api/lifecycle-trend")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trusted_now"] == 210
+    assert body["trend"][0]["cumulative_trusted"] == 68
+
+
+def test_trend_route_booting_when_db_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app as dashboard_app  # noqa: E402  (path inserted above)
+    from fastapi.testclient import TestClient
+
+    def _raise() -> dict[str, object]:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(dashboard_app, "lifecycle_trend", _raise)
+    client = TestClient(dashboard_app.app)
+    resp = client.get("/api/lifecycle-trend")
+    assert resp.status_code == 503
+    assert resp.json()["booting"] is True
+
+
 def test_route_serves_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     # The route serves the snapshot dict straight through; we patch the snapshot so no DB is touched.
     import app as dashboard_app  # noqa: E402  (path inserted above)
