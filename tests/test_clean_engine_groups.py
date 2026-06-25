@@ -1349,3 +1349,61 @@ def test_price_volume_contract_and_seed_equals_live() -> None:
             err_msg=f"price_volume.{fname} seed-replay != live",
         )
     _assert_feature_spec_contract(seed_out["price_volume"], PriceVolumeGroup().declare(), "price_volume ")
+
+
+# ========================================================================================================= #
+# CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
+# (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
+# (CoV²<1e-9, _OLS_DENOM_X_CENTERED_REL_EPS) OR denom_x <= 1e-12·(Σx)² — a near-constant-but-nonzero return
+# window is NaN on BOTH paths. The clean _windowed_corr/_windowed_ols_slope only guard var_x>0 → DIVERGENCE.
+# ========================================================================================================= #
+
+
+@pytest.mark.xfail(
+    reason="PORT BUG (flagged to ArchOverhaul): clean _windowed_corr/_windowed_ols_slope guard only var_x>0, "
+    "but legacy corr_/slope_ reject denom_x <= 1e-9·(b·sxx) (CoV²<1e-9) AND <= 1e-12·(Σx)². On a near-constant "
+    "nonzero return window (CoV²~1e-13) legacy → NaN, clean → spurious value (corr of float noise). The exact "
+    "corr-denom cancellation guard that gated incremental_safe; the clean kernel must add both relative floors.",
+    strict=True,
+)
+def test_windowed_corr_rejects_near_constant_x_like_legacy() -> None:
+    """A near-constant-but-nonzero x (return ticking by the same tiny amount, CoV²<1e-9): legacy corr_ returns
+    NaN (catastrophic-cancellation reject); the clean kernel must too, NOT a spurious correlation of noise."""
+    n = 10
+    x = (1e-4 + np.linspace(0.0, 1e-10, n))[None, :]  # constant to ~6 sig figs → CoV² ~ 1e-13
+    y = np.arange(n, dtype=np.float64)[None, :]
+    b = float(n)
+    sxx = float((x[0] * x[0]).sum())
+    sx = float(x[0].sum())
+    cov2 = (b * sxx - sx * sx) / (b * sxx)
+    assert cov2 < 1e-9  # the legacy reject regime
+    assert np.isnan(_windowed_corr(x, y, n)[0]), "near-constant-x corr must be NaN (legacy 1e-9 b·sxx guard)"
+
+
+@pytest.mark.xfail(
+    reason="Same PORT BUG on the OLS slope: legacy slope_ rejects denom_x<=1e-9·(b·sxx); clean only var_x>0. "
+    "obv_slope/kyle_lambda on a near-constant regressor diverge (legacy NaN, clean spurious slope).",
+    strict=True,
+)
+def test_windowed_ols_slope_rejects_near_constant_x_like_legacy() -> None:
+    n = 10
+    x = (1e-4 + np.linspace(0.0, 1e-10, n))[None, :]
+    y = np.arange(n, dtype=np.float64)[None, :]
+    assert np.isnan(_windowed_ols_slope(x, y, n)[0]), "near-constant-x slope must be NaN (legacy guard)"
+
+
+def test_distribution_moment_floor_matches_legacy() -> None:
+    """CORRECT port (the GOOD case): distribution's m2>1e-12 moment floor (_MOMENT_MIN_VAR) matches legacy
+    exactly → a near-constant-return window (m2 << 1e-12) gives NaN skew/kurt, same as legacy. This is the
+    distribution-side analogue of the corr guard, and it IS faithful (unlike _windowed_corr)."""
+    from quantlib.features.clean_groups_windowed import DistributionClean, _MOMENT_MIN_VAR  # noqa: PLC0415
+
+    assert _MOMENT_MIN_VAR == 1e-12  # matches legacy distribution._MOMENT_MIN_VAR
+    eng = CleanEngine([DistributionClean()], ["A"], 130)
+    c = 100.0
+    out = {}
+    for ep in range(15):
+        c = c * (1.0 + 1e-9)  # near-constant return → m2 ~ 1e-18 << 1e-12
+        out = eng.step(_ohlcv_bar(["A"], [c], [c + 1], [c - 1], [c], 60 + ep * 60))["distribution"]
+    assert np.isnan(out["ret_skew_10m"][0]), "near-constant m2<1e-12 → skew NaN (matches legacy)"
+    assert np.isnan(out["ret_kurt_10m"][0]), "near-constant m2<1e-12 → kurt NaN (matches legacy)"
