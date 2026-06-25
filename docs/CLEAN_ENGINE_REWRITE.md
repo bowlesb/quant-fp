@@ -61,7 +61,14 @@ _<final delete list + LOC from CodeAudit>_
 
 ## How correctness is checked (replacing byte-parity)
 
-- **Formula/unit tests** per group: synthetic inputs with a known answer → assert the math.
+- **THE load-bearing invariant** (`tests/test_clean_engine.py::test_backfill_equals_replay`): `seed(H) +
+  step(m)` produces byte-identical output to a continuous `step` over the whole `H+m` sequence — across
+  windowed / cross-sectional / recursive-EMA / cumulative / swing kinds in one multi-group engine. This
+  **proves the design's central claim** — live and backfill are the *same replay*, so they cannot diverge —
+  which is exactly what makes the legacy second-form + the entire parity machinery unnecessary. (7 tests pass.)
+- **Formula/unit tests** per group: synthetic inputs with a known answer → assert the math (trend OLS r²=1 on a
+  line; breadth K/N cross-sectional; macd EMA presence-decay — an absent symbol HOLDS its EMA; swing pivot;
+  cumulative reset; ring gap-safe window).
 - **Sanity**: per-feature `valid_range`, no degenerate all-NaN/all-zero, expected monotonicity.
 - **Golden-set quality**: the existing `app.features.quality` validation re-pointed at the new engine — every
   feature VALID (2+ unique values; binary both 0/1; events real).
