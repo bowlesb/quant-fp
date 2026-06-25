@@ -1833,3 +1833,67 @@ def test_sector_return_contract_and_seed_equals_live() -> None:
         np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(lo["sector_return"][fname]),
                                    rtol=1e-12, err_msg=f"sector_return.{fname} seed != live")
     _assert_feature_spec_contract(so["sector_return"], SectorReturnGroup().declare(), "sector_return ")
+
+
+# ========================================================================================================= #
+# CROSS-SECTIONAL — batch 2e: peer_relative (own − behavioral-CLUSTER mean; same 2 present()-gates as
+# sector_return but grouped by window.static['cluster_id'], reuses _sector_mean_vector).
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_xsectional import PeerRelativeClean  # noqa: E402
+
+
+def test_peer_relative_cluster_mean_present_gated() -> None:
+    """DENOMINATOR gate: the cluster mean is over PRESENT members only. Cluster 0 = {A,B,C}; B absent → A,C
+    demean against {A,C}, not {A,stale-B,C}. peer_relative_ret = own − cluster_mean."""
+    syms = ["A", "B", "C"]
+    eng = CleanEngine([PeerRelativeClean()], syms, WINDOW)
+    eng.static = {"cluster_id": np.array([0, 0, 0])}
+    # 8 minutes all present (so the 5m return is defined), then a minute where only A,C deliver (B absent)
+    for ep in range(8):
+        eng.step(_sec_bar({"A": 100.0 + ep, "B": 100.0 + ep, "C": 100.0 + 2 * ep}, 60 + ep * 60))
+    out = eng.step(_sec_bar({"A": 108.0, "C": 116.0}, 600))["peer_relative"]
+    # A and C present, demeaned vs the present cluster {A,C} → peer_relative finite, sums to ~0 within {A,C}
+    assert np.isfinite(out["peer_relative_ret_5m"][0])  # A
+    assert np.isfinite(out["peer_relative_ret_5m"][2])  # C
+    assert np.isnan(out["peer_relative_ret_5m"][1])     # B ABSENT → output-gated NaN
+    # within the present cluster {A,C}, the two excesses sum to ~0 (demeaned vs their own mean)
+    assert out["peer_relative_ret_5m"][0] + out["peer_relative_ret_5m"][2] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_peer_relative_unmapped_cluster_nan() -> None:
+    """NULL cluster (-1) → peer_relative NaN (no peer group)."""
+    eng = CleanEngine([PeerRelativeClean()], ["A"], WINDOW)
+    eng.static = {"cluster_id": np.array([-1])}
+    out = {}
+    for ep in range(8):
+        out = eng.step(_sec_bar({"A": 100.0 + ep}, 60 + ep * 60))["peer_relative"]
+    assert np.isnan(out["peer_relative_ret_5m"][0])
+
+
+def test_peer_relative_contract_and_seed_equals_live() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.peer_relative import PeerRelativeReturnGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(27)
+    syms = [f"S{i}" for i in range(6)]
+    clusters = np.array([0, 0, 0, 1, 1, 1])
+    hist = []
+    for t in range(30):
+        present = {s: 100.0 + np.cumsum(rng.standard_normal(1))[0] for s in syms if rng.random() > 0.2}
+        if present:
+            hist.append(_sec_bar(present, 60 + t * 60))
+    se = CleanEngine([PeerRelativeClean()], syms, WINDOW)
+    se.static = {"cluster_id": clusters}
+    se.seed(hist[:-1])
+    so = se.step(hist[-1])
+    le = CleanEngine([PeerRelativeClean()], syms, WINDOW)
+    le.static = {"cluster_id": clusters}
+    lo = {}
+    for h in hist:
+        lo = le.step(h)
+    for fname, arr in so["peer_relative"].items():
+        np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(lo["peer_relative"][fname]),
+                                   rtol=1e-12, err_msg=f"peer_relative.{fname} seed != live")
+    _assert_feature_spec_contract(so["peer_relative"], PeerRelativeReturnGroup().declare(), "peer_relative ")
