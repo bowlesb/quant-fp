@@ -718,9 +718,10 @@ class IncrementalEngine:
         """FP_STATE_SPINE: the (n_symbols, n_value_cols) value matrix for ``price_volume`` at the LIVE latest
         ``minute``, built entirely in numpy — no per-minute polars derive, no ``_reindex`` join.
 
-        The frame arrives pre-sorted by ``[symbol, minute]`` (the caller sorts once, off the hot path), so each
-        symbol's rows are contiguous and minute-ordered. We read the per-symbol LATEST row (its block's last) and
-        PRIOR close (the block's second-to-last — ``close.shift(1).over("symbol")`` positionally) as numpy arrays,
+        The live frame is delivered minute-major (capture does NOT sort it), so we order it ``[symbol, minute]``
+        here with a numpy lexsort (polars-free) to make each symbol's rows contiguous and minute-ascending. We
+        then read the per-symbol LATEST row (its block's last) and PRIOR close (the block's second-to-last —
+        ``close.shift(1).over("symbol")`` positionally) as numpy arrays,
         aligned to the fixed session index, then:
           * ``price_volume_safe_cols`` derives the safe value columns (vol/cv/mfv/up/dn + presence + the pv-corr
             OLS pairs with the y=vol−anchor centering) — cell-for-cell the safe half of ``_derived_row``;
@@ -732,22 +733,29 @@ class IncrementalEngine:
         n_sym = len(symbols)
         sym_pos = {sym: i for i, sym in enumerate(symbols)}
 
-        # Pull the needed columns once (no derive, no sort — the frame is already [symbol, minute]-sorted).
+        # Pull the needed columns once to numpy. The live frame is NOT guaranteed sorted (capture delivers it
+        # minute-major), so we order it [symbol, minute] HERE with a numpy lexsort — polars-free (a numpy argsort
+        # on the extracted arrays, not a polars .sort()), so the per-minute COMPUTE stays zero-polars. After the
+        # lexsort each symbol's rows are contiguous and minute-ascending, exactly the invariant the block
+        # extraction below needs (and that the non-spine path establishes with its own ``.sort(["symbol",
+        # "minute"])``).
         sub = frame.select(["symbol", "minute", "close", "high", "low", "volume", "__anchor_volume"])
-        sym_arr = sub["symbol"].to_numpy()
-        close_arr = sub["close"].to_numpy().astype(np.float64)
-        high_arr = sub["high"].to_numpy().astype(np.float64)
-        low_arr = sub["low"].to_numpy().astype(np.float64)
-        vol_arr = sub["volume"].to_numpy().astype(np.float64)
-        anchor_arr = sub["__anchor_volume"].to_numpy().astype(np.float64)
+        sym_raw = sub["symbol"].to_numpy()
+        minute_raw = sub["minute"].dt.epoch("s").to_numpy().astype(np.int64)
+        srt = np.lexsort((minute_raw, sym_raw))  # primary key = symbol, secondary = minute (ascending)
+        sym_arr = sym_raw[srt]
+        close_arr = sub["close"].to_numpy().astype(np.float64)[srt]
+        high_arr = sub["high"].to_numpy().astype(np.float64)[srt]
+        low_arr = sub["low"].to_numpy().astype(np.float64)[srt]
+        vol_arr = sub["volume"].to_numpy().astype(np.float64)[srt]
+        anchor_arr = sub["__anchor_volume"].to_numpy().astype(np.float64)[srt]
 
-        # Per-symbol contiguous block boundaries in the pre-sorted frame: starts[i] is the first row of symbol i's
-        # block, so its LATEST row is the row before the next block's start (the block's last), and its PRIOR row
-        # is one before that (only if the block has >= 2 rows — else no prior bar, lag is null).
-        uniq, starts = np.unique(sym_arr, return_index=True)
-        order = np.argsort(starts)
-        uniq = uniq[order]
-        starts = starts[order]
+        # Per-symbol contiguous block boundaries in the now-sorted arrays: starts[i] is the first row of symbol
+        # i's block, so its LATEST row is the row before the next block's start (the block's last, minute-max),
+        # and its PRIOR row is one before that (only if the block has >= 2 rows — else no prior bar, lag is null).
+        uniq, starts = np.unique(
+            sym_arr, return_index=True
+        )  # np.unique returns sorted-unique + first indices
         ends = np.append(starts[1:], len(sym_arr))  # one past each block's last row
 
         close = np.full(n_sym, np.nan)
