@@ -1472,65 +1472,38 @@ def test_price_volume_contract_and_seed_equals_live() -> None:
     _assert_feature_spec_contract(seed_out["price_volume"], PriceVolumeGroup().declare(), "price_volume ")
 
 
-def test_price_volume_sparse_time_window_matches_legacy() -> None:
-    """RE-GATE price_volume (#60 re-port, c3cd8c0) on the SPARSE axis — enforcing the gappy-h2h invariant on
-    the keystone 70-feature group. The earlier green was DENSE-ONLY (vwap_deviation diverged, even sign-flipped,
-    on sparse). Now every windowed reduction is masked via trailing_time, and obv_slope's OLS regresses on the
-    REBASED-MINUTE axis (not positional arange). Head-to-head a gappy symbol (spans 85 min) vs legacy BATCH:
-    vwap_deviation/up_volume_ratio (windowed sums) AND obv_slope (time-OLS, slope-per-MINUTE) match exactly."""
+def test_price_volume_sparse_matches_legacy_compute_golden() -> None:
+    """RE-ANCHORED (#66, the in-line-re-derivation audit): diff the clean price_volume output cell-for-cell vs
+    a golden captured from the REAL legacy PriceVolumeGroup.compute() (tests/pv_golden.json, built out-of-band
+    via attach_reduction_anchors on the gappy fixture in tests/pv_in.json). This replaces the prior in-line
+    polars re-derivation (close.shift / rolling_sum_by / manual obv OLS), which — like the sector_beta
+    mutual-false-green — could encode the wrong convention and agree with a same-wrong port. The legacy
+    compute() output is the authoritative tie-breaker; all 70 features match it on the SPARSE (85-min gappy)
+    fixture, including the time-windowed vwap/ratios and the rebased-minute obv_slope time-OLS."""
     import datetime  # noqa: PLC0415
-
-    import polars as pl  # noqa: PLC0415
+    import json  # noqa: PLC0415
 
     base = datetime.datetime(2026, 6, 1, 9, 30)
     offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70, 74, 78, 81, 85]
-    rng = np.random.default_rng(17)
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
-    vols = (rng.random(len(offsets)) * 1e5 + 1e4).round()
-    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
-    df = pl.DataFrame({"minute": mins, "close": closes, "volume": vols.astype(float)}).sort("minute")
-    df = df.with_columns((pl.col("close") * pl.col("volume")).alias("cv"),
-                         (pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"))
-    df = df.with_columns(pl.when(pl.col("ret") > 0).then(pl.col("volume")).otherwise(0.0).alias("up"),
-                         (pl.col("ret").sign() * pl.col("volume")).fill_null(0.0).alias("sv"))
-    df = df.with_columns(pl.col("sv").cum_sum().alias("obv"))
-
-    def _rby(col: str, w: int) -> pl.Expr:
-        return pl.col(col).rolling_sum_by("minute", window_size=f"{w}m")
-
-    for w in (5, 15, 30):
-        df = df.with_columns(_rby("cv", w).alias(f"scv{w}"), _rby("volume", w).alias(f"sv{w}"),
-                             _rby("up", w).alias(f"su{w}"))
-    last = df.tail(1)
-    cl = closes[-1]
-    t_last = mins[-1]
+    pv_in = json.load(open(os.path.join(os.path.dirname(__file__), "pv_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "pv_golden.json")))
+    closes, vols = pv_in["closes"], pv_in["vols"]
 
     eng = CleanEngine([PriceVolumeClean()], ["A"], 400)
     out = {}
-    for i in range(len(offsets)):
+    for i, o in enumerate(offsets):
         out = eng.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
                         "high": np.array([closes[i] + 0.3]), "low": np.array([closes[i] - 0.3]),
                         "volume": np.array([vols[i]], dtype=np.float64),
-                        "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})["price_volume"]
-    for w in (5, 15, 30):
-        leg_vwap = cl / (last[f"scv{w}"][0] / last[f"sv{w}"][0]) - 1.0
-        leg_up = last[f"su{w}"][0] / last[f"sv{w}"][0]
-        assert out[f"vwap_deviation_{w}m"][0] == pytest.approx(leg_vwap, rel=1e-7), f"vwap_deviation_{w}m sparse"
-        assert out[f"up_volume_ratio_{w}m"][0] == pytest.approx(leg_up, rel=1e-7), f"up_volume_ratio_{w}m sparse"
-
-    # obv_slope: time-OLS of obv on the REBASED minute axis over the last w wall-minutes (slope-per-MINUTE).
-    for w in (15, 30):
-        win = df.filter((pl.col("minute") > t_last - datetime.timedelta(minutes=w)) & (pl.col("minute") <= t_last))
-        axis = np.array([(x - base).total_seconds() / 60.0 for x in win["minute"]])
-        axis = axis - axis.min()
-        y = win["obv"].to_numpy()
-        n = len(axis)
-        cov = n * (axis * y).sum() - axis.sum() * y.sum()
-        var_x = n * (axis * axis).sum() - axis.sum() ** 2
-        leg_obv = (cov / var_x) / win["volume"].mean()
-        assert out[f"obv_slope_{w}m"][0] == pytest.approx(leg_obv, rel=1e-6), (
-            f"obv_slope_{w}m sparse: clean != legacy time-OLS on the rebased-minute axis"
-        )
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
+                                                 dtype=np.int64)})["price_volume"]
+    assert set(out) == set(golden), "price_volume feature set != legacy compute()"
+    for fname, gv in golden.items():
+        cv = float(out[fname][0])
+        if gv is None:
+            assert np.isnan(cv), f"price_volume.{fname}: legacy NULL, clean {cv}"
+        else:
+            assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"price_volume.{fname}: legacy {gv} clean {cv}"
 
 
 def test_trend_quality_sparse_time_ols_matches_legacy() -> None:
@@ -3605,6 +3578,10 @@ _LEGACY_GROUP_OF = {
     "signed_trade_ratio": ("signed_trade_ratio", "SignedTradeRatioGroup"),
     "trade_flow": ("trade_flow", "TradeFlowGroup"),
     "trade_freq_z": ("trade_freq_z", "TradeFreqZGroup"),
+    "market_context": ("market_context", "MarketContextGroup"),
+    "round_levels": ("round_levels", "RoundLevelsGroup"),
+    "volume_exhaustion": ("volume_exhaustion", "VolumeExhaustionGroup"),
+    "volume_leads_price": ("volume_leads_price", "VolumeLeadsPriceGroup"),
     # STUBS (clean declares fewer than legacy) — xfailed below until filled:
     "breadth": ("breadth", "BreadthGroup"),
     "prior_day": ("prior_day", "PriorDayGroup"),
