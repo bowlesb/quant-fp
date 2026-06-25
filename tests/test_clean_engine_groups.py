@@ -1069,3 +1069,106 @@ def test_quote_spread_contract() -> None:
                "mean_ask_size": np.array([rng.random() * 100], dtype=np.float64)}
         out = eng.step(bar)["quote_spread"]
     _assert_feature_spec_contract(out, QuoteSpreadGroup().declare(), "quote_spread ")
+
+
+# ========================================================================================================= #
+# BULK PORT — BATCH 1b (volatility) + 1c (liquidity), windowed/ReductionGroup.
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_windowed import LiquidityClean, VolatilityClean  # noqa: E402
+
+
+def test_volatility_realized_vol_known_std() -> None:
+    """realized_vol_{w}m = sample std (ddof=1) of close-to-close returns. Drive a known close path and assert
+    against numpy's ddof=1 std of the returns over the window."""
+    closes = [100.0, 101.0, 102.0, 101.5, 103.0, 102.0]
+    eng = CleanEngine([VolatilityClean()], ["A"], WINDOW)
+    out = {}
+    for ep, c in enumerate(closes):
+        out = eng.step(_ohlcv_bar(["A"], [c], [c + 1], [c - 1], [c], 60 + ep * 60))["volatility"]
+    rets = np.diff(closes) / np.array(closes[:-1])  # the 5 returns
+    assert out["realized_vol_5m"][0] == pytest.approx(np.std(rets, ddof=1), rel=1e-9)
+
+
+def test_volatility_parkinson_known() -> None:
+    """parkinson_vol_{w}m = sqrt(mean(ln(H/L)²)/(4ln2)). Constant H/L → known value."""
+    h, low_ = 102.0, 98.0
+    pk = np.sqrt((np.log(h / low_) ** 2) / (4.0 * _LN2_REF))
+    eng = CleanEngine([VolatilityClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(20):
+        out = eng.step(_ohlcv_bar(["A"], [100.0], [h], [low_], [100.0], 60 + ep * 60))["volatility"]
+    assert out["parkinson_vol_15m"][0] == pytest.approx(pk, rel=1e-9)
+
+
+def test_volatility_contract() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.volatility import VolatilityGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(6)
+    eng = CleanEngine([VolatilityClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(40):
+        c = 100.0 + np.cumsum(rng.standard_normal(1))[0]
+        out = eng.step(_ohlcv_bar(["A"], [c], [c + abs(rng.normal()) + 0.5], [c - abs(rng.normal()) - 0.5],
+                                  [c], 60 + ep * 60))["volatility"]
+    _assert_feature_spec_contract(out, VolatilityGroup().declare(), "volatility ")
+
+
+def _liq_bar(symbols, close, vol, sgn, epoch):
+    return {"symbol": np.array(symbols), "close": np.array(close, dtype=np.float64),
+            "volume": np.array(vol, dtype=np.float64), "signed_volume": np.array(sgn, dtype=np.float64),
+            "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+
+def test_liquidity_kyle_lambda_known_slope() -> None:
+    """kyle_lambda = OLS slope of Δp (close change) on signed_volume. Construct Δp = 2·signed_volume exactly
+    → slope = 2.0."""
+    eng = CleanEngine([LiquidityClean()], ["A"], WINDOW)
+    closes = [100.0]
+    sgns = [0.0]
+    for k in range(1, 12):
+        sgn = float(k)
+        closes.append(closes[-1] + 2.0 * sgn)  # Δp = 2·signed_volume
+        sgns.append(sgn)
+    out = {}
+    for ep, (c, s) in enumerate(zip(closes, sgns)):
+        out = eng.step(_liq_bar(["A"], [c], [1000.0], [s], 60 + ep * 60))["liquidity"]
+    assert out["kyle_lambda_10m"][0] == pytest.approx(2.0, rel=1e-6)
+
+
+def test_liquidity_roll_spread_sign_and_zero() -> None:
+    """roll_spread = 2·sqrt(−cov(Δp,Δp_lag))/close when cov<0, else 0. A mean-reverting (alternating) price
+    has NEGATIVE autocov → positive roll_spread; a trending price has cov>=0 → roll_spread 0."""
+    # alternating up/down → negative autocovariance of consecutive Δp
+    alt = CleanEngine([LiquidityClean()], ["A"], WINDOW)
+    base = 100.0
+    o = {}
+    for ep in range(12):
+        base += 1.0 if ep % 2 == 0 else -1.0
+        o = alt.step(_liq_bar(["A"], [base], [1000.0], [0.0], 60 + ep * 60))["liquidity"]
+    assert o["roll_spread_10m"][0] > 0.0
+    # steady uptrend → Δp constant → autocov ~0 → roll_spread 0
+    up = CleanEngine([LiquidityClean()], ["A"], WINDOW)
+    ou = {}
+    for ep in range(12):
+        ou = up.step(_liq_bar(["A"], [100.0 + ep], [1000.0], [0.0], 60 + ep * 60))["liquidity"]
+    assert ou["roll_spread_10m"][0] == pytest.approx(0.0)
+
+
+def test_liquidity_amihud_nonneg_and_contract() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.liquidity import LiquidityGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(8)
+    eng = CleanEngine([LiquidityClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(40):
+        out = eng.step(_liq_bar(["A"], [100.0 + rng.standard_normal()], [1000.0 + rng.random() * 4000],
+                                [rng.standard_normal() * 1000], 60 + ep * 60))["liquidity"]
+    for w in (10, 30):
+        a = out[f"amihud_illiq_{w}m"][0]
+        assert np.isnan(a) or a >= 0.0, "amihud must be >= 0"
+    _assert_feature_spec_contract(out, LiquidityGroup().declare(), "liquidity ")
