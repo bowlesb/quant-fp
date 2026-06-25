@@ -80,16 +80,15 @@ def test_trend_quality_perfect_downtrend_negative_slope() -> None:
     assert out["price_slope_10m"][0] < 0
 
 
-def test_trend_quality_flat_is_zero_slope_nan_r2() -> None:
-    """A flat close has zero variance in y → slope 0 (no move), r2 undefined (var_y == 0) → NaN."""
+def test_trend_quality_flat_is_zero_slope_zero_r2() -> None:
+    """A flat close → slope 0 (no move) AND r2 0.0. The shared OLS kernel leaves r2 null/NaN on var_y=0, but
+    trend_quality's assemble() PINS r2=0 there (slope_defined & r2_undefined → 0.0; trend_quality.py:122-124,
+    'a flat line has zero explained variance, not an undefined fit'). Confirmed authoritative via legacy
+    compute() OUTPUT on a flat-price frame = 0.0 across all windows. The re-port matches — r2=0, NOT NaN."""
     closes = {"A": [50.0] * 20}
     out = _run([TrendQualityClean()], ["A"], closes)["trend_quality"]
     assert out["price_slope_10m"][0] == pytest.approx(0.0)
-    # legacy NULLs r2 on flat y (denom_y=0 ≤ floor). The #60 trend_quality re-port wrongly forces r2=0 —
-    # xfail until ArchOverhaul gates r2 on the denom_y floor (flagged).
-    if not np.isnan(out["price_r2_10m"][0]):
-        pytest.xfail("trend_quality re-port flat r2=0 diverges from legacy NaN (#60 denom_y floor) — flagged")
-    assert np.isnan(out["price_r2_10m"][0]), "flat series r2 is undefined"
+    assert out["price_r2_10m"][0] == pytest.approx(0.0), "flat price → r2 0 (assemble pins it; legacy output=0)"
 
 
 def test_trend_quality_slope_is_known_value() -> None:
@@ -1530,12 +1529,10 @@ def test_trend_quality_sparse_time_ols_matches_legacy() -> None:
                         "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
                                                  dtype=np.int64)})["trend_quality"]
     assert of["price_slope_15m"][0] == pytest.approx(0.0), "flat price → slope 0 (no move)"
-    # flat y → denom_y = b·Σy²−(Σy)² = 0 ≤ the legacy denom_y floor → r2 is NULL (NOT 0). The trend_quality
-    # re-port (12ee077) WRONGLY forces r2=0; legacy NULLs it (declarative.py:226 defined_corr guard). xfail
-    # until ArchOverhaul gates r2 on the denom_y floor — flip to a hard assert then.
-    if not np.isnan(of["price_r2_15m"][0]):
-        pytest.xfail("trend_quality re-port flat r2=0 diverges from legacy NaN (#60 denom_y floor) — flagged")
-    assert np.isnan(of["price_r2_15m"][0])
+    # flat price → r2 0.0: the OLS kernel leaves r2 null/NaN on var_y=0, but trend_quality's assemble() PINS
+    # it to 0 (trend_quality.py:122-124). CONFIRMED via legacy compute() OUTPUT on a flat frame = 0.0 across
+    # all windows (the authoritative oracle; my earlier 'legacy NULLs it' read the kernel, not the assemble).
+    assert of["price_r2_15m"][0] == pytest.approx(0.0), "flat price → r2 0 (assemble pins it; legacy output=0)"
 
 
 def test_reduction_groups_sparse_time_window_matches_legacy() -> None:
