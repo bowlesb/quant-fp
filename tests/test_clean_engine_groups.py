@@ -3151,6 +3151,61 @@ def test_live_event_tape_session_csr_is_populated_from_loaders() -> None:
     assert edgar["payload"][int(edgar["off"][b])] == pytest.approx(float(_EDGAR_FORM_CODE["10-Q"])), "edgar 10-Q code"
 
 
+def test_news_sentiment_lookahead_boundary_matches_legacy_compute() -> None:
+    """#75 LAYER B — the NON-NEGOTIABLE LOOK-AHEAD gate (Lead: a leak = future info in a live feature). Drive
+    clean NewsSentimentClean over a minute grid STRADDLING an article's available_at (T), with the session built
+    by the REAL clean_session.build_event_tape (NOT a hand-built CSR — the self-consistent-bubble trap this gate
+    must avoid), and diff EVERY (symbol, minute) cell vs real legacy NewsSentimentGroup.compute() on the same
+    news frame. Grid = {T-1, T, T+1, T+59, T+61}; symbol A has the article, B is the EMPTY-TAPE symbol.
+
+    The decisive assertion is the EXACT <= boundary: news_count_60m across the grid = [0, 1, 1, 1, 0] — ABSENT
+    at T-1 (no leak before available_at), PRESENT at EXACTLY T (the inclusive <= edge), held through the 60m
+    window, and DROPPED at T+61 (past the (minute-60m, minute] right-closed/left-open edge). An off-by-one to a
+    strict < would zero the T cell; a leak to T-1 would be future info live. 90/90 cells match real compute()
+    (tests/et_news_golden.json from the legacy compute(); input tests/et_news_in.json)."""
+    import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_reference import NewsSentimentClean  # noqa: PLC0415
+    from quantlib.features.clean_session import build_event_tape  # noqa: PLC0415
+
+    et_in = json.load(open(os.path.join(os.path.dirname(__file__), "et_news_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "et_news_golden.json")))
+    syms = ["A", "B"]  # A has the article at T; B is empty-tape
+    article_at = datetime.datetime.fromtimestamp(et_in["T_epoch"], tz=datetime.timezone.utc)
+    news = pl.DataFrame(
+        {"symbol": ["A"], "available_at": [article_at], "sentiment": [et_in["sentiment"]]},
+        schema={"symbol": pl.String, "available_at": pl.Datetime("us", "UTC"), "sentiment": pl.Float64})
+    tape = build_event_tape(news, syms, "sentiment")  # the REAL production CSR pivot
+    session = {"news_at": tape["at"], "news_off": tape["off"], "news_sentiment": tape["payload"]}
+
+    eng = CleanEngine([NewsSentimentClean()], syms, 400)
+    eng.set_session(session)
+    captured: dict[str, dict[str, float]] = {}
+    for mi, epoch in enumerate(et_in["grid_epochs"]):
+        out = eng.step({"symbol": np.array(syms), "minute_epoch": np.array([epoch], dtype=np.int64)})["news_sentiment"]
+        for s in syms:
+            captured[f"{s}@{mi}"] = {k: float(out[k][syms.index(s)]) for k in out}
+
+    assert set(captured) == set(golden), "news_sentiment (sym,minute) cell set != legacy compute()"
+    for cell_key, feats in golden.items():
+        for fname, gv in feats.items():
+            cv = captured[cell_key][fname]
+            if gv is None:
+                assert np.isnan(cv), f"news_sentiment {cell_key}.{fname}: legacy NULL, clean {cv}"
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), (
+                    f"news_sentiment {cell_key}.{fname}: legacy {gv} clean {cv}"
+                )
+    # explicit boundary witness: the <= edge (T-1=absent, T=present) + the 60m window exit (T+61=dropped)
+    counts = [captured[f"A@{mi}"]["news_count_60m"] for mi in range(len(et_in["grid_epochs"]))]
+    assert counts == [0.0, 1.0, 1.0, 1.0, 0.0], (
+        f"look-ahead boundary: news_count_60m must be [0,1,1,1,0] across (T-1,T,T+1,T+59,T+61), got {counts}"
+    )
+
+
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
     """RE-ANCHORED (#66 + #68): diff clean multi_day_returns cell-for-cell vs a golden from the REAL legacy
     MultiDayReturnGroup.compute() on a 70-day fixture (tests/md_in.json). This CAUGHT the #68 stale-convention
