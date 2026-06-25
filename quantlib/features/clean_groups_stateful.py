@@ -61,6 +61,53 @@ _RUNNER_BAND_HI = 20.0
 _RUNNER_ACTIVE_EARLY_MOVE = 0.30
 
 
+def _update_session_cumulative(window: Window) -> dict[str, np.ndarray]:
+    """Maintain the per-(symbol, ET-session) cumulative accumulators in ``window.state`` and return the current
+    ``{run_high, run_low, run_dollar, sess_open, close}``. Shared by the runner/dumper/gap_fill session-reset
+    machines. Updated ONLY on a present RTH bar (etm≥570); RESET on a symbol's first present bar of a new ET
+    session (sdate change); an absent symbol's accumulators are untouched (present-decay). Pre-market bars
+    (etm<570) don't update."""
+    n = window.n
+    state = window.state
+    present = window.present()
+    sdate, etm = _et_session(window.minute_epoch)
+    op = window.latest("open")
+    high = window.latest("high")
+    low = window.latest("low")
+    close = window.latest("close")
+    volume = window.latest("volume")
+
+    if state.get("run_high") is None:
+        state["run_high"] = np.full(n, np.nan)
+        state["run_low"] = np.full(n, np.nan)
+        state["run_dollar"] = np.zeros(n)
+        state["sess_open"] = np.full(n, np.nan)
+        state["sdate"] = np.full(n, -1.0)
+    run_high, run_low = state["run_high"], state["run_low"]
+    run_dollar, sess_open, prev_sdate = state["run_dollar"], state["sess_open"], state["sdate"]
+
+    update = present & (etm >= _OPEN_MINUTE)
+    new_session = update & (prev_sdate != float(sdate))
+    with np.errstate(invalid="ignore"):
+        dollar = close * volume
+        new_run_high = np.where(new_session, high, np.where(update, np.fmax(run_high, high), run_high))
+        new_run_low = np.where(new_session, low, np.where(update, np.fmin(run_low, low), run_low))
+        new_run_dollar = np.where(new_session, dollar, np.where(update, run_dollar + dollar, run_dollar))
+        new_sess_open = np.where(new_session, op, sess_open)
+    state["run_high"] = new_run_high
+    state["run_low"] = new_run_low
+    state["run_dollar"] = new_run_dollar
+    state["sess_open"] = new_sess_open
+    state["sdate"] = np.where(update, float(sdate), prev_sdate)
+    return {
+        "run_high": new_run_high,
+        "run_low": new_run_low,
+        "run_dollar": new_run_dollar,
+        "sess_open": new_sess_open,
+        "close": close,
+    }
+
+
 class RunnerStateClean:
     """CUMULATIVE SESSION-RESET (the small-cap-runner regime): per (symbol, ET-session), the running max-high /
     cum dollar-volume / first session open since the 09:30 ET open, vs the prior-day close. Resets every
@@ -86,58 +133,72 @@ class RunnerStateClean:
     )
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
-        n = window.n
-        state = window.state
-        present = window.present()
-        sdate, etm = _et_session(window.minute_epoch)
-        in_rth = etm >= _OPEN_MINUTE
-        op = window.latest("open")
-        high = window.latest("high")
-        close = window.latest("close")
-        volume = window.latest("volume")
-
-        run_high = state.get("run_high")
-        if run_high is None:
-            run_high = np.full(n, np.nan)
-            state["run_dollar"] = np.zeros(n)
-            state["sess_open"] = np.full(n, np.nan)
-            state["sdate"] = np.full(n, -1.0)
-        run_dollar = state["run_dollar"]
-        sess_open = state["sess_open"]
-        prev_sdate = state["sdate"]
-
-        # a symbol UPDATES only on a present RTH bar; it RESETS (new session) on its first present bar where the
-        # carried sdate differs from today's. Absent symbols (or pre-open minutes) leave their accumulators as-is.
-        update = present & in_rth
-        new_session = update & (prev_sdate != float(sdate))
-        with np.errstate(invalid="ignore"):
-            dollar = close * volume
-            # running max-high: reset to today's high on a new session, else max(carried, high), only on update.
-            new_run_high = np.where(new_session, high, np.where(update, np.fmax(run_high, high), run_high))
-            new_run_dollar = np.where(new_session, dollar, np.where(update, run_dollar + dollar, run_dollar))
-            new_sess_open = np.where(new_session, op, sess_open)
-        new_sdate = np.where(update, float(sdate), prev_sdate)
-        state["run_high"] = new_run_high
-        state["run_dollar"] = new_run_dollar
-        state["sess_open"] = new_sess_open
-        state["sdate"] = new_sdate
-
+        acc = _update_session_cumulative(window)
+        run_high, sess_open, run_dollar, close = (
+            acc["run_high"],
+            acc["sess_open"],
+            acc["run_dollar"],
+            acc["close"],
+        )
         prev_close = window.session.get("prev_close")
         if prev_close is None:
-            prev_close = np.full(n, np.nan)
+            prev_close = np.full(window.n, np.nan)
         with np.errstate(invalid="ignore", divide="ignore"):
-            early_move = new_run_high / prev_close - 1.0
+            early_move = run_high / prev_close - 1.0
             in_band = (prev_close >= _RUNNER_BAND_LO) & (prev_close <= _RUNNER_BAND_HI)
             is_active = in_band & (early_move >= _RUNNER_ACTIVE_EARLY_MOVE)
-            out = {
+            return {
                 "runner_early_move": early_move,
-                "runner_gap_open": new_sess_open / prev_close - 1.0,
-                "runner_pullback_from_high": close / new_run_high - 1.0,
-                "runner_log_dollar_vol": np.log1p(new_run_dollar),
+                "runner_gap_open": sess_open / prev_close - 1.0,
+                "runner_pullback_from_high": close / run_high - 1.0,
+                "runner_log_dollar_vol": np.log1p(run_dollar),
                 "runner_in_band": in_band.astype(np.float64),
                 "runner_is_active": is_active.astype(np.float64),
             }
-        return out
+
+
+class DumperStateClean:
+    """CUMULATIVE SESSION-RESET (the small-cap-crash regime, the cum-MIN mirror of runner): per (symbol,
+    ET-session) the running min-low / cum dollar-vol / first open since 09:30 ET, vs prior close. dumper_early_
+    drop = 1 − run_low/prev_close (running max drop); dumper_gap_open = sess_open/prev_close−1;
+    dumper_bounce_from_low = close/run_low−1; dumper_log_dollar_vol = log1p(run_dollar); dumper_in_band =
+    prev_close ∈ [2,20]; dumper_is_active = in_band & early_drop≥0.30. Legacy: ``DumperStateGroup``. Same
+    session-reset machinery as runner (shared ``_update_session_cumulative``)."""
+
+    name = "dumper_state"
+    input_cols = ("open", "high", "low", "close", "volume")
+    feature_names = (
+        "dumper_early_drop",
+        "dumper_gap_open",
+        "dumper_bounce_from_low",
+        "dumper_log_dollar_vol",
+        "dumper_in_band",
+        "dumper_is_active",
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        acc = _update_session_cumulative(window)
+        run_low, sess_open, run_dollar, close = (
+            acc["run_low"],
+            acc["sess_open"],
+            acc["run_dollar"],
+            acc["close"],
+        )
+        prev_close = window.session.get("prev_close")
+        if prev_close is None:
+            prev_close = np.full(window.n, np.nan)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            early_drop = 1.0 - run_low / prev_close
+            in_band = (prev_close >= _RUNNER_BAND_LO) & (prev_close <= _RUNNER_BAND_HI)
+            is_active = in_band & (early_drop >= _RUNNER_ACTIVE_EARLY_MOVE)
+            return {
+                "dumper_early_drop": early_drop,
+                "dumper_gap_open": sess_open / prev_close - 1.0,
+                "dumper_bounce_from_low": close / run_low - 1.0,
+                "dumper_log_dollar_vol": np.log1p(run_dollar),
+                "dumper_in_band": in_band.astype(np.float64),
+                "dumper_is_active": is_active.astype(np.float64),
+            }
 
 
 class TechnicalClean:
