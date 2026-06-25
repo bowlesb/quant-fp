@@ -255,15 +255,24 @@ class CleanEngine:
     def _marshal(self, minute_bars: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Turn the current minute's bars (``{col: (n_present,) array}`` + a ``symbol`` array) into the
         ``(n_present, n_cols)`` row block + the index positions to scatter into. Pure numpy — no sort, no
-        frame: the present symbols are read by name into their fixed index slots."""
+        frame: the present symbols are read by name into their fixed index slots.
+
+        SKIP-NOT-CRASH for an unknown symbol: a symbol absent from the fixed ``ring.index`` (subscribed but not
+        in the session snapshot universe the index was built over) is DROPPED from this minute's fold — it gets
+        no row and no present-mark — rather than raising ``KeyError`` mid-stream. This degrades a coverage gap to
+        a missing-feature DIVERGENCE (caught by the canary store-diff) instead of a CRASH that kills armed live
+        capture. The expected steady state is zero unknowns (subscribed ⊆ universe by construction); this is the
+        belt-and-suspenders for the one mismatch that would otherwise take down the live path."""
         syms = minute_bars["symbol"]
-        pos = np.array([self.ring.index[s] for s in syms], dtype=np.int64)
+        keep = np.array([symbol in self.ring.index for symbol in syms], dtype=bool)
+        kept_syms = syms[keep] if not keep.all() else syms
+        pos = np.array([self.ring.index[symbol] for symbol in kept_syms], dtype=np.int64)
         if self.cols:
-            rows = np.column_stack([np.asarray(minute_bars[c], dtype=np.float64) for c in self.cols])
+            rows = np.column_stack([np.asarray(minute_bars[c], dtype=np.float64)[keep] for c in self.cols])
         else:
             # a group that reads no bar columns (e.g. ``calendar`` — purely timestamp-derived): the ring
             # carries no values, but the minute's present positions still drive present()/the watermark.
-            rows = np.empty((len(syms), 0), dtype=np.float64)
+            rows = np.empty((len(kept_syms), 0), dtype=np.float64)
         return rows, pos
 
     def emit(self, minute_bars: dict[str, np.ndarray]) -> tuple[list[str], dict[str, dict[str, np.ndarray]]]:
