@@ -1717,3 +1717,33 @@ def test_sector_beta_contract_and_seed_equals_live() -> None:
         np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(live_out["sector_beta"][fname]),
                                    rtol=1e-12, err_msg=f"sector_beta.{fname} seed != live")
     _assert_feature_spec_contract(seed_out["sector_beta"], SectorBetaGroup().declare(), "sector_beta ")
+
+
+def test_sector_beta_near_constant_sector_return_matches_legacy_batch() -> None:
+    """INTEGRITY (Lead): sector_beta uses its OWN _windowed_sector_ols guard, NOT the shared corr/slope kernel
+    fix — so the near-zero-variance hazard could re-recur in this separate path. Confirm its OWN guard matches
+    legacy _ols_from_sums EXACTLY at the near-constant-SECTOR-RETURN boundary (low sector dispersion / few
+    present names → denom collapses). FINDING: legacy sector_beta has NO relative-variance floor — it guards
+    (n>=MIN_PAIRS=5 & var_x>0 & var_y>0) and NULLs a non-physical |beta|>BETA_MAX=15. So at near-constant-x the
+    bare var_x>0 PASSES, but cov/tiny-var → huge beta → BETA_MAX NULLs it. The clean port replicates this
+    EXACTLY (beta NaN via BETA_MAX, corr clipped) — matches legacy batch-truth, NOT the pv 1e-9 relative floor
+    (that was pv's return-x-side guard specifically). Different mechanism, same reject, faithful port."""
+    from quantlib.features.clean_groups_xsectional import _SECTOR_BETA_MAX, _SECTOR_MIN_PAIRS  # noqa: PLC0415
+
+    n = 10
+    sec = (1e-4 + np.linspace(0.0, 1e-10, n))[None, :]  # near-constant nonzero sector return (CoV²~1e-13)
+    own = np.linspace(0.0, 0.05, n)[None, :]
+    beta, corr = _windowed_sector_ols(own, sec, n)
+    # legacy _ols_from_sums replicated exactly (bare var>0 + BETA_MAX + clip; NO relative floor)
+    x, y, nn = sec[0], own[0], float(n)
+    sx, sy = x.sum(), y.sum()
+    sxx, syy, sxy = (x * x).sum(), (y * y).sum(), (x * y).sum()
+    cov, var_x, var_y = sxy - sx * sy / nn, sxx - sx * sx / nn, syy - sy * sy / nn
+    defined = (nn >= _SECTOR_MIN_PAIRS) and (var_x > 0) and (var_y > 0)
+    beta_raw = cov / var_x
+    legacy_beta = beta_raw if (defined and abs(beta_raw) <= _SECTOR_BETA_MAX) else np.nan
+    legacy_corr = float(np.clip(cov / (np.sqrt(var_x) * np.sqrt(var_y)), -1, 1)) if defined else np.nan
+    # beta: both NaN (BETA_MAX nulls the exploded slope). corr: both the clipped value (no BETA_MAX on corr).
+    assert (np.isnan(beta[0]) and np.isnan(legacy_beta)) or beta[0] == pytest.approx(legacy_beta)
+    assert (np.isnan(corr[0]) and np.isnan(legacy_corr)) or corr[0] == pytest.approx(legacy_corr)
+    assert np.isnan(beta[0]), "near-constant-sector beta must be NULLed (BETA_MAX), matching legacy"
