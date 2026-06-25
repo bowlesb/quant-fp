@@ -3256,20 +3256,69 @@ def test_live_event_tape_session_csr_is_populated_from_loaders() -> None:
     assert edgar["payload"][int(edgar["off"][b])] == pytest.approx(float(_EDGAR_FORM_CODE["10-Q"])), "edgar 10-Q code"
 
 
-def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
-    """#76 canary condition-B (Lead's flagged crash-risk) — RESOLVED by #78 (7c41007: _marshal SKIPs an unknown
-    symbol instead of KeyError-ing). The clean engine's ring.index is built ONCE per session from
-    _session_symbols (snapshot union + the first minute's floor); a symbol that FIRST streams in a LATER minute
-    is absent from it. The OLD behavior was a KeyError = a live SHARD CRASH (worse than any value diff). The #78
-    fix degrades that to a tolerated missing-feature divergence: the late symbol is DROPPED from that minute's
-    fold (no crash, no row), and the PRESENT symbols still compute normally. Steady state is zero unknowns
-    (subscribed ⊆ universe by construction); this is the belt-and-suspenders.
+def _run_late_symbol_clean(base: "datetime.datetime") -> "CaptureState":  # type: ignore[name-defined]
+    """Drive the REAL process_bars clean branch (FP_CLEAN_ENGINE=1): warm 8 minutes over {AAA,BBB,CCC}, then a
+    9th where ZZZ first appears (absent from the engine's session-built ring.index). Returns the CaptureState."""
+    import datetime as dt  # noqa: PLC0415
+    import os  # noqa: PLC0415
 
-    Drive the REAL process_bars clean branch (FP_CLEAN_ENGINE=1): warm 8 minutes over {AAA,BBB,CCC}, then a 9th
-    where ZZZ first appears. Assert: (1) NO crash; (2) ZZZ is SKIPPED (no row — the documented skip-not-emit
-    behavior, NOT OLD's emit-with-warmup; a divergence the canary store-diff would surface, deliberately chosen
-    over a crash); (3) the present {AAA,BBB,CCC} still get their min-8 rows (the skip doesn't drop them).
-    Harness /tmp/canary_crash.py."""
+    from quantlib.features.capture import CaptureState, process_bars  # noqa: PLC0415
+
+    def _bars(minute: dt.datetime, extra: str | None = None) -> list[dict]:
+        syms = ["AAA", "BBB", "CCC"] + ([extra] if extra else [])
+        rows = []
+        for off, s in enumerate(syms):
+            i = int((minute - base).total_seconds() // 60)
+            close = 100.0 + off * 2.0 + i * 0.02
+            rows.append({"S": s, "o": close * 0.999, "c": close, "h": close * 1.002,
+                         "l": close * 0.998, "v": 900.0, "t": minute.isoformat()})
+        return rows
+
+    os.environ["FP_CLEAN_ENGINE"] = "1"
+    try:
+        state = CaptureState()
+        for mi in range(8):  # engine's ring.index built over {AAA,BBB,CCC} at the first call
+            process_bars(state, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cc78", "mock",
+                         "2026-06-18", 120, accumulate=True, write=False)
+        process_bars(state, _bars(base + dt.timedelta(minutes=8), extra="ZZZ"), "/tmp/cc78", "mock",
+                     "2026-06-18", 120, accumulate=True, write=False)
+    finally:
+        os.environ.pop("FP_CLEAN_ENGINE", None)
+    return state
+
+
+def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
+    """#76 canary condition-B (Lead's flagged crash-risk) — CRASH-SAFETY half (a real pass). The clean engine's
+    ring.index is built ONCE per session from _session_symbols; a symbol that FIRST streams in a LATER minute is
+    absent → the OLD behavior was a KeyError = a live SHARD CRASH. #78 hardened _marshal to not raise. This
+    asserts the permanent invariant: NO crash, and the PRESENT {AAA,BBB,CCC} still compute that minute. (Whether
+    the unknown symbol is SKIPPED or EMITTED is the coverage question — gated separately below.)"""
+    import datetime as dt  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    base = dt.datetime(2026, 6, 18, 14, 0, tzinfo=dt.timezone.utc)
+    state = _run_late_symbol_clean(base)  # reaching here = no crash
+    min8 = base + dt.timedelta(minutes=8)
+    pv_min8 = state.accumulated["price_volume"].with_columns(
+        pl.col("minute").dt.replace_time_zone("UTC")).filter(pl.col("minute") == min8)
+    assert {"AAA", "BBB", "CCC"} <= set(pv_min8["symbol"].to_list()), (
+        "the present symbols must still compute despite the late unknown symbol"
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="#78 coverage gap: the late symbol is currently SKIPPED (skip-not-crash), "
+                                       "so clean DROPS ZZZ while OLD emits it — a silent missing-feature gap. The "
+                                       "correct fix builds ring.index from the SUBSCRIBED list so clean EMITS ZZZ "
+                                       "== OLD (coverage parity). A skip-only fix must FAIL this; only the "
+                                       "subscribed-index fix flips it green.")
+def test_live_late_streamed_symbol_emits_coverage_parity_with_old() -> None:
+    """#76 canary condition-B — COVERAGE half (Lead's strengthening: skip-not-crash ALONE is the lazy fix; it
+    silently drops the late symbol where OLD computes it). The correct fix builds the engine index from the
+    SUBSCRIBED symbol list so a late-streaming symbol is in ring.index and clean EMITS its warm-up row like OLD.
+    This asserts coverage PARITY: clean emits ZZZ at min 8 AND its row matches the OLD path's ZZZ row cell-for-
+    cell (a representative windowed group). xfail-strict until the subscribed-index fix lands — a skip-only fix
+    leaves ZZZ absent and FAILS here, so it can't be rubber-stamped green."""
     import datetime as dt  # noqa: PLC0415
     import os  # noqa: PLC0415
 
@@ -3289,24 +3338,36 @@ def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
                          "l": close * 0.998, "v": 900.0, "t": minute.isoformat()})
         return rows
 
-    os.environ["FP_CLEAN_ENGINE"] = "1"
-    try:
-        state = CaptureState()
-        for mi in range(8):  # engine's ring.index built over {AAA,BBB,CCC} at the first call
-            process_bars(state, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cc78", "mock",
-                         "2026-06-18", 120, accumulate=True, write=False)
-        # minute 8: ZZZ first appears — must NOT crash the marshal (the #78 skip-not-KeyError safety)
-        process_bars(state, _bars(base + dt.timedelta(minutes=8), extra="ZZZ"), "/tmp/cc78", "mock",
-                     "2026-06-18", 120, accumulate=True, write=False)
-    finally:
-        os.environ.pop("FP_CLEAN_ENGINE", None)
-    # (1) no crash reaching here; (2) ZZZ SKIPPED (the documented skip-not-emit); (3) present symbols still emit.
-    pv = state.accumulated["price_volume"]
     min8 = base + dt.timedelta(minutes=8)
-    pv_min8 = pv.with_columns(pl.col("minute").dt.replace_time_zone("UTC")).filter(pl.col("minute") == min8)
-    assert pv_min8.filter(pl.col("symbol") == "ZZZ").height == 0, "unknown ZZZ must be SKIPPED (no row), not emitted"
-    present_at_min8 = set(pv_min8["symbol"].to_list())
-    assert {"AAA", "BBB", "CCC"} <= present_at_min8, "the present symbols must still compute despite the skipped ZZZ"
+    clean_state = _run_late_symbol_clean(base)
+    # OLD path over the identical stream
+    os.environ.pop("FP_CLEAN_ENGINE", None)
+    old_state = CaptureState()
+    for mi in range(8):
+        process_bars(old_state, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cc78old", "mock",
+                     "2026-06-18", 120, accumulate=True, write=False)
+    process_bars(old_state, _bars(min8, extra="ZZZ"), "/tmp/cc78old", "mock",
+                 "2026-06-18", 120, accumulate=True, write=False)
+
+    def _zzz(state: CaptureState, group: str) -> pl.DataFrame:
+        d = state.accumulated[group]
+        return d.with_columns(pl.col("minute").dt.replace_time_zone("UTC")).filter(
+            (pl.col("symbol") == "ZZZ") & (pl.col("minute") == min8))
+
+    clean_zzz = _zzz(clean_state, "price_volume")
+    old_zzz = _zzz(old_state, "price_volume")
+    assert clean_zzz.height >= 1, "clean must EMIT the late symbol ZZZ (subscribed-index coverage), not skip it"
+    crow = clean_zzz.tail(1).to_dicts()[0]
+    orow = old_zzz.tail(1).to_dicts()[0]
+    for fname in [c for c in old_zzz.columns if c not in ("symbol", "minute")]:
+        ov, cv = orow.get(fname), crow.get(fname)
+        ofin = ov is not None and np.isfinite(float(ov))
+        cfin = cv is not None and np.isfinite(float(cv))
+        if not ofin and not cfin:
+            continue
+        assert ofin and cfin and np.isclose(float(ov), float(cv), rtol=1e-6, atol=1e-9), (
+            f"late-symbol ZZZ coverage parity: price_volume.{fname} OLD {ov} clean {cv}"
+        )
 
 
 def test_live_clean_engine_session_groups_match_direct_engine_dense() -> None:
