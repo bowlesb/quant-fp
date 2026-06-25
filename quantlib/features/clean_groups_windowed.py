@@ -117,6 +117,54 @@ def _returns(close: np.ndarray) -> np.ndarray:
 
 
 _FOUR_LN2 = 2.772588722239781
+_MOMENT_MIN_VAR = 1e-12
+
+
+class DistributionClean:
+    """DISTRIBUTION: per window of one-minute returns — ret_skew (m3/m2^1.5), ret_kurt (excess, m4/m2²−3),
+    downside_vol / upside_vol (RMS of the negative / positive returns). Central moments from masked power sums;
+    skew/kurt defined only when n≥3 and m2 > 1e-12 (variance floor against cancellation noise). Legacy:
+    ``DistributionGroup`` (ReductionGroup, distribution.py)."""
+
+    name = "distribution"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (10, 15, 30, 60, 120)
+    feature_names = tuple(
+        f"{prefix}_{w}m"
+        for w in _WINDOWS
+        for prefix in ("ret_skew", "ret_kurt", "downside_vol", "upside_vol")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        ret = _returns(close)
+        dn2 = np.where(ret < 0.0, ret * ret, 0.0)
+        up2 = np.where(ret > 0.0, ret * ret, 0.0)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            rw = _trailing_window(ret, w)
+            mask = np.isfinite(rw)
+            n = mask.sum(axis=1).astype(np.float64)
+            rf = np.where(mask, rw, 0.0)
+            s1 = rf.sum(axis=1)
+            s2 = (rf * rf).sum(axis=1)
+            s3 = (rf * rf * rf).sum(axis=1)
+            s4 = (rf * rf * rf * rf).sum(axis=1)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                mean = s1 / n
+                m2 = s2 / n - mean * mean
+                m3 = s3 / n - 3.0 * mean * (s2 / n) + 2.0 * mean**3
+                m4 = s4 / n - 4.0 * mean * (s3 / n) + 6.0 * mean * mean * (s2 / n) - 3.0 * mean**4
+                defined = (n >= 3.0) & (m2 > _MOMENT_MIN_VAR)
+                out[f"ret_skew_{w}m"] = np.where(defined, m3 / m2**1.5, np.nan)
+                out[f"ret_kurt_{w}m"] = np.where(defined, m4 / (m2 * m2) - 3.0, np.nan)
+                dn2_w = _windowed_sum(dn2, w)
+                up2_w = _windowed_sum(up2, w)
+                out[f"downside_vol_{w}m"] = np.where(
+                    n >= 2.0, np.sqrt(np.clip(dn2_w / n, 0.0, None)), np.nan
+                )
+                out[f"upside_vol_{w}m"] = np.where(n >= 2.0, np.sqrt(np.clip(up2_w / n, 0.0, None)), np.nan)
+        return out
 
 
 class PriceVolumeClean:
