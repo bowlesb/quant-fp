@@ -86,7 +86,15 @@ class FeatureTrust:
 
 @dataclass
 class GroupCoverage:
-    """One feature-group's coverage for the target symbol: presence, history reach, and its feature columns."""
+    """One feature-group's coverage for the target symbol: presence, history reach, and its feature columns.
+
+    GROUP-GRANULAR, not per-feature-verified. Coverage is decided at the GROUP level (is the symbol's row
+    present in the group's partitions?) and the listed ``features`` are the group's columns — claimed covered
+    on the assumption that a group's features are CO-CAPTURED in the same (group, version, source, date)
+    partition, so any feature in the group shares the symbol's group-level presence. That holds for the
+    current store layout (one partition per group carries all its feature columns). It is NOT a per-feature
+    value check: this report does not assert each individual feature column is non-null for the symbol, only
+    that the symbol is present in the group that produces them."""
 
     group: str
     version: str
@@ -297,6 +305,10 @@ def build_report(
         key=lambda item: item.backfill_span_days,
     )[:10]
 
+    # Denominators are DERIVED at runtime, never hardcoded: ``n_groups_total`` is the count of groups the
+    # reader actually finds on disk (the live registry/active-set as materialized in the store), and
+    # ``n_features_covered`` is the size of the symbol's own covered-feature set. So if the clean-engine
+    # integration shifts the group/feature count, these track it automatically instead of silently rotting.
     report: dict[str, object] = {
         "symbol": symbol,
         "n_groups_total": len(coverages),
