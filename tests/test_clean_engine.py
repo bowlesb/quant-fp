@@ -200,3 +200,58 @@ def test_seed_replay_carried_state_bit_identical() -> None:
             assert np.allclose(
                 live._group_state[group][key], seeded._group_state[group][key], equal_nan=True
             ), f"carried state {group}.{key} diverged between live accumulation and seed-replay"
+
+
+def test_presence_gated_on_real_delivery_not_carried_value() -> None:
+    """The systemic presence fix: a presence-gated group (EMA / cumulative) must gate on window.present() — the
+    REAL current-minute delivery — NOT isfinite(latest()), which returns the CARRIED value on an absent minute.
+    So a symbol that delivered the SAME bars must get IDENTICAL carried state whether or not OTHER symbols were
+    present, and an ABSENT symbol must HOLD its EMA / not increment its count."""
+
+    def run(sparse: bool) -> float:
+        eng = CleanEngine([ex.MacdClean()], ["A", "B"], 60)
+        for t in range(30):
+            if sparse and t % 2 == 1:  # B absent on odd minutes
+                eng.step(
+                    {
+                        "symbol": np.array(["A"]),
+                        "close": np.array([100.0 + t]),
+                        "minute_epoch": np.array([t * 60]),
+                    }
+                )
+            else:
+                eng.step(
+                    {
+                        "symbol": np.array(["A", "B"]),
+                        "close": np.array([100.0 + t, 200.0 + t]),
+                        "minute_epoch": np.array([t * 60]),
+                    }
+                )
+        return float(eng._group_state["macd"]["ema12"][0])  # A's EMA
+
+    assert abs(run(False) - run(True)) < 1e-12  # A delivered the same bars → identical EMA either way
+
+    # an ABSENT symbol holds its EMA across a gap; a cumulative count does not increment on an absent minute
+    eng = CleanEngine([ex.MacdClean(), ex.IntradaySeasonalityClean()], ["A", "B"], 60)
+    for t in range(20):
+        eng.step(
+            {
+                "symbol": np.array(["A", "B"]),
+                "close": np.array([100.0, 100.0]),
+                "volume": np.array([10.0, 10.0]),
+                "minute_epoch": np.array([t * 60]),
+            }
+        )
+    b_ema = float(eng._group_state["macd"]["ema12"][1])
+    b_cnt = float(eng._group_state["intraday_seasonality"]["cnt"][1])
+    for t in range(20, 25):  # B absent
+        eng.step(
+            {
+                "symbol": np.array(["A"]),
+                "close": np.array([110.0]),
+                "volume": np.array([10.0]),
+                "minute_epoch": np.array([t * 60]),
+            }
+        )
+    assert float(eng._group_state["macd"]["ema12"][1]) == b_ema  # B's EMA held
+    assert float(eng._group_state["intraday_seasonality"]["cnt"][1]) == b_cnt  # B's count held

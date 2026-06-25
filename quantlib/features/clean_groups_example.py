@@ -233,7 +233,9 @@ class MacdClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.latest("close")
-        present = np.isfinite(close)
+        present = (
+            window.present()
+        )  # the REAL delivery mask — NOT isfinite(latest), which is the carried value
         state = window.state
         ema12 = self._ema(state, "ema12", np.where(present, close, 0.0), 12, present)
         ema26 = self._ema(state, "ema26", np.where(present, close, 0.0), 26, present)
@@ -259,7 +261,9 @@ class IntradaySeasonalityClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         volume = window.latest("volume")
-        present = np.isfinite(volume)
+        present = (
+            window.present()
+        )  # the REAL delivery mask — the count must NOT increment on an absent minute
         state = window.state
         day = window.minute_epoch // self._SESSION_SECONDS
         # reset the running sum/count when the session day changes
@@ -288,7 +292,7 @@ class SwingClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.latest("close")
-        present = np.isfinite(close)
+        present = window.present()  # the REAL delivery mask — the leg must NOT advance on an absent minute
         state = window.state
         n = window.n
         if state.get("extreme") is None:
@@ -357,4 +361,5 @@ class PriorDayClean:
             return {"gap_from_prior_close": np.full(window.n, np.nan)}
         with np.errstate(invalid="ignore", divide="ignore"):
             gap = close / prior_close - 1.0
-        return {"gap_from_prior_close": np.where(np.isfinite(close), gap, np.nan)}
+        # gap is emitted only for a symbol that delivered a bar this minute (present), not on a carried close
+        return {"gap_from_prior_close": np.where(window.present() & np.isfinite(close), gap, np.nan)}

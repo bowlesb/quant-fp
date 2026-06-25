@@ -123,8 +123,16 @@ class Window:
         static: dict[str, np.ndarray] | None = None,
         minute_epoch: int = 0,
         session: dict[str, np.ndarray] | None = None,
+        present: np.ndarray | None = None,
     ) -> None:
         self._ring = ring
+        # The REAL per-symbol current-minute delivery mask (the engine's ``present_pos`` at step time). A
+        # presence-gated group (EMA decay, cross-sectional count, cumulative increment) MUST gate on THIS, not on
+        # ``isfinite(latest(col))`` — because ``latest`` returns the CARRIED value for an absent symbol, so
+        # isfinite is True even when the symbol delivered no bar this minute. Using the carried value as
+        # "present" is the systemic bug (an absent EMA decays, an absent symbol gets counted, a cumulative count
+        # increments) — ``present`` is the one correct source of "did this symbol deliver a bar this minute".
+        self._present = present if present is not None else np.ones(ring.n, dtype=bool)
         self.symbols = ring.symbols
         self.n = ring.n
         # ``state`` is the group's OWN carried per-symbol state (mutated in place across steps): the engine holds
@@ -151,6 +159,13 @@ class Window:
 
     def count(self) -> np.ndarray:
         return self._ring.count()
+
+    def present(self) -> np.ndarray:
+        """The ``(n_symbols,)`` bool mask of which symbols DELIVERED a bar THIS minute. The one correct presence
+        source for a presence-gated group — NOT ``isfinite(latest(col))``, which is True on an absent symbol
+        because ``latest`` returns the carried value. EMA decay, cross-sectional counts, and cumulative
+        increments must gate on this."""
+        return self._present
 
 
 class CleanEngine:
@@ -225,10 +240,17 @@ class CleanEngine:
         self.ring.append(rows, pos)
         if minute_epoch:
             self._watermark = minute_epoch
+        present = np.zeros(self.ring.n, dtype=bool)  # the REAL delivery mask for this minute
+        present[pos] = True
         out: dict[str, dict[str, np.ndarray]] = {}
         for group in self.groups:
             window = Window(
-                self.ring, self._group_state[group.name], self.static, minute_epoch, self.session
+                self.ring,
+                self._group_state[group.name],
+                self.static,
+                minute_epoch,
+                self.session,
+                present,
             )
             out[group.name] = group.compute(window)
         self._last_out = out
