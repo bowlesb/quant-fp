@@ -2364,6 +2364,12 @@ def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
     0.965204@59. We capture the clean engine AT EACH of those minutes and assert it matches — proving clean
     TRACKS legacy across the boundary, not just at one hand-picked minute.
 
+    PRODUCTION-CONSTRUCTION CONFIRMED (Lead's symmetry check): legacy LIVE runs compute_latest() (not the
+    backfill compute()), which emits ONE row at the ANCHOR/last minute (59) = 0.965204 — IDENTICAL to compute()
+    @min59 and to the clean engine's FINAL emit. So the clean port matches production-live at the
+    production-emitted minute; the 0.959045@min58 value is the BATCH value at a non-final minute, also correct.
+    (See /tmp/sb_prod_construction.py: compute_latest B@min59 == 0.965204 == clean final emit.)
+
     (My earlier "0/6 divergence" was a harness off-by-one — I compared clean's FINAL emit @min59 (0.965204)
     against a legacy golden pinned @min58 (0.959045). Both numbers are CORRECT legacy at their own minute; the
     per-minute cell diff below makes that explicit and would catch a real divergence at any of the three.
@@ -2401,7 +2407,9 @@ def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
         if o in (57, 58, 59):  # capture across the gappy-presence boundary (A absent@57/59, present@58)
             captured[o] = {k: v.copy() for k, v in out.items()}
     b = syms.index("B")  # B is dense — its sector_beta is well-defined in legacy
-    # PER-MINUTE cell diff vs the independently-pinned true legacy SectorBetaGroup.compute() output for B:
+    # PER-MINUTE cell diff vs the independently-pinned true legacy SectorBetaGroup.compute() output for B.
+    # min59 (0.9652040) is the ANCHOR/last minute = what legacy LIVE compute_latest() emits AND the clean
+    # engine's final emit (production-construction equivalence, Lead's symmetry check).
     legacy_beta_15m_by_minute = {57: 0.9552009, 58: 0.9590448, 59: 0.9652040}
     for minute, expected in legacy_beta_15m_by_minute.items():
         got = captured[minute]["sector_beta_15m"][b]
@@ -2945,11 +2953,51 @@ from quantlib.features.clean_groups_daily import (  # noqa: E402
     DailyBetaClean,
     LiquidityRankClean,
     MultiDayClean,
+    MultiDayVwapClean,
+    OvernightBetaClean,
     OvernightIntradaySplitClean,
     _daily_return,
     _daily_vol,
     _dist_from_high,
 )
+
+
+def test_multi_day_vwap_overnight_beta_shared_session_matches_legacy() -> None:
+    """#70 value-gate (ruling-(a) ONE-shared-session-fixture mandate): diff clean multi_day_vwap +
+    overnight_beta cell-for-cell vs goldens from the REAL legacy *Group.compute() on ONE shared 80-day daily
+    fixture (tests/daily70_in.json: A=1.4x SPY, B=0.4x, with open/close/volume/vwap). Both daily-snapshot
+    groups read the SAME session matrices (daily_close/open/vwap/volume + spy_row) under the #68 [-1]=today
+    convention (_asof = [:, -2]). Audited the FULL feature set for a high-beta (A) + low-beta (B) name:
+    multi_day_vwap 10/10 (dist_from_vwap/above_vwap across the windows), overnight_beta 3/3
+    (overnight/intraday beta + the W11 asymmetry) match legacy compute()."""
+    import json  # noqa: PLC0415
+
+    daily70_in = json.load(open(os.path.join(os.path.dirname(__file__), "daily70_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "daily70_golden.json")))
+    syms = ["A", "B", "SPY"]
+    session = {
+        "daily_close": np.vstack([np.array(daily70_in[s]["close"]) for s in syms]),
+        "daily_open": np.vstack([np.array(daily70_in[s]["open"]) for s in syms]),
+        "daily_vwap": np.vstack([np.array(daily70_in[s]["vwap"]) for s in syms]),
+        "daily_volume": np.vstack([np.array(daily70_in[s]["volume"]) for s in syms]),
+    }
+    for gname, cls in (("multi_day_vwap", MultiDayVwapClean), ("overnight_beta", OvernightBetaClean)):
+        eng = CleanEngine([cls()], syms, WINDOW)
+        eng.static = {"spy_row": np.array([2])}
+        eng.set_session(session)
+        out = eng.step({"symbol": np.array(syms), "close": session["daily_close"][:, -1], "volume": np.zeros(3),
+                        "minute_epoch": np.array([570 * 60], dtype=np.int64)})[gname]
+        for si, sym in enumerate(("A", "B")):
+            gold = golden[gname][sym]
+            assert set(out) == set(gold), f"{gname} feature set != legacy compute() ({sym})"
+            for fname, gv in gold.items():
+                cv = float(out[fname][si])
+                if gv is None:
+                    assert np.isnan(cv), f"{gname}[{sym}].{fname}: legacy NULL, clean {cv}"
+                else:
+                    assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), (
+                        f"{gname}[{sym}].{fname}: legacy {gv} clean {cv}"
+                    )
 
 
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
