@@ -260,6 +260,49 @@ def _row_corr(x_mat: np.ndarray, y_mat: np.ndarray) -> np.ndarray:
     return np.where(perfect, np.sign(cov), corr)
 
 
+_RESID_MIN_POINTS = 4.0  # legacy resid_std minimum paired count for a meaningful residual distribution
+_RESID_REL_FLOOR = 1e-6  # legacy resid_std relative-spread cutoff (near-perfect-fit → undefined)
+
+
+def _time_ols_slope_r2_resid(
+    x_mat: np.ndarray, y_mat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The time-OLS bundle (slope, r2, resid_std%, mean_y, n) of y on x over a pre-masked (n,k) TIME window,
+    matching the legacy ``_ols_stat_exprs`` centered-sum algebra EXACTLY (so the difference-of-sums rounds
+    identically). x = the rebased-minute axis (the caller masks both to the (T−w,T] window). slope uses the
+    legacy X-side denom floors; r2 the corr-denom floors + perfect-fit n==2→1.0; resid_std = √(SSR/n)/ȳ·100
+    with SSR = syy_c − slope·sxy_c (clip≥0), guarded by n≥4 & sxx_c>0 & resid_var > (1e-6·ȳ)²."""
+    mask = np.isfinite(x_mat) & np.isfinite(y_mat)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, x_mat, 0.0)
+    yf = np.where(mask, y_mat, 0.0)
+    sx, sy = xf.sum(axis=1), yf.sum(axis=1)
+    sxx, syy, sxy = (xf * xf).sum(axis=1), (yf * yf).sum(axis=1), (xf * yf).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        denom_x = n * sxx - sx * sx
+        denom_y = n * syy - sy * sy
+        cov = n * sxy - sx * sy
+        slope = cov / denom_x
+        x_ok = _denom_x_defined(n, sx, sxx, denom_x)
+        slope = np.where(x_ok, slope, np.nan)
+        # r2 (corr² with the legacy floors + perfect-fit n==2 → 1.0)
+        defined_corr = x_ok & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
+        r2 = np.where(defined_corr, (cov * cov) / (denom_x * denom_y), np.nan)
+        r2 = np.where(defined_corr & (n == _OLS_PERFECT_FIT_COUNT), 1.0, r2)
+        # resid_std% via the centered-sum SSR (the same algebra the legacy resid_std stat uses)
+        sxx_c = sxx - sx * sx / n
+        sxy_c = sxy - sx * sy / n
+        syy_c = syy - sy * sy / n
+        slope_r = sxy_c / sxx_c
+        ssr = np.clip(syy_c - slope_r * sxy_c, 0.0, None)
+        mean_y = sy / n
+        resid_var = ssr / n
+        resid_floor = (_RESID_REL_FLOOR * mean_y) ** 2
+        resid_defined = (n >= _RESID_MIN_POINTS) & (sxx_c > 0.0) & (resid_var > resid_floor)
+        resid_std = np.where(resid_defined, np.sqrt(resid_var) / mean_y * 100.0, np.nan)
+    return slope, r2, resid_std, mean_y, n
+
+
 _RANGE_REL_EPS = 1e-9
 
 
@@ -953,4 +996,88 @@ class VolumeClean:
                     std_w > _VOL_STD_REL_EPS * np.abs(mean_w), zscore, np.nan
                 )
                 out[f"volume_ratio_{w}m"] = latest_volume / mean_w
+        return out
+
+
+class ResidualAnalysisClean:
+    """TREND_QUALITY: residual_std_{w}m = std of the OLS residuals around the trailing-w close-vs-time trend, as
+    a percent of mean price (how tightly price hugs its trend line). A time-OLS (x = rebased minute) — the SSR
+    via the legacy centered-sum algebra, guarded n≥4 & sxx_c>0 & resid_var>(1e-6·ȳ)². Legacy:
+    ``ResidualAnalysisGroup``."""
+
+    name = "residual_analysis"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
+    feature_names = tuple(f"residual_std_{w}m" for w in _WINDOWS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        time_axis = _rebased_minute_axis(window.trailing_minute())
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("close", w))
+            x = np.where(in_window, time_axis, np.nan)
+            y = np.where(in_window, close, np.nan)
+            _slope, _r2, resid_std, _mean_y, _n = _time_ols_slope_r2_resid(x, y)
+            out[f"residual_std_{w}m"] = resid_std
+        return out
+
+
+_CM_SLOPE_CAP = 0.001
+_CM_SLOPE_WEIGHT = 0.4
+_CM_R2_WEIGHT = 0.3
+_CM_RESID_WEIGHT = 0.3
+_CM_RESID_SCALE = 0.5
+_CM_FLAG_SLOPE_MIN = 0.0002
+_CM_FLAG_R2_MIN = 0.7
+_CM_FLAG_RESID_MAX = 0.3
+
+
+class CleanMomentumClean:
+    """TREND_QUALITY: clean_momentum_score_{w}m = a 0-1 composite blending normalized slope magnitude, R², and
+    low residuals of the trailing-w close-vs-time OLS; momentum_quality_flag_{w}m = 1.0 when the trend is a
+    high-quality setup (|slope|>thr AND R²>0.7 AND resid_std<0.3). A time-OLS (x = rebased minute). The
+    residual-std term is built from the SAME OLS bundle as residual_analysis (std_close²·(n-1)·(1-r2)/n form,
+    here via the shared SSR). NULL where resid_std is undefined. Legacy: ``CleanMomentumScoreGroup``."""
+
+    name = "clean_momentum"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
+    feature_names = tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("clean_momentum_score", "momentum_quality_flag")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        time_axis = _rebased_minute_axis(window.trailing_minute())
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("close", w))
+            x = np.where(in_window, time_axis, np.nan)
+            y = np.where(in_window, close, np.nan)
+            slope, r2, _ssr_resid, mean_y, _n = _time_ols_slope_r2_resid(x, y)
+            # clean_momentum's resid_std is its OWN formula (NOT residual_analysis's SSR stat): std_close² ·
+            # (n−1)·(1−r2)/n, √, /mean·100 — guarded only by std_close (n≥2) + r2 being defined, a LOOSER gate
+            # than the SSR stat's n≥4/floor (so it's defined on cells the SSR resid is not). mean/std over the
+            # SAME time window.
+            mean_close, _ = _row_mean(np.where(in_window, close, np.nan))
+            std_close = _row_std(np.where(in_window, close, np.nan))
+            n_window = _row_sum(np.where(in_window, 1.0, np.nan))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                var_resid = std_close**2 * (n_window - 1.0) * (1.0 - r2) / n_window
+                resid_std = np.sqrt(np.clip(var_resid, 0.0, None)) / mean_close * 100.0
+                abs_slope = np.abs(slope / mean_y)  # fractional move per minute (legacy _norm_slope)
+                slope_score = np.clip(abs_slope / _CM_SLOPE_CAP, None, 1.0) * _CM_SLOPE_WEIGHT
+                r2_score = r2 * _CM_R2_WEIGHT
+                resid_score = np.clip(1.0 - resid_std / _CM_RESID_SCALE, 0.0, None) * _CM_RESID_WEIGHT
+                score = slope_score + r2_score + resid_score
+                flag = (
+                    (abs_slope > _CM_FLAG_SLOPE_MIN)
+                    & (r2 > _CM_FLAG_R2_MIN)
+                    & (resid_std < _CM_FLAG_RESID_MAX)
+                )
+            # the whole group keys on resid_std being defined (legacy: when(resid_std.is_null()).then(None)).
+            resid_undefined = ~np.isfinite(resid_std)
+            out[f"clean_momentum_score_{w}m"] = np.where(resid_undefined, np.nan, score)
+            out[f"momentum_quality_flag_{w}m"] = np.where(resid_undefined, np.nan, flag.astype(np.float64))
         return out
