@@ -218,7 +218,12 @@ class CleanEngine:
         frame: the present symbols are read by name into their fixed index slots."""
         syms = minute_bars["symbol"]
         pos = np.array([self.ring.index[s] for s in syms], dtype=np.int64)
-        rows = np.column_stack([np.asarray(minute_bars[c], dtype=np.float64) for c in self.cols])
+        if self.cols:
+            rows = np.column_stack([np.asarray(minute_bars[c], dtype=np.float64) for c in self.cols])
+        else:
+            # a group that reads no bar columns (e.g. ``calendar`` — purely timestamp-derived): the ring
+            # carries no values, but the minute's present positions still drive present()/the watermark.
+            rows = np.empty((len(syms), 0), dtype=np.float64)
         return rows, pos
 
     def step(self, minute_bars: dict[str, np.ndarray]) -> dict[str, dict[str, np.ndarray]]:
