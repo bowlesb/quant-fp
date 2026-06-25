@@ -508,6 +508,12 @@ class IncrementalEngine:
         self.obv_running: dict[str, np.ndarray] = (
             {}
         )  # ns -> (n_symbols,) running cumulative for "cumulative" slots
+        # FP_STATE_SPINE: the carried per-symbol prior close (last minute's close, one value/symbol), maintained
+        # each fold exactly like ``obv_running`` so the polars-free derive never re-reads the historical buffer
+        # for ``close.shift(1).over("symbol")``. Seeded from the buffer once (off the hot path), then updated to
+        # the current close at the end of each spine fold. NaN where a symbol has not yet been seen.
+        self.spine_prior_close: np.ndarray | None = None
+        self._in_seed = False  # True only during the seed replay loop, to keep the spine path out of warm-up
         # FP_POINT_RING: carry the groups' point/lag columns in an O(1) per-symbol positional ring instead of
         # the per-minute whole-buffer ``resolve_points`` pass (phase_profile: ~6ms framework overhead). The
         # specs (the (source, lag) columns to carry) are pure plan metadata, built once. ``point_ring`` is the
@@ -670,6 +676,7 @@ class IncrementalEngine:
         # (flag on AND the engine's groups are exactly {price_volume}); off → today's exact path, byte-identical.
         if (
             slice_derive
+            and not self._in_seed
             and spine_active({g.name for g in self.groups})
             and self.symbols is not None
             and minute == frame["minute"].max()
@@ -733,51 +740,41 @@ class IncrementalEngine:
         n_sym = len(symbols)
         sym_pos = {sym: i for i, sym in enumerate(symbols)}
 
-        # Pull the needed columns once to numpy. The live frame is NOT guaranteed sorted (capture delivers it
-        # minute-major), so we order it [symbol, minute] HERE with a numpy lexsort — polars-free (a numpy argsort
-        # on the extracted arrays, not a polars .sort()), so the per-minute COMPUTE stays zero-polars. After the
-        # lexsort each symbol's rows are contiguous and minute-ascending, exactly the invariant the block
-        # extraction below needs (and that the non-spine path establishes with its own ``.sort(["symbol",
-        # "minute"])``).
-        sub = frame.select(["symbol", "minute", "close", "high", "low", "volume", "__anchor_volume"])
-        sym_raw = sub["symbol"].to_numpy()
-        minute_raw = sub["minute"].dt.epoch("s").to_numpy().astype(np.int64)
-        srt = np.lexsort((minute_raw, sym_raw))  # primary key = symbol, secondary = minute (ascending)
-        sym_arr = sym_raw[srt]
-        close_arr = sub["close"].to_numpy().astype(np.float64)[srt]
-        high_arr = sub["high"].to_numpy().astype(np.float64)[srt]
-        low_arr = sub["low"].to_numpy().astype(np.float64)[srt]
-        vol_arr = sub["volume"].to_numpy().astype(np.float64)[srt]
-        anchor_arr = sub["__anchor_volume"].to_numpy().astype(np.float64)[srt]
-
-        # Per-symbol contiguous block boundaries in the now-sorted arrays: starts[i] is the first row of symbol
-        # i's block, so its LATEST row is the row before the next block's start (the block's last, minute-max),
-        # and its PRIOR row is one before that (only if the block has >= 2 rows — else no prior bar, lag is null).
-        uniq, starts = np.unique(
-            sym_arr, return_index=True
-        )  # np.unique returns sorted-unique + first indices
-        ends = np.append(starts[1:], len(sym_arr))  # one past each block's last row
+        # Read ONLY the current minute's bars — one row per present symbol — and scatter them into the fixed
+        # symbol index by numpy position. NO sort and NO whole-buffer read: the historical context the derive
+        # needs (each symbol's PRIOR close) comes from carried state (``spine_prior_close``), not from re-reading
+        # the buffer. ``minute == latest`` is a boolean row-mask (not a sort/pivot/join — the ops Ben named), and
+        # the scatter is numpy fancy-indexing. This is the spine's whole point: derive = current bar + carried
+        # state, so the per-minute path has zero sort.
+        minute_epoch = int(minute.timestamp())  # type: ignore[attr-defined]
+        sym_all = frame["symbol"].to_numpy()
+        min_all = frame["minute"].dt.epoch("s").to_numpy().astype(np.int64)
+        at_t = min_all == minute_epoch  # the current minute's rows (the only ones the live step folds)
+        cur_syms = sym_all[at_t]
+        pos = np.array([sym_pos.get(s, -1) for s in cur_syms], dtype=np.int64)
+        if (pos < 0).any():
+            raise SymbolSetExpanded([str(s) for s in cur_syms[pos < 0][:5]])  # new ticker -> caller re-seeds
 
         close = np.full(n_sym, np.nan)
         high = np.full(n_sym, np.nan)
         low = np.full(n_sym, np.nan)
         volume = np.full(n_sym, np.nan)
         anchor_volume = np.full(n_sym, np.nan)
-        prior_close = np.full(n_sym, np.nan)
         present = np.zeros(n_sym, dtype=bool)
-        for block_i, sym in enumerate(uniq):
-            pos = sym_pos.get(sym)
-            if pos is None:
-                raise SymbolSetExpanded([str(sym)])  # a genuinely new ticker — caller re-seeds
-            last = ends[block_i] - 1
-            close[pos] = close_arr[last]
-            high[pos] = high_arr[last]
-            low[pos] = low_arr[last]
-            volume[pos] = vol_arr[last]
-            anchor_volume[pos] = anchor_arr[last]
-            present[pos] = True
-            if last - 1 >= starts[block_i]:  # the block has a prior row -> positional shift(1)
-                prior_close[pos] = close_arr[last - 1]
+        close[pos] = frame["close"].to_numpy().astype(np.float64)[at_t]
+        high[pos] = frame["high"].to_numpy().astype(np.float64)[at_t]
+        low[pos] = frame["low"].to_numpy().astype(np.float64)[at_t]
+        volume[pos] = frame["volume"].to_numpy().astype(np.float64)[at_t]
+        anchor_volume[pos] = frame["__anchor_volume"].to_numpy().astype(np.float64)[at_t]
+        present[pos] = True
+
+        # PRIOR close = carried state (last minute's close per symbol), NOT a buffer re-read. Seeded once at
+        # ``seed`` (off the hot path); NaN for a symbol not yet seen (a first appearance -> ret null, exactly as
+        # ``close.shift(1).over("symbol")`` leaves it). After this minute's derive we roll it forward to the
+        # current close (below), so next minute reads it as the prior.
+        if self.spine_prior_close is None:
+            self.spine_prior_close = np.full(n_sym, np.nan)
+        prior_close = self.spine_prior_close
 
         y_anchored = bool(self.reg_y_anchor)  # FP_RUST_REDUCE on -> pv y is centered on the volume anchor
         safe = price_volume_safe_cols(
@@ -789,7 +786,6 @@ class IncrementalEngine:
 
         # OBV-slope OLS pairs from the carried state (== _stateful_matrix's cumulative+time block, numpy already).
         assert self.ref_epoch is not None
-        minute_epoch = int(minute.timestamp())  # type: ignore[attr-defined]
         time_x = np.full(n_sym, (minute_epoch - self.ref_epoch) / 60.0, dtype=np.float64)
         inc = obv_increment(close, prior_close, volume, present)
         for ns in self.stateful_ns:
@@ -809,6 +805,11 @@ class IncrementalEngine:
             }
             for key, column in pairs.items():
                 matrix[:, self.col_index[f"__rd_{ns}_{key}"]] = column
+
+        # Roll the carried prior close forward: this minute's close becomes next minute's prior (per present
+        # symbol; an absent symbol keeps its last-seen close, so a gap still reads the last PRESENT bar as the
+        # positional shift(1), matching backfill). One per-symbol scatter — no buffer read.
+        self.spine_prior_close[present] = close[present]
         return matrix
 
     def _reindex_to_index(self, row: pl.DataFrame) -> tuple[pl.DataFrame, np.ndarray]:
@@ -883,6 +884,10 @@ class IncrementalEngine:
             # Seed the point ring by folding every buffered minute (== resolve_points over the buffer at each
             # minute, carried), so the live ring state == the backfill points the instant seed returns.
             self.point_ring = PointRing(self.symbols, self.point_specs)
+        # Seed runs the PROVEN polars slice-derive for EVERY minute (incl the buffer's latest) — the spine numpy
+        # path is the live per-minute hot path only, never the once-per-session warm-up. ``_in_seed`` keeps the
+        # spine branch (which would otherwise trigger on the last seed minute == buffer max) out of the replay.
+        self._in_seed = True
         for minute in sorted(buffer_frame["minute"].unique()):
             minute_epoch = int(minute.timestamp())
             self._roll_time_origin(minute_epoch)
@@ -890,6 +895,21 @@ class IncrementalEngine:
             self.state.trim()
             if self.point_ring is not None:
                 self.point_ring.fold(buffer_frame.filter(pl.col("minute") == minute))
+        self._in_seed = False
+        # Seed the carried prior close: each symbol's LAST close in the buffer, so the first live step reads it as
+        # the positional shift(1). One group_by at seed (off the hot path), aligned to the fixed index.
+        last_close = (
+            buffer_frame.sort("minute")
+            .group_by("symbol", maintain_order=True)
+            .last()
+            .select(["symbol", "close"])
+        )
+        prior = np.full(len(self.symbols), np.nan)
+        pos_of = {s: i for i, s in enumerate(self.symbols)}
+        for sym, cl in zip(last_close["symbol"].to_list(), last_close["close"].to_list()):
+            if sym in pos_of and cl is not None:
+                prior[pos_of[sym]] = float(cl)
+        self.spine_prior_close = prior
         # The internal invariants are cheap (O(windows)) and run by DEFAULT at init — a corrupted fold/expire
         # surfaces immediately, on every seed, not only on the warm-start path. The deep O(buffer) sum-vs-
         # buffer reconstruction is opt-in (FP_INCREMENT_DEEP_CHECK=1) so steady-state throughput is unaffected.
