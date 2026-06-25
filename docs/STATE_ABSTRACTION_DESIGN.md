@@ -11,10 +11,17 @@
 > ensuring complexity is as limited as possible so we reduce overhead."*
 
 Three requirements, and the design is judged on them — not on speed. We measured the real numbers so we don't
-overclaim: the full bar→vector path is **277ms per minute (median), of which feature compute is ~89ms (~32%)**;
-the rest is store-write + IPC + bus. The compute itself is already ~42× under the per-minute budget. So this is a
-**simplicity** win — measured by mechanisms and lines removed — and even the part of the time it *could* touch
-(the ~32% compute third) is not the point. Throughput is a floor we must not regress, never a target.
+overclaim, and we're careful to quote them at a matched scale:
+
+- **At sim scale (a bounded ~1,000-symbol run):** the full bar→vector path is **277ms per minute (median)**, of
+  which **feature compute is ~89ms (~32%)**; the other ~68% is store-write + IPC + bus + shard contention. So
+  even the part of the latency the demolition *could* touch is only about a third.
+- **At full universe (~7,000 symbols, 8 shards):** the compute alone is ~1.4s per minute — comfortably ~42×
+  under the 60-second budget. (Different scale from the line above — don't add them; the apples-to-apples
+  "compute is ~1/3 of bar→vector" is the sim-scale pair.)
+
+Either way the conclusion is the same: **this is a simplicity win** — measured by mechanisms and lines removed —
+not a latency rescue. Throughput is a floor we must not regress, never a target.
 
 1. **ONE abstraction to hold state.**
 2. **No more implementations than we actually need** — the honest minimum, not artificial unification.
@@ -228,9 +235,9 @@ changes at any step, and the fingerprint is unchanged throughout.
 
 ## What this is NOT
 
-- **NOT a speed project.** The full bar→vector is 277ms/min, compute is ~89ms (~32%) of that and already 42×
-  under budget; the demolition only touches that compute third and isn't trying to shrink it. Throughput is a
-  floor we won't regress, not a target.
+- **NOT a speed project.** At sim scale the full bar→vector is 277ms/min and compute is ~89ms (~32%) of it; at
+  full universe the compute is ~1.4s/min, ~42× under budget. The demolition only touches the compute fraction
+  and isn't trying to shrink it. Throughput is a floor we won't regress, not a target.
 - **NOT "one universal ring."** EMA and Cumulative genuinely fork; forcing them in would add complexity. The
   honest minimum is one container + ~3-4 folds.
 - **NOT a value change.** Every step is byte-identical to backfill, enforced by #451. The fingerprint is unchanged.
