@@ -80,9 +80,9 @@ def _dist_from_high(daily_close: np.ndarray, w: int) -> np.ndarray:
 class MultiDayClean:
     """DAILY-SNAPSHOT: multi-day return / volatility / N-day-high distance from the settled daily closes,
     point-in-time as of the prior close. daily_return_{w}d, daily_vol_{w}d, dist_from_{w}d_high. Reads
-    ``window.session['daily_close']``. Legacy: ``MultiDayGroup`` (DailySnapshotGroup)."""
+    ``window.session['daily_close']``. Legacy: ``MultiDayReturnGroup`` (name "multi_day_returns")."""
 
-    name = "multi_day"
+    name = "multi_day_returns"
     input_cols = ()  # reads only the daily snapshot, not the minute bars
     _DAY_WINDOWS: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 90, 120, 180, 240)
     _VOL_DAYS: tuple[int, ...] = (5, 10, 20, 30, 60)
