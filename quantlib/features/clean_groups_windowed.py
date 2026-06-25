@@ -740,3 +740,125 @@ class EfficiencyClean:
             out[f"efficiency_ratio_{w}m"] = np.abs(ratio)
             out[f"directional_efficiency_{w}m"] = ratio
         return out
+
+
+def _positional_shift(mat: np.ndarray, k: int) -> np.ndarray:
+    """Shift a ``(n, window)`` trailing matrix RIGHT by ``k`` columns (positional ``shift(k).over(symbol)``):
+    column t holds the value from ``k`` present-bars earlier; the first ``k`` columns become NaN. Used for the
+    lagged-return regressors / prior-return references that legacy builds with ``close.shift(k)``."""
+    out = np.full_like(mat, np.nan)
+    if k < mat.shape[1]:
+        out[:, k:] = mat[:, : mat.shape[1] - k]
+    return out
+
+
+class ReturnDynamicsClean:
+    """MOMENTUM: return-structure features. autocorr_{1,2}_{w}m = lag-1/lag-2 autocorrelation of the 1m return
+    over the TIME window (corr of ret vs its positional lag, in [-1,1]); ret_accel_{w}m = trailing-w return
+    minus the prior-w return. MIXED: the autocorr is a TIME-windowed corr of value-on-(positional-lagged-value),
+    but ret_accel's references ``close.shift(w)``/``shift(2w)`` are POSITIONAL w/2w-bar lookbacks. Legacy:
+    ``ReturnDynamicsGroup`` (ReductionGroup)."""
+
+    name = "return_dynamics"
+    input_cols = ("close",)
+    _AUTOCORR_WINDOWS: tuple[int, ...] = (10, 15, 30, 60, 120)
+    _ACCEL_WINDOWS: tuple[int, ...] = (5, 10, 15, 30, 60)
+    feature_names = (
+        tuple(f"autocorr_1_{w}m" for w in _AUTOCORR_WINDOWS)
+        + tuple(f"autocorr_2_{w}m" for w in _AUTOCORR_WINDOWS)
+        + tuple(f"ret_accel_{w}m" for w in _ACCEL_WINDOWS)
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        latest_close = window.latest("close")
+        n_sym = close.shape[0]
+        ret = _returns(close)  # ret[t] = close[t]/close[t-1] − 1 (positional 1m return)
+        ret_lag1 = _positional_shift(ret, 1)  # ret at t−1
+        ret_lag2 = _positional_shift(ret, 2)  # ret at t−2
+        out: dict[str, np.ndarray] = {}
+        for w in self._AUTOCORR_WINDOWS:
+            # TIME window (legacy corr_ = rolling OLS over rolling_sum_by("minute")): corr over the bars in the
+            # last w minutes where BOTH the return and its lag are present.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            out[f"autocorr_1_{w}m"] = _row_corr(
+                np.where(in_window, ret_lag1, np.nan), np.where(in_window, ret, np.nan)
+            )
+            out[f"autocorr_2_{w}m"] = _row_corr(
+                np.where(in_window, ret_lag2, np.nan), np.where(in_window, ret, np.nan)
+            )
+        for w in self._ACCEL_WINDOWS:
+            # ret_accel = (close[T]/close.shift(w) − 1) − (close.shift(w)/close.shift(2w) − 1) — POSITIONAL
+            # w/2w-bar lookbacks (legacy pt_(l{w})/pt_(l{2w})).
+            lw = close[:, -(w + 1)] if close.shape[1] > w else np.full(n_sym, np.nan)
+            l2w = close[:, -(2 * w + 1)] if close.shape[1] > 2 * w else np.full(n_sym, np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                recent = latest_close / lw - 1.0
+                prior = lw / l2w - 1.0
+                out[f"ret_accel_{w}m"] = recent - prior
+        return out
+
+
+class MomentumConsistencyClean:
+    """MOMENTUM: path-consistency from the 1m return signs over each window. consistent_direction_{w}m =
+    fraction of the window's returns whose sign matches the net w-move (0.5 when net flat); reversal_count_{w}m =
+    sign-flips between consecutive returns / w; momentum_acceleration_{w}m = (recent-half mean − older-half mean)
+    × 100. All additive TIME-windowed sums of short-lag sign indicators; the net-move reference ``close.shift(w)``
+    is a POSITIONAL w-bar lookback. Legacy: ``MomentumConsistencyGroup`` (ReductionGroup)."""
+
+    name = "momentum_consistency"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
+    feature_names = tuple(
+        f"{prefix}_{w}m"
+        for w in _WINDOWS
+        for prefix in ("consistent_direction", "reversal_count", "momentum_acceleration")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        latest_close = window.latest("close")
+        n_sym = close.shape[0]
+        ret = _returns(close)  # close[t]/close[t-1] − 1; NaN where the immediate prior minute is absent
+        ret_prev = _positional_shift(ret, 1)
+        finite_ret = np.isfinite(ret)
+        up = np.where(finite_ret & (ret > 0.0), 1.0, np.where(finite_ret, 0.0, np.nan))
+        down = np.where(finite_ret & (ret < 0.0), 1.0, np.where(finite_ret, 0.0, np.nan))
+        has_ret = np.where(finite_ret, 1.0, np.nan)
+        # a reversal: both returns present, nonzero, and opposite sign.
+        flip_bool = (
+            finite_ret
+            & np.isfinite(ret_prev)
+            & (ret != 0.0)
+            & (ret_prev != 0.0)
+            & ((ret > 0.0) != (ret_prev > 0.0))
+        )
+        flip = np.where(finite_ret, flip_bool.astype(np.float64), np.nan)
+        ret_filled = np.where(finite_ret, ret, np.nan)  # present-only 1m return (sum excludes absent)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            half = w // 2
+            full_mask = np.isfinite(window.trailing_time("close", w))
+            half_mask = np.isfinite(window.trailing_time("close", half))
+            n_ret = _row_sum(np.where(full_mask, has_ret, np.nan))
+            up_w = _row_sum(np.where(full_mask, up, np.nan))
+            down_w = _row_sum(np.where(full_mask, down, np.nan))
+            flip_w = _row_sum(np.where(full_mask, flip, np.nan))
+            # net move over the window = close[T] − close.shift(w) (POSITIONAL w-bar lookback). NaN until the
+            # w-ago bar exists.
+            lw = close[:, -(w + 1)] if close.shape[1] > w else np.full(n_sym, np.nan)
+            net = latest_close - lw
+            with np.errstate(invalid="ignore", divide="ignore"):
+                frac = np.where(net > 0.0, up_w / n_ret, np.where(net < 0.0, down_w / n_ret, 0.5))
+                defined_dir = (n_ret > 0.0) & np.isfinite(net)
+                out[f"consistent_direction_{w}m"] = np.where(defined_dir, frac, np.nan)
+                out[f"reversal_count_{w}m"] = np.where(n_ret > 0.0, flip_w / float(w), np.nan)
+                # acceleration: recent half-window mean − older (full − recent) mean, ×100.
+                recent_n = _row_sum(np.where(half_mask, has_ret, np.nan))
+                recent_sum = _row_sum(np.where(half_mask, ret_filled, np.nan))
+                older_n = n_ret - recent_n
+                older_sum = _row_sum(np.where(full_mask, ret_filled, np.nan)) - recent_sum
+                recent_mean = np.where(recent_n > 0.0, recent_sum / recent_n, np.nan)
+                older_mean = np.where(older_n > 0.0, older_sum / older_n, np.nan)
+                out[f"momentum_acceleration_{w}m"] = (recent_mean - older_mean) * 100.0
+        return out
