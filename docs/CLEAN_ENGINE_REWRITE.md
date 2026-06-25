@@ -47,24 +47,32 @@ and we do not claim it as one.
 
 ## What's DELETED (compute-engine sprawl — proposals on the branch, for your approval)
 
-Deleted by CodeAudit as branch proposals (not applied live):
+Deleted by CodeAudit as branch proposals (not applied live). **Two machineries that look similar but are NOT
+the same** — this distinction is load-bearing:
+
+**DELETABLE — the byte-parity-BETWEEN-TWO-FORMS machinery (obsoleted by the invariant):**
 - the second engine + the four `step*` twins
 - the per-kind state wrappers (`stateful.py`: EMA/Cumulative/LastK/Extrema/ReductionFold) + the
   `WindowedSumState`/`PointRing`/`ValueInputRing` constellation
-- the duplicate capture paths (`capture` / `real_capture` / `sharded_capture` redundancy)
-- the **byte-parity machinery** Ben dropped: the #451 demolition gate, `validate.py` / `validation_sweep` /
-  `parity_audit` / `compare`, the `FP_*_PARITY` shadow plumbing
+- `parity_audit.py`, the **#451 value-parity demolition gate**, the `FP_*_PARITY` shadow flags, `parity.py`
 - dead code, `__pycache__`, stale compiled artifacts
 
-_<final delete list + LOC from CodeAudit>_
+These existed ONLY to chase fast-live-vs-backfill divergence between two compute forms. The backfill=replay
+invariant makes the two forms the **same** form → this machinery is genuinely obsolete. **The honest Ben
+framing: dropped because the design removes what it guarded, not because we stopped caring about correctness.**
 
-## What REMAINS (kept — production, not sprawl)
+## What REMAINS (HARD KEEP — production, NOT sprawl)
 
-- the ~68 group-math files (the actual features)
-- **the live TRUST / CERT system** — `within_day_*` certifier, `trust_lifecycle`, the trust-grading the
-  strategies trade on. It grades *via* parity but it is a production capability the live trading depends on —
-  explicitly NOT deleted. (Anything CodeAudit was unsure about is flagged here for your call, not cut.)
-- the registry, `base.py` contracts, the store/bus boundary
+- the ~67 group-math files (the actual features)
+- **the live TRUST / CERT system — HARD KEEP, NOT byte-parity:** `compare.py`, `validate.py`,
+  `validation_sweep.py`, `within_day_*` (the certifier), `trust_lifecycle`, the trust-grading the strategies
+  trade on. These answer a **DIFFERENT question** — "is the live feature trustworthy vs *settled reality*,
+  stable enough to trade real money on" — NOT "do two compute forms agree." backfill=replay says NOTHING about
+  that. The live OLD engine still produces real live-vs-settled divergence (provisional close vs settled bar
+  revisions), so the cert is doing real work TODAY; deleting it would blind the live trust system. Whether any
+  cert piece becomes retirable AFTER the new engine goes live is a SEPARATE, carefully-argued FUTURE decision —
+  never an overnight delete. (Trust/capture already IMPORT compare/validate/validation_sweep — confirmed.)
+- the registry, `base.py` contracts, the store/bus boundary, the capture/store path
 
 ## How correctness is checked (replacing byte-parity)
 
