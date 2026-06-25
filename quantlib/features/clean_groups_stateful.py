@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from quantlib.features.clean_engine import Window
-from quantlib.features.clean_groups_windowed import _masked_mean, _masked_std, _windowed_sum
+from quantlib.features.clean_groups_windowed import _row_mean, _row_std, _row_sum
 
 _ET = ZoneInfo("America/New_York")
 _OPEN_MINUTE = 570  # 09:30 ET — the session-cumulative groups confine to RTH (et_minute_of_day >= this)
@@ -244,36 +244,37 @@ class TechnicalClean:
     ) + tuple(f"sma_dist_{w}m" for w in _SMA_WINDOWS)
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
-        close_buf = window.trailing("close")
         close = window.latest("close")
         present = window.present()
         state = window.state
 
-        # MACD — recursive ADJUSTED EWM of close (12/26 spans) + 9-span EMA of the macd line.
+        # MACD — recursive ADJUSTED EWM of close (12/26 spans) + 9-span EMA of the macd line (NOT windowed).
         ema12 = _adjusted_ema(state, "ema12", np.where(present, close, np.nan), 12, present)
         ema26 = _adjusted_ema(state, "ema26", np.where(present, close, np.nan), 26, present)
         macd_line = ema12 - ema26
         macd_signal = _adjusted_ema(state, "signal", np.where(present, macd_line, np.nan), 9, present)
 
-        # RSI_14m — windowed gain/loss sums over the trailing 14 per-bar price changes.
+        # RSI_14m — gain/loss sums over the trailing 14-MINUTE window (legacy rolling_sum_by('minute','14m')).
+        # The per-bar diff is between consecutive PRESENT bars (positional, = close - close.shift(1)); the SUM
+        # is over the bars whose minute is within the 14m window.
+        close_full = window.trailing("close")
+        close_14 = window.trailing_time("close", 14)  # bars in the last 14 minutes (the rest NaN)
         with np.errstate(invalid="ignore"):
-            diff = close_buf[:, 1:] - close_buf[:, :-1]
-            diff = np.concatenate([np.full((close_buf.shape[0], 1), np.nan), diff], axis=1)
-            gain = np.where(diff > 0.0, diff, 0.0)
-            loss = np.where(diff < 0.0, -diff, 0.0)
-        # restore NaN where the diff itself is NaN (no prior bar) so warm-up bars don't count as 0-gain
-        gain = np.where(np.isfinite(diff), gain, np.nan)
-        loss = np.where(np.isfinite(diff), loss, np.nan)
-        sum_gain = _windowed_sum(gain, 14)
-        sum_loss = _windowed_sum(loss, 14)
+            diff = close_full[:, 1:] - close_full[:, :-1]
+            diff = np.concatenate([np.full((close_full.shape[0], 1), np.nan), diff], axis=1)
+            in14 = np.isfinite(close_14)  # the time-window mask, aligned to close_full columns
+            gain = np.where(in14 & (diff > 0.0), diff, np.where(in14 & np.isfinite(diff), 0.0, np.nan))
+            loss = np.where(in14 & (diff < 0.0), -diff, np.where(in14 & np.isfinite(diff), 0.0, np.nan))
+        sum_gain = _row_sum(gain)
+        sum_loss = _row_sum(loss)
         total = sum_gain + sum_loss
         with np.errstate(invalid="ignore", divide="ignore"):
             rsi = np.where(total > 0.0, np.clip(100.0 * sum_gain / total, 0.0, 100.0), np.nan)
 
-        # Bollinger (20m): position = (close − sma20)/(2·std20); width = 4·std20/sma20. Relative-eps + finite
-        # guard so a degenerate flat window is NULL (matches legacy bb_well_defined).
-        sma20, _ = _masked_mean(close_buf, 20)
-        std20 = _masked_std(close_buf, 20)
+        # Bollinger (20-MINUTE window): position = (close − sma20)/(2·std20); width = 4·std20/sma20.
+        close_20 = window.trailing_time("close", 20)
+        sma20, _ = _row_mean(close_20)
+        std20 = _row_std(close_20)
         with np.errstate(invalid="ignore", divide="ignore"):
             bb_ok = np.isfinite(std20) & (std20 > _BB_REL_EPS * np.abs(sma20)) & (np.abs(sma20) > 0.0)
             bb_position = np.where(bb_ok, (close - sma20) / (2.0 * std20), np.nan)
@@ -288,7 +289,7 @@ class TechnicalClean:
             "bb_width_20m": bb_width,
         }
         for w in _SMA_WINDOWS:
-            sma_w, _ = _masked_mean(close_buf, w)
+            sma_w, _ = _row_mean(window.trailing_time("close", w))  # SMA over the trailing-w-MINUTE window
             with np.errstate(invalid="ignore", divide="ignore"):
                 out[f"sma_dist_{w}m"] = close / sma_w - 1.0
         return out

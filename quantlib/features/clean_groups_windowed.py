@@ -167,6 +167,36 @@ def _row_nanmin(mat: np.ndarray) -> np.ndarray:
     return np.where(all_nan, np.nan, out)
 
 
+def _row_sum(mat: np.ndarray) -> np.ndarray:
+    """Per-row sum over a full ``(n, k)`` matrix, NaN bars → 0 (an all-NaN row sums to 0). For an already
+    TIME-windowed matrix (from ``trailing_time``)."""
+    return np.where(np.isfinite(mat), mat, 0.0).sum(axis=1)
+
+
+def _row_mean(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row mean of a full ``(n, k)`` matrix ignoring NaN, + the present-count. NaN where the row is empty.
+    For an already TIME-windowed matrix."""
+    mask = np.isfinite(mat)
+    n = mask.sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(mask, mat, 0.0).sum(axis=1) / n
+    return np.where(n > 0, mean, np.nan), n
+
+
+def _row_std(mat: np.ndarray) -> np.ndarray:
+    """Per-row SAMPLE std (ddof=1) of a full ``(n, k)`` matrix ignoring NaN; NaN where fewer than 2 present. For
+    an already TIME-windowed matrix."""
+    mask = np.isfinite(mat)
+    n = mask.sum(axis=1).astype(np.float64)
+    x = np.where(mask, mat, 0.0)
+    sum_x = x.sum(axis=1)
+    sum_x2 = (x * x).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        var = (sum_x2 - sum_x * sum_x / n) / (n - 1.0)
+        std = np.sqrt(np.clip(var, 0.0, None))
+    return np.where(n > 1.0, std, np.nan)
+
+
 _RANGE_REL_EPS = 1e-9
 
 
