@@ -9,7 +9,7 @@ night — nothing live changed, nothing armed.
 
 Three things, instead of the 90-file machinery sprawl:
 
-1. **`clean_engine.py` (~190 LOC, one file)** — the ONE engine, on your `tracker.py` model:
+1. **`clean_engine.py` (~265 LOC, one file)** — the ONE engine, on your `tracker.py` model:
    - `RingBuffer`: per-symbol circular buffer of the last `window` bar columns. O(1) append; a trailing-window
      read is a roll. Absent symbols don't advance their cursor, so a gap reads the last *present* bars — the
      positional window a feature wants, gap-safe by construction.
@@ -29,14 +29,21 @@ Three things, instead of the 90-file machinery sprawl:
    sanity (valid ranges, no all-NaN/all-zero, monotonicity), and the golden-set quality checks. **Not**
    byte-identity to the old floats.
 
-## File / LOC — BEFORE → AFTER
+## File / LOC — BEFORE → AFTER (honest framing)
 
-| | BEFORE (main) | AFTER (this branch) |
+**Do NOT read this as "32k → 224 LOC."** The 32,160-LOC codebase is two layers, and only the MACHINERY
+layer collapses — the feature MATH stays (it's the actual features, just ported to the new interface).
+CodeAudit's locked baseline:
+
+| layer | BEFORE | what happens |
 |---|---|---|
-| machinery `.py` files in `quantlib/features/` | **90** | _<filled as deletions land>_ |
-| machinery LOC (non-group) | ~32,000 | _<filled>_ |
-| the engine | 2 engines + 4 `step*` twins + per-kind state wrappers (`declarative.py` + `incremental.py` + `stateful.py` + the ring constellation, ~3,500 LOC) | **`clean_engine.py`, ~190 LOC, one file** |
-| group-math files | 68 (kept) | 68 (kept, ported to one interface) |
+| **machinery** (the sprawl) | **89 files / 22,275 LOC** — two engines + `step*` twins + per-kind wrappers + the ring/building-block constellation | **collapses** toward: the **224-LOC engine** + ~894 LOC of absorbed building-blocks + the trust/capture that STAYS. The ~3,182-LOC engine-collapse lands group-by-group as the port proceeds. |
+| **feature math** | **67 files / 9,885 LOC** | **STAYS** — these are the features. Each group ports to the one `compute(window)` interface (its math is unchanged, just re-expressed). |
+| **total** | **156 files / 32,160 LOC** | machinery shrinks; math stays; trust/capture stays. |
+
+**Tonight's actual delete = 602 LOC** (`parity_audit.py`, grep-clean). The ~3,182-LOC engine-collapse is the
+**migration headline** that accrues group-by-group once Ben approves the approach — it is NOT a tonight number,
+and we do not claim it as one.
 
 ## What's DELETED (compute-engine sprawl — proposals on the branch, for your approval)
 
@@ -126,5 +133,6 @@ The trust system is unchanged; it grades the new engine's output exactly as it g
   the deletion guardrail (trust system carved out, all deletions = branch proposals).
 - IN PROGRESS: porting the remaining groups; CP's correctness validation; CodeAudit's deletion PRs + the final
   BEFORE→AFTER numbers.
-- The headline is the SHAPE: 90-file machinery → one ~190-LOC engine + the kept math + correctness validation.
+- The headline is the SHAPE: the ~22k-LOC / 89-file machinery layer collapses toward one ~265-LOC engine +
+  absorbed building-blocks; the 9,885-LOC feature math STAYS (ported to the one interface); trust/capture STAYS.
   The exact LOC delta fills in as the deletions land; the engine + the proven interface are the substance.
