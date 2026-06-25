@@ -398,6 +398,31 @@ def test_macd_line_matches_ema_recurrence() -> None:
     assert out["macd_line"][0] == pytest.approx(expected, rel=1e-9)
 
 
+def test_macd_line_is_adjusted_ewm_not_simple_vs_polars() -> None:
+    """EMA-CONVENTION GATE (Lead): pin MacdClean's macd_line against the REAL legacy primitive — polars
+    ewm_mean(adjust=True) — directly, AND assert it is NOT the simple (adjust=False) recurrence, in the WARM-UP
+    zone where they diverge most. This guards the whole recursive-EMA class (MacdClean + technical's MACD) from
+    a silent revert to the simple convention, and validates _ema_ref itself against polars (not just self-
+    consistency). On [100,110,120] span12 the gap is adjusted 111.11 vs simple 104.38 — caught here."""
+    import polars as pl  # noqa: PLC0415
+
+    closes = [100.0, 101.0, 103.0, 102.0, 105.0, 107.0, 106.0, 110.0, 108.0, 112.0, 111.0, 115.0]
+    eng = CleanEngine([MacdClean()], ["A"], WINDOW)
+    clean_line = []
+    for c in closes:
+        out = eng.step({"symbol": np.array(["A"]), "close": np.array([c])})["macd"]
+        clean_line.append(float(out["macd_line"][0]))
+    series = pl.Series(closes)
+    adjusted = (series.ewm_mean(span=12, adjust=True) - series.ewm_mean(span=26, adjust=True)).to_numpy()
+    simple = (series.ewm_mean(span=12, adjust=False) - series.ewm_mean(span=26, adjust=False)).to_numpy()
+    np.testing.assert_allclose(clean_line, adjusted, rtol=1e-9,
+                               err_msg="MacdClean macd_line != polars ewm_mean(adjust=True) — the legacy convention")
+    # the WARM-UP cells must differ from the simple form (else the fixture can't tell the conventions apart).
+    assert not np.allclose(clean_line[:5], simple[:5], rtol=1e-6), (
+        "warm-up macd_line coincides with the SIMPLE (adjust=False) form — fixture can't gate the convention"
+    )
+
+
 def test_macd_histogram_is_line_minus_signal() -> None:
     """histogram == macd_line − macd_signal, by definition, every bar."""
     engine = CleanEngine([MacdClean()], ["A"], WINDOW)
