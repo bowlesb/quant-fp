@@ -20,6 +20,7 @@ backfill over the buffer), then each live ``step`` ``fold``s the one new minute 
 the points from the ring instead of ``resolve_points``. Armed by ``FP_POINT_RING=1`` (default OFF =
 ``resolve_points`` path); byte-identical either way (tests/test_fp_point_ring.py).
 """
+
 from __future__ import annotations
 
 import json
@@ -166,12 +167,15 @@ class PointRing:
         rows (one per present symbol)."""
         if not self.sources:
             return  # no point columns to carry (a group set with no points) — the ring is vacuous
-        present = minute_frame.select(["symbol", *self.sources]).sort("symbol")
+        # NO sort: each present symbol is scattered into the ring at its FIXED index position (``self.index``),
+        # so the order of ``minute_frame``'s rows is irrelevant — a ``.sort("symbol")`` here was wasted work (the
+        # per-minute sort Ben named). We read the columns to numpy in frame order and write by position.
+        present = minute_frame.select(["symbol", *self.sources])
         present_symbols = present["symbol"].to_list()
         keep = [i for i, symbol in enumerate(present_symbols) if symbol in self.index]
-        rows = np.array([self.index[present_symbols[i]] for i in keep], dtype=np.int64)
-        if rows.size == 0:
+        if not keep:
             return
+        rows = np.array([self.index[present_symbols[i]] for i in keep], dtype=np.int64)
         values = np.column_stack([present[source].to_numpy().astype(np.float64) for source in self.sources])
         slots = self._write[rows]
         self._ring[rows, slots, :] = values[keep]
