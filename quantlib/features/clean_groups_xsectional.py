@@ -378,8 +378,10 @@ class SectorReturnClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")
+        minute = window.trailing_minute()
         present = window.present()
         latest_close = window.latest("close")
+        now_epoch = window.minute_epoch
         n_sym = close.shape[0]
         sector = window.static.get("sector")
         if sector is None:
@@ -388,10 +390,10 @@ class SectorReturnClean:
         keep = present & (sector != self._UNKNOWN)
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            if close.shape[1] > w:
-                prior = close[:, -(w + 1)]
-            else:
-                prior = np.full(n_sym, np.nan)
+            # own_ret = close[T]/close[T−w]−1 with a STRICT exact-minute lag (legacy lagged(close, w)) — NULL on
+            # a sparse member with no bar exactly w minutes ago, NOT the w-th prior POSITIONAL bar (which spans
+            # the gap). The cross-symbol mean below is at-T (1-D, all-present-at-T) so it's already aligned.
+            prior = _value_at_lag(close, minute, now_epoch, w)
             with np.errstate(invalid="ignore", divide="ignore"):
                 own_ret = latest_close / prior - 1.0
             sec_mean = _sector_mean_vector(own_ret, sector, present)
@@ -415,8 +417,10 @@ class PeerRelativeClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")
+        minute = window.trailing_minute()
         present = window.present()
         latest_close = window.latest("close")
+        now_epoch = window.minute_epoch
         n_sym = close.shape[0]
         cluster = window.static.get("cluster_id")
         if cluster is None:
@@ -424,10 +428,9 @@ class PeerRelativeClean:
         keep = present & (cluster != self._UNKNOWN)
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            if close.shape[1] > w:
-                prior = close[:, -(w + 1)]
-            else:
-                prior = np.full(n_sym, np.nan)
+            # STRICT exact-minute lag (legacy lagged(close, w)) — NULL on a sparse member with no bar exactly w
+            # minutes ago, NOT the w-th prior POSITIONAL bar. The peer mean below is at-T (1-D, aligned).
+            prior = _value_at_lag(close, minute, now_epoch, w)
             with np.errstate(invalid="ignore", divide="ignore"):
                 own_ret = latest_close / prior - 1.0
             peer_mean = _sector_mean_vector(own_ret, cluster, present)
