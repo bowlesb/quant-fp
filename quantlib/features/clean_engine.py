@@ -1,0 +1,173 @@
+"""The one feature engine — carried per-symbol state, one path, no per-minute polars framework.
+
+Replaces the legacy machinery sprawl (two engines + four ``step*`` twins + per-kind state wrappers + the
+duplicate capture paths + the byte-parity demolition gate) with a single understandable engine built on Ben's
+``tracker.py`` model: a per-symbol carried numpy buffer, a few array ops per bar, and one read surface.
+
+THE ONE PATH
+------------
+    engine = CleanEngine(groups, symbols, window)  # fixed symbol index + the deepest window any group reads
+    engine.seed(history)                           # replay warm-up history bar-by-bar to build carried state
+    feats = engine.step(minute_bars)               # fold ONE minute, then read every group's features for it
+
+There is no second "fast vs backfill" formulation and no parity gate between them, because there is only one
+computation: **the live step and the backfill are the same replay.** Backfill = ``seed`` the buffer then
+``step`` each historical minute; live = ``step`` each new minute. They cannot diverge — it is the same code.
+(This is the ``seed(H); fold(m) == seed(H+m)`` invariant the old design proved as an *endpoint*; here it is
+simply how the engine works.)
+
+THE STATE
+---------
+``RingBuffer`` carries, per symbol, the last ``window`` minutes of bar columns as a fixed ``(n_symbols,
+window, n_cols)`` numpy array with a per-symbol write cursor (a circular buffer — append is O(1), a read of
+the trailing window is a roll). Absent symbols simply do not advance their cursor, so each symbol's buffer
+holds its own present bars in order — the positional history a windowed feature reads, gap-safe by
+construction. This is ``tracker.py``'s ``CircularBufferOnDisk`` generalized to the symbol axis, in memory.
+
+THE GROUP INTERFACE
+-------------------
+Every feature group implements ONE method against the carried window:
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        '''Return {feature_name: (n_symbols,) array} for the latest minute, computed from the carried
+        per-symbol window. Numpy in, numpy out — no polars.'''
+
+``Window`` is the read surface over the carried state: ``window.trailing("close")`` returns the
+``(n_symbols, window)`` trailing matrix (oldest→newest); ``window.latest("close")`` the ``(n_symbols,)``
+current bar; ``window.count()`` the per-symbol filled length (warm-up / readiness). The math each group
+already had (rolling sums, OLS, candlestick patterns, …) becomes a small numpy function over these arrays —
+the same arithmetic, expressed once, framework-free.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+import numpy as np
+
+
+class EngineGroup(Protocol):
+    """The one interface a feature group implements to run on the engine. ``name`` + ``feature_names`` are the
+    output contract; ``input_cols`` are the bar columns the group reads; ``compute`` is its numpy math over the
+    carried window. (Class-A intraday-invariant groups — calendar / sector / daily snapshots — implement the
+    same ``compute`` but read once-per-session state instead of the rolling window.)"""
+
+    name: str
+    feature_names: tuple[str, ...]
+    input_cols: tuple[str, ...]
+
+    def compute(self, window: "Window") -> dict[str, np.ndarray]: ...
+
+
+class RingBuffer:
+    """Per-symbol circular buffer of the last ``window`` minutes of bar columns — the carried state.
+
+    State is one ``(n_symbols, window, n_cols)`` float array + a per-symbol write cursor and filled-count.
+    ``append`` writes the present symbols' bars at their next slot (O(1) per symbol); ``trailing`` returns each
+    symbol's window in time order. Absent symbols are untouched (cursor unchanged), so a gap reads the last
+    *present* bars — the positional window a feature wants, gap-safe by construction (the tracker.py model).
+    """
+
+    def __init__(self, symbols: list[str], window: int, cols: tuple[str, ...]) -> None:
+        self.symbols = list(symbols)
+        self.index = {s: i for i, s in enumerate(self.symbols)}
+        self.n = len(self.symbols)
+        self.window = int(window)
+        self.cols = tuple(cols)
+        self.col_index = {c: i for i, c in enumerate(self.cols)}
+        self._buf = np.full((self.n, self.window, len(self.cols)), np.nan, dtype=np.float64)
+        self._write = np.zeros(self.n, dtype=np.int64)  # next slot to write, per symbol
+        self._count = np.zeros(self.n, dtype=np.int64)  # filled minutes so far, per symbol (caps at window)
+
+    def append(self, rows: np.ndarray, present_pos: np.ndarray) -> None:
+        """Write this minute's bars: ``rows`` is ``(n_present, n_cols)`` for the present symbols at index
+        positions ``present_pos``. Each present symbol advances its own cursor by one (mod window); absent
+        symbols are untouched (their cursor/count hold, so their window keeps its last present bars)."""
+        if present_pos.size == 0:
+            return
+        slots = self._write[present_pos]
+        self._buf[present_pos, slots, :] = rows
+        self._write[present_pos] = (slots + 1) % self.window
+        self._count[present_pos] = np.minimum(self._count[present_pos] + 1, self.window)
+
+    def trailing(self, col: str) -> np.ndarray:
+        """The ``(n_symbols, window)`` trailing matrix for ``col``, oldest→newest per symbol (a per-symbol roll
+        so the newest bar is the last column). NaN where a symbol has fewer than ``window`` present bars."""
+        ci = self.col_index[col]
+        plane = self._buf[:, :, ci]  # (n, window) in physical slot order
+        # roll each symbol so the column after its write cursor (the oldest) is first, newest is last.
+        idx = (self._write[:, None] + np.arange(self.window)[None, :]) % self.window
+        return np.take_along_axis(plane, idx, axis=1)
+
+    def latest(self, col: str) -> np.ndarray:
+        """The ``(n_symbols,)`` current (newest) bar value for ``col``. NaN for a symbol with no bars yet."""
+        ci = self.col_index[col]
+        newest = (self._write - 1) % self.window
+        val = self._buf[np.arange(self.n), newest, ci]
+        return np.where(self._count > 0, val, np.nan)
+
+    def count(self) -> np.ndarray:
+        """Per-symbol filled-minute count (for warm-up / readiness — a feature whose window isn't filled yet
+        returns NaN by its own math, exactly as a short backfill window does)."""
+        return self._count.copy()
+
+
+class Window:
+    """The read surface a group's ``compute`` sees — a thin view over the ``RingBuffer`` (+ optional
+    per-session state for Class-A groups). Keeps the group math decoupled from the buffer internals."""
+
+    def __init__(self, ring: RingBuffer, session: dict[str, np.ndarray] | None = None) -> None:
+        self._ring = ring
+        self.symbols = ring.symbols
+        self.n = ring.n
+        self.session = session or {}
+
+    def trailing(self, col: str) -> np.ndarray:
+        return self._ring.trailing(col)
+
+    def latest(self, col: str) -> np.ndarray:
+        return self._ring.latest(col)
+
+    def count(self) -> np.ndarray:
+        return self._ring.count()
+
+
+class CleanEngine:
+    """The one engine: a fixed symbol index + a carried ``RingBuffer`` + the groups, with one ``step`` that
+    folds a minute and reads every group's features. No second form, no parity gate, no per-minute polars."""
+
+    def __init__(self, groups: list[EngineGroup], symbols: list[str], window: int) -> None:
+        self.groups = list(groups)
+        self.symbols = list(symbols)
+        cols: list[str] = []
+        for group in self.groups:
+            for col in group.input_cols:
+                if col not in cols:
+                    cols.append(col)
+        self.cols = tuple(cols)
+        self.ring = RingBuffer(self.symbols, window, self.cols)
+
+    def _marshal(self, minute_bars: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+        """Turn the current minute's bars (``{col: (n_present,) array}`` + a ``symbol`` array) into the
+        ``(n_present, n_cols)`` row block + the index positions to scatter into. Pure numpy — no sort, no
+        frame: the present symbols are read by name into their fixed index slots."""
+        syms = minute_bars["symbol"]
+        pos = np.array([self.ring.index[s] for s in syms], dtype=np.int64)
+        rows = np.column_stack([np.asarray(minute_bars[c], dtype=np.float64) for c in self.cols])
+        return rows, pos
+
+    def step(self, minute_bars: dict[str, np.ndarray]) -> dict[str, dict[str, np.ndarray]]:
+        """Fold ONE minute into the carried buffer, then read every group's features for it. Returns
+        ``{group_name: {feature_name: (n_symbols,) array}}``."""
+        rows, pos = self._marshal(minute_bars)
+        self.ring.append(rows, pos)
+        window = Window(self.ring)
+        return {group.name: group.compute(window) for group in self.groups}
+
+    def seed(self, history: list[dict[str, np.ndarray]]) -> None:
+        """Replay warm-up history minute-by-minute (== backfill over the buffer): fold each historical minute so
+        the carried state on the first live ``step`` is exactly what it would be having processed that history.
+        Same code as ``step`` (minus the read), so live state == backfill state by construction."""
+        for minute_bars in history:
+            rows, pos = self._marshal(minute_bars)
+            self.ring.append(rows, pos)
