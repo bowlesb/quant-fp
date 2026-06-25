@@ -1,0 +1,15 @@
+{
+  "n_dates": 45,
+  "dates_first": "2026-04-15",
+  "dates_last": "2026-06-18",
+  "n_cells": 40,
+  "n_fdr_reject": 3,
+  "n_nwt_ge2": 8,
+  "n_beats_shuffle": 10,
+  "n_sign_replicates": 15,
+  "n_GO_all_gates": 0,
+  "max_incr_ic": 0.23188229154737833,
+  "max_nw_t": 0.8852699049545973,
+  "data_absent_features": [],
+  "n_evaluable_cells": 40
+}
