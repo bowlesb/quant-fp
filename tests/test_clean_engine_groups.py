@@ -3413,6 +3413,87 @@ def test_edgar_filing_lookahead_boundary_matches_legacy_compute() -> None:
     )
 
 
+@pytest.mark.parametrize("offset_seconds", [-1, 0, 1])
+def test_event_tape_1second_boundary_no_lookahead_leak(offset_seconds: int) -> None:
+    """1-SECOND knife-edge of the inclusive look-ahead boundary (ArchOverhaul's adversarial fixture, Lead-ruled
+    into the suite). The minute grid is at second 0 (14:30:00); legacy gates available_at <= minute. An event at
+    minute−1s and minute+0s ENTERS the 14:30 cell (the inclusive <= edge); an event at minute+1s does NOT (it's
+    after the minute → a 1-SECOND leak would be catastrophic future-info in a live feature). Pin clean ==
+    legacy compute() per-(symbol,minute) cell at each sub-minute offset, through the REAL build_event_tape CSR,
+    for BOTH news_sentiment and edgar_filing_frequency. The discriminating assertion: entered@boundary ==
+    (offset_seconds <= 0). My other look-ahead gates are minute-granularity; this is the sub-second precision
+    test — a +1s event entering the boundary minute is the exact silent leak this catches."""
+    import datetime as dt  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.base import BatchContext  # type: ignore  # noqa: PLC0415
+    from quantlib.features.clean_groups_reference import (  # noqa: PLC0415
+        EdgarFilingFrequencyClean,
+        NewsSentimentClean,
+        _EDGAR_FORM_CODE,
+    )
+    from quantlib.features.clean_session import build_event_tape  # noqa: PLC0415
+    from quantlib.features.groups.edgar_filing_frequency import EdgarFilingFrequencyGroup  # type: ignore  # noqa: PLC0415,E501
+    from quantlib.features.groups.news_sentiment import NewsSentimentGroup  # type: ignore  # noqa: PLC0415
+
+    utc = dt.timezone.utc
+    syms = ["AAA", "BBB"]  # AAA carries the boundary event; BBB is empty-tape
+    idx = {s: i for i, s in enumerate(syms)}
+    day0 = dt.datetime(2026, 6, 10, 14, 29, tzinfo=utc)
+    minutes = [day0 + dt.timedelta(minutes=k) for k in range(3)]  # 14:29, 14:30, 14:31
+    boundary = minutes[1]
+    event_at = boundary + dt.timedelta(seconds=offset_seconds)
+
+    news_df = pl.DataFrame([{"symbol": "AAA", "available_at": event_at, "sentiment": 0.7}]).with_columns(
+        pl.col("available_at").cast(pl.Datetime("us", "UTC")))
+    edgar_df = pl.DataFrame([{"symbol": "AAA", "form_type": "8-K", "available_at": event_at}]).with_columns(
+        pl.col("available_at").cast(pl.Datetime("us", "UTC")))
+    minute_df = pl.DataFrame([{"symbol": s, "minute": m} for m in minutes for s in syms]).with_columns(
+        pl.col("minute").cast(pl.Datetime("us", "UTC")))
+
+    news_csr = build_event_tape(news_df, syms, "sentiment")
+    edgar_csr = build_event_tape(edgar_df, syms, "form_type", payload_fn=_EDGAR_FORM_CODE.__getitem__)
+    session = {
+        "news_at": news_csr["at"], "news_off": news_csr["off"], "news_sentiment": news_csr["payload"],
+        "edgar_at": edgar_csr["at"], "edgar_off": edgar_csr["off"], "edgar_form": edgar_csr["payload"],
+    }
+
+    expect_entered = offset_seconds <= 0  # <=0s enters (inclusive); +1s must NOT (the leak)
+    for clean_group, legacy_group, frames, witness in (
+        (NewsSentimentClean(), NewsSentimentGroup(), {"minute_agg": minute_df, "news": news_df}, "news_count_60m"),
+        (EdgarFilingFrequencyClean(), EdgarFilingFrequencyGroup(),
+         {"minute_agg": minute_df, "filings": edgar_df}, "edgar_filing_count_7d"),
+    ):
+        legacy = legacy_group.compute(BatchContext(frames=frames)).sort(["symbol", "minute"])
+        legacy = legacy.with_columns(pl.col("minute").dt.replace_time_zone("UTC"))
+        fnames = [spec.name for spec in legacy_group.declare()]
+        eng = CleanEngine([clean_group], syms, 5)
+        eng.set_session(session)
+        cells: dict[tuple, dict[str, float]] = {}
+        for m in minutes:
+            present, feats = eng.emit({"symbol": np.array(syms), "close": np.array([100.0, 100.0]),
+                                       "minute_epoch": np.array([int(m.timestamp())], dtype=np.int64)})
+            for s in present:
+                cells[(m, s)] = {fn: float(feats[clean_group.name][fn][idx[s]]) for fn in fnames}
+        for row in legacy.iter_rows(named=True):
+            key = (row["minute"], row["symbol"])
+            if key not in cells:
+                continue
+            for fn in fnames:
+                lv, cv = row[fn], cells[key][fn]
+                ln = lv is None or (isinstance(lv, float) and not np.isfinite(lv))
+                if ln:
+                    assert not np.isfinite(cv), f"{clean_group.name} {key} {fn}: legacy NULL, clean {cv} (offset {offset_seconds:+d}s)"
+                else:
+                    assert abs(lv - cv) <= 1e-9, f"{clean_group.name} {key} {fn}: legacy {lv} clean {cv} (offset {offset_seconds:+d}s)"
+        entered = cells[(boundary, "AAA")][witness]
+        assert (entered >= 1.0) == expect_entered, (
+            f"{clean_group.name}: offset {offset_seconds:+d}s {witness}@boundary={entered}, "
+            f"expected {'entered' if expect_entered else 'NOT entered'} (a +1s entry = a future-info leak)"
+        )
+
+
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
     """RE-ANCHORED (#66 + #68): diff clean multi_day_returns cell-for-cell vs a golden from the REAL legacy
     MultiDayReturnGroup.compute() on a 70-day fixture (tests/md_in.json). This CAUGHT the #68 stale-convention
