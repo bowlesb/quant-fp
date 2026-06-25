@@ -925,3 +925,147 @@ def test_reference_template_docstring_example() -> None:
     none_specs = [FeatureSpec(name="x", description="", dtype="Float64", valid_range=None, nan_policy="none")]
     with pytest.raises(AssertionError, match="nan_policy"):
         _assert_feature_spec_contract({"x": np.array([1.0, np.nan])}, none_specs)
+
+
+# ========================================================================================================= #
+# BULK PORT — BATCH 1a (windowed/ReductionGroup): range_expansion, ohlc_vol, quote_spread.
+# Each gated: formula on hand-computable inputs + legacy FeatureSpec contract + omit-marshaled absence +
+# warm-up edge. Contracts pulled from the LEGACY declare() in /home/ben/quant-fp (the authoritative source).
+# ========================================================================================================= #
+
+_LN2_REF = 0.6931471805599453
+from quantlib.features.clean_groups_windowed import (  # noqa: E402
+    OhlcVolClean,
+    QuoteSpreadClean,
+    RangeExpansionClean,
+)
+
+
+def _ohlcv_bar(symbols, o, h, low, c, epoch, *, extra=None):
+    bar = {"symbol": np.array(symbols), "open": np.array(o, dtype=np.float64),
+           "high": np.array(h, dtype=np.float64), "low": np.array(low, dtype=np.float64),
+           "close": np.array(c, dtype=np.float64), "minute_epoch": np.array([epoch], dtype=np.int64)}
+    if extra:
+        for k, v in extra.items():
+            bar[k] = np.array(v, dtype=np.float64)
+    return bar
+
+
+# --- range_expansion: ratio of recent vs trailing windowed mean of (high-low)/close --- #
+
+def test_range_expansion_constant_is_one() -> None:
+    """A constant per-bar range fraction → recent mean == trailing mean → ratio 1.0."""
+    eng = CleanEngine([RangeExpansionClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(60):  # fill the deepest (60) trailing window
+        out = eng.step(_ohlcv_bar(["A"], [100.0], [102.0], [98.0], [100.0], 60 + ep * 60))["range_expansion"]
+    assert out["range_expansion_5_30m"][0] == pytest.approx(1.0)
+    assert out["range_expansion_10_60m"][0] == pytest.approx(1.0)
+
+
+def test_range_expansion_expanding_gt_one() -> None:
+    """Recent bars wider-range than the trailing average → ratio > 1 (expansion)."""
+    eng = CleanEngine([RangeExpansionClean()], ["A"], WINDOW)
+    for ep in range(40):  # narrow baseline (range 2)
+        eng.step(_ohlcv_bar(["A"], [100.0], [101.0], [99.0], [100.0], 60 + ep * 60))
+    out = {}
+    for ep in range(40, 45):  # recent 5 wide (range 6)
+        out = eng.step(_ohlcv_bar(["A"], [100.0], [103.0], [97.0], [100.0], 60 + ep * 60))["range_expansion"]
+    assert out["range_expansion_5_30m"][0] > 1.0
+
+
+def test_range_expansion_contract_and_warmup() -> None:
+    """FeatureSpec contract (legacy valid_range=(0,None), nan_policy=warmup) + warm-up NaN before the trailing
+    window fills."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.range_expansion import RangeExpansionGroup  # type: ignore  # noqa: PLC0415
+
+    eng = CleanEngine([RangeExpansionClean()], ["A"], WINDOW)
+    # warm-up: only 3 bars, the 30/60 trailing windows aren't filled but masked-mean uses present-count, so
+    # the ratio is defined once >=1 present bar in BOTH windows; with 3 bars both means exist → finite.
+    out = {}
+    for ep in range(3):
+        out = eng.step(_ohlcv_bar(["A"], [100.0], [102.0], [98.0], [100.0], 60 + ep * 60))["range_expansion"]
+    _assert_feature_spec_contract(out, RangeExpansionGroup().declare(), "range_expansion ")
+    # single bar: recent==trailing==same one bar → ratio 1.0 (well-defined)
+    eng2 = CleanEngine([RangeExpansionClean()], ["A"], WINDOW)
+    o1 = eng2.step(_ohlcv_bar(["A"], [100.0], [102.0], [98.0], [100.0], 60))["range_expansion"]
+    assert o1["range_expansion_5_30m"][0] == pytest.approx(1.0)
+
+
+# --- ohlc_vol: Garman-Klass + Rogers-Satchell --- #
+
+def test_ohlc_vol_known_garman_klass() -> None:
+    """Constant OHLC bar: GK var = 0.5·ln(H/L)² − (2ln2−1)·ln(C/O)². With H=102,L=98,C=O=100:
+    ln(C/O)=0 → GK var = 0.5·ln(102/98)². sqrt of that mean = the GK vol."""
+    h, low_, c, o = 102.0, 98.0, 100.0, 100.0
+    gk_var = 0.5 * (np.log(h / low_) ** 2) - (2 * _LN2_REF - 1.0) * (np.log(c / o) ** 2)
+    eng = CleanEngine([OhlcVolClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(10):
+        out = eng.step(_ohlcv_bar(["A"], [o], [h], [low_], [c], 60 + ep * 60))["ohlc_vol"]
+    assert out["garman_klass_vol_5m"][0] == pytest.approx(np.sqrt(gk_var), rel=1e-9)
+
+
+def test_ohlc_vol_nonneg_and_contract() -> None:
+    """GK/RS vols are >= 0 (clip + sqrt) and within the legacy valid_range (0, 5); warm-up nan_policy."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.ohlc_vol import OhlcVolGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(2)
+    eng = CleanEngine([OhlcVolClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(30):
+        c = 100.0 + rng.standard_normal()
+        out = eng.step(_ohlcv_bar(["A"], [c], [c + abs(rng.normal()) + 0.5], [c - abs(rng.normal()) - 0.5],
+                                  [c + rng.normal() * 0.3], 60 + ep * 60))["ohlc_vol"]
+    for fname, arr in out.items():
+        finite = arr[np.isfinite(arr)]
+        assert finite.size == 0 or finite.min() >= 0.0, f"{fname} negative vol"
+    _assert_feature_spec_contract(out, OhlcVolGroup().declare(), "ohlc_vol ")
+
+
+def test_ohlc_vol_log_domain_nan_on_nonpositive() -> None:
+    """GK/RS are log-domain: a non-positive price → log NaN propagates → vol NaN (no spurious 0)."""
+    eng = CleanEngine([OhlcVolClean()], ["A"], WINDOW)
+    out = eng.step(_ohlcv_bar(["A"], [100.0], [0.0], [98.0], [100.0], 60))["ohlc_vol"]  # high=0 → ln(0) NaN
+    assert np.isnan(out["garman_klass_vol_5m"][0]), "non-positive price must NaN, not 0"
+
+
+# --- quote_spread: point-in-time + trailing means, nan_policy=sparse --- #
+
+def test_quote_spread_known_values() -> None:
+    """latest spread/imbalance + book_depth = bid+ask; trailing means over known constant inputs."""
+    eng = CleanEngine([QuoteSpreadClean()], ["A"], WINDOW)
+    extra = {"mean_spread_bps": [2.0], "quote_imbalance": [0.3], "mean_bid_size": [100.0], "mean_ask_size": [150.0]}
+    out = {}
+    for ep in range(10):
+        bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([60 + ep * 60], dtype=np.int64)}
+        bar.update({k: np.array(v, dtype=np.float64) for k, v in extra.items()})
+        out = eng.step(bar)["quote_spread"]
+    assert out["spread_bps_1m"][0] == pytest.approx(2.0)
+    assert out["quote_imbalance_1m"][0] == pytest.approx(0.3)
+    assert out["book_depth_1m"][0] == pytest.approx(250.0)  # 100 + 150
+    assert out["spread_bps_5m"][0] == pytest.approx(2.0)  # mean of constant
+    assert out["quote_imbalance_30m"][0] == pytest.approx(0.3)
+
+
+def test_quote_spread_contract() -> None:
+    """Legacy FeatureSpec contract: spread (0,1e5), imbalance (-1,1), depth (0,None), nan_policy=sparse."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.quote_spread import QuoteSpreadGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(4)
+    eng = CleanEngine([QuoteSpreadClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(20):
+        bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([60 + ep * 60], dtype=np.int64),
+               "mean_spread_bps": np.array([rng.random() * 5], dtype=np.float64),
+               "quote_imbalance": np.array([rng.standard_normal() * 0.3], dtype=np.float64),
+               "mean_bid_size": np.array([rng.random() * 100], dtype=np.float64),
+               "mean_ask_size": np.array([rng.random() * 100], dtype=np.float64)}
+        out = eng.step(bar)["quote_spread"]
+    _assert_feature_spec_contract(out, QuoteSpreadGroup().declare(), "quote_spread ")
