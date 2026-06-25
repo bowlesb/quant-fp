@@ -862,3 +862,95 @@ class MomentumConsistencyClean:
                 older_mean = np.where(older_n > 0.0, older_sum / older_n, np.nan)
                 out[f"momentum_acceleration_{w}m"] = (recent_mean - older_mean) * 100.0
         return out
+
+
+def _running_extreme(mat: np.ndarray, kind: str) -> np.ndarray:
+    """Per-row running cum-max / cum-min over a ``(n, k)`` TIME-windowed close matrix (oldest→newest), ignoring
+    NaN (absent / out-of-window bars do not reset the extreme). ``kind`` is "max" or "min". Cells that are NaN
+    stay NaN in the output (no extreme defined there yet)."""
+    fill = -np.inf if kind == "max" else np.inf
+    filled = np.where(np.isfinite(mat), mat, fill)
+    running = (
+        np.maximum.accumulate(filled, axis=1) if kind == "max" else np.minimum.accumulate(filled, axis=1)
+    )
+    return np.where(np.isfinite(mat), running, np.nan)
+
+
+_DRAW_MIN_POINTS = 2  # a path excursion needs ≥2 closes (one bar cannot draw up or down)
+
+
+class DrawRangeClean:
+    """VOLATILITY (path-shape): over the trailing w minutes, max draw-down |maxdd| + max draw-up maxdu of the
+    close path. max_drawdown_{w}m = |min_t(close/running_max − 1)|, max_drawup_{w}m = max_t(close/running_min −
+    1), draw_range_{w}m = their sum. The running cum-max/cum-min are anchored at the window's earliest in-window
+    bar (TIME window, close>0 only). NULL on a window with <2 closes. Legacy: ``DrawRangeGroup``."""
+
+    name = "draw_range"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (60,)
+    feature_names = tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("draw_range", "max_drawup", "max_drawdown")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            # TIME window of closes (legacy rolling period "{w}m"); Guard 2: close>0 only (a non-positive bar
+            # would corrupt the running extreme — excluded identically to the legacy pre-filter).
+            close_w = window.trailing_time("close", w)
+            close_w = np.where(close_w > 0.0, close_w, np.nan)
+            n = np.isfinite(close_w).sum(axis=1)
+            run_max = _running_extreme(close_w, "max")
+            run_min = _running_extreme(close_w, "min")
+            with np.errstate(invalid="ignore", divide="ignore"):
+                drawdown_path = close_w / run_max - 1.0  # ≤ 0 per bar
+                drawup_path = close_w / run_min - 1.0  # ≥ 0 per bar
+            maxdd = _row_nanmin(drawdown_path)  # the deepest (most negative) drawdown
+            maxdu = _row_nanmax(drawup_path)  # the highest drawup
+            warm = n >= _DRAW_MIN_POINTS
+            drawdown_leg = np.where(warm, -maxdd, np.nan)  # magnitude (≥0)
+            drawup_leg = np.where(warm, maxdu, np.nan)
+            total = np.where(warm, -maxdd + maxdu, np.nan)
+            # is_finite backstop (matches legacy _finite): any stray non-finite → NaN.
+            out[f"draw_range_{w}m"] = np.where(np.isfinite(total), total, np.nan)
+            out[f"max_drawup_{w}m"] = np.where(np.isfinite(drawup_leg), drawup_leg, np.nan)
+            out[f"max_drawdown_{w}m"] = np.where(np.isfinite(drawdown_leg), drawdown_leg, np.nan)
+        return out
+
+
+_VOL_STD_REL_EPS = 1e-6  # volume_zscore relative-std guard: std must be a non-trivial fraction of the mean
+
+
+class VolumeClean:
+    """VOLUME: dollar_volume_1m = latest close·volume; volume_zscore_{w}m = (volT − mean)/std over the trailing
+    w minutes (NULL on a near-constant-volume window — the RELATIVE std guard std > 1e-6·|mean|, not a bare
+    std>0); volume_ratio_{w}m = volT/mean. Mean/std are TIME-windowed (ddof=1). Legacy: ``VolumeGroup``."""
+
+    name = "volume"
+    input_cols = ("close", "volume")
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
+    feature_names = ("dollar_volume_1m",) + tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("volume_zscore", "volume_ratio")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        volume = window.trailing("volume")
+        latest_volume = window.latest("volume")
+        latest_close = window.latest("close")
+        with np.errstate(invalid="ignore"):
+            out: dict[str, np.ndarray] = {"dollar_volume_1m": latest_close * latest_volume}
+        for w in self._WINDOWS:
+            # TIME window (legacy mean_/std_ = rolling_*_by("minute")): the mean/std over the last w minutes.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            masked_vol = np.where(in_window, volume, np.nan)
+            mean_w, _ = _row_mean(masked_vol)
+            std_w = _row_std(masked_vol)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                # RELATIVE std guard: a near-constant-volume window (std ~1e-9 of a ~1e6 mean) → NULL z-score,
+                # not a blown-up ratio. NULL also during warm-up (std NaN, <2 samples).
+                zscore = (latest_volume - mean_w) / std_w
+                out[f"volume_zscore_{w}m"] = np.where(
+                    std_w > _VOL_STD_REL_EPS * np.abs(mean_w), zscore, np.nan
+                )
+                out[f"volume_ratio_{w}m"] = latest_volume / mean_w
+        return out
