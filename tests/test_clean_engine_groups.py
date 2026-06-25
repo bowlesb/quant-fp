@@ -3467,3 +3467,101 @@ def test_session_reset_machines_contract() -> None:
         eng.step(_ohlcv_session_bar(["S"], [11.0], [12.0], [9.0], [11.5], [1000], _et_session_epoch(9, 30)))
         out = eng.step(_ohlcv_session_bar(["S"], [11.5], [13.0], [10.0], [12.0], [2000], epoch))[clean_group.name]
         _assert_feature_spec_contract(out, legacy_group.declare(), f"{clean_group.name} ")
+
+
+# ========================================================================================================= #
+# FEATURE-SET-COMPLETENESS GATE (Lead, must-have-before-relaunch): a clean group's feature NAMES must EQUAL its
+# legacy group's declare() names — the EXACT SET, not a subset. value-match + sparse-h2h only check the EMITTED
+# subset, so a STUB (clean declares fewer features than legacy) passes them while silently dropping features
+# from the models. This is the only gate that catches stubs. The 6 known stubs (06-25 sweep) are xfailed with
+# their gap so they're TRACKED + can't regress; flip each to a hard match when ArchOverhaul fills it.
+# ========================================================================================================= #
+
+# clean group name -> (legacy module under quantlib.features.groups, legacy Group class)
+_LEGACY_GROUP_OF = {
+    "price_volume": ("price_volume", "PriceVolumeGroup"),
+    "price_levels": ("price_levels", "PriceLevelGroup"),
+    "price_returns": ("price_returns", "PriceReturnGroup"),
+    "volatility": ("volatility", "VolatilityGroup"),
+    "ohlc_vol": ("ohlc_vol", "OhlcVolGroup"),
+    "quote_spread": ("quote_spread", "QuoteSpreadGroup"),
+    "range_expansion": ("range_expansion", "RangeExpansionGroup"),
+    "realized_range": ("realized_range", "RealizedRangeGroup"),
+    "distribution": ("distribution", "DistributionGroup"),
+    "liquidity": ("liquidity", "LiquidityGroup"),
+    "trend_quality": ("trend_quality", "TrendQualityGroup"),
+    "technical": ("technical", "TechnicalGroup"),
+    "sector_beta": ("sector_beta", "SectorBetaGroup"),
+    "market_turbulence": ("market_turbulence", "MarketTurbulenceGroup"),
+    "cross_sectional_rank": ("cross_sectional_rank", "CrossSectionalRankGroup"),
+    "return_dispersion": ("return_dispersion", "ReturnDispersionGroup"),
+    "sector_return": ("sector_return", "SectorReturnGroup"),
+    "peer_relative": ("peer_relative", "PeerRelativeReturnGroup"),
+    "calendar": ("calendar", "CalendarGroup"),
+    "multi_day": ("multi_day", "MultiDayReturnGroup"),
+    "daily_beta": ("daily_beta", "DailyBetaGroup"),
+    "overnight_intraday_split": ("overnight_intraday_split", "OvernightIntradaySplitGroup"),
+    "liquidity_rank": ("liquidity_rank", "LiquidityRankGroup"),
+    "runner_state": ("runner_state", "RunnerStateGroup"),
+    "dumper_state": ("dumper_state", "DumperStateGroup"),
+    "gap_fill_state": ("gap_fill_state", "GapFillStateGroup"),
+    "candlestick": ("candlestick", "CandlestickGroup"),
+    "momentum": ("momentum", "MomentumGroup"),
+    "efficiency": ("efficiency", "EfficiencyGroup"),
+    "return_dynamics": ("return_dynamics", "ReturnDynamicsGroup"),
+    "momentum_consistency": ("momentum_consistency", "MomentumConsistencyGroup"),
+    "draw_range": ("draw_range", "DrawRangeGroup"),
+    "residual_analysis": ("residual_analysis", "ResidualAnalysisGroup"),
+    "clean_momentum": ("clean_momentum", "CleanMomentumScoreGroup"),
+    # STUBS (clean declares fewer than legacy) — xfailed below until filled:
+    "breadth": ("breadth", "BreadthGroup"),
+    "prior_day": ("prior_day", "PriorDayGroup"),
+    "swing": ("swing", "SwingGroup"),
+    "volume": ("volume", "VolumeGroup"),
+    "intraday_seasonality": ("intraday_seasonality", "IntradaySeasonalityGroup"),
+}
+
+# Known stubs (06-25 sweep): clean feature-set ⊊ legacy. xfail-tracked until ArchOverhaul fills them.
+_KNOWN_STUBS = {"breadth", "prior_day", "swing", "intraday_seasonality"}  # trend_quality + volume FILLED
+
+
+def _clean_group_instance(name):  # type: ignore[no-untyped-def]
+    import quantlib.features.clean_groups_daily as cd  # noqa: PLC0415
+    import quantlib.features.clean_groups_example as ce  # noqa: PLC0415
+    import quantlib.features.clean_groups_pointwise as cp  # noqa: PLC0415
+    import quantlib.features.clean_groups_stateful as cs  # noqa: PLC0415
+    import quantlib.features.clean_groups_windowed as cw  # noqa: PLC0415
+    import quantlib.features.clean_groups_xsectional as cx  # noqa: PLC0415
+
+    for mod in (cw, ce, cx, cd, cs, cp):
+        for attr in dir(mod):
+            obj = getattr(mod, attr)
+            if isinstance(obj, type) and getattr(obj, "name", None) == name and hasattr(obj, "feature_names"):
+                return obj()
+    return None
+
+
+@pytest.mark.parametrize("clean_name", sorted(_LEGACY_GROUP_OF))
+def test_feature_set_completeness_vs_legacy(clean_name: str) -> None:
+    """A clean group's feature NAMES must EQUAL its legacy declare() names (exact set, not subset). Catches
+    STUBS that value-match/sparse-h2h miss. Known stubs are xfailed with their gap until filled."""
+    import importlib  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    inst = _clean_group_instance(clean_name)
+    assert inst is not None, f"clean group {clean_name} not found"
+    clean_feats = set(inst.feature_names)
+
+    sys.path.insert(0, "/home/ben/quant-fp")
+    mod_name, cls_name = _LEGACY_GROUP_OF[clean_name]
+    legacy_mod = importlib.import_module(f"quantlib.features.groups.{mod_name}")
+    legacy_feats = {s.name for s in getattr(legacy_mod, cls_name)().declare()}
+
+    missing = legacy_feats - clean_feats
+    extra = clean_feats - legacy_feats
+    if clean_name in _KNOWN_STUBS:
+        if missing or extra:
+            pytest.xfail(f"{clean_name} STUB: clean {len(clean_feats)} vs legacy {len(legacy_feats)}; "
+                         f"missing {sorted(missing)[:4]}; extra {sorted(extra)[:3]} — ArchOverhaul to fill")
+    assert not missing, f"{clean_name}: STUB — missing {len(missing)} legacy features: {sorted(missing)[:8]}"
+    assert not extra, f"{clean_name}: clean has EXTRA features not in legacy: {sorted(extra)[:8]}"
