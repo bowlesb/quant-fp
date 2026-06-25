@@ -2258,7 +2258,9 @@ def test_price_levels_contract_and_seed_equals_live() -> None:
 
 from quantlib.features.clean_groups_daily import (  # noqa: E402
     DailyBetaClean,
+    LiquidityRankClean,
     MultiDayClean,
+    OvernightIntradaySplitClean,
     _daily_return,
     _daily_vol,
     _dist_from_high,
@@ -2430,6 +2432,103 @@ def test_daily_beta_contract() -> None:
     daily_close, syms = _daily_close_with_beta(80, beta=1.2, seed=7)
     out = _step_daily_beta(daily_close, syms)
     _assert_feature_spec_contract(out, DailyBetaGroup().declare(), "daily_beta ")
+
+
+# ========================================================================================================= #
+# DAILY-SNAPSHOT — overnight_intraday_split + liquidity_rank (both DailySnapshotGroup, daily-DENSE so no
+# positional/time issue). overnight reads window.session['daily_open'+'daily_close'] (NOTE: daily_open is a NEW
+# session-schema field for the go-live populator). liquidity_rank reads daily_close+daily_volume.
+# ========================================================================================================= #
+
+
+def test_overnight_intraday_split_matches_legacy() -> None:
+    """intraday_ret = close/open−1; overnight_minus_intraday = (open/prev_close−1) − intraday; overnight_share
+    = |overnight|/(|overnight|+|intraday|), NULL on a zero-move day. Head-to-head on a give-back name + a
+    zero-move name."""
+    syms = ["A", "B", "Z"]
+    # A: overnight gap up (open 110 vs prev_close 100) + intraday up (close 121); B: gap up, intraday give-back
+    daily_open = np.array([[100.0, 105.0, 110.0], [50.0, 51.0, 55.0], [20.0, 20.0, 20.0]])
+    daily_close = np.array([[100.0, 100.0, 121.0], [50.0, 50.0, 52.0], [20.0, 20.0, 20.0]])
+    eng = CleanEngine([OvernightIntradaySplitClean()], syms, WINDOW)
+    eng.set_session({"daily_open": daily_open, "daily_close": daily_close})
+    out = eng.step({"symbol": np.array(syms), "close": daily_close[:, -1], "volume": np.zeros(3),
+                    "minute_epoch": np.array([60], dtype=np.int64)})["overnight_intraday_split"]
+    for i in range(3):
+        op, cl, pc = daily_open[i, -1], daily_close[i, -1], daily_close[i, -2]
+        overnight, intraday = op / pc - 1.0, cl / op - 1.0
+        abs_total = abs(overnight) + abs(intraday)
+        assert out["intraday_ret"][i] == pytest.approx(intraday)
+        assert out["overnight_minus_intraday"][i] == pytest.approx(overnight - intraday)
+        if abs_total > 0:
+            assert out["overnight_share"][i] == pytest.approx(abs(overnight) / abs_total)
+        else:
+            assert np.isnan(out["overnight_share"][i]), "zero-move day → overnight_share NaN"
+    assert out["overnight_share"][0] > 0.0, "A has a real overnight + intraday move (non-vacuous share)"
+
+
+def test_overnight_intraday_split_contract_and_warmup() -> None:
+    """Contract (intraday_ret∈[-1,5], share∈[0,1]); <2 daily columns or no session → all-NaN (warm-up)."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.overnight_intraday_split import OvernightIntradaySplitGroup  # type: ignore  # noqa: PLC0415,E501
+
+    syms = ["A", "B"]
+    daily_open = np.array([[100.0, 105.0, 110.0], [50.0, 51.0, 55.0]])
+    daily_close = np.array([[100.0, 102.0, 121.0], [50.0, 50.0, 52.0]])
+    eng = CleanEngine([OvernightIntradaySplitClean()], syms, WINDOW)
+    eng.set_session({"daily_open": daily_open, "daily_close": daily_close})
+    out = eng.step({"symbol": np.array(syms), "close": daily_close[:, -1], "volume": np.zeros(2),
+                    "minute_epoch": np.array([60], dtype=np.int64)})["overnight_intraday_split"]
+    _assert_feature_spec_contract(out, OvernightIntradaySplitGroup().declare(), "overnight_intraday_split ")
+    eng2 = CleanEngine([OvernightIntradaySplitClean()], syms, WINDOW)  # no session → all-NaN
+    out2 = eng2.step({"symbol": np.array(syms), "close": np.array([100.0, 50.0]), "volume": np.zeros(2),
+                      "minute_epoch": np.array([60], dtype=np.int64)})["overnight_intraday_split"]
+    assert all(np.all(np.isnan(arr)) for arr in out2.values()), "no daily snapshot → all-NaN"
+
+
+def test_liquidity_rank_matches_legacy_adv_and_percentile() -> None:
+    """adv_dollar_log_20d = log1p(trailing-20d mean dollar volume, min 10 days); liquidity_rank = cross-
+    sectional rank(method='average')/count of the ADV (1 = most liquid). Head-to-head vs hand average-rank;
+    warm-up (<10 days) → NaN."""
+    rng = np.random.default_rng(5)
+    syms = ["X", "Y", "Z", "W"]
+    daily_close = 50.0 + rng.random((4, 25)) * 50.0
+    daily_volume = rng.random((4, 25)) * 1e6
+    eng = CleanEngine([LiquidityRankClean()], syms, WINDOW)
+    eng.set_session({"daily_close": daily_close, "daily_volume": daily_volume})
+    out = eng.step({"symbol": np.array(syms), "close": daily_close[:, -1], "volume": np.zeros(4),
+                    "minute_epoch": np.array([60], dtype=np.int64)})["liquidity_rank"]
+    adv_hand = (daily_close * daily_volume)[:, -20:].mean(axis=1)  # all 20 finite
+    # average-rank / count (1 = most liquid), matching polars rank(method='average')/count
+    order = np.argsort(np.argsort(adv_hand))  # ordinal; ties absent in random floats → average==ordinal
+    rank_hand = (order + 1.0) / len(adv_hand)
+    for i in range(4):
+        assert out["adv_dollar_log_20d"][i] == pytest.approx(np.log1p(adv_hand[i]))
+        assert out["liquidity_rank"][i] == pytest.approx(rank_hand[i])
+    assert out["liquidity_rank"].max() == pytest.approx(1.0), "the most-liquid name ranks 1.0"
+    short = daily_close[:, :8]  # <10 days → warm-up NaN
+    eng2 = CleanEngine([LiquidityRankClean()], syms, WINDOW)
+    eng2.set_session({"daily_close": short, "daily_volume": daily_volume[:, :8]})
+    out2 = eng2.step({"symbol": np.array(syms), "close": short[:, -1], "volume": np.zeros(4),
+                      "minute_epoch": np.array([60], dtype=np.int64)})["liquidity_rank"]
+    assert np.all(np.isnan(out2["adv_dollar_log_20d"])), "<10 days → NaN (warm-up)"
+
+
+def test_liquidity_rank_contract() -> None:
+    """produced == declared (adv_dollar_log ≥ 0, liquidity_rank ∈ [0,1])."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.liquidity_rank import LiquidityRankGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(9)
+    syms = ["X", "Y", "Z"]
+    daily_close = 50.0 + rng.random((3, 25)) * 50.0
+    daily_volume = rng.random((3, 25)) * 1e6
+    eng = CleanEngine([LiquidityRankClean()], syms, WINDOW)
+    eng.set_session({"daily_close": daily_close, "daily_volume": daily_volume})
+    out = eng.step({"symbol": np.array(syms), "close": daily_close[:, -1], "volume": np.zeros(3),
+                    "minute_epoch": np.array([60], dtype=np.int64)})["liquidity_rank"]
+    _assert_feature_spec_contract(out, LiquidityRankGroup().declare(), "liquidity_rank ")
 
 
 # ========================================================================================================= #
