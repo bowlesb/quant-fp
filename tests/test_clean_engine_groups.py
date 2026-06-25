@@ -3063,6 +3063,53 @@ def test_live_daily_session_is_populated_from_backfill_daily() -> None:
         assert key in session and session[key].shape == (3, 5), f"{key} matrix must be populated (n_sym, n_days)"
 
 
+@pytest.mark.xfail(strict=True, reason="#73 step-4 NOT wired: no live producer pivots load_news_features/"
+                                       "load_filings into the session CSR (news_at/off/sentiment, edgar_at/off/"
+                                       "form) → news_sentiment + edgar_filing_frequency emit NaN/0 defaults live")
+def test_live_event_tape_session_csr_is_populated_from_loaders() -> None:
+    """#75 LAYER A — event-tape live-wiring gate (Lead: news/edgar input is the SESSION surface, reloaded
+    per-session; #69 daily-pivot + this CSR-pivot are ONE builder = #73 step 4). Same durable enforcement as
+    the #69 daily gate, CSR instead of matrix: the news_sentiment/edgar_filing_frequency clean groups read the
+    per-symbol CSR tapes (news_at/news_off/news_sentiment, edgar_at/edgar_off/edgar_form) from window.session;
+    nothing on the LIVE path pivots loaders.load_news_features / loaders.load_filings into that layout yet
+    (set_session is test-only), so both groups emit their NaN/0 defaults live.
+
+    Asserts the #73-step-4 DELIVERABLE: a per-session pivot from the held loader frames
+    (load_news_features = symbol/available_at/sentiment; load_filings = symbol/form_type/available_at) into the
+    session CSR — flat ascending-by-(symbol,available_at) arrays + per-symbol offsets. XFAIL(strict) until the
+    builder exists: FAILS LOUDLY if step-4 is claimed done without the CSR pivot, and the strict marker forces
+    this flipped to a real assertion when it lands. NOT satisfiable by a hand-fed set_session (the test-only
+    path this gate forbids — the same self-consistent-bubble trap #75 Layer B must also avoid). LAYER B (the
+    look-ahead <= boundary + per-cell value diff vs real compute()) gates the REAL CSR build once this lands."""
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    syms = ["A", "B", "C"]  # C is the EMPTY-TAPE symbol (no events) — must still get a valid offset slice
+    avail = datetime.datetime(2026, 6, 25, 14, 32, tzinfo=datetime.timezone.utc)
+    news_frame = pl.DataFrame(
+        {"symbol": ["A", "A", "B"], "available_at": [avail, avail + datetime.timedelta(hours=1), avail],
+         "sentiment": [0.4, -0.2, 0.1]},
+        schema={"symbol": pl.String, "available_at": pl.Datetime("us", "UTC"), "sentiment": pl.Float64})
+    filings_frame = pl.DataFrame(
+        {"symbol": ["A", "B"], "form_type": ["8-K", "10-Q"], "available_at": [avail, avail]},
+        schema={"symbol": pl.String, "form_type": pl.String, "available_at": pl.Datetime("us", "UTC")})
+
+    # the not-yet-existing live builder (#73 step 4). When it lands, point this at the real symbol + DROP xfail.
+    from quantlib.features.event_tape_session_builder import (  # type: ignore  # noqa: PLC0415
+        build_clean_event_tape_session,
+    )
+
+    session = build_clean_event_tape_session(news_frame, filings_frame, syms)
+    for key in ("news_at", "news_off", "news_sentiment", "edgar_at", "edgar_off", "edgar_form"):
+        assert key in session, f"session CSR missing {key} (event-tape pivot not wired)"
+    # CSR offsets: len == n_symbols + 1, monotonic; symbol A has 2 news rows, C (empty) has a zero-width slice
+    assert session["news_off"].shape == (len(syms) + 1,), "news_off must be (n_symbols+1,) CSR offsets"
+    a, c = syms.index("A"), syms.index("C")
+    assert session["news_off"][a + 1] - session["news_off"][a] == 2, "symbol A must have 2 news rows in the CSR"
+    assert session["news_off"][c + 1] - session["news_off"][c] == 0, "empty-tape symbol C → zero-width CSR slice"
+
+
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
     """RE-ANCHORED (#66 + #68): diff clean multi_day_returns cell-for-cell vs a golden from the REAL legacy
     MultiDayReturnGroup.compute() on a 70-day fixture (tests/md_in.json). This CAUGHT the #68 stale-convention
