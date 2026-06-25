@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from quantlib.features.clean_engine import Window
+from quantlib.features.clean_groups_windowed import _row_corr, _row_ols_slope, _row_std
 
 
 def _average_rank(values: np.ndarray) -> np.ndarray:
@@ -428,6 +429,80 @@ class SectorBetaClean:
             # unmapped-sector names → NULL (no sector series to regress on)
             out[f"sector_beta_{w}m"] = np.where(is_unknown, np.nan, beta)
             out[f"sector_corr_{w}m"] = np.where(is_unknown, np.nan, corr)
+        return out
+
+
+def _align_market_return(minute: np.ndarray, spy_ret: np.ndarray, spy_minute: np.ndarray) -> np.ndarray:
+    """Map SPY's per-bar return onto every (symbol, bar) cell BY MINUTE — for each symbol's bar at minute m,
+    the SPY return at the SAME minute m (NaN where SPY has no bar at m). This is the legacy minute-join: each
+    symbol's ring column is its OWN present minute, so a positional broadcast of SPY's row would pair a sparse
+    name's bar with SPY's bar at a DIFFERENT minute. Vectorized via searchsorted on SPY's (monotonic) valid
+    minutes."""
+    valid = (spy_minute >= 0) & np.isfinite(spy_ret)
+    vmin = spy_minute[valid]
+    vret = spy_ret[valid]
+    out = np.full(minute.shape, np.nan)
+    if vmin.size == 0:
+        return out
+    order = np.argsort(vmin, kind="stable")  # SPY minutes ascending (the buffer is oldest→newest already)
+    vmin_sorted = vmin[order]
+    vret_sorted = vret[order]
+    flat = minute.reshape(-1)
+    pos = np.searchsorted(vmin_sorted, flat)
+    in_range = (pos < vmin_sorted.size) & (flat >= 0)
+    pos_clipped = np.clip(pos, 0, vmin_sorted.size - 1)
+    hit = in_range & (vmin_sorted[pos_clipped] == flat)  # an exact-minute match in SPY
+    aligned = np.where(hit, vret_sorted[pos_clipped], np.nan)
+    return aligned.reshape(minute.shape)
+
+
+_MARKET_BETA_MAX = 15.0  # |beta| above this → NULL (legacy BETA_MAX — a degenerate near-zero-var-SPY fit)
+
+
+class MarketBetaClean:
+    """CROSS_SECTIONAL: per window, the OLS of each name's one-minute return (y) on SPY's one-minute return (x,
+    the same broadcast value for every symbol) — a VALUE-OLS, NOT a time-OLS (x is SPY's return, not the minute,
+    so NO rebased-minute axis). market_beta_{w}m = slope (NULL when |beta|>15), market_corr_{w}m = corr in
+    [-1,1], idio_vol_{w}m = std(own ret)·sqrt(clip(1−r2,0,1)). TIME-windowed (legacy std_/OLS = rolling_*_by).
+    SPY's row index from ``window.static['spy_row']``. Legacy: ``MarketBetaGroup`` (ReductionGroup)."""
+
+    name = "market_beta"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (10, 15, 30, 45, 60, 90, 120)
+    feature_names = tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("market_beta", "market_corr", "idio_vol")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        n_sym = close.shape[0]
+        spy_row = window.static.get("spy_row")
+        if spy_row is None:
+            nan = np.full(n_sym, np.nan)
+            return {name: nan for name in self.feature_names}
+        spy_idx = int(np.asarray(spy_row).flat[0])
+        own_ret = _buffer_returns(close)  # (n_sym, buffer) per-bar 1m return
+        minute = window.trailing_minute()  # (n_sym, buffer) the minute-epoch at each bar (-1 empty)
+        # SPY's return must be paired to each symbol BY MINUTE, not by buffer position — each symbol's ring
+        # column is its OWN present minute, so SPY's column t is a different minute than a sparse name's column
+        # t. Build a minute→SPY-return lookup from SPY's own (minute, return) bars, then map every symbol's
+        # minute matrix through it (NaN where SPY has no bar at that minute). This is the legacy minute-join.
+        mkt_ret = _align_market_return(minute, own_ret[spy_idx], minute[spy_idx])
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            # TIME window (legacy std_/OLS = rolling_*_by("minute")): mask the paired returns to the last w mins.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            x = np.where(in_window, mkt_ret, np.nan)  # x = SPY return (the regressor)
+            y = np.where(in_window, own_ret, np.nan)  # y = own return (the regressand)
+            beta = _row_ols_slope(x, y)
+            corr = _row_corr(x, y)
+            own_std = _row_std(y)
+            with np.errstate(invalid="ignore"):
+                r2 = corr * corr
+                idio = own_std * np.sqrt(np.clip(1.0 - np.clip(r2, 0.0, 1.0), 0.0, None))
+            out[f"market_beta_{w}m"] = np.where(np.abs(beta) <= _MARKET_BETA_MAX, beta, np.nan)
+            out[f"market_corr_{w}m"] = corr
+            out[f"idio_vol_{w}m"] = idio
         return out
 
 
