@@ -13,7 +13,12 @@ from __future__ import annotations
 import numpy as np
 
 from quantlib.features.clean_engine import Window
-from quantlib.features.clean_groups_windowed import _denom_x_defined, _rebased_minute_axis
+from quantlib.features.clean_groups_windowed import (
+    _denom_x_defined,
+    _rebased_minute_axis,
+    _row_mean,
+    _row_sum,
+)
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
 
@@ -88,15 +93,16 @@ class VwapDeviationClean:
         close = window.trailing("close")
         volume = window.trailing("volume")
         latest_close = window.latest("close")
+        cv = close * volume
         out: dict[str, np.ndarray] = {}
         for w in WINDOWS:
-            c = _trailing_window(close, w)
-            v = _trailing_window(volume, w)
-            mask = np.isfinite(c) & np.isfinite(v)
-            cv = np.where(mask, c * v, 0.0).sum(axis=1)
-            vol = np.where(mask, v, 0.0).sum(axis=1)
+            # TIME window (legacy rolling_sum_by("minute")): the VWAP sums are over the bars in the last w
+            # minutes, NOT the last w positional slots — a sparse symbol diverges otherwise.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            vol = _row_sum(np.where(in_window, volume, np.nan))
+            cv_w = _row_sum(np.where(in_window, cv, np.nan))
             with np.errstate(invalid="ignore", divide="ignore"):
-                vwap = cv / vol
+                vwap = cv_w / vol
                 dev = latest_close / vwap - 1.0
             out[f"vwap_deviation_{w}m"] = np.where(vol > 0, dev, np.nan)
         return out
@@ -122,12 +128,11 @@ class RealizedRangeClean:
             rng = (high - low) / close  # per-bar range fraction, (n, window)
         out: dict[str, np.ndarray] = {}
         for w in REALIZED_WINDOWS:
-            r = _trailing_window(rng, w)
-            mask = np.isfinite(r)
-            n_present = mask.sum(axis=1)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                mean_rng = np.where(mask, r, 0.0).sum(axis=1) / n_present
-            out[f"realized_range_{w}m"] = np.where(n_present > 0, mean_rng, np.nan)
+            # TIME window (legacy rolling_mean_by("minute")): the mean is over the bars in the last w minutes,
+            # NOT the last w positional slots — a sparse symbol diverges otherwise.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            mean_rng, _ = _row_mean(np.where(in_window, rng, np.nan))
+            out[f"realized_range_{w}m"] = mean_rng
         return out
 
 
