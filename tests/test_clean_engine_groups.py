@@ -3309,6 +3309,98 @@ def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
     assert {"AAA", "BBB", "CCC"} <= present_at_min8, "the present symbols must still compute despite the skipped ZZZ"
 
 
+def test_live_clean_engine_session_groups_match_direct_engine_dense() -> None:
+    """#76 canary PRIMARY-oracle plumbing proof: the LIVE path (process_bars + FP_CLEAN_ENGINE=1 + real
+    snapshots) must reproduce the clean engine's own output for the SESSION-DEPENDENT + INDEX + CROSS-SECTIONAL
+    groups (daily_beta/multi_day_*/overnight_beta/market_context/market_beta/sector_beta/return_dispersion) —
+    i.e. the live marshal→emit→reshape + build_session wiring is faithful. On an ALL-DENSE universe (incl
+    SPY/QQQ so spy_row/qqq_row populate, + a reference snapshot for sector/flags), clean-LIVE == a directly-
+    driven CleanEngine over the SAME build_session output, cell-for-cell (0 mismatches across all 8 groups).
+    (The gappy-symbol axis is a separate harness item — the live state.ring's carried-bar/minute_epoch handling
+    on absent minutes must be mirrored; the per-group gappy correctness is already proven vs legacy compute().)"""
+    import datetime as dt  # noqa: PLC0415
+    import math  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.capture import CaptureState, process_bars  # noqa: PLC0415
+    from quantlib.features.clean_capture import emit_to_frames, minute_frame_to_bars  # noqa: PLC0415
+    from quantlib.features.clean_engine import CleanEngine  # noqa: PLC0415
+    from quantlib.features.clean_registry import (  # noqa: PLC0415
+        ALL_CLEAN_GROUPS,
+        ALL_CLEAN_INPUT_COLS,
+    )
+    from quantlib.features.clean_session import build_session  # noqa: PLC0415
+
+    base = dt.datetime(2026, 6, 18, 14, 0, tzinfo=dt.timezone.utc)
+    syms = ("AAA", "BBB", "SPY", "QQQ")  # all DENSE (the gappy axis is proven per-group vs legacy elsewhere)
+
+    def _bars(minute: dt.datetime) -> list[dict]:
+        rows = []
+        for off, s in enumerate(syms):
+            i = int((minute - base).total_seconds() // 60)
+            close = 100.0 + off * 2.0 + 5.0 * math.sin((i + off) / 9.0) + i * 0.02
+            rows.append({"S": s, "o": close * 0.999, "c": close, "h": close * 1.002,
+                         "l": close * 0.998, "v": 900.0 + off * 50, "t": minute.isoformat()})
+        return rows
+
+    day0 = dt.date(2026, 3, 1)
+    daily = pl.DataFrame([
+        {"symbol": s, "date": day0 + dt.timedelta(days=d),
+         "open": (px := 100.0 + (hash(s) % 50) + math.sin(d / 7.0) * 3 + d * 0.1) * 0.99,
+         "high": px * 1.01, "low": px * 0.98, "close": px, "volume": 1e6, "vwap": px}
+        for s in syms for d in range(70)])
+    reference = pl.DataFrame([
+        {"symbol": s, "sector": "technology", "cluster_id": 0,
+         "shortable": True, "easy_to_borrow": True, "marginable": True, "fractionable": True} for s in syms])
+    snapshots = {"daily": daily, "reference": reference}
+
+    os.environ["FP_CLEAN_ENGINE"] = "1"
+    try:
+        live = CaptureState()
+        for mi in range(20):
+            process_bars(live, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cp76", "mock",
+                         "2026-06-18", 120, snapshots=snapshots, accumulate=True, write=False)
+    finally:
+        os.environ.pop("FP_CLEAN_ENGINE", None)
+
+    # direct engine over the SAME session/static, driven via the SAME marshal/reshape the live path uses
+    direct_syms = sorted(set(syms) | set(daily["symbol"].to_list()))
+    eng = CleanEngine(list(ALL_CLEAN_GROUPS), direct_syms, 120)
+    session, static = build_session(snapshots, direct_syms)
+    eng.set_session(session)
+    eng.static = static
+    direct: dict[str, list[pl.DataFrame]] = {}
+    for mi in range(20):
+        minute = base + dt.timedelta(minutes=mi)
+        frame = pl.DataFrame([{"symbol": r["S"], "minute": minute, "open": r["o"], "close": r["c"],
+                               "high": r["h"], "low": r["l"], "volume": r["v"]} for r in _bars(minute)])
+        present, feats = eng.emit(minute_frame_to_bars(frame, ALL_CLEAN_INPUT_COLS, int(minute.timestamp())))
+        for gname, gframe in emit_to_frames(present, feats, eng.symbols, int(minute.timestamp())).items():
+            if gframe.height:
+                direct.setdefault(gname, []).append(gframe)
+    direct_acc = {g: pl.concat(v) for g, v in direct.items() if v}
+
+    session_groups = ["daily_beta", "multi_day_returns", "multi_day_vwap", "overnight_beta",
+                      "market_context", "market_beta", "sector_beta", "return_dispersion"]
+    for gname in session_groups:
+        ld, dd = live.accumulated[gname], direct_acc[gname]
+        feats = [c for c in ld.columns if c not in ("symbol", "minute") and c in dd.columns]
+        joined = ld.join(dd, on=["symbol", "minute"], how="inner", suffix="_d")
+        assert joined.height > 0, f"{gname}: no overlapping (symbol,minute) rows to compare"
+        for row in joined.iter_rows(named=True):
+            for fname in feats:
+                live_v, direct_v = row[fname], row[fname + "_d"]
+                lv = np.nan if live_v is None else float(live_v)
+                dv = np.nan if direct_v is None else float(direct_v)
+                if np.isnan(lv) and np.isnan(dv):
+                    continue
+                assert np.isfinite(lv) and np.isfinite(dv) and np.isclose(lv, dv, rtol=1e-6, atol=1e-9), (
+                    f"{gname}.{fname} ({row['symbol']}): live {lv} != direct {dv} (live-plumbing divergence)"
+                )
+
+
 def test_news_sentiment_lookahead_boundary_matches_legacy_compute() -> None:
     """#75 LAYER B — the NON-NEGOTIABLE LOOK-AHEAD gate (Lead: a leak = future info in a live feature). Drive
     clean NewsSentimentClean over a minute grid STRADDLING an article's available_at (T), with the session built
