@@ -82,11 +82,18 @@ These are NOT correctness-of-math (that's gated per group) — they're the wirin
    those groups emit their NaN defaults live (honest, not wrong) — so clean can go live for the
    non-session groups FIRST and the session groups light up when #69 lands.
 
-5. **Reduction-anchor parity for the volume-centering groups.** A few groups still read the centered-std column
-   `attach_reduction_anchors` writes onto `minute_agg`. The clean ports of those groups must either read the same
-   anchor (carry it as a bar column the engine folds) or the integration keeps the anchor attach on the input
-   marshal (step 3). DELIVERABLE: confirm which clean groups need the anchor and carry it as an `input_col`;
-   verify the centered column is identical to the OLD path on a shared minute (parity-neutral, like backfill).
+5. **Enriched derived bar columns (the real input-contract dependency).** VERIFIED by sweeping every clean
+   group's `input_cols`: NO clean group reads the legacy reduction-anchor / centered-std column — the windowed
+   ports (e.g. `PriceVolumeClean` = `high/low/close/volume`) compute their centering INTERNALLY from raw OHLCV
+   (the port-the-batch-math principle). What clean groups DO need beyond raw OHLCV is the per-minute ENRICHED
+   columns the reader already produces for both live and backfill (`materialize.py:108` / `capture.py:42`
+   enrich `minute_agg` with `n_trades, signed_volume, spread, imbalance, mean_spread_bps, …`):
+   `PriceVolumeClean` reads `signed_volume`; `QuoteSpreadClean` reads `mean_spread_bps/quote_imbalance/
+   mean_bid_size/mean_ask_size`; the #63 tick-tape groups will read their derived `_hhi/_gap_fano/bin-count`
+   columns (same input-contract class — the worker populates them, like `daily_open`). DELIVERABLE: the minute
+   marshal (gap 3) must carry the FULL enriched column set (union of every group's `input_cols`), not just raw
+   OHLCV; the enrich step is unchanged and already a shared live+backfill boundary, so this is parity-neutral.
+   The original "reduction-anchor parity" worry does NOT apply — there is no anchor column to thread.
 
 ## Cutover mechanics (flag-gated, reversible)
 
