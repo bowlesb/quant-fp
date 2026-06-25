@@ -64,12 +64,16 @@ curve as proof:
 
 Either way the conclusion is the same: **this is a simplicity win** — measured by mechanisms and lines removed.
 But there is *also* a real latency consequence, and it is the point Ben cares most about: the dominant per-minute
-cost today is **not** arithmetic — it is the polars framework tax (matrix_at / resolve_points / assemble,
-measured ~86% of each group's minute). The redesign does not *shrink* that tax, it **deletes** it: the per-minute
-hot path becomes polars-free numpy-on-carried-state (next section). That deletion is *why* a hard `<300ms` bar at
-full universe is reachable at all — you cannot get there by trimming a tax that dominates, only by removing it.
-We hold the number honest until the `price_volume` spike proves it (the 71ms → few-ms pure-numpy proof), but the
-*shape* of the win is clear: delete the tax, don't optimize it.
+cost today is **not** arithmetic — it is the polars framework tax (matrix_at / resolve_points / assemble). This is
+now **measured to the phase**, not estimated: profiling the live FR=1 minute, every armed group's actual *fold*
+is **0.006–0.16ms** (genuinely a few ops), while the per-minute polars around it is **75–96%** of the step. Across
+all 19 armed groups: **167ms step = 0.98ms fold + 152ms polars tax (91%)**; `price_volume` alone is
+**9.94ms = 0.16ms numpy fold + 8.97ms polars tax (90%)**. The redesign does not *shrink* that tax, it **deletes**
+it: the per-minute hot path becomes polars-free numpy-on-carried-state (next section), which takes that
+**167ms → ~1ms (≈170×)** at reference scale — not by faster arithmetic (the arithmetic is already ~1ms) but by
+removing the frame the arithmetic was needlessly wrapped in. That deletion is *why* a hard `<300ms` bar at full
+universe is reachable at all — you cannot get there by trimming a tax that dominates, only by removing it. The
+*shape* of the win is now proven, not asserted: delete the tax, don't optimize it.
 
 ### The per-minute hot path is polars-free
 
@@ -94,6 +98,16 @@ This is exactly the `tracker.py` discipline made literal at scale: **his hot pat
 (`current_sum += new − evicted`; read = an O(1) lookup off the carried aggregate; nothing recomputes over the
 buffer per minute) — **ours must be too**, generalized to every fold-kind and vectorized across the symbol axis.
 The framework tax is not a third lever to *collapse*; it is the thing we *delete*.
+
+**This is measured, not asserted.** Profiling the live FR=1 minute decomposes each group's step into its numpy
+fold versus the polars around it: the fold is **0.006–0.16ms** (already a few ops, exactly Ben's bar), the polars
+is **75–96%** of the step. `price_volume`: `9.94ms = 0.16ms fold + 8.97ms polars (90%)`. All 19 armed groups:
+`167ms = 0.98ms fold + 152ms polars (91%)`. Removing the per-minute polars takes that **167ms → ~1ms (≈170×)**.
+And the pieces are not speculative — `PointRing` (#440, `resolve_points` → O(1) numpy), the `matrix_at`-ring (#454,
+numpy materialize), and `emit_numpy` (#448, numpy assemble) **already** eliminate individual phases of exactly this
+tax; the container generalizes those into one fully polars-free hot path. So the design's value claim sharpens to
+its final form: **fewer mechanisms AND a polars-free hot path — that combination, not fold-conversion alone, is the
+actual path to `<300ms`.**
 
 1. **ONE abstraction to hold state.**
 2. **No more implementations than we actually need** — the honest minimum, not artificial unification.
@@ -406,19 +420,28 @@ The order (lowest-risk first, each green before the next, confirmed against the 
 Every ported kind also carries its **`is_ready`** (step 1 establishes the container check; each later step's kind
 declares its own condition — windowed-sum = window filled, EMA = warmup span, snapshot = snapshot exists, etc.).
 2. **WindowedSum payload onto the spine** (the big one). Re-point the incremental reductions; carry the Class-A/B
-   conditioning. **`price_volume` is the proven exemplar for this step**, not a theoretical one: its O(1) fold
-   was spiked at live reference scale (312 tickers / 245-minute window) and ran **122ms batch → 14ms incremental
-   (8.5×, −108ms), byte-identical via #451 (38 tests, isolated + co-resident)**. Crucially, the **Class-A
-   conditioning the parked groups need already exists and is value-gate-proven** — the `regression_y_anchor`
-   centering the volume regressand plus the x-side `_OLS_DENOM_X_CENTERED_REL_EPS` variance guard
-   (`declarative.py`, #402/#416/#418), exercised on the degenerate flat-`Σxx≈0` cell by the co-resident test. So
-   the windowed-sum payload **inherits** the conditioning, it does not reinvent it; the other parked groups
-   (`clean_momentum`/`trend_quality`/`residual_analysis` = Class-A, `range_expansion` = Class-B,
-   `market_beta` = Class-A) ride the same proven route. There is one known shared-engine hazard — two groups that
-   share the same engine, where a numerical quirk in one (`price_volume`) could corrupt the other
-   (`return_dynamics`); the value gate catches it. It lives *entirely inside this step* (all are windowed-sum
-   groups), so there's no co-residency constraint that crosses steps — this step migrates its groups together and
-   stays co-resident-gated by #451 internally.
+   conditioning. **`price_volume` is the proven exemplar for the *fold half* of this step**, not a theoretical
+   one: spiked at live reference scale (312 tickers / 245-minute window), its whole-buffer batch recompute
+   collapsed to the O(1) fold at **122ms → 14ms (8.5×, −108ms), byte-identical via #451 (38 tests, isolated +
+   co-resident)**. Crucially, the **Class-A conditioning the parked groups need already exists and is
+   value-gate-proven** — the `regression_y_anchor` centering the volume regressand plus the x-side
+   `_OLS_DENOM_X_CENTERED_REL_EPS` variance guard (`declarative.py`, #402/#416/#418), exercised on the degenerate
+   flat-`Σxx≈0` cell by the co-resident test. So the windowed-sum payload **inherits** the conditioning, it does
+   not reinvent it; the other parked groups (`clean_momentum`/`trend_quality`/`residual_analysis` = Class-A,
+   `range_expansion` = Class-B, `market_beta` = Class-A) ride the same proven route.
+
+   **Two distinct proofs, do not conflate them.** The 122 → 14ms spike proves the *fold half* (O(1) arithmetic +
+   the conditioning, value-identical). It does **not** yet prove the polars-free half: phase-profiling that same
+   14ms (FR=1) minute shows it is `0.16ms numpy fold + 8.97ms polars tax (90%)` — i.e. the 8.5× came from killing
+   the whole-buffer *batch*, but the residual still pays the per-minute polars tax the GREEN groups also pay.
+   Eliminating that tax (the polars-free hot path, the `167 → ~1ms / 170×` finding) is the *second* proof, and it
+   is what takes price_volume's 14ms toward ~1ms. The migration must land **both**: the O(1) fold (proven here)
+   **and** the numpy read surface (the tax deletion).
+
+   There is one known shared-engine hazard — two groups that share the same engine, where a numerical quirk in one
+   (`price_volume`) could corrupt the other (`return_dynamics`); the value gate catches it. It lives *entirely
+   inside this step* (all are windowed-sum groups), so there's no co-residency constraint that crosses steps —
+   this step migrates its groups together and stays co-resident-gated by #451 internally.
 3. **EMA / Lag / Extrema / Cumulative payloads.** Port the `StatefulEngine` kinds and **delete the stable-set
    assert + the `_prepared_latest` wrapper** — the two churn riders (fill-null, presence-gated decay) bake into
    the container fold here.
