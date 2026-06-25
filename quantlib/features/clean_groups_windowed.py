@@ -1287,3 +1287,85 @@ class SignedTradeRatioClean:
             with np.errstate(invalid="ignore", divide="ignore"):
                 out[f"signed_trade_ratio_{w}m"] = np.where(sum_vol > 0.0, sum_sv / sum_vol, np.nan)
         return out
+
+
+_VEX_UP_VOL_REL_EPS = 1e-9  # volume_exhaustion up-vol relative floor (down/up ratio denominator)
+_VEX_CONTRACTIONS: tuple[tuple[int, int], ...] = ((5, 30), (10, 60))
+
+
+class VolumeExhaustionClean:
+    """VOLUME: vol_down_up_ratio_{w}m = Σ(down-bar volume)/Σ(up-bar volume) over the window (RELATIVE floor on
+    Σup-vol); vol_dryup_{w}m = latest volume / trailing-w mean volume; vol_contraction_{s}_{l}m = mean vol over
+    s / mean vol over l. All TIME-windowed. Legacy: ``VolumeExhaustionGroup`` (ReductionGroup)."""
+
+    name = "volume_exhaustion"
+    input_cols = ("open", "close", "volume")
+    _WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
+    _ALL_WINDOWS: tuple[int, ...] = (5, 10, 15, 30, 60)  # WINDOWS ∪ the contraction legs
+    feature_names = (
+        tuple(f"vol_down_up_ratio_{w}m" for w in _WINDOWS)
+        + tuple(f"vol_dryup_{w}m" for w in _WINDOWS)
+        + tuple(f"vol_contraction_{s}_{long}m" for s, long in _VEX_CONTRACTIONS)
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        op = window.trailing("open")
+        close = window.trailing("close")
+        volume = window.trailing("volume")
+        latest_volume = window.latest("volume")
+        down_vol = np.where(close < op, volume, 0.0)
+        up_vol = np.where(close > op, volume, 0.0)
+        # per-window trailing mean volume (used by dryup + both legs of each contraction).
+        mean_vol: dict[int, np.ndarray] = {}
+        for w in self._ALL_WINDOWS:
+            in_window = np.isfinite(window.trailing_time("close", w))
+            mean_vol[w], _ = _row_mean(np.where(in_window, volume, np.nan))
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("close", w))
+            dn = _row_sum(np.where(in_window, down_vol, np.nan))
+            up = _row_sum(np.where(in_window, up_vol, np.nan))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                out[f"vol_down_up_ratio_{w}m"] = np.where(
+                    up > _VEX_UP_VOL_REL_EPS * (up + dn), dn / up, np.nan
+                )
+                out[f"vol_dryup_{w}m"] = np.where(mean_vol[w] > 0.0, latest_volume / mean_vol[w], np.nan)
+        for s, long in _VEX_CONTRACTIONS:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                out[f"vol_contraction_{s}_{long}m"] = np.where(
+                    mean_vol[long] > 0.0, mean_vol[s] / mean_vol[long], np.nan
+                )
+        return out
+
+
+_VLP_LAGS: tuple[int, ...] = (1, 2, 3, 5)
+
+
+class VolumeLeadsPriceClean:
+    """CROSS_SECTIONAL (but SAME-SYMBOL paired-OLS): vol_leads_corr_lag{k}_{w}m = correlation over the trailing w
+    minutes between volume k minutes earlier (x) and this minute's return (y) — volume leading price. Both legs
+    are the SAME symbol's positional-within-symbol series (x = volume.shift(k), y = the positional 1m return), so
+    they're aligned by construction (no cross-symbol minute-misalignment). TIME-windowed corr (shared kernel
+    floors). Legacy: ``VolumeLeadsPriceGroup`` (ReductionGroup)."""
+
+    name = "volume_leads_price"
+    input_cols = ("close", "volume")
+    _WINDOWS: tuple[int, ...] = (15, 30, 60)
+    feature_names = tuple(f"vol_leads_corr_lag{k}_{w}m" for w in _WINDOWS for k in _VLP_LAGS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        volume = window.trailing("volume")
+        ret = _returns(close)  # positional 1m return (legacy _ret = close/close.shift(1)−1); ±Inf→NaN below
+        ret = np.where(np.isfinite(ret), ret, np.nan)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("close", w))
+            yw = np.where(in_window, ret, np.nan)
+            for k in _VLP_LAGS:
+                vol_lag = _positional_shift(
+                    volume, k
+                )  # volume k present-bars earlier (legacy volume.shift(k))
+                xw = np.where(in_window, vol_lag, np.nan)
+                out[f"vol_leads_corr_lag{k}_{w}m"] = _row_corr(xw, yw)
+        return out
