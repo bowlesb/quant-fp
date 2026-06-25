@@ -173,10 +173,10 @@ class SectorReturnGroup(FeatureGroup):
         return self._assemble(ctx, minute_keys)
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE gather: the sector aggregate at minute T depends only on THAT minute's per-symbol
-        returns, so the reduce is identical to compute() — we emit only the latest minute's rows. The
-        minute returns are still built over the buffer (lagged join), then the reduce + broadcast run
-        unchanged, so compute_latest == compute().last by construction (tests/test_fp_latest)."""
-        minute_keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = minute_keys["minute"].max()
-        return self._assemble(ctx, minute_keys.filter(pl.col("minute") == latest))
+        """LATEST-MINUTE gather: the sector aggregate at minute T depends only on THAT minute's cross-section,
+        and the trailing returns feeding it read at most ``max(MINUTE_WINDOWS)`` minutes back — so slice the
+        buffer to that trailing window and run the SAME reduce (compute_latest_on_window) instead of building
+        returns over the WHOLE buffer and discarding all but the latest minute. The ``reference`` sector map
+        (no ``minute`` column) passes through the slice whole. Parity-true by construction + generic-guarded
+        (tests/test_fp_latest)."""
+        return self.compute_latest_on_window(ctx, max(MINUTE_WINDOWS) + 1)

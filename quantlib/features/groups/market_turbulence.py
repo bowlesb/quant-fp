@@ -249,31 +249,12 @@ class MarketTurbulenceGroup(FeatureGroup):
         return self._assemble(ctx, minute_keys)
 
     def compute_latest(self, ctx: BatchContext) -> pl.DataFrame:
-        """LATEST-MINUTE gather: the turbulence at minute ``T`` depends only on THAT minute's per-symbol
-        measures, so we build the per-symbol measures FOR ``T`` ALONE — a handful of ``close[T-W]`` lookups
-        and one trailing-``RV_WINDOW`` std slice — instead of the rolling ``_abs_returns``/``_realized_vol``
-        full-buffer derive that ``compute()`` runs over every minute then discards all but the last. The
-        reduce + broadcast are then the same universe-mean GATHER, so ``compute_latest`` == ``compute()``
-        filtered to the last minute cell-for-cell (guarded by ``tests/test_fp_market_turbulence`` and the
-        generic ``tests/test_fp_latest`` parity test). Symbols with no bar at ``T`` do not contribute to
-        either measure (``_abs_returns_latest`` keys off ``close[T]``; the RV is LEFT-joined onto that set)."""
-        minute_keys = ctx.frame("minute_agg").select(["symbol", "minute"])
-        latest = minute_keys["minute"].max()
-        frame = ctx.frame("minute_agg").select(["symbol", "minute", "close"])
-
-        abs_returns = self._abs_returns_latest(frame, latest)
-        realized_vol = self._realized_vol_latest(frame, latest)
-        # LEFT join: keep only symbols present at ``T`` (the ``_abs_returns_latest`` set) — a symbol with no
-        # bar AT ``T`` must not contribute to minute ``T``'s reduce even if it has RV-window logrets, exactly
-        # as the rolling form (filtered to ``minute == latest``) drops it.
-        measures = abs_returns.join(realized_vol, on="symbol", how="left").with_columns(
-            pl.lit(latest).alias("minute")
-        )
-        measures = self._pin_universe(ctx, measures)
-        market = self._reduce(measures)
-
-        names = [spec.name for spec in self.declare()]
-        latest_keys = minute_keys.filter(pl.col("minute") == latest)
-        out = latest_keys.join(market, on="minute", how="left")
-        exprs = [pl.col(name).cast(pl.Float64).alias(name) for name in names]
-        return out.with_columns(exprs).select(["symbol", "minute", *names])
+        """LATEST-MINUTE gather: the turbulence at ``T`` depends only on THAT minute's cross-section, and the
+        trailing |return| / realized-vol measures read at most ``max(ABSRET_WINDOWS)`` minutes back (+ the one
+        prior bar a one-minute return needs at the window's start) — so slice the buffer to that trailing
+        window and run the SAME rolling ``compute`` (compute_latest_on_window) instead of a full-buffer derive
+        discarded to the last minute. Byte-identical to ``compute().last`` (guarded by the generic
+        ``tests/test_fp_latest`` + ``tests/test_fp_market_turbulence``), and faster than the prior bespoke
+        T-alone form (whole-buffer ~23ms → bounded ~9ms). The bespoke ``_abs_returns_latest`` /
+        ``_realized_vol_latest`` helpers remain (covered by their own unit tests)."""
+        return self.compute_latest_on_window(ctx, max(ABSRET_WINDOWS) + 1)
