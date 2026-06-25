@@ -450,22 +450,64 @@ class SwingClean:
         }
 
 
+_PRIOR_DAY_PIVOTS = ("p", "r1", "s1", "r2", "s2")
+
+
 class PriorDayClean:
-    """DAILY-SNAPSHOT: intraday-invariant prior-day reference levels (prior close), computed ONCE per session
-    and broadcast to every minute. Reads ``window.session`` (the engine's per-session memo) instead of the
-    rolling window — proving the snapshot kind. ``gap_from_prior_close`` = today's latest / prior_close − 1.
-    """
+    """DAILY-SNAPSHOT (MULTI_DAY): prior-day reference LEVELS (the floor-trader pivots P/R1/S1/R2/S2 from the
+    prior day's OHLC + the prior H/L/C) and the at-T close's distance from each, plus the overnight gap. All
+    levels are anchored to the LAST COMPLETED daily bar (D-1) — the daily snapshot's second-newest column
+    (``[:, -2]``); today's daily open (``[:, -1]``) supplies gap_open. The close-relative distances read the
+    live minute close. Legacy: ``PriorDayGroup`` (DailySnapshotGroup)."""
 
     name = "prior_day"
     input_cols = ("close",)
-    feature_names = ("gap_from_prior_close",)
+    feature_names = (
+        "gap_open",
+        "dist_from_prior_high",
+        "dist_from_prior_low",
+        "dist_from_prior_close",
+        "above_pivot",
+    ) + tuple(f"dist_from_pivot_{pivot}" for pivot in _PRIOR_DAY_PIVOTS)
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
-        prior_close = window.session.get("prior_close")
-        close = window.latest("close")
-        if prior_close is None:
-            return {"gap_from_prior_close": np.full(window.n, np.nan)}
+        n = window.n
+        nan = np.full(n, np.nan)
+        daily_open = window.session.get("daily_open")
+        daily_high = window.session.get("daily_high")
+        daily_low = window.session.get("daily_low")
+        daily_close = window.session.get("daily_close")
+        if (
+            daily_open is None
+            or daily_high is None
+            or daily_low is None
+            or daily_close is None
+            or daily_close.shape[1] < 2
+        ):
+            return {name: nan for name in self.feature_names}
+        # D-1 (last COMPLETED daily bar) levels = the second-newest daily column; today's open = newest.
+        today_open = daily_open[:, -1]
+        prev_high = daily_high[:, -2]
+        prev_low = daily_low[:, -2]
+        prev_close = daily_close[:, -2]
         with np.errstate(invalid="ignore", divide="ignore"):
-            gap = close / prior_close - 1.0
-        # gap is emitted only for a symbol that delivered a bar this minute (present), not on a carried close
-        return {"gap_from_prior_close": np.where(window.present() & np.isfinite(close), gap, np.nan)}
+            pivot = (prev_high + prev_low + prev_close) / 3.0
+            span = prev_high - prev_low
+            levels = {
+                "p": pivot,
+                "r1": 2.0 * pivot - prev_low,
+                "s1": 2.0 * pivot - prev_high,
+                "r2": pivot + span,
+                "s2": pivot - span,
+            }
+            close = window.latest("close")  # the at-T minute close
+            out: dict[str, np.ndarray] = {
+                "gap_open": today_open / prev_close - 1.0,
+                "dist_from_prior_high": close / prev_high - 1.0,
+                "dist_from_prior_low": close / prev_low - 1.0,
+                "dist_from_prior_close": close / prev_close - 1.0,
+                "above_pivot": (close > pivot).astype(np.float64),
+            }
+            for pivot_name in _PRIOR_DAY_PIVOTS:
+                out[f"dist_from_pivot_{pivot_name}"] = close / levels[pivot_name] - 1.0
+        return out
