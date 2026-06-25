@@ -2358,12 +2358,18 @@ def test_sector_beta_sparse_minute_aligned_matches_legacy() -> None:
 def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
     """RESOLVED #62 re-gate (Lead's mixed-sparsity-within-sector ask): a 4-MEMBER sector with A-gappy +
     B/C/D-dense, so legacy gives a NON-NULL sector_beta (the earlier 2-member fixture NULLs and masked the
-    residual). Clean == legacy EXACTLY for dense symbol B — once the comparison is MINUTE-ALIGNED. The legacy
-    golden is pinned at minute 58 (A is gappy on EVEN minutes → PRESENT at 58, ABSENT at 59); the clean engine
-    must be read at minute 58 too, NOT its final emit at minute 59. (My earlier 0/6 "divergence" was a harness
-    off-by-one: clean@min59 0.96520 vs legacy@min58 0.95904; aligned, both = 0.95904. The fixes c251212
-    minute-aligned mean + a02e7cb strict-1m OLS legs are correct.) Lead lesson: gate per-(minute,symbol) cell,
-    never a single hand-picked-minute spot-check where the two engines' last row lands on different minutes."""
+    residual). Clean == legacy EXACTLY for dense symbol B at EVERY minute. The independently-pinned true legacy
+    SectorBetaGroup.compute() for B gives a DISTINCT value per minute across the gappy-presence boundary (A is
+    gappy on EVEN offsets → PRESENT at 58, ABSENT at 57/59): sector_beta_15m = 0.955201@57, 0.959045@58,
+    0.965204@59. We capture the clean engine AT EACH of those minutes and assert it matches — proving clean
+    TRACKS legacy across the boundary, not just at one hand-picked minute.
+
+    (My earlier "0/6 divergence" was a harness off-by-one — I compared clean's FINAL emit @min59 (0.965204)
+    against a legacy golden pinned @min58 (0.959045). Both numbers are CORRECT legacy at their own minute; the
+    per-minute cell diff below makes that explicit and would catch a real divergence at any of the three.
+    Fixes c251212 minute-aligned mean + a02e7cb strict-1m OLS legs are correct. Lead lesson: gate
+    per-(minute,symbol) cell, never a single hand-picked-minute spot-check where the two engines' last row
+    lands on different minutes. Legacy truth: /tmp/sb_legacy_multimin.py.)"""
     import datetime  # noqa: PLC0415
 
     base = datetime.datetime(2026, 6, 1, 9, 30)
@@ -2386,22 +2392,31 @@ def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
     for s in syms:
         for j, o in enumerate(offsets[s]):
             events.setdefault(o, {})[s] = float(closes[s][j])
-    out_at_58: dict[str, np.ndarray] = {}
+    captured: dict[int, dict[str, np.ndarray]] = {}
     for o in sorted(events):
         pm = events[o]
         out = eng.step({"symbol": np.array(list(pm)), "close": np.array(list(pm.values()), dtype=np.float64),
                         "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
                                                  dtype=np.int64)})["sector_beta"]
-        if o == 58:  # MINUTE-ALIGN to the legacy golden's pinned minute (A present at 58, absent at 59)
-            out_at_58 = {k: v.copy() for k, v in out.items()}
+        if o in (57, 58, 59):  # capture across the gappy-presence boundary (A absent@57/59, present@58)
+            captured[o] = {k: v.copy() for k, v in out.items()}
     b = syms.index("B")  # B is dense — its sector_beta is well-defined in legacy
-    legacy = {  # legacy SectorBetaGroup.compute() OUTPUT for B @ minute 58 (verified, /tmp/sb_nonnull.py)
+    # PER-MINUTE cell diff vs the independently-pinned true legacy SectorBetaGroup.compute() output for B:
+    legacy_beta_15m_by_minute = {57: 0.9552009, 58: 0.9590448, 59: 0.9652040}
+    for minute, expected in legacy_beta_15m_by_minute.items():
+        got = captured[minute]["sector_beta_15m"][b]
+        assert got == pytest.approx(expected, rel=1e-5), (
+            f"sector_beta_15m[B]@min{minute}: clean {got} vs legacy {expected}"
+        )
+    legacy_at_58 = {  # full feature set @ minute 58 (legacy compute() OUTPUT, /tmp/sb_nonnull.py)
         "sector_beta_15m": 0.9590448101695276, "sector_corr_15m": 0.9358274462036749,
         "sector_beta_30m": 0.9195091239980999, "sector_corr_30m": 0.9369723493584321,
         "sector_beta_60m": 1.061111724464088, "sector_corr_60m": 0.9673437248898764,
     }
-    for k, v in legacy.items():
-        assert out_at_58[k][b] == pytest.approx(v, rel=1e-5), f"sector_beta.{k}[B]@min58: clean {out_at_58[k][b]} vs legacy {v}"
+    for k, v in legacy_at_58.items():
+        assert captured[58][k][b] == pytest.approx(v, rel=1e-5), (
+            f"sector_beta.{k}[B]@min58: clean {captured[58][k][b]} vs legacy {v}"
+        )
 
 def test_technical_sparse_matches_legacy_compute_golden() -> None:
     """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean technical cell-for-cell vs a golden from the
@@ -3385,6 +3400,8 @@ _LEGACY_GROUP_OF = {
     "multi_day_returns": ("multi_day", "MultiDayReturnGroup"),
     "daily_beta": ("daily_beta", "DailyBetaGroup"),
     "overnight_intraday_split": ("overnight_intraday_split", "OvernightIntradaySplitGroup"),
+    "multi_day_vwap": ("multi_day_vwap", "MultiDayVwapGroup"),
+    "overnight_beta": ("overnight_beta", "OvernightBetaGroup"),
     "liquidity_rank": ("liquidity_rank", "LiquidityRankGroup"),
     "runner_state": ("runner_state", "RunnerStateGroup"),
     "dumper_state": ("dumper_state", "DumperStateGroup"),
