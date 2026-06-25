@@ -20,6 +20,45 @@ overclaim, and we're careful to quote them at a matched scale:
   under the 60-second budget. (Different scale from the line above — don't add them; the apples-to-apples
   "compute is ~1/3 of bar→vector" is the sim-scale pair.)
 
+#### Why ~7,000 symbols is *not* 289ms × 7,000
+
+A fair first reaction is: "if one ticker is ~289ms, 7,000 tickers can't be 1.4s — even on 32 cores the math
+doesn't work." It doesn't, *if* cost were per-ticker. It isn't — and here is exactly why, with the measured
+curve as proof:
+
+1. **The engine is frame-vectorized — symbols are ROWS, not passes.** A shard holds *all* of its symbols as
+   rows in one columnar (polars) frame, and each feature is *one expression evaluated over the whole column at
+   once*. Adding a symbol adds a **row to an already-vectorized operation**, not another pass over the code.
+   So the cost is **fixed overhead + a tiny marginal per-symbol**, never `per-symbol × N`.
+
+2. **The measured scaling curve proves it (one shard, isolated):**
+
+   | symbols on the shard | per-minute compute |
+   |---|---|
+   | 100 | 123ms |
+   | 437 | 326ms |
+   | 875 | 574ms |
+
+   That's a straight line of **~75ms fixed + ~0.57ms per symbol** — clearly sub-linear in the way that matters.
+   The line that dissolves the paradox: **100 tickers of compute is 123ms — already *cheaper* than the single
+   289ms anchor.** If cost were per-ticker, 100 tickers would be ~30 *seconds*. It's 123ms. So the "× 7,000"
+   mental model is simply the wrong shape for this engine.
+
+3. **7,000 = 8 shards × ~875, and the shards run in parallel** on the 32-core box. The per-minute universe
+   latency is therefore the **slowest single shard** (~574ms isolated, ~1.4s once all 8 contend for cores) —
+   **not × 8, and certainly not × 7,000.**
+
+4. **What the 289ms anchor actually is.** That number is a fixed-overhead-dominated *single-bet end-to-end*
+   figure (one symbol's whole bar→vector, mostly framework/setup cost), **not** the per-ticker *compute*. So it
+   should never be multiplied by symbol count — the per-symbol compute marginal is ~0.57ms, not 289ms.
+
+**Two honest caveats (kept in plain sight, not buried):**
+- The ~1.4s is **compute-only** — synthetic bars, warm buffers, with store-write / IPC / bus deliberately
+  excluded (those are off the per-minute critical path). It is the cost of the part this redesign touches.
+- The **full end-to-end at 7,000 is not directly measured.** We measured e2e only at the bounded ~1,000-symbol
+  sim scale, where compute was ~1/3 of the 277ms bar→vector. So the honest claim is precise: *"the compute the
+  redesign touches is well under budget at full universe,"* **not** *"the whole pipeline is 1.4s at 7,000."*
+
 Either way the conclusion is the same: **this is a simplicity win** — measured by mechanisms and lines removed —
 not a latency rescue. Throughput is a floor we must not regress, never a target.
 
