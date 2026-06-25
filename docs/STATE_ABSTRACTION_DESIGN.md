@@ -131,29 +131,34 @@ That is the complexity to remove.
 ## The design: one container, one lifecycle, a small set of folds
 
 The whole thing collapses to **one idea**: a feature group owns a **per-symbol carried-state container**. Every
-minute, the container does the same three things for every group — and the *only* thing that differs between
-groups is a tiny declared piece. Here is the shape:
+minute, the container does the same things for every group — and the *only* thing that differs between groups is
+a tiny declared piece. Here is the shape:
 
 ```
-A group declares THREE small things:
+A group declares FOUR small things:
   • its STATE     — what it carries per symbol (a few rows / a running sum / one decayed value)
   • its FOLD      — how one new minute updates that state  (the O(1) step)
   • its READ      — how it turns the state into the feature value at "now"
+  • its READY     — when its value is VALID: how much history / what condition before "now" can be trusted
 
 The CONTAINER (shared by ALL groups, written once) owns everything else:
   • the fixed symbol index            (who we track)
   • churn                             (a symbol shows up / disappears this minute)
   • the lifecycle                     (seed from history, rebuild when stale)
   • idempotency                       (re-seeing a minute never double-counts)
+  • the readiness CHECK + handling    (ask every group's READY; withhold/flag a not-yet-ready value)
 ```
 
 A minute bar enters one way (the container's `fold`), the group's declared fold updates its state in a few
-operations, the group's declared read produces the value. That's it. No engine to pick, no `step` variant to
-choose, no base class to match.
+operations, the container asks the group's declared `ready` whether the value is valid yet, and — if it is — the
+group's declared read produces it. That's it. No engine to pick, no `step` variant to choose, no base class to
+match. (The fourth element, **readiness**, is the gap Ben flagged on first read — see its own section below; it's
+first-class, not a footnote.)
 
 ### The one shared part — "the spine"
 
-Four things must behave *identically* for every group, so they live in the container, written once:
+Five things must behave *identically* for every group, so they live in the container, written once (the first
+four below; the fifth — readiness — gets its own section after, because Ben rightly flagged it as first-class):
 
 1. **Fixed symbol index + churn.** We track a fixed set of symbols. When a symbol has no bar this minute it
    simply doesn't contribute — exactly what the backfill (the source of truth) does when there's no row. We
@@ -184,18 +189,54 @@ Two small **churn riders** also live in the container (both proven value-identic
   real bar this minute" flag, and the recursive folds use it. (Without this a gappy symbol's MACD silently
   drifts; with it, it's identical to the backfill. Verified.)
 
+### The fourth declared element — READINESS (am I warmed up yet?)
+
+This is the gap Ben caught: **a feature must be able to say "my value isn't valid yet."** At the start of a
+session a windowed feature has no window filled, an EMA hasn't seen its warmup span, a daily-snapshot feature has
+no snapshot yet — and its output, if emitted, is a partial/wrong number a strategy must not trade on. The coarse
+"seed from history / rebuild when stale" lifecycle can say *is the state fresh?* but **not** *is the value
+trustworthy yet?* Those are different questions, and readiness is the second one.
+
+So readiness is a **first-class, per-group declaration** — the fourth thing a group writes:
+
+```
+group.is_ready(symbol) -> bool      # is THIS symbol's value valid at "now"?
+```
+
+The condition is **per-feature, not one-size** (Ben's point): a windowed-sum is ready when its deepest window is
+filled; an EMA when its warmup span has elapsed; a snapshot once the daily snapshot exists; a state-machine when
+it has its first completed leg; a point-lag when the lagged bar is present. Each fold-kind/group implements its
+own `is_ready`. What the **container** owns — uniformly, once — is the *checking* and the *handling*: before it
+hands a value to the bus, it asks `is_ready`, and a not-ready value is **withheld or flagged, never silently
+emitted as if valid.** (This closes a real bug class: a strategy trading on an under-warmed partial.)
+
+We don't invent this — we **generalize machinery we already built** (PR #165, warm-start readiness):
+- `WindowedSumState.populated(window)` (incremental.py:286) — the source-agnostic "has this window's full depth
+  been absorbed?" — is exactly the windowed-sum kind's `is_ready`.
+- The three-way **FULL / legitimately-not-yet-full / FAILED** distinction (`assert_ready` incremental.py:347,
+  `IncrementUnderfilled` :108) is precisely the readiness vocabulary: *FULL* = ready/emit; *legitimately short*
+  (first day, new ticker, real gap) = not-ready, withhold, no error; *FAILED* (history was present but didn't get
+  absorbed) = a real bug, raise. The container's readiness check is this, lifted to every kind.
+- The `FeatureSpec.nan_policy` already names this per feature (`"none"` / `"warmup"` / `"sparse"`, base.py:120) —
+  the design makes that declaration *do* something uniformly instead of each group hand-handling it.
+
+So the contract is **`{state, fold, read, ready}`**: a group declares its state, how to fold a minute, how to
+read the value, and **when that value is valid** — and the container owns the seed, the churn, the idempotency,
+**and the readiness check + not-ready handling** for all of them.
+
 ### The "no more than we need" part — exactly the folds the data demands
 
 We tested, by construction, whether all the state shapes are really *one* thing. The honest answer — and the one
 Ben asked for — is **one container with a small, closed set of fold-kinds, not a single universal ring.** We
 proved which ones genuinely merge and which genuinely don't:
 
-| fold-kind | what it carries | which of today's mechanisms it absorbs | evidence |
-|---|---|---|---|
-| **row-ring** | the last *N* per-symbol rows | `PointRing` + `ValueInputRing` + `WindowedSumState` (a row-ring **plus** a running-sum read; it keeps `_buf_vals` precisely to subtract on window-exit) | #26 (both refactored onto one base, 34 green); #27 |
-| **accumulator-reduce** | one running value per symbol, reset on a key | `CumulativeState` (session min/max/sum/first) + `ExtremaState` (windowed max/min) | #27 |
-| **recursive** | a single decayed value (`v = α·new + (1−α)·v`) | `EMAState` | #27 (genuinely forks — no rows to carry) |
-| **state-machine** | a small bounded per-symbol machine | `swing` / `swing_dc` (a ZigZag leg-state machine) | pressure-test C1 |
+| fold-kind | what it carries | which of today's mechanisms it absorbs | its `is_ready` | evidence |
+|---|---|---|---|---|
+| **row-ring** | the last *N* per-symbol rows | `PointRing` + `ValueInputRing` + `WindowedSumState` (a row-ring **plus** a running-sum read; it keeps `_buf_vals` precisely to subtract on window-exit) | the window is filled / the lagged row is present (`populated`) | #26 (both refactored onto one base, 34 green); #27 |
+| **accumulator-reduce** | one running value per symbol, reset on a key | `CumulativeState` (session min/max/sum/first) + `ExtremaState` (windowed max/min) | at least one bar absorbed since the reset key | #27 |
+| **recursive** | a single decayed value (`v = α·new + (1−α)·v`) | `EMAState` | its warmup span has elapsed | #27 (genuinely forks — no rows to carry) |
+| **state-machine** | a small bounded per-symbol machine | `swing` / `swing_dc` (a ZigZag leg-state machine) | its first leg/pivot has completed | pressure-test C1 |
+| **snapshot** | today's per-(symbol,date) snapshot | `SessionCache` / `DailySnapshotGroup` | the daily snapshot exists for this session | — |
 
 `EMAState` and `CumulativeState` **do not** collapse into the row-ring — an EMA keeps one number and overwrites
 it; it has no rows to address (verified: `stateful.py:481`, no slot/cursor/count). Forcing them into "a ring of
@@ -252,7 +293,8 @@ seven.
 
 But the honest headline is **not the line count — it's the count of concepts.** Seven ways to hold state, two
 engines, and four `step*` variants become **one container + a handful of declared folds.** A feature author
-writes `{state, fold, read}` and never touches a drive loop, a churn rule, a seed path, or a `step` variant.
+writes `{state, fold, read, ready}` and never touches a drive loop, a churn rule, a seed path, a readiness check,
+or a `step` variant.
 *That* is what "no more implementations than we actually need" and "complexity no one can follow → complexity
 anyone can" mean in practice. The lines are a side effect; the followability is the point.
 
@@ -267,8 +309,12 @@ the migration is mechanical and safe:
 The order (lowest-risk first, each green before the next, confirmed against the real dependency edges):
 
 1. **Build the shared spine + the positional row-ring payload.** The spine = the symbol-index + count/minute
-   channel + watermark + the existing `RunningState` lifecycle. Port `PointRing` + `ValueInputRing` onto it first
-   — convergence already proven (#26), two consumers, lowest risk.
+   channel + watermark + the existing `RunningState` lifecycle + **the readiness check** (lift `populated` /
+   `assert_ready`'s three-way FULL/short/FAILED to the container). Port `PointRing` + `ValueInputRing` onto it
+   first — convergence already proven (#26), two consumers, lowest risk.
+
+Every ported kind also carries its **`is_ready`** (step 1 establishes the container check; each later step's kind
+declares its own condition — windowed-sum = window filled, EMA = warmup span, snapshot = snapshot exists, etc.).
 2. **WindowedSum payload onto the spine** (the big one). Re-point the incremental reductions; carry the Class-A/B
    conditioning. There is one known shared-engine hazard — two groups that share the same engine, where a
    numerical quirk in one (`price_volume`) could corrupt the other (`return_dynamics`); the value gate catches it.
