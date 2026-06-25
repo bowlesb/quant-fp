@@ -3909,6 +3909,60 @@ def test_market_beta_sparse_matches_legacy_value_ols() -> None:
     assert out["market_corr_10m"][0] == pytest.approx(0.999993967242856, rel=1e-5)
     assert out["idio_vol_10m"][0] == pytest.approx(1.5961737412446957e-05, rel=1e-4, abs=1e-7)
     assert out["market_beta_60m"][0] == pytest.approx(1.4199652688121314, rel=1e-5)
+
+
+def test_market_context_outperforming_nan_not_zero_matches_legacy() -> None:
+    """GATE market_context on the NaN-NOT-0 axis — the silent coercion ArchOverhaul fixed (1220 false-0s):
+    outperforming_{w}m = (own_ret − SPY_ret > 0) must be NULL where the relative return is UNDEFINED, NOT 0.
+    Legacy (None > 0) = None; numpy (NaN > 0) = False = a spurious 0 — so the clean port must gate on
+    isfinite(rel). Completeness (name-set) passes either way, so this VALUE gate is what catches a regression.
+    Fixture: SPY (dense index) + A (gappy, every-other-min → its strict w-minute lag is ABSENT for several
+    windows → own_ret NaN → rel NaN). Diff vs real legacy MarketContextGroup.compute(): 72/72 cells match,
+    including the outperforming_{w}m that legacy NULLs (10 of them NaN, ZERO false-zeros). qqq absent in the
+    fixture → nasdaq_* NaN both sides. Golden tests/market_context_golden.json."""
+    import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_xsectional import MarketContextClean  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    a_off = list(range(0, 40, 2))   # gappy
+    spy_off = list(range(0, 40))    # dense index
+    syms = ["A", "SPY"]
+    mc_in = json.load(open(os.path.join(os.path.dirname(__file__), "market_context_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "market_context_golden.json")))
+
+    eng = CleanEngine([MarketContextClean()], syms, 400)
+    eng.static = {"spy_row": np.array([syms.index("SPY")])}  # no qqq_row → nasdaq_* NaN (matches legacy, no QQQ)
+    events: dict[int, dict[str, float]] = {}
+    for off, close in zip(a_off, mc_in["a"]):
+        events.setdefault(off, {})["A"] = float(close)
+    for off, close in zip(spy_off, mc_in["spy"]):
+        events.setdefault(off, {})["SPY"] = float(close)
+    captured: dict[tuple[str, int], dict[str, float]] = {}
+    for off in sorted(events):
+        present = events[off]
+        out = eng.step({"symbol": np.array(list(present)),
+                        "close": np.array(list(present.values()), dtype=np.float64),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=off)).timestamp())],
+                                                 dtype=np.int64)})["market_context"]
+        for s in present:
+            captured[(s, off)] = {k: float(out[k][syms.index(s)]) for k in out}
+
+    probe = {"A": 38, "SPY": 39}  # A present at 38 (even), SPY at its last minute 39
+    nan_not_zero = 0
+    for s, gfeats in golden.items():
+        for fname, gv in gfeats.items():
+            cv = captured[(s, probe[s])][fname]
+            if gv is None:
+                assert np.isnan(cv), f"market_context {s}.{fname}: legacy NULL, clean {cv} (NaN→0 coercion bug?)"
+                if fname.startswith("outperforming"):
+                    nan_not_zero += 1
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"market_context {s}.{fname}: legacy {gv} clean {cv}"
+    assert nan_not_zero >= 1, "fixture must exercise at least one outperforming_wm that legacy NULLs (the axis)"
+
+
 # ========================================================================================================= #
 # breadth RE-PORT gate (PRE-STAGED, #61): breadth is DOUBLE-broken as a stub — clean uses POSITIONAL windows
 # (breadth_up_5/_10/_30) where legacy is TIME (breadth_up_5m/_30m/_60m/_1d/_5d) AND is missing all 15
