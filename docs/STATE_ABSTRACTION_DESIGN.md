@@ -449,9 +449,10 @@ declares its own condition — windowed-sum = window filled, EMA = warmup span, 
    the parked set is the **five** above, not six.)
 
    **Two distinct proofs, both now demonstrated.** The 122 → 14ms spike proves the *fold half* (O(1) arithmetic +
-   the conditioning, value-identical). That 14ms was still `0.16ms numpy fold + 8.97ms polars tax (90%)` — the
-   8.5× came from killing the whole-buffer *batch*, but the residual still paid the per-minute polars tax the
-   GREEN groups also pay. The *second* proof — eliminating that tax — is now also in hand: the fully-numpy
+   the conditioning, value-identical). That 14ms was still `0.16ms numpy fold + 8.97ms polars tax (90%)` — and the
+   tax is the *shared per-minute framework*, not anything price_volume-specific: `matrix_at 3.78 + resolve_points
+   3.15 + assemble 2.04 = 8.97ms`, the exact phases the GREEN armed groups also pay. The 8.5× came from killing
+   the whole-buffer *batch*; the residual is that framework tax. The *second* proof — eliminating that tax — is now also in hand: the fully-numpy
    `price_volume` step (zero per-minute polars) measured **2.0ms** (compute `0.16ms` polars-free) and is **byte-
    identical to backfill** at FR=0+FR=1 including the conditioning cells (the `test_fp_incremental_emit` 6+6 and
    the #451 co-resident 39-pass). So both halves are demonstrated on the hardest real group: the migration must
