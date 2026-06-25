@@ -30,6 +30,42 @@ def _masked_mean(values: np.ndarray, w: int) -> tuple[np.ndarray, np.ndarray]:
     return np.where(n_present > 0, mean, np.nan), n_present
 
 
+def _windowed_ols_slope(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window OLS slope of ``y`` on ``x`` per symbol, masked to bars where BOTH are finite —
+    matching the legacy ``slope_`` reduction: slope = (n·Σxy − Σx·Σy) / (n·Σx² − (Σx)²), NaN where n<2 or
+    var_x==0. ``x_mat``/``y_mat`` are ``(n_symbols, buffer)``."""
+    xw = _trailing_window(x_mat, w)
+    yw = _trailing_window(y_mat, w)
+    mask = np.isfinite(xw) & np.isfinite(yw)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, xw, 0.0)
+    yf = np.where(mask, yw, 0.0)
+    sx = xf.sum(axis=1)
+    sy = yf.sum(axis=1)
+    sxx = (xf * xf).sum(axis=1)
+    sxy = (xf * yf).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = n * sxy - sx * sy
+        var_x = n * sxx - sx * sx
+        slope = cov / var_x
+    return np.where((n >= 2.0) & (var_x > 0.0), slope, np.nan)
+
+
+def _windowed_cov(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window sample covariance of ``x`` and ``y`` per symbol over bars where BOTH finite,
+    population form ``Σ(xy)/n − (Σx/n)(Σy/n)`` (matching the legacy Roll-spread autocovariance assembly).
+    NaN where n<2."""
+    xw = _trailing_window(x_mat, w)
+    yw = _trailing_window(y_mat, w)
+    mask = np.isfinite(xw) & np.isfinite(yw)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, xw, 0.0)
+    yf = np.where(mask, yw, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = (xf * yf).sum(axis=1) / n - (xf.sum(axis=1) / n) * (yf.sum(axis=1) / n)
+    return np.where(n >= 2.0, cov, np.nan)
+
+
 def _masked_std(values: np.ndarray, w: int) -> np.ndarray:
     """Trailing ``w``-window SAMPLE std (ddof=1, matching the legacy ``std_`` reduction) of ``values`` ignoring
     NaN. NaN where fewer than 2 present bars (the count>1 guard). std = sqrt((Σx² − (Σx)²/n)/(n−1))."""
@@ -90,6 +126,46 @@ class VolatilityClean:
             mean_hl2, _ = _masked_mean(hl2, w)
             with np.errstate(invalid="ignore"):
                 out[f"parkinson_vol_{w}m"] = np.sqrt(np.clip(mean_hl2 / _FOUR_LN2, 0.0, None))
+        return out
+
+
+class LiquidityClean:
+    """LIQUIDITY (Layer B): amihud_illiq_{w}m = mean(|return|/dollar-volume), undefined (NaN, excluded) on a
+    non-positive dollar minute; roll_spread_{w}m = 2·sqrt(−cov(Δp, Δp_lag))/close when that autocov < 0 else 0;
+    kyle_lambda_{w}m = OLS slope of Δp on signed_volume. Legacy: ``LiquidityGroup`` (ReductionGroup)."""
+
+    name = "liquidity"
+    input_cols = ("close", "volume", "signed_volume")
+    _WINDOWS: tuple[int, ...] = (10, 15, 30, 60, 120)
+    feature_names = tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("amihud_illiq", "roll_spread", "kyle_lambda")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        volume = window.trailing("volume")
+        signed_volume = window.trailing("signed_volume")
+        latest_close = window.latest("close")
+        # Δp = close - close_{-1} (first column NaN); Δp_lag = close_{-1} - close_{-2}.
+        dp = np.full_like(close, np.nan)
+        dp[:, 1:] = close[:, 1:] - close[:, :-1]
+        dp_lag = np.full_like(close, np.nan)
+        dp_lag[:, 2:] = close[:, 1:-1] - close[:, :-2]
+        # amihud per-bar |return|/dollar, NaN on dollar<=0 (excluded from the window mean on both paths).
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ret = close[:, 1:] / close[:, :-1] - 1.0
+            ret_full = np.concatenate([np.full((close.shape[0], 1), np.nan), ret], axis=1)
+            dollar = close * volume
+            amihud = np.where(dollar > 0.0, np.abs(ret_full) / dollar, np.nan)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            out[f"amihud_illiq_{w}m"], _ = _masked_mean(amihud, w)
+            cov = _windowed_cov(dp, dp_lag, w)
+            with np.errstate(invalid="ignore"):
+                roll = np.where(cov < 0.0, 2.0 * np.sqrt(-cov) / latest_close, 0.0)
+            # cov NaN (warm-up, <2 pairs) -> NaN; cov>=0 -> 0.0 (Roll defined as 0 on non-negative autocov).
+            out[f"roll_spread_{w}m"] = np.where(np.isnan(cov), np.nan, roll)
+            out[f"kyle_lambda_{w}m"] = _windowed_ols_slope(signed_volume, dp, w)
         return out
 
 
