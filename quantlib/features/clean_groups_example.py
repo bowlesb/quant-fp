@@ -14,6 +14,7 @@ import numpy as np
 
 from quantlib.features.clean_engine import Window
 from quantlib.features.clean_groups_windowed import (
+    _close_at_lag,
     _denom_x_defined,
     _rebased_minute_axis,
     _row_mean,
@@ -136,10 +137,37 @@ class RealizedRangeClean:
         return out
 
 
+_TRUE: np.ndarray = np.array(True)  # sentinel: a current-bar operand whose value is always KNOWN (broadcast)
+
+
+def _kleene_and(operands: list[tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
+    """Fold a boolean AND chain in polars' KLEENE 3-valued logic, per (value, is_known) operand. Result float:
+    0.0 if ANY operand is definitely False (value False AND known), NaN if no operand is False but ≥1 is unknown
+    (a null prev-bar term), else 1.0. ``is_known`` may be ``_TRUE`` (the operand is always known — a current-bar
+    term) or a per-symbol bool mask (known iff the prior bar exists). Matches the legacy ``(a & b & ...).cast``
+    where a null operand makes the chain null unless an earlier operand already forced it False."""
+    n = operands[0][0].shape[0]
+    any_false = np.zeros(n, dtype=bool)
+    any_unknown = np.zeros(n, dtype=bool)
+    for value, known in operands:
+        is_known = np.broadcast_to(known, value.shape)
+        any_false |= is_known & ~value  # a known-False operand → the AND is definitely False
+        any_unknown |= ~is_known  # an unknown operand → the AND may be null
+    out = np.ones(n, dtype=np.float64)
+    out[any_unknown & ~any_false] = np.nan  # unknown wins only when nothing is already False
+    out[any_false] = 0.0
+    return out
+
+
 class CandlestickClean:
-    """Per-bar candlestick geometry + the two-candle engulfing pattern (reads the prior bar). A DIFFERENT shape
-    from the rolling/windowed groups — per-bar arithmetic on the latest OHLC + a lag-1 read — proving the
-    interface covers bespoke per-bar/lag features, not just windowed reductions."""
+    """CANDLESTICK: 8 single-bar geometry features (per-bar arithmetic on the latest OHLC) + 4 two-candle
+    patterns (engulfing/harami) that read the PRIOR bar. Legacy: ``CandlestickGroup`` (StatefulGroup).
+
+    The two-candle patterns read ``_prev_open``/``_prev_close`` via legacy ``LagSpec(minutes=1)`` = a STRICT
+    TIME-lag (the bar at EXACTLY T−1 minute, NULL when that minute is absent — == base.lagged), NOT the
+    immediately-prior PRESENT bar. On a gap the patterns are NULL (nan_policy=warmup), not computed off a stale
+    bar — so they use ``_close_at_lag`` (the strict T−1 lookup), not ``trailing[:, -2]``. The 8 single-bar
+    features are pure per-bar geometry on the latest OHLC (genuinely positional / point-in-time)."""
 
     name = "candlestick"
     input_cols = ("open", "high", "low", "close")
@@ -147,8 +175,15 @@ class CandlestickClean:
         "body_ratio",
         "upper_shadow_ratio",
         "lower_shadow_ratio",
+        "is_bullish",
         "is_doji",
+        "is_hammer",
+        "is_shooting_star",
+        "is_marubozu",
         "pattern_engulfing_bullish",
+        "pattern_engulfing_bearish",
+        "pattern_harami_bullish",
+        "pattern_harami_bearish",
     )
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
@@ -157,29 +192,70 @@ class CandlestickClean:
         low = window.latest("low")
         c = window.latest("close")
         rng = h - low
-        valid = rng > 0
+        positive = rng > 0.0
+        body_top = np.maximum(o, c)
+        body_bottom = np.minimum(o, c)
         with np.errstate(invalid="ignore", divide="ignore"):
-            body = np.abs(c - o) / rng
-            upper = (h - np.maximum(o, c)) / rng
-            lower = (np.minimum(o, c) - low) / rng
-        body = np.where(valid, body, 0.0)
-        upper = np.where(valid, upper, 0.0)
-        lower = np.where(valid, lower, 0.0)
-        is_doji = (body < 0.10).astype(np.float64)
-        # two-candle bullish engulfing: this bar bullish (c>o), prior bar bearish, this body engulfs prior body.
-        prior = _trailing_window(window.trailing("close"), 2)  # (n, 2): [prior_close, this_close]
-        prior_close = prior[:, 0]
-        prior_open = _trailing_window(window.trailing("open"), 2)[:, 0]
-        this_bull = c > o
-        prior_bear = prior_close < prior_open
-        engulf = this_bull & prior_bear & (c >= prior_open) & (o <= prior_close)
-        return {
+            body = np.where(positive, np.abs(c - o) / rng, 0.0)
+            upper = np.where(positive, (h - body_top) / rng, 0.0)
+            lower = np.where(positive, (body_bottom - low) / rng, 0.0)
+        curr_bull = c > o
+        curr_bear = c < o
+        # prior bar's open/close at EXACTLY T−1 minute (strict time-lag, NaN on a gap).
+        minute = window.trailing_minute()
+        now_epoch = window.minute_epoch
+        prev_open = _close_at_lag(window.trailing("open"), minute, now_epoch, 1)
+        prev_close = _close_at_lag(window.trailing("close"), minute, now_epoch, 1)
+        prev_known = np.isfinite(prev_open) & np.isfinite(prev_close)
+        out: dict[str, np.ndarray] = {
             "body_ratio": body,
             "upper_shadow_ratio": upper,
             "lower_shadow_ratio": lower,
-            "is_doji": is_doji,
-            "pattern_engulfing_bullish": engulf.astype(np.float64),
+            "is_bullish": curr_bull.astype(np.float64),
+            "is_doji": (body < 0.1).astype(np.float64),
+            "is_hammer": ((lower > 0.6) & (upper < 0.1) & (body < 0.4)).astype(np.float64),
+            "is_shooting_star": ((upper > 0.6) & (lower < 0.1) & (body < 0.4)).astype(np.float64),
+            "is_marubozu": (body > 0.9).astype(np.float64),
         }
+        # two-candle patterns: a chain of boolean ANDs where every PREV-dependent term is UNKNOWN (null) when
+        # the T−1 bar is absent, while the current-bar terms (curr_bull/curr_bear) are always known. polars
+        # evaluates the chain in KLEENE 3-valued logic → 0.0 if ANY operand is definitely False (e.g. curr_bear
+        # already fails), null ONLY if no operand is False but ≥1 is unknown. A blanket "prev absent → NaN" is
+        # WRONG (legacy emits 0.0 when a current-bar term fails). _kleene_and folds (value, is_known) operands.
+        with np.errstate(invalid="ignore"):
+            out["pattern_engulfing_bullish"] = _kleene_and(
+                [
+                    (curr_bull, _TRUE),
+                    (prev_close < prev_open, prev_known),
+                    (c >= prev_open, prev_known),
+                    (o <= prev_close, prev_known),
+                ]
+            )
+            out["pattern_engulfing_bearish"] = _kleene_and(
+                [
+                    (curr_bear, _TRUE),
+                    (prev_close > prev_open, prev_known),
+                    (o >= prev_close, prev_known),
+                    (c <= prev_open, prev_known),
+                ]
+            )
+            out["pattern_harami_bullish"] = _kleene_and(
+                [
+                    (curr_bull, _TRUE),
+                    (prev_close < prev_open, prev_known),
+                    (body_top <= prev_open, prev_known),
+                    (body_bottom >= prev_close, prev_known),
+                ]
+            )
+            out["pattern_harami_bearish"] = _kleene_and(
+                [
+                    (curr_bear, _TRUE),
+                    (prev_close > prev_open, prev_known),
+                    (body_top <= prev_close, prev_known),
+                    (body_bottom >= prev_open, prev_known),
+                ]
+            )
+        return out
 
 
 class BreadthClean:
