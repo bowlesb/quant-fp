@@ -1984,6 +1984,54 @@ def test_xrank_contract() -> None:
     _assert_feature_spec_contract(out, CrossSectionalRankGroup().declare(), "cross_sectional_rank ")
 
 
+def test_cross_sectional_rank_exact_minute_lag_matches_legacy_compute() -> None:
+    """VALUE gate for the exact-minute-lag fix (15a64ef, the #67 class sweep): return_rank_{w}m uses a STRICT
+    w-minute lag (_value_at_lag, NaN on a gap), NOT the positional close[:,-(w+1)]. A gappy symbol whose
+    w-return is NaN must be EXCLUDED from the cross-sectional rank that minute — else its spliced positional
+    return is wrongly ranked and shifts EVERYONE's percentile (the mutual-false-green axis; the prior
+    present-gating + contract tests don't check rank VALUES vs real compute()). Mixed-sparsity universe (A/C/D
+    dense + B every-3rd), diffed vs real legacy CrossSectionalRankGroup.compute() = 24/24. Witness: B's
+    return_rank_5m/15m are NULL (its short-window strict lag is absent) so B drops out of those ranks, and the
+    others are ranked over the present-with-finite-return subset. Golden tests/xrank_golden.json."""
+    import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = {"A": list(range(0, 40)), "B": [0, 3, 6, 9, 12, 18, 21, 27, 30, 33, 36, 39],
+               "C": list(range(0, 40)), "D": list(range(0, 40))}
+    syms = ["A", "B", "C", "D"]
+    xr_in = json.load(open(os.path.join(os.path.dirname(__file__), "xrank_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "xrank_golden.json")))
+
+    eng = CleanEngine([CrossSectionalRankClean()], syms, WINDOW)
+    events: dict[int, dict[str, tuple[float, float]]] = {}
+    for s in syms:
+        for i, off in enumerate(offsets[s]):
+            events.setdefault(off, {})[s] = (float(xr_in[s]["close"][i]), float(xr_in[s]["volume"][i]))
+    captured: dict[str, dict[str, float]] = {}
+    for off in sorted(events):
+        present = events[off]
+        out = eng.step({"symbol": np.array(list(present)),
+                        "close": np.array([present[s][0] for s in present], dtype=np.float64),
+                        "volume": np.array([present[s][1] for s in present], dtype=np.float64),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=off)).timestamp())],
+                                                 dtype=np.int64)})["cross_sectional_rank"]
+        for s in present:
+            captured[s] = {k: float(out[k][syms.index(s)]) for k in out}  # @min39 (last) per symbol
+
+    nulled_gappy = 0
+    for s, gfeats in golden.items():
+        for fname, gv in gfeats.items():
+            cv = captured[s][fname]
+            if gv is None:
+                assert np.isnan(cv), f"cross_sectional_rank {s}.{fname}: legacy NULL, clean {cv}"
+                if s == "B" and fname.startswith("return_rank"):
+                    nulled_gappy += 1
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"cross_sectional_rank {s}.{fname}: legacy {gv} clean {cv}"
+    assert nulled_gappy >= 1, "fixture must exercise the gappy symbol dropping out of a rank (the exact-lag axis)"
+
+
 # ========================================================================================================= #
 # CROSS-SECTIONAL — batch 2b: return_dispersion (intraday horizons). GREEN-INTRADAY-ONLY: the 4 daily-horizon
 # features are DEFERRED-NaN by design (Lead's integrity guardrail — a deferred-NaN feature passes the contract
@@ -3054,8 +3102,10 @@ def test_daily_groups_share_one_matrix_convention_vs_legacy() -> None:
 
 # The KNOWN warmup-class gap (#77): features where legacy NULLs a partial window (rolling op, no min_samples)
 # but the clean group computes on it. As ArchOverhaul adds the min_samples=w guard, REMOVE entries here — each
-# removed entry becomes a hard clean==legacy assertion. (daily_vol guards n>1, not n>=w like _dist_from_high.)
-_WARMUP_PARTIAL_WINDOW_GAP = {f"daily_vol_{w}d" for w in (10, 20, 30, 60)}
+# removed entry becomes a hard clean==legacy assertion. EMPTY now: the daily_vol guard landed (88ef47f,
+# _daily_vol: n>1 → n>=w, matching _dist_from_high), so EVERY daily feature now NULLs the partial window like
+# legacy — the whole exact class is closed. The sweep stays as durable coverage for any FUTURE regression.
+_WARMUP_PARTIAL_WINDOW_GAP: set[str] = set()
 
 
 def _build_warmup_short_session() -> tuple[dict[str, np.ndarray], list[str]]:
