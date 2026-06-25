@@ -13,6 +13,7 @@ Pattern (reused per ported group as batches land):
     monotonicity where the feature's definition implies it (steeper trend → larger |slope|).
   * MULTI-GROUP PASS: the engine computes every group correctly in ONE shared step (the live shape).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -31,7 +32,9 @@ from quantlib.features.clean_groups_example import (
 WINDOW = 60
 
 
-def _bars(symbols: list[str], close: list[float], volume: list[float] | None = None) -> dict[str, np.ndarray]:
+def _bars(
+    symbols: list[str], close: list[float], volume: list[float] | None = None
+) -> dict[str, np.ndarray]:
     """One minute's bar block for the given present symbols."""
     block: dict[str, np.ndarray] = {
         "symbol": np.array(symbols),
@@ -193,7 +196,9 @@ def test_no_all_nan_or_all_zero_over_varied_fixture() -> None:
     """SANITY: over a varied multi-symbol fixture, no feature comes out all-NaN or all-zero (a dead feature)."""
     rng = np.random.default_rng(1)
     syms = [f"S{i}" for i in range(6)]
-    closes = {s: list(100.0 + np.cumsum(rng.standard_normal(40) * (0.5 + 0.1 * i))) for i, s in enumerate(syms)}
+    closes = {
+        s: list(100.0 + np.cumsum(rng.standard_normal(40) * (0.5 + 0.1 * i))) for i, s in enumerate(syms)
+    }
     volumes = {s: list(1000.0 + rng.random(40) * 4000) for s in syms}
     out = _run([TrendQualityClean(), VwapDeviationClean()], syms, closes, volumes)
     for gname, feats in out.items():
@@ -222,10 +227,22 @@ def test_realized_range_known_constant_value() -> None:
     """Every bar has high-low = 2, close = 100 → range fraction 0.02 each bar → trailing mean = 0.02."""
     engine = CleanEngine([RealizedRangeClean()], ["A"], WINDOW)
     for _ in range(6):
-        engine.step({"symbol": np.array(["A"]), "high": np.array([101.0]),
-                     "low": np.array([99.0]), "close": np.array([100.0])})
-    out = engine.step({"symbol": np.array(["A"]), "high": np.array([101.0]),
-                       "low": np.array([99.0]), "close": np.array([100.0])})["realized_range"]
+        engine.step(
+            {
+                "symbol": np.array(["A"]),
+                "high": np.array([101.0]),
+                "low": np.array([99.0]),
+                "close": np.array([100.0]),
+            }
+        )
+    out = engine.step(
+        {
+            "symbol": np.array(["A"]),
+            "high": np.array([101.0]),
+            "low": np.array([99.0]),
+            "close": np.array([100.0]),
+        }
+    )["realized_range"]
     for w in (3, 5, 10):
         assert out[f"realized_range_{w}m"][0] == pytest.approx(2.0 / 100.0)
 
@@ -234,8 +251,22 @@ def test_realized_range_nonnegative_and_mean_of_known() -> None:
     """A known two-value range series averages correctly and is always >= 0."""
     engine = CleanEngine([RealizedRangeClean()], ["A"], WINDOW)
     # bar 1: range 4 (h104,l100,c100 → 0.04); bar 2: range 2 (h102,l100,c100 → 0.02). mean over 2 = 0.03
-    engine.step({"symbol": np.array(["A"]), "high": np.array([104.0]), "low": np.array([100.0]), "close": np.array([100.0])})
-    out = engine.step({"symbol": np.array(["A"]), "high": np.array([102.0]), "low": np.array([100.0]), "close": np.array([100.0])})["realized_range"]
+    engine.step(
+        {
+            "symbol": np.array(["A"]),
+            "high": np.array([104.0]),
+            "low": np.array([100.0]),
+            "close": np.array([100.0]),
+        }
+    )
+    out = engine.step(
+        {
+            "symbol": np.array(["A"]),
+            "high": np.array([102.0]),
+            "low": np.array([100.0]),
+            "close": np.array([100.0]),
+        }
+    )["realized_range"]
     assert out["realized_range_3m"][0] == pytest.approx((0.04 + 0.02) / 2)
     assert out["realized_range_3m"][0] >= 0.0
 
@@ -258,8 +289,12 @@ def test_candlestick_body_and_shadow_ratios_known() -> None:
 
 def test_candlestick_doji_flag() -> None:
     """A near-zero body (o≈c) → is_doji 1; a large body → is_doji 0."""
-    doji = CleanEngine([CandlestickClean()], ["A"], WINDOW).step(_ohlc(["A"], [100.0], [105.0], [95.0], [100.2]))["candlestick"]
-    big = CleanEngine([CandlestickClean()], ["A"], WINDOW).step(_ohlc(["A"], [100.0], [110.0], [90.0], [109.0]))["candlestick"]
+    doji = CleanEngine([CandlestickClean()], ["A"], WINDOW).step(
+        _ohlc(["A"], [100.0], [105.0], [95.0], [100.2])
+    )["candlestick"]
+    big = CleanEngine([CandlestickClean()], ["A"], WINDOW).step(
+        _ohlc(["A"], [100.0], [110.0], [90.0], [109.0])
+    )["candlestick"]
     assert doji["is_doji"][0] == 1.0
     assert big["is_doji"][0] == 0.0
 
@@ -267,15 +302,17 @@ def test_candlestick_doji_flag() -> None:
 def test_candlestick_bullish_engulfing() -> None:
     """Prior bar bearish (o102 c98), this bar bullish engulfing (o97 c103, body covers prior) → flag 1."""
     engine = CleanEngine([CandlestickClean()], ["A"], WINDOW)
-    engine.step(_ohlc(["A"], [102.0], [103.0], [97.0], [98.0]))   # prior: bearish (c<o)
-    out = engine.step(_ohlc(["A"], [97.0], [104.0], [96.0], [103.0]))["candlestick"]  # this: bullish, engulfs
+    engine.step(_ohlc(["A"], [102.0], [103.0], [97.0], [98.0]))  # prior: bearish (c<o)
+    out = engine.step(_ohlc(["A"], [97.0], [104.0], [96.0], [103.0]))[
+        "candlestick"
+    ]  # this: bullish, engulfs
     assert out["pattern_engulfing_bullish"][0] == 1.0
 
 
 def test_candlestick_no_engulfing_when_prior_bullish() -> None:
     """Prior bar bullish → not a bullish-engulfing setup → flag 0."""
     engine = CleanEngine([CandlestickClean()], ["A"], WINDOW)
-    engine.step(_ohlc(["A"], [98.0], [103.0], [97.0], [102.0]))   # prior: bullish
+    engine.step(_ohlc(["A"], [98.0], [103.0], [97.0], [102.0]))  # prior: bullish
     out = engine.step(_ohlc(["A"], [97.0], [104.0], [96.0], [103.0]))["candlestick"]
     assert out["pattern_engulfing_bullish"][0] == 0.0
 
@@ -384,16 +421,21 @@ def test_macd_decays_on_presence_not_clock() -> None:
         sparse_out = sparse_engine.step({"symbol": np.array(["A"]), "close": np.array([c])})["macd"]
         if i < len(dense_closes) - 1:
             sparse_engine.step({"symbol": np.array([], dtype="<U4"), "close": np.array([])})  # A absent
-    assert sparse_out["macd_line"][0] == pytest.approx(dense_out["macd_line"][0], rel=1e-9), \
-        "EMA decayed across the gap (should hold)"
+    assert sparse_out["macd_line"][0] == pytest.approx(
+        dense_out["macd_line"][0], rel=1e-9
+    ), "EMA decayed across the gap (should hold)"
 
 
 def test_macd_per_symbol_absence_holds_ema() -> None:
     """The PRODUCTION-relevant sparse case: A and B present, then a minute where only A delivers (advancing
     epoch). B's EMA must HOLD across the minute it was absent (not re-decay toward its carried close)."""
+
     def _bar(symbols, closes, epoch):
-        return {"symbol": np.array(symbols), "close": np.array(closes, dtype=np.float64),
-                "minute_epoch": np.array([epoch], dtype=np.int64)}
+        return {
+            "symbol": np.array(symbols),
+            "close": np.array(closes, dtype=np.float64),
+            "minute_epoch": np.array([epoch], dtype=np.int64),
+        }
 
     engine = CleanEngine([MacdClean()], ["A", "B"], WINDOW)
     engine.step(_bar(["A", "B"], [100.0, 200.0], 60))
@@ -422,14 +464,26 @@ def test_all_six_groups_one_pass() -> None:
     cross-sectional (breadth), and EMA (macd) groups in ONE step — every kind, one shared pass."""
     rng = np.random.default_rng(5)
     syms = [f"S{i}" for i in range(5)]
-    groups = [TrendQualityClean(), VwapDeviationClean(), RealizedRangeClean(),
-              CandlestickClean(), BreadthClean(), MacdClean()]
+    groups = [
+        TrendQualityClean(),
+        VwapDeviationClean(),
+        RealizedRangeClean(),
+        CandlestickClean(),
+        BreadthClean(),
+        MacdClean(),
+    ]
     engine = CleanEngine(groups, syms, WINDOW)
     out = {}
     for _ in range(30):
         c = 100.0 + rng.standard_normal(5).cumsum()
-        bars = {"symbol": np.array(syms), "open": c * 0.999, "high": c * 1.003,
-                "low": c * 0.997, "close": c, "volume": 1000.0 + rng.random(5) * 3000}
+        bars = {
+            "symbol": np.array(syms),
+            "open": c * 0.999,
+            "high": c * 1.003,
+            "low": c * 0.997,
+            "close": c,
+            "volume": 1000.0 + rng.random(5) * 3000,
+        }
         out = engine.step(bars)
     assert set(out) == {g.name for g in groups}
     for group in groups:
@@ -452,18 +506,12 @@ def _close_bars(present_symbols, closes):
     return {"symbol": np.array(present_symbols), "close": np.array(closes, dtype=np.float64)}
 
 
-@pytest.mark.xfail(
-    reason="SAME interface gap as macd (reported): breadth counts a symbol ABSENT this minute as a valid "
-    "cross-section member — window.trailing('close') returns its CARRIED bars so ret is finite → valid=True "
-    "even with no bar this minute. The axis-0 reduce should count only THIS-minute-present symbols; needs "
-    "window.present(). Until then the cross-sectional denominator is wrong on sparse minutes.",
-    strict=True,
-)
 def test_breadth_sparse_presence_counts_only_present() -> None:
     """ADVERSARIAL (cross-sectional + sparse): A,B trend UP, C,D trend DOWN (all 4 present 6 bars). Then a
     minute where ONLY A,B deliver. Presence-aware breadth reduces over the 2 PRESENT (up) names →
     breadth_up=1.0, down=0.0. The BUG counts the 2 ABSENT (down-history) names via their carried bars →
-    denominator 4 → up=0.5, down=0.5 (verified). Asserting the CORRECT answer → fails until window.present()."""
+    denominator 4 → up=0.5, down=0.5 (verified). Asserting the CORRECT answer → fails until window.present().
+    """
     syms = ["A", "B", "C", "D"]
     engine = CleanEngine([BreadthClean()], syms, WINDOW)
     for k in range(6):
@@ -478,9 +526,9 @@ def test_macd_gap_hand_computed() -> None:
     bars only (the defined presence-decay semantics) and assert. Currently xfail-documented as broken — this
     test asserts the CORRECT (presence-decay) answer, so it fails until window.present() lands."""
     engine = CleanEngine([MacdClean()], ["A"], WINDOW)
-    engine.step(_close_bars(["A"], [100.0]))            # bar 1
-    engine.step(_close_bars(["A"], [110.0]))            # bar 2
-    engine.step(_close_bars([], []))                    # A ABSENT — EMA must HOLD
+    engine.step(_close_bars(["A"], [100.0]))  # bar 1
+    engine.step(_close_bars(["A"], [110.0]))  # bar 2
+    engine.step(_close_bars([], []))  # A ABSENT — EMA must HOLD
     out = engine.step(_close_bars(["A"], [120.0]))["macd"]  # bar 3 (the 3rd PRESENT bar)
     expected = _ema_ref([100.0, 110.0, 120.0], 12) - _ema_ref([100.0, 110.0, 120.0], 26)
     if not np.isfinite(out["macd_line"][0]) or out["macd_line"][0] != pytest.approx(expected, rel=1e-9):
@@ -521,14 +569,18 @@ def test_seed_replay_equals_live_carried_state() -> None:
         assert set(s_state) == set(l_state), f"{gname} state keys differ seed vs live"
         for key in s_state:
             np.testing.assert_allclose(
-                np.nan_to_num(s_state[key]), np.nan_to_num(l_state[key]), rtol=1e-12,
+                np.nan_to_num(s_state[key]),
+                np.nan_to_num(l_state[key]),
+                rtol=1e-12,
                 err_msg=f"{gname}.{key} carried state diverged seed-replay vs live",
             )
     # final output identical
     for gname, feats in seed_out.items():
         for fname, arr in feats.items():
             np.testing.assert_allclose(
-                np.nan_to_num(arr), np.nan_to_num(live_out[gname][fname]), rtol=1e-12,
+                np.nan_to_num(arr),
+                np.nan_to_num(live_out[gname][fname]),
+                rtol=1e-12,
                 err_msg=f"{gname}.{fname} output diverged seed-replay vs live",
             )
 
@@ -600,7 +652,8 @@ def test_macd_seed_equals_live_WITH_gaps() -> None:
     minutes (gaps), seeded via replay vs fed live one-at-a-time → the carried EMA must be bit-identical AND
     (once present() lands) match the hand-rolled present-bars-only recurrence. Today both paths share the same
     presence bug so they AGREE but are WRONG; after present() they agree AND are right. The agreement half is
-    asserted now (seed==live), the correctness half flips in when present() lands (see the xfail gap test)."""
+    asserted now (seed==live), the correctness half flips in when present() lands (see the xfail gap test).
+    """
     present_closes = [100.0, 110.0, 120.0, 115.0]
     # sequence with a gap after each present bar (except the last)
     seq = []
@@ -622,11 +675,14 @@ def test_macd_seed_equals_live_WITH_gaps() -> None:
     np.testing.assert_allclose(
         np.nan_to_num(seed_engine._group_state["macd"]["ema12"]),
         np.nan_to_num(live_engine._group_state["macd"]["ema12"]),
-        rtol=1e-12, err_msg="macd ema12 carried state diverged seed-replay vs live ACROSS GAPS",
+        rtol=1e-12,
+        err_msg="macd ema12 carried state diverged seed-replay vs live ACROSS GAPS",
     )
     np.testing.assert_allclose(
-        np.nan_to_num(seed_out["macd"]["macd_line"]), np.nan_to_num(live_out["macd"]["macd_line"]),
-        rtol=1e-12, err_msg="macd_line diverged seed vs live across gaps",
+        np.nan_to_num(seed_out["macd"]["macd_line"]),
+        np.nan_to_num(live_out["macd"]["macd_line"]),
+        rtol=1e-12,
+        err_msg="macd_line diverged seed vs live across gaps",
     )
 
 
@@ -635,9 +691,13 @@ def test_swing_duplicate_minute_does_not_double_advance() -> None:
     leg-state. Feed a bar, then RE-deliver the same minute_epoch — the extreme/pivot must be the same as if it
     were delivered once. A plain present() bool does NOT cover this (the re-delivery still reads present=True);
     catching it here flags whether a last-epoch dedup guard is needed beyond presence."""
+
     def _bar(close, epoch):
-        return {"symbol": np.array(["A"]), "close": np.array([close]),
-                "minute_epoch": np.array([epoch], dtype=np.int64)}
+        return {
+            "symbol": np.array(["A"]),
+            "close": np.array([close]),
+            "minute_epoch": np.array([epoch], dtype=np.int64),
+        }
 
     once = CleanEngine([SwingClean()], ["A"], WINDOW)
     once.step(_bar(100.0, 60))
@@ -651,8 +711,9 @@ def test_swing_duplicate_minute_does_not_double_advance() -> None:
     dup_extreme = dup._group_state["swing"]["extreme"][0]
 
     # re-delivering an already-seen minute must not change the leg-state (extreme already at 110 either way)
-    assert dup_extreme == pytest.approx(once_extreme), \
-        "duplicate minute double-advanced swing leg-state — needs a last-epoch dedup guard beyond present()"
+    assert dup_extreme == pytest.approx(
+        once_extreme
+    ), "duplicate minute double-advanced swing leg-state — needs a last-epoch dedup guard beyond present()"
 
 
 def test_cumulative_duplicate_minute_does_not_double_count() -> None:
@@ -661,15 +722,21 @@ def test_cumulative_duplicate_minute_does_not_double_count() -> None:
     watermark (5d5f564): a re-delivered minute_epoch (<= watermark) is a no-op — no re-append, no group
     compute — so the cnt stays 1. The dedup guard is at the ENGINE level (owns it once for every carried-state
     kind), separate from presence — exactly as scoped."""
+
     def _vbar(vol, epoch):
-        return {"symbol": np.array(["A"]), "volume": np.array([vol]),
-                "minute_epoch": np.array([epoch], dtype=np.int64)}
+        return {
+            "symbol": np.array(["A"]),
+            "volume": np.array([vol]),
+            "minute_epoch": np.array([epoch], dtype=np.int64),
+        }
 
     engine = CleanEngine([IntradaySeasonalityClean()], ["A"], WINDOW)
     engine.step(_vbar(1000.0, 60))
     engine.step(_vbar(1000.0, 60))  # SAME minute re-delivered
     cnt = engine._group_state["intraday_seasonality"]["cnt"][0]
-    assert cnt == pytest.approx(1.0), "duplicate minute double-counted the cumulative cnt (needs epoch dedup)"
+    assert cnt == pytest.approx(
+        1.0
+    ), "duplicate minute double-counted the cumulative cnt (needs epoch dedup)"
 
 
 # --------------------------------------------------------------------------------------------------------- #
@@ -681,19 +748,29 @@ def test_intraday_seasonality_session_reset_two_days() -> None:
     """CUMULATIVE/reset: the since-open running mean is correct mid-session AND resets at the day boundary —
     session 2 starts fresh (ratio back to base), not carried across. (The cnt double-count on a DUPLICATE
     minute is a separate footgun, covered by test_cumulative_duplicate_minute_does_not_double_count.)"""
+
     def _vbar(vol, epoch):
-        return {"symbol": np.array(["A"]), "volume": np.array([vol]),
-                "minute_epoch": np.array([epoch], dtype=np.int64)}
+        return {
+            "symbol": np.array(["A"]),
+            "volume": np.array([vol]),
+            "minute_epoch": np.array([epoch], dtype=np.int64),
+        }
 
     day = 86400
     engine = CleanEngine([IntradaySeasonalityClean()], ["A"], WINDOW)
     engine.step(_vbar(1000.0, 0))
     engine.step(_vbar(2000.0, 60))
-    out1 = engine.step(_vbar(3000.0, 120))["intraday_seasonality"]  # mean(1000,2000,3000)=2000, 3000/2000=1.5
+    out1 = engine.step(_vbar(3000.0, 120))[
+        "intraday_seasonality"
+    ]  # mean(1000,2000,3000)=2000, 3000/2000=1.5
     assert out1["volume_vs_session_mean"][0] == pytest.approx(1.5)
     out2 = engine.step(_vbar(500.0, day))["intraday_seasonality"]  # new session: mean=500, ratio=1.0
-    assert out2["volume_vs_session_mean"][0] == pytest.approx(1.0), "session did not reset at the day boundary"
-    assert engine._group_state["intraday_seasonality"]["cnt"][0] == pytest.approx(1.0), "reset did not clear cnt"
+    assert out2["volume_vs_session_mean"][0] == pytest.approx(
+        1.0
+    ), "session did not reset at the day boundary"
+    assert engine._group_state["intraday_seasonality"]["cnt"][0] == pytest.approx(
+        1.0
+    ), "reset did not clear cnt"
 
 
 def test_prior_day_compute_once_stable_across_steps() -> None:
@@ -714,9 +791,14 @@ def test_watermark_out_of_order_and_multi_group_multi_symbol() -> None:
     """Extend the C4 watermark proof (ArchOverhaul's ask): an OUT-OF-ORDER minute (epoch < watermark) is a
     no-op, and a duplicate is idempotent across MULTIPLE groups + symbols at once. The engine owns idempotency
     once for every carried-state kind, so all of them must be unchanged by a stale/duplicate delivery."""
+
     def _multi(symbols, vols, closes, epoch):
-        return {"symbol": np.array(symbols), "volume": np.array(vols, dtype=np.float64),
-                "close": np.array(closes, dtype=np.float64), "minute_epoch": np.array([epoch], dtype=np.int64)}
+        return {
+            "symbol": np.array(symbols),
+            "volume": np.array(vols, dtype=np.float64),
+            "close": np.array(closes, dtype=np.float64),
+            "minute_epoch": np.array([epoch], dtype=np.int64),
+        }
 
     syms = ["A", "B"]
     groups = [IntradaySeasonalityClean(), MacdClean(), SwingClean()]
@@ -727,11 +809,12 @@ def test_watermark_out_of_order_and_multi_group_multi_symbol() -> None:
     before = {g.name: {k: v.copy() for k, v in engine._group_state[g.name].items()} for g in groups}
 
     engine.step(_multi(syms, [9999.0, 9999.0], [200.0, 200.0], 120))  # DUPLICATE epoch 120 → no-op
-    engine.step(_multi(syms, [9999.0, 9999.0], [200.0, 200.0], 30))   # OUT-OF-ORDER epoch 30 < 120 → no-op
+    engine.step(_multi(syms, [9999.0, 9999.0], [200.0, 200.0], 30))  # OUT-OF-ORDER epoch 30 < 120 → no-op
 
     for g in groups:
         for key, arr in engine._group_state[g.name].items():
             np.testing.assert_array_equal(
-                np.nan_to_num(arr), np.nan_to_num(before[g.name][key]),
+                np.nan_to_num(arr),
+                np.nan_to_num(before[g.name][key]),
                 err_msg=f"{g.name}.{key} changed on a duplicate/out-of-order minute (watermark leak)",
             )

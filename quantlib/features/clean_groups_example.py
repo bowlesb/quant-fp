@@ -184,6 +184,9 @@ class BreadthClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")
+        present = (
+            window.present()
+        )  # the REAL delivery mask — an absent symbol must NOT enter the denominator
         out: dict[str, np.ndarray] = {}
         for w in (5, 10, 30):
             cw = _trailing_window(close, w)
@@ -192,7 +195,10 @@ class BreadthClean:
             oldest = cw[:, 0]
             with np.errstate(invalid="ignore", divide="ignore"):
                 ret = newest / oldest - 1.0
-            valid = np.isfinite(ret)
+            # gate on present(): a symbol that delivered no bar this minute has a finite trailing return from
+            # its CARRIED close, so isfinite(ret) alone wrongly counts it. Breadth is "fraction of the universe
+            # moving up RIGHT NOW" — only symbols present this minute participate.
+            valid = np.isfinite(ret) & present
             band = 1e-4  # dead-band: a name within ±band is neither up nor down (robust count, breadth.py)
             up = (ret > band) & valid
             down = (ret < -band) & valid
