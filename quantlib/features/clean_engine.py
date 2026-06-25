@@ -185,6 +185,13 @@ class Window:
         """
         return self._ring.trailing_time(col, minutes, self.minute_epoch)
 
+    def trailing_minute(self) -> np.ndarray:
+        """The ``(n_symbols, window)`` minute-epoch matrix rolled oldest→newest (same layout as ``trailing``).
+        Empty slots are -1. Lets a group read each bar's minute — for an EXACT time-lag lookup (the value at
+        minute ``T−W``, the legacy ``lagged`` point semantics) or a consecutive-1m-step guard (logret only across
+        an exact one-minute step), which a plain trailing-Δminute MASK can't express."""
+        return self._ring._rolled_minute()
+
     def latest(self, col: str) -> np.ndarray:
         return self._ring.latest(col)
 

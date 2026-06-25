@@ -214,6 +214,115 @@ def _sector_mean_vector(values: np.ndarray, sector: np.ndarray, present: np.ndar
     return out
 
 
+_RV_WINDOW = 30  # market_turbulence realized-vol window (minutes): std of 1m logrets over (T-RV_WINDOW, T]
+_RV_MIN_OBS = 10  # min valid 1m logrets in the RV window for a defined per-symbol RV (else NaN)
+
+
+def _value_at_lag(close: np.ndarray, minute: np.ndarray, now_epoch: int, w: int) -> np.ndarray:
+    """The per-symbol close at EXACTLY ``now_epoch − w`` minutes (the legacy ``lagged(close, w)`` point
+    lookup) — NaN where no bar is stamped at that exact minute. ``close``/``minute`` are the rolled trailing
+    matrices (oldest→newest); ``minute`` empty slots are -1. This is a strict time-lag (a sparse symbol with no
+    bar exactly ``w`` ago gets NaN, NOT its nearest bar) — the point-in-time semantics ``mkt_absret`` needs, not
+    a window MASK."""
+    target = now_epoch - w * 60
+    match = minute == target  # (n_sym, window) — the slot(s) at the exact lagged minute
+    n_sym = close.shape[0]
+    out = np.full(n_sym, np.nan)
+    has = match.any(axis=1)
+    if has.any():
+        # exactly one bar per symbol can carry a given minute-epoch (the ring stamps one per minute), so the
+        # first (only) match per row is the value.
+        idx = np.argmax(match, axis=1)
+        out[has] = close[np.arange(n_sym)[has], idx[has]]
+    return out
+
+
+def _market_realized_vol(
+    close: np.ndarray, minute: np.ndarray, present: np.ndarray, now_epoch: int
+) -> np.ndarray:
+    """Per-symbol trailing-``_RV_WINDOW`` realized vol at T = ddof=1 std of the 1m LOG returns over the window
+    ``(T−_RV_WINDOW, T]``, defined with at least ``_RV_MIN_OBS`` valid returns (else NaN). A logret is valid
+    ONLY across an EXACT one-minute step with both closes positive (a gap does not splice a multi-minute jump
+    into the vol), matching legacy ``_realized_vol``. ``close``/``minute`` are the FULL rolled trailing matrices
+    (oldest→newest, empty slots minute -1) — the logret at minute m needs close[m] AND close[m−1], so the close
+    a step BEFORE the left edge (at T−_RV_WINDOW) must be available; the logret is then gated to its END minute
+    in the left-open ``(T−_RV_WINDOW, T]`` (so the bar at exactly T−_RV_WINDOW supplies a prior close but its
+    own out-of-window logret is excluded). ``present`` is the value-truth's per-T row gate (the rolling form
+    emits an RV row at minute T only for a symbol with a bar at T)."""
+    prev_close = close[:, :-1]
+    cur_close = close[:, 1:]
+    prev_min = minute[:, :-1]
+    cur_min = minute[:, 1:]
+    exact_step = (prev_min >= 0) & (cur_min >= 0) & ((cur_min - prev_min) == 60)
+    # the logret's END minute must be inside the left-open RV window (T−_RV_WINDOW, T].
+    in_window = (cur_min > now_epoch - _RV_WINDOW * 60) & (cur_min <= now_epoch)
+    valid = exact_step & in_window & (prev_close > 0) & (cur_close > 0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        logret = np.where(valid, np.log(cur_close / prev_close), np.nan)
+    mask = np.isfinite(logret)
+    n = mask.sum(axis=1).astype(np.float64)
+    x = np.where(mask, logret, 0.0)
+    sum_x = x.sum(axis=1)
+    sum_x2 = (x * x).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        var = (sum_x2 - sum_x * sum_x / n) / (n - 1.0)
+        rv = np.sqrt(np.clip(var, 0.0, None))
+    rv = np.where(n >= _RV_MIN_OBS, rv, np.nan)
+    return np.where(present, rv, np.nan)
+
+
+def _universe_mean(values: np.ndarray) -> float:
+    """The universe equal-weight mean over the FINITE entries (nulls auto-excluded, the legacy polars ``mean``);
+    NaN where no symbol has a valid measurement that minute."""
+    finite = np.isfinite(values)
+    if not finite.any():
+        return np.nan
+    return float(values[finite].mean())
+
+
+class MarketTurbulenceClean:
+    """CROSS_SECTIONAL gather: universe-wide realized-move-magnitude SCALARS broadcast to every present symbol —
+    NOT a per-symbol fold (same per-minute universe reduce as breadth/return_dispersion). Per minute T:
+
+      * ``mkt_absret_{W}m`` = universe equal-weight mean of ``|close[T]/close[T−W] − 1|`` (the realized
+        whole-market MOVE MAGNITUDE over the trailing W minutes — turbulence, not direction), and
+      * ``mkt_rv_30m``      = universe equal-weight mean of each symbol's trailing-30m realized vol (std of 1m
+        log returns over (T−30, T], ≥10 obs) — the universe-mean realized-vol level.
+
+    The denominator is symbols with a VALID measurement that minute (a close at BOTH T and T−W for absret; ≥10
+    valid 1m logrets in (T−30, T] for RV), computed identically and present()-gated at T (the value-truth /
+    rolling BATCH form emits a measure row at minute T only for a symbol with a bar at T). Legacy:
+    ``MarketTurbulenceGroup``; one of the live REDUCE_GROUPS."""
+
+    name = "market_turbulence"
+    input_cols = ("close",)
+    _ABSRET_WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
+    feature_names = tuple(f"mkt_absret_{w}m" for w in _ABSRET_WINDOWS) + (f"mkt_rv_{_RV_WINDOW}m",)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        minute = window.trailing_minute()
+        present = window.present()
+        latest_close = window.latest("close")
+        now_epoch = window.minute_epoch
+        out: dict[str, np.ndarray] = {}
+        for w in self._ABSRET_WINDOWS:
+            lag_close = _value_at_lag(close, minute, now_epoch, w)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                absret = np.abs(latest_close / lag_close - 1.0)
+            # present()-gate at T: a symbol absent at T has no close[T] (its latest_close is carried/stale), so
+            # it contributes no |return| to the universe mean — the value-truth's per-T measurement set.
+            absret = np.where(present, absret, np.nan)
+            mkt = _universe_mean(absret)
+            out[f"mkt_absret_{w}m"] = np.where(present, mkt, np.nan)
+        # RV: per-symbol std of 1m logrets over (T−RV_WINDOW, T] — read over the FULL trailing close (the
+        # logret at the window's left edge needs the close one step before it), gated to its end-minute inside.
+        rv = _market_realized_vol(close, minute, present, now_epoch)
+        mkt_rv = _universe_mean(rv)
+        out[f"mkt_rv_{_RV_WINDOW}m"] = np.where(present, mkt_rv, np.nan)
+        return out
+
+
 class SectorReturnClean:
     """CROSS_SECTIONAL: per window — sector_return_{w}m = the equal-weight mean trailing-w return of the
     ticker's GICS sector (present members), sector_excess_{w}m = the ticker's own trailing-w return minus that
