@@ -27,9 +27,12 @@ doesn't work." It doesn't, *if* cost were per-ticker. It isn't — and here is e
 curve as proof:
 
 1. **The engine is frame-vectorized — symbols are ROWS, not passes.** A shard holds *all* of its symbols as
-   rows in one columnar (polars) frame, and each feature is *one expression evaluated over the whole column at
-   once*. Adding a symbol adds a **row to an already-vectorized operation**, not another pass over the code.
-   So the cost is **fixed overhead + a tiny marginal per-symbol**, never `per-symbol × N`.
+   rows operated on together, and each feature is *one operation evaluated over the whole symbol axis at once*.
+   Adding a symbol adds a **row to an already-vectorized operation**, not another pass over the code.
+   So the cost is **fixed overhead + a tiny marginal per-symbol**, never `per-symbol × N`. (Today that vectorized
+   operation runs over a per-minute **polars frame** — and that frame *is* the framework tax this redesign
+   deletes; see "The per-minute hot path is polars-free" below. Frame-vectorization across symbols is **kept** —
+   but as a **numpy 2D array operated along the symbol axis**, which is both tax-free and faster.)
 
 2. **The measured scaling curve proves it (one shard, isolated):**
 
@@ -59,8 +62,38 @@ curve as proof:
   sim scale, where compute was ~1/3 of the 277ms bar→vector. So the honest claim is precise: *"the compute the
   redesign touches is well under budget at full universe,"* **not** *"the whole pipeline is 1.4s at 7,000."*
 
-Either way the conclusion is the same: **this is a simplicity win** — measured by mechanisms and lines removed —
-not a latency rescue. Throughput is a floor we must not regress, never a target.
+Either way the conclusion is the same: **this is a simplicity win** — measured by mechanisms and lines removed.
+But there is *also* a real latency consequence, and it is the point Ben cares most about: the dominant per-minute
+cost today is **not** arithmetic — it is the polars framework tax (matrix_at / resolve_points / assemble,
+measured ~86% of each group's minute). The redesign does not *shrink* that tax, it **deletes** it: the per-minute
+hot path becomes polars-free numpy-on-carried-state (next section). That deletion is *why* a hard `<300ms` bar at
+full universe is reachable at all — you cannot get there by trimming a tax that dominates, only by removing it.
+We hold the number honest until the `price_volume` spike proves it (the 71ms → few-ms pure-numpy proof), but the
+*shape* of the win is clear: delete the tax, don't optimize it.
+
+### The per-minute hot path is polars-free
+
+This is the single most important property of the design, and it is a real architectural shift. **Ben's rule:**
+a correct hot path has *no framework tax* — "my old code doesn't have any framework tax; if it does, you're
+doing it wrong. Polars is likely a fine library, but if it's causing a tax, we're using it wrong." Today's engine
+builds a **polars frame every minute** (pivot/sort/groupby/`matrix_at`/`resolve_points`/`assemble`) — that is the
+~86% the profiler sees, and it is there *by construction*, not because the math is hard. The redesign removes it:
+
+- **Carried state is numpy, not a frame.** Per-symbol ring rows and carried aggregates live as a
+  `symbols × values` 2D numpy array (fixed symbol index along axis 0). No per-minute frame is materialized.
+- **The fold is vectorized numpy arithmetic on the incoming bar.** `new − evicted` over the symbol axis,
+  recursive EMA update, extrema compare — plain array ops, no expression engine.
+- **Reads are numpy indexing / axis-reduces.** A lookup is `state[:, col]`; a windowed read is an O(1) lookup off
+  a maintained aggregate; a **cross-sectional reduce (the gather L1 halves) is a numpy reduce along the symbol
+  axis** — *not* a polars groupby. Frame-vectorization across symbols is kept; the frame is not.
+- **Polars stays — but only OFF the hot path.** Batch, backfill, session load, and pre-minute setup may use
+  polars freely. The per-minute critical path runs **zero** polars: no frame, pivot, sort, groupby, or
+  `matrix_at`.
+
+This is exactly the `tracker.py` discipline made literal at scale: **his hot path is polars-free numpy**
+(`current_sum += new − evicted`; read = an O(1) lookup off the carried aggregate; nothing recomputes over the
+buffer per minute) — **ours must be too**, generalized to every fold-kind and vectorized across the symbol axis.
+The framework tax is not a third lever to *collapse*; it is the thing we *delete*.
 
 1. **ONE abstraction to hold state.**
 2. **No more implementations than we actually need** — the honest minimum, not artificial unification.
@@ -382,7 +415,10 @@ declares its own condition — windowed-sum = window filled, EMA = warmup span, 
    the container fold here.
 4. **swing opaque-state-machine payload** — it already implements the lifecycle + watermark, so it's the
    lowest-effort port.
-5. **Collapse the four `step*` twins into one read-surface dispatch and delete the second engine.**
+5. **Collapse the four `step*` twins into one polars-free numpy read-surface dispatch and delete the second
+   engine.** The four twins exist because the per-minute path went through the polars frame; once the hot path is
+   numpy-on-carried-state, the read is a single numpy indexing/axis-reduce dispatch and the frame path is gone —
+   `phase_profile` must show the polars phases at zero for each migrated group.
 
 Each step re-runs #451 before the next; green means values survived, red means stop and fix. No feature output
 changes at any step, and the fingerprint is unchanged throughout.
@@ -406,7 +442,8 @@ for, and the consolidation is what makes them *useful*. Two profilers stay as th
 - **`phase_profile.py`** — the micro-profiler that opens one group's minute into its handful of phases (the
   buffer derive, the actual fold arithmetic, the point/lag pass, the assemble) and shows where the time really
   is. This is the tool that proved the live cost is ~1% arithmetic and ~86% polars-shuffling — i.e. the time is
-  in the *plumbing*, not the math.
+  the per-minute polars *plumbing*, not the math. That is precisely the tax the polars-free hot path **deletes**,
+  and the profiler is how we *prove* each migrated group dropped its polars phases to zero.
 
 Here is the payoff, stated plainly: **today**, that plumbing is smeared across two engines × four `step*` twins ×
 a per-kind wrapper each — so "why is this slow?" means tracing a path through a web no one fully holds in their
