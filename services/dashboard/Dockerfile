@@ -38,6 +38,10 @@ COPY quantlib ./quantlib
 # Copy ALL dashboard modules via glob so a newly-added panel can never be silently dropped from the
 # image (a hardcoded list previously omitted liquidity_bands/raw_coverage, crashing app.py's imports).
 COPY services/dashboard/*.py ./
+# The per-ticker coverage route (ticker_coverage_route.py) imports the engine-free reader + report builder
+# from ops/ticker_coverage.py. It is self-contained (stdlib + polars + a LAZY quantlib import used only on the
+# optional trust path), so copy just that one file alongside the dashboard modules — NOT the whole ops/ tree.
+COPY ops/ticker_coverage.py ./ticker_coverage.py
 
 # The curated feature-group guide the worker reads at build time (group_guide.py looks here by default).
 COPY docs/feature_group_guide.yaml ./feature_group_guide.yaml

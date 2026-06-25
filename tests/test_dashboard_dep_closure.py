@@ -53,6 +53,16 @@ REQUIREMENTS_TXT = DASHBOARD_DIR / "requirements.txt"
 # stage (NOT a PyPI line in requirements.txt). Its import name is ``quant_tick``.
 WHEEL_TOP_LEVEL = "quant_tick"
 
+# First-party modules the Dockerfile COPYs into the image from OUTSIDE services/dashboard/ — they live next to
+# the dashboard modules at runtime (image /app/<name>.py) so a dashboard module imports them as a bare sibling,
+# but on disk they are elsewhere in the repo. {import-name -> repo source path}. The closure walk must treat
+# these as first-party (resolve to their source, walk their imports) — exactly as the interpreter will in the
+# image — instead of mis-reading them as undeclared third-party packages.
+# COPY ops/ticker_coverage.py ./ticker_coverage.py — the per-ticker coverage route's engine-free reader.
+IMAGE_EXTRA_MODULES: dict[str, Path] = {
+    "ticker_coverage": REPO_ROOT / "ops" / "ticker_coverage.py",
+}
+
 # Import-name -> requirements distribution-name, for the cases where they differ. Most packages
 # import under their distribution name (fastapi, redis, numpy, polars, psycopg). The exceptions:
 # ``import yaml`` is the ``pyyaml`` distribution (the group-detail-panel guide parser);
@@ -118,6 +128,10 @@ def _module_to_path(module: str) -> Path | None:
     dashboard_module = DASHBOARD_DIR / f"{parts[0]}.py"
     if "." not in module and dashboard_module.is_file():
         return dashboard_module
+    # A bare top-level name the Dockerfile COPYs in from elsewhere in the repo (image first-party sibling).
+    extra = IMAGE_EXTRA_MODULES.get(module)
+    if extra is not None and extra.is_file():
+        return extra
     return None
 
 
@@ -193,7 +207,7 @@ def _third_party_top_level(modules: set[str]) -> set[str]:
         top = module.split(".")[0]
         if top in stdlib or top.startswith("_"):
             continue
-        if top == "quantlib" or top in dashboard_modules:
+        if top == "quantlib" or top in dashboard_modules or top in IMAGE_EXTRA_MODULES:
             continue
         third_party.add(top)
     return third_party
