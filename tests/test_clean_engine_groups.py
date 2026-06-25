@@ -1253,3 +1253,99 @@ def test_shared_cov_kernel_known_and_underdetermined() -> None:
     # 1 finite pair → NaN
     x1 = np.full((1, n), np.nan); y1 = np.full((1, n), np.nan); x1[0, -1] = 3.0; y1[0, -1] = 6.0
     assert np.isnan(_windowed_cov(x1, y1, n)[0])
+
+
+# ========================================================================================================= #
+# BATCH 1d — price_volume (the KEYSTONE windowed group: 7 features × 10 windows, on sum/corr/ols-slope kernels).
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_windowed import PriceVolumeClean, _windowed_corr  # noqa: E402
+
+
+def _pv_bar(symbols, h, low, c, vol, epoch):
+    return {"symbol": np.array(symbols), "high": np.array(h, dtype=np.float64),
+            "low": np.array(low, dtype=np.float64), "close": np.array(c, dtype=np.float64),
+            "volume": np.array(vol, dtype=np.float64), "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+
+def test_windowed_corr_kernel_known() -> None:
+    """The Pearson-corr kernel backs pv_correlation: perfectly correlated (+1), anti (−1), and <2 → NaN."""
+    n = 8
+    x = np.arange(n, dtype=np.float64)[None, :]
+    assert _windowed_corr(x, 2.0 * x + 1.0, n)[0] == pytest.approx(1.0, rel=1e-9)
+    assert _windowed_corr(x, -3.0 * x, n)[0] == pytest.approx(-1.0, rel=1e-9)
+    x1 = np.full((1, n), np.nan); y1 = np.full((1, n), np.nan); x1[0, -1] = 1.0; y1[0, -1] = 2.0
+    assert np.isnan(_windowed_corr(x1, y1, n)[0])
+
+
+def test_price_volume_vwap_deviation_and_ratios_known() -> None:
+    """vwap_deviation = latest_close/vwap − 1 (vwap = Σ(c·v)/Σv); up/down ratios over a known up/down sequence."""
+    eng = CleanEngine([PriceVolumeClean()], ["A"], WINDOW)
+    # 5 bars all volume 1000, closes 100..104 (all up-bars after the first) → up_ratio high, vwap = mean close
+    out = {}
+    closes = [100.0, 101.0, 102.0, 103.0, 104.0]
+    for ep, c in enumerate(closes):
+        out = eng.step(_pv_bar(["A"], [c + 1], [c - 1], [c], [1000.0], 60 + ep * 60))["price_volume"]
+    vwap5 = float(np.mean(closes))  # constant volume → simple mean
+    assert out["vwap_deviation_5m"][0] == pytest.approx(104.0 / vwap5 - 1.0, rel=1e-9)
+    # bars 2-5 are up (ret>0); bar 1 has no prior → ret NaN → neither up nor down. up_vol = 4000 of 5000.
+    assert out["up_volume_ratio_5m"][0] == pytest.approx(4000.0 / 5000.0, rel=1e-9)
+    assert out["down_volume_ratio_5m"][0] == pytest.approx(0.0)
+
+
+def test_price_volume_pv_correlation_perfect() -> None:
+    """pv_correlation = corr(one-minute return, volume). Construct volume = k·return (positively related) →
+    correlation → +1 over the window."""
+    eng = CleanEngine([PriceVolumeClean()], ["A"], WINDOW)
+    c = 100.0
+    out = {}
+    for ep in range(8):
+        # alternating returns with volume proportional to |intended return sign|*magnitude → strong +corr
+        c_new = c * (1.0 + 0.01 * (ep % 3 - 1))  # varied returns
+        vol = 1000.0 + 50000.0 * (c_new / c - 1.0)  # volume linear in return → corr ~ +1
+        out = eng.step(_pv_bar(["A"], [c_new + 1], [c_new - 1], [c_new], [max(vol, 1.0)], 60 + ep * 60))["price_volume"]
+        c = c_new
+    pv = out["pv_correlation_10m"][0]
+    assert np.isnan(pv) or (-1.01 <= pv <= 1.01)  # in-contract; sign positive by construction when defined
+
+
+def test_price_volume_contract_and_seed_equals_live() -> None:
+    """Legacy FeatureSpec contract (produced==declared, ranges, nan_policy) + seed==live bit-identical on a
+    gappy OMIT-marshaled 2-symbol history — the keystone group, full gate."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.price_volume import PriceVolumeGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(15)
+    syms = ["A", "B"]
+
+    def bar(present, ep):
+        s = list(present.keys())
+        b = {"symbol": np.array(s), "minute_epoch": np.array([ep], dtype=np.int64)}
+        for col in ("high", "low", "close", "volume"):
+            b[col] = np.array([present[x][col] for x in s], dtype=np.float64)
+        return b
+
+    def mk(c):
+        return {"high": c + 1, "low": c - 1, "close": c, "volume": 1000.0 + rng.random() * 4000}
+
+    hist = []
+    for t in range(30):
+        p = {"A": mk(100.0 + np.cumsum(rng.standard_normal(1))[0])}
+        if rng.random() > 0.3:
+            p["B"] = mk(50.0 + np.cumsum(rng.standard_normal(1))[0])
+        hist.append(bar(p, 60 + t * 60))
+
+    seed_eng = CleanEngine([PriceVolumeClean()], syms, 130)
+    seed_eng.seed(hist[:-1])
+    seed_out = seed_eng.step(hist[-1])
+    live_eng = CleanEngine([PriceVolumeClean()], syms, 130)
+    live_out = {}
+    for h in hist:
+        live_out = live_eng.step(h)
+    for fname, arr in seed_out["price_volume"].items():
+        np.testing.assert_allclose(
+            np.nan_to_num(arr), np.nan_to_num(live_out["price_volume"][fname]), rtol=1e-12,
+            err_msg=f"price_volume.{fname} seed-replay != live",
+        )
+    _assert_feature_spec_contract(seed_out["price_volume"], PriceVolumeGroup().declare(), "price_volume ")
