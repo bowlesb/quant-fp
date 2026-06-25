@@ -1605,3 +1605,115 @@ def test_return_dispersion_intraday_contract_daily_deferred_flagged() -> None:
     assert not (deferred & intraday), "no intraday feature may be deferred-NaN"
     # produced set == declared (the daily exist-as-NaN, which the contract allows under nan_policy=sparse)
     assert set(ReturnDispersionClean().feature_names) == declared
+
+
+# ========================================================================================================= #
+# CROSS-SECTIONAL — batch 2c: sector_beta (per-(minute,sector) equal-weight aggregate + per-symbol OLS on its
+# OWN sector return, window.static sector labels). Trickiest cross-sectional: present()-gated sector mean + OLS.
+# NOTE: legacy _ols_from_sums guards n>=MIN_PAIRS(5) & var_x>0 & var_y>0 — a BARE var>0 (batch-truth, NOT the
+# 1e-9 relative floor pv_correlation needs); the clean _windowed_sector_ols matching var>0 is correct.
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_xsectional import (  # noqa: E402
+    SectorBetaClean,
+    _sector_equal_weight_returns,
+    _windowed_sector_ols,
+)
+
+
+def _sec_bar(present_map, epoch):
+    """present_map: {symbol: close}; absent symbols OMITTED."""
+    syms = list(present_map.keys())
+    return {"symbol": np.array(syms), "close": np.array([present_map[s] for s in syms], dtype=np.float64),
+            "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+
+def test_sector_equal_weight_present_gated() -> None:
+    """The per-(minute,sector) equal-weight mean is over PRESENT-FINITE returns only: a NaN return (absent
+    symbol's row) is excluded from its sector's mean (mask.sum over axis 0). Sector 0 = {A,B}, sector 1 = {C}.
+    On a minute where A's return is NaN (warm-up/absent), sector-0 mean = B's return alone."""
+    ret = np.array([[np.nan, 0.02], [np.nan, 0.04], [np.nan, 0.10]])  # 3 symbols, 2 minutes
+    sector = np.array([0, 0, 1])  # A,B in sector 0; C in sector 1
+    sec_ret = _sector_equal_weight_returns(ret, sector)
+    # minute 1 (col 1): sector-0 mean over A,B = (0.02+0.04)/2 = 0.03, broadcast to A and B rows
+    assert sec_ret[0, 1] == pytest.approx(0.03)
+    assert sec_ret[1, 1] == pytest.approx(0.03)
+    assert sec_ret[2, 1] == pytest.approx(0.10)  # sector 1 = C alone
+
+
+def test_sector_equal_weight_absent_excluded() -> None:
+    """Adversarial: if A is absent (NaN return) but B present, sector-0 mean = B alone, NOT (B + stale A)/2."""
+    ret = np.array([[np.nan, np.nan], [np.nan, 0.04]])  # A all-NaN (absent), B present at minute 1
+    sector = np.array([0, 0])
+    sec_ret = _sector_equal_weight_returns(ret, sector)
+    assert sec_ret[1, 1] == pytest.approx(0.04), "absent A leaked into the sector mean"
+
+
+def test_sector_beta_ols_known_slope() -> None:
+    """sector_beta OLS: own_ret = 2·sector_ret exactly → beta = 2.0, corr = 1.0 (perfect)."""
+    n = 8
+    sec_ret = np.linspace(-0.01, 0.01, n)[None, :]
+    own_ret = 2.0 * sec_ret
+    beta, corr = _windowed_sector_ols(own_ret, sec_ret, n)
+    assert beta[0] == pytest.approx(2.0, rel=1e-9)
+    assert corr[0] == pytest.approx(1.0, rel=1e-9)
+
+
+def test_sector_beta_min_pairs_and_beta_max() -> None:
+    """n < MIN_PAIRS(5) → NaN; |beta| > BETA_MAX(15) → beta NULL (non-physical)."""
+    n = 8
+    sec_ret = np.full((1, n), np.nan)
+    sec_ret[0, -3:] = [0.001, 0.002, 0.003]  # only 3 pairs < MIN_PAIRS
+    own = np.full((1, n), np.nan)
+    own[0, -3:] = [0.002, 0.004, 0.006]
+    beta, corr = _windowed_sector_ols(own, sec_ret, n)
+    assert np.isnan(beta[0]) and np.isnan(corr[0]), "n<MIN_PAIRS must be NaN"
+    # |beta|>15: own_ret = 20·sector_ret → beta 20 > BETA_MAX → NULL
+    sr = np.linspace(-0.001, 0.001, n)[None, :]
+    big = _windowed_sector_ols(20.0 * sr, sr, n)
+    assert np.isnan(big[0][0]), "|beta|>15 must be NULL"
+
+
+def test_sector_beta_unmapped_sector_nan() -> None:
+    """An unmapped-sector name (sector == -1) → sector_beta/sector_corr NaN (no sector series to regress on)."""
+    eng = CleanEngine([SectorBetaClean()], ["A"], WINDOW)
+    eng.static = {"sector": np.array([-1])}  # A is unmapped
+    out = {}
+    for ep in range(20):
+        out = eng.step(_sec_bar({"A": 100.0 + ep * 0.1}, 60 + ep * 60))["sector_beta"]
+    assert np.isnan(out["sector_beta_15m"][0])
+    assert np.isnan(out["sector_corr_15m"][0])
+
+
+def test_sector_beta_contract_and_seed_equals_live() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.sector_beta import SectorBetaGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(24)
+    syms = [f"S{i}" for i in range(6)]
+    sectors = np.array([0, 0, 0, 1, 1, 1])
+
+    def run(engine, hist):
+        out = {}
+        for h in hist:
+            out = engine.step(h)
+        return out, engine
+
+    hist = []
+    for t in range(30):
+        present = {s: 100.0 + np.cumsum(rng.standard_normal(1))[0] for i, s in enumerate(syms) if rng.random() > 0.2}
+        if present:
+            hist.append(_sec_bar(present, 60 + t * 60))
+
+    seed_eng = CleanEngine([SectorBetaClean()], syms, WINDOW)
+    seed_eng.static = {"sector": sectors}
+    seed_eng.seed(hist[:-1])
+    seed_out = seed_eng.step(hist[-1])
+    live_eng = CleanEngine([SectorBetaClean()], syms, WINDOW)
+    live_eng.static = {"sector": sectors}
+    live_out, _ = run(live_eng, hist)
+    for fname, arr in seed_out["sector_beta"].items():
+        np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(live_out["sector_beta"][fname]),
+                                   rtol=1e-12, err_msg=f"sector_beta.{fname} seed != live")
+    _assert_feature_spec_contract(seed_out["sector_beta"], SectorBetaGroup().declare(), "sector_beta ")
