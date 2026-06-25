@@ -197,6 +197,57 @@ def _row_std(mat: np.ndarray) -> np.ndarray:
     return np.where(n > 1.0, std, np.nan)
 
 
+def _rebased_minute_axis(minute: np.ndarray) -> np.ndarray:
+    """The ``(n_symbols, window)`` ``kind="time"`` OLS x-axis = the actual bar MINUTE rebased to the earliest
+    present minute, in minutes: ``(minute − origin)/60``; empty slots (-1) → NaN. The rebase is load-bearing —
+    raw epoch-minutes (~1e7) blow up ``(Σx)²`` (~1e15) → catastrophic cancellation in ``denom_x`` → a spurious
+    OLS-floor reject. A frame-relative axis is also what the legacy ``kind="time"`` regression uses (the slope is
+    translation-invariant, so the rebase is value-neutral on the slope itself)."""
+    minute = minute.astype(np.float64)
+    present_min = minute[minute >= 0]
+    origin = present_min.min() if present_min.size else 0.0
+    return np.where(minute >= 0, (minute - origin) / 60.0, np.nan)
+
+
+def _row_ols_slope(x_mat: np.ndarray, y_mat: np.ndarray) -> np.ndarray:
+    """OLS slope of ``y`` on ``x`` over a full ``(n, k)`` matrix where BOTH finite — the TIME-windowed twin of
+    ``_windowed_ols_slope`` (the caller has already masked the matrix to the (T−w, T] minutes; every finite cell
+    is in-window). Same legacy X-side floors (n≥2 AND denom_x > 1e-12·(Σx)² AND > 1e-9·n·Σx²)."""
+    mask = np.isfinite(x_mat) & np.isfinite(y_mat)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, x_mat, 0.0)
+    yf = np.where(mask, y_mat, 0.0)
+    sx, sy = xf.sum(axis=1), yf.sum(axis=1)
+    sxx, sxy = (xf * xf).sum(axis=1), (xf * yf).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        denom_x = n * sxx - sx * sx
+        cov = n * sxy - sx * sy
+        slope = cov / denom_x
+    return np.where(_denom_x_defined(n, sx, sxx, denom_x), slope, np.nan)
+
+
+def _row_corr(x_mat: np.ndarray, y_mat: np.ndarray) -> np.ndarray:
+    """Pearson correlation of ``x`` and ``y`` over a full ``(n, k)`` matrix where BOTH finite — the TIME-windowed
+    twin of ``_windowed_corr`` (caller pre-masks to the (T−w, T] window). Same legacy denom floors + perfect-fit
+    (n==2 → sign(cov)) — a near-constant x OR y window is NaN, never a spurious correlation of float noise.
+    """
+    mask = np.isfinite(x_mat) & np.isfinite(y_mat)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, x_mat, 0.0)
+    yf = np.where(mask, y_mat, 0.0)
+    sx, sy = xf.sum(axis=1), yf.sum(axis=1)
+    sxx, syy, sxy = (xf * xf).sum(axis=1), (yf * yf).sum(axis=1), (xf * yf).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        denom_x = n * sxx - sx * sx
+        denom_y = n * syy - sy * sy
+        cov = n * sxy - sx * sy
+        defined = _denom_x_defined(n, sx, sxx, denom_x) & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
+        corr = cov / np.sqrt(denom_x * denom_y)
+    corr = np.where(defined, corr, np.nan)
+    perfect = defined & (n == _OLS_PERFECT_FIT_COUNT)
+    return np.where(perfect, np.sign(cov), corr)
+
+
 _RANGE_REL_EPS = 1e-9
 
 
@@ -326,7 +377,13 @@ class PriceVolumeClean:
     """PRICE_VOLUME: per window — vwap_deviation (close/vwap−1), up/down_volume_ratio, volume_delta,
     buying_pressure (volume-weighted money-flow), pv_correlation (return-vs-volume corr), obv_slope (OLS slope
     of on-balance-volume on time, normalized by mean window volume). Legacy: ``PriceVolumeGroup`` — the keystone
-    windowed group, 7 features × 10 windows. Built on the shared sum/corr/ols-slope kernels."""
+    windowed group, 7 features × 10 windows.
+
+    TIME-windowed (legacy ``rolling_*_by("minute","{w}m")``): every windowed reduction is masked to the bars
+    whose minute is in the last ``w`` minutes (``trailing_time``), NOT the last ``w`` positional slots — on a
+    sparse symbol the two diverge. The obv_slope OLS regresses on the rebased real-minute axis (a ``kind="time"``
+    regression), not a positional arange. Validated cell-for-cell vs legacy BATCH ``compute()`` on dense+sparse.
+    """
 
     name = "price_volume"
     input_cols = ("high", "low", "close", "volume")
@@ -361,27 +418,38 @@ class PriceVolumeClean:
         cv = close * volume
         up_vol = np.where(ret > 0.0, volume, 0.0)
         dn_vol = np.where(ret < 0.0, volume, 0.0)
-        # signed volume + on-balance-volume cumulative across the trailing buffer (NaN ret -> 0 signed)
+        # signed volume + on-balance-volume cumulative across the trailing buffer (NaN ret -> 0 signed). OBV
+        # stays cumulative-from-buffer-start; only the per-window OLS over it is TIME-windowed (below).
         signed = np.where(ret > 0.0, volume, np.where(ret < 0.0, -volume, 0.0))
         signed = np.where(np.isfinite(signed), signed, 0.0)
         obv = np.cumsum(signed, axis=1)
-        # frame-relative time axis (origin-invariant; the slope is unaffected by the offset)
-        time_axis = np.broadcast_to(np.arange(close.shape[1], dtype=np.float64), close.shape)
+        # the obv_slope OLS is a kind="time" regression: x = the ACTUAL MINUTE (frame-relative), NOT a positional
+        # arange — on a sparse symbol the minute gaps make the slope differ. REBASE to the earliest present
+        # minute so the operands stay small (raw epoch-minutes ~1e7 → (Σx)² ~1e15 → catastrophic cancellation in
+        # denom_x → spurious floor reject). Empty slots NaN; the per-window time mask then restricts to (T−w, T].
+        time_axis = _rebased_minute_axis(window.trailing_minute())
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            vol_w = _windowed_sum(volume, w)
+            # TIME window (legacy rolling_*_by("minute","{w}m")): keep only bars whose minute is within the last
+            # w minutes, the rest NaN — a sparse symbol's window is bounded by TIME, not slot count.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            vol_w = _row_sum(np.where(in_window, volume, np.nan))
             with np.errstate(invalid="ignore", divide="ignore"):
-                vwap = _windowed_sum(cv, w) / vol_w
+                vwap = _row_sum(np.where(in_window, cv, np.nan)) / vol_w
                 out[f"vwap_deviation_{w}m"] = np.where(vol_w > 0.0, latest_close / vwap - 1.0, np.nan)
-                up_w = _windowed_sum(up_vol, w)
-                dn_w = _windowed_sum(dn_vol, w)
+                up_w = _row_sum(np.where(in_window, up_vol, np.nan))
+                dn_w = _row_sum(np.where(in_window, dn_vol, np.nan))
                 out[f"up_volume_ratio_{w}m"] = np.where(vol_w > 0.0, up_w / vol_w, np.nan)
                 out[f"down_volume_ratio_{w}m"] = np.where(vol_w > 0.0, dn_w / vol_w, np.nan)
                 out[f"volume_delta_{w}m"] = np.where(vol_w > 0.0, (up_w - dn_w) / vol_w, np.nan)
-                out[f"buying_pressure_{w}m"] = np.where(vol_w > 0.0, _windowed_sum(mfv, w) / vol_w, np.nan)
-            out[f"pv_correlation_{w}m"] = _windowed_corr(ret, volume, w)
-            mean_vol, _ = _masked_mean(volume, w)
-            slope = _windowed_ols_slope(time_axis, obv, w)
+                out[f"buying_pressure_{w}m"] = np.where(
+                    vol_w > 0.0, _row_sum(np.where(in_window, mfv, np.nan)) / vol_w, np.nan
+                )
+            out[f"pv_correlation_{w}m"] = _row_corr(
+                np.where(in_window, ret, np.nan), np.where(in_window, volume, np.nan)
+            )
+            mean_vol, _ = _row_mean(np.where(in_window, volume, np.nan))
+            slope = _row_ols_slope(np.where(in_window, time_axis, np.nan), np.where(in_window, obv, np.nan))
             with np.errstate(invalid="ignore", divide="ignore"):
                 out[f"obv_slope_{w}m"] = np.where(mean_vol > 0.0, slope / mean_vol, np.nan)
         return out
