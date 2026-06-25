@@ -1359,16 +1359,10 @@ def test_price_volume_contract_and_seed_equals_live() -> None:
 # ========================================================================================================= #
 
 
-@pytest.mark.xfail(
-    reason="PORT BUG (flagged to ArchOverhaul): clean _windowed_corr/_windowed_ols_slope guard only var_x>0, "
-    "but legacy corr_/slope_ reject denom_x <= 1e-9·(b·sxx) (CoV²<1e-9) AND <= 1e-12·(Σx)². On a near-constant "
-    "nonzero return window (CoV²~1e-13) legacy → NaN, clean → spurious value (corr of float noise). The exact "
-    "corr-denom cancellation guard that gated incremental_safe; the clean kernel must add both relative floors.",
-    strict=True,
-)
 def test_windowed_corr_rejects_near_constant_x_like_legacy() -> None:
     """A near-constant-but-nonzero x (return ticking by the same tiny amount, CoV²<1e-9): legacy corr_ returns
-    NaN (catastrophic-cancellation reject); the clean kernel must too, NOT a spurious correlation of noise."""
+    NaN (catastrophic-cancellation reject); the clean kernel must too, NOT a spurious correlation of noise.
+    FIXED by the kernel denom floors (ff13dc3) — was the corr-denom port bug (legacy NaN vs clean ~1.001)."""
     n = 10
     x = (1e-4 + np.linspace(0.0, 1e-10, n))[None, :]  # constant to ~6 sig figs → CoV² ~ 1e-13
     y = np.arange(n, dtype=np.float64)[None, :]
@@ -1380,16 +1374,26 @@ def test_windowed_corr_rejects_near_constant_x_like_legacy() -> None:
     assert np.isnan(_windowed_corr(x, y, n)[0]), "near-constant-x corr must be NaN (legacy 1e-9 b·sxx guard)"
 
 
-@pytest.mark.xfail(
-    reason="Same PORT BUG on the OLS slope: legacy slope_ rejects denom_x<=1e-9·(b·sxx); clean only var_x>0. "
-    "obv_slope/kyle_lambda on a near-constant regressor diverge (legacy NaN, clean spurious slope).",
-    strict=True,
-)
 def test_windowed_ols_slope_rejects_near_constant_x_like_legacy() -> None:
+    """Slope mirrors corr: a near-constant x → NaN (legacy 1e-9·n·Σx² floor), not a spurious slope. FIXED ff13dc3."""
     n = 10
     x = (1e-4 + np.linspace(0.0, 1e-10, n))[None, :]
     y = np.arange(n, dtype=np.float64)[None, :]
     assert np.isnan(_windowed_ols_slope(x, y, n)[0]), "near-constant-x slope must be NaN (legacy guard)"
+
+
+def test_windowed_corr_perfect_fit_two_points_sign() -> None:
+    """ArchOverhaul's SECOND fix: a window with exactly 2 present points is a perfect fit → corr = sign(cov)
+    (±1.0 exactly), NOT the raw ratio. Matches legacy corr_'s perfect-fit rule. Both signs."""
+    n = 6
+    # only the last 2 columns present (others NaN) → n==2 perfect fit
+    x = np.full((1, n), np.nan)
+    y = np.full((1, n), np.nan)
+    x[0, -2:] = [1.0, 2.0]
+    y[0, -2:] = [10.0, 20.0]  # positively related → +1
+    assert _windowed_corr(x, y, n)[0] == pytest.approx(1.0)
+    y[0, -2:] = [20.0, 10.0]  # negatively related → −1
+    assert _windowed_corr(x, y, n)[0] == pytest.approx(-1.0)
 
 
 def test_distribution_moment_floor_matches_legacy() -> None:
