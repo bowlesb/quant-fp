@@ -144,6 +144,36 @@ _FOUR_LN2 = 2.772588722239781
 _MOMENT_MIN_VAR = 1e-12
 
 
+class PriceReturnsClean:
+    """PRICE: simple + log close-to-close return over each trailing window — ret_{w}m = close/close_{-w} − 1,
+    log_ret_{w}m = ln(close/close_{-w}). The lag is POSITIONAL (the w-th prior present bar in the carried
+    buffer), matching the engine's gap-safe trailing semantics. NaN until w+1 present bars (warm-up). Legacy:
+    ``PriceReturnGroup`` (a StatefulGroup whose math is plain positional-lag returns, not a state machine).
+    """
+
+    name = "price_returns"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 40, 45, 60, 90, 120, 180)
+    feature_names = tuple(f"ret_{w}m" for w in _WINDOWS) + tuple(f"log_ret_{w}m" for w in _WINDOWS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        latest = window.latest("close")
+        n_sym = close.shape[0]
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            # the w-th prior present bar is buffer column -(w+1); NaN if the symbol has < w+1 present bars.
+            if close.shape[1] > w:
+                prior = close[:, -(w + 1)]
+            else:
+                prior = np.full(n_sym, np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ratio = latest / prior
+                out[f"ret_{w}m"] = ratio - 1.0
+                out[f"log_ret_{w}m"] = np.log(ratio)
+        return out
+
+
 class DistributionClean:
     """DISTRIBUTION: per window of one-minute returns — ret_skew (m3/m2^1.5), ret_kurt (excess, m4/m2²−3),
     downside_vol / upside_vol (RMS of the negative / positive returns). Central moments from masked power sums;
