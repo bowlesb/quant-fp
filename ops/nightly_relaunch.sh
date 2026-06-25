@@ -34,6 +34,11 @@ NETWORK_FALLBACK="quant_default"
 ENV_FILE="${ENV_FILE:-.env}"
 STORE_ROOT="${STORE_ROOT:-/store}"
 LAUNCH_MODULE="quantlib.features.live_capture"
+# Bias the kernel AWAY from picking fc as the OOM victim when the shared box spikes (fc has no mem LIMIT
+# and was killed at 9% usage by a host-wide spike on 2026-06-24). Negative => protect; -500 (not -1000) keeps
+# fc killable as a last resort, and this sets victim PRIORITY only, never a memory cap (a cap would make fc
+# OOM itself as its warm rings legitimately grow). Set OOM_SCORE_ADJ= (empty) to omit the flag.
+OOM_SCORE_ADJ="${OOM_SCORE_ADJ:--500}"
 
 log()  { printf '[nightly_relaunch] %s\n' "$*" >&2; }
 fail() { printf '[nightly_relaunch] FATAL: %s\n' "$*" >&2; exit 1; }
@@ -96,6 +101,7 @@ build_run_cmd() {
   # daily-frame features are clean from minute one either way.
   local cmd=(docker run -d --name "$CONTAINER" --restart "$restart" --network "$network"
              --env-file "$ENV_FILE" -w "$workdir")
+  [ -n "$OOM_SCORE_ADJ" ] && cmd+=(--oom-score-adj "$OOM_SCORE_ADJ")
   [ "${WARM_START:-1}" = "1" ] && cmd+=(-e FP_WARM_START=1)
   if docker inspect "$CONTAINER" >/dev/null 2>&1; then
     # Reproduce each mount (bind: host path; volume: volume name) -> destination, preserving ro/rw.
