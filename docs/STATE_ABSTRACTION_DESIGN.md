@@ -183,9 +183,9 @@ math, which keeps doing the same arithmetic, just plugged into one container ins
 
 | today | measured LOC | becomes |
 |---|---|---|
-| `IncrementalEngine` + `StatefulEngine` (two engines doing the SAME seed/fold/emit lifecycle on different payloads) | **~755** (555 + 200) | **ONE container drive loop** (seed + fold + read; churn + idempotency in one place) |
-| the 4 `step*` twins + emit drive (`step`/`step_numpy`/`step_rust`/`step_rust_unified` + the latest-frame helpers) | **~67** | **ONE read-surface dispatch** (numpy default, Rust where it pays — one path, not four) |
-| `StatefulEngine`'s churn wrapper (`_fold_minute` / `_prepared_latest` / the stable-set assert `stateful.py:733` / the per-kind seed branches) | (part of the ~200) | **deleted** — churn + seed handled once by the spine (the C3 win) |
+| `IncrementalEngine` (555) + `StatefulEngine` + its emit drive (~244) — two engines doing the SAME seed/fold/emit lifecycle on different payloads | **~800** | **ONE container drive loop** (~200–250 lines of new code; seed + fold + read; churn + idempotency in one place) → **net ~550 removed** |
+| the 4 `step*` twins + emit drive (`step`/`step_numpy`/`step_rust`/`step_rust_unified` + the latest-frame helpers, ~112) | **~112** | **ONE read-surface dispatch** (~25 lines) → **net ~87 removed** |
+| `StatefulEngine`'s churn wrapper (`_fold_minute` / `_prepared_latest` / the stable-set assert `stateful.py:733` / the per-kind seed branches) | ~40 | **deleted** — churn + seed handled once by the spine (the C3 win) |
 | `ReductionFoldState` (already just a `WindowedSumState` wrapper) | **75** | folds into the windowed-sum payload — nothing new |
 
 **What STAYS but plugs into the container — the per-kind math (the (state, fold) a group declares; keeps its arithmetic, loses its wrappers):**
@@ -200,12 +200,16 @@ math, which keeps doing the same arithmetic, just plugged into one container ins
 | `SessionCache` (snapshot) | 31 | **snapshot** payload (state = today's snapshot; fold = no-op; read = broadcast) — already minimal |
 | `swing` `_SymbolLeg` (state machine) | — | **opaque state-machine** payload (`advance(value, minute) → row`) — already implements the lifecycle |
 
-**Net (measured).** The state/engine code is ~3,500 lines across 10 files. The genuinely-DELETED part is the
-**duplication**: the two engines collapse to one container drive loop (~500 lines gone), the four `step*` twins
-to one dispatch (~40), `ReductionFoldState` disappears (it's already a `WindowedSumState` wrapper, ~75), and the
-churn wrappers + stable-set assert + per-kind seed branches go (~40). That is **~700–900 lines of duplicated
-drive/seed/churn/dispatch removed.** The per-kind math (~900 lines: the windowed-sum, the accumulators, the EMA,
-the rings) **stays** — it's the `(state, fold)` each group declares, now behind one interface instead of seven.
+**Net (measured), counted honestly.** The state/engine code is ~3,500 lines across 10 files. The genuinely-removed
+part is the **duplication** — but we count it as the *net* removed, because the engines don't just vanish, they're
+*replaced* by one smaller container drive loop. So: the two engines (~800) become one drive loop (~200–250) ≈
+**~550 net removed**; the four `step*` twins (~112) become one dispatch (~25) ≈ **~87 removed**;
+`ReductionFoldState` disappears (already a `WindowedSumState` wrapper, ~75 — but its math is *kept* in the
+windowed-sum payload, so it's a dedup not a deletion); and the churn wrappers + stable-set assert + per-kind seed
+branches go ≈ **~40 removed**. That totals **~650–700 lines of duplicated drive/seed/churn/dispatch removed.**
+The per-kind math (~553 lines: WindowedSum 232, ReductionFold 75, Cumulative 69, Extrema 63, EMA 50, LastK 35,
+SessionCache 29) **stays** — it's the `(state, fold)` each group declares, now behind one interface instead of
+seven.
 
 But the honest headline is **not the line count — it's the count of concepts.** Seven ways to hold state, two
 engines, and four `step*` variants become **one container + a handful of declared folds.** A feature author
