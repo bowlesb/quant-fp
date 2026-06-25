@@ -201,6 +201,31 @@ class DumperStateClean:
             }
 
 
+class GapFillStateClean:
+    """SESSION-RESET (the overnight-gap-fill regime): the running fraction of the overnight gap filled by this
+    minute. gap_fill_fraction = (close − sess_open)/(prev_close − sess_open) — 0 at the open, 1.0 = back to
+    prev_close (filled), <0 = extended past the open; NULL on a zero-gap day (|denom| ≤ 1e-9). gap_extended
+    (Int8) = 1 if fraction < 0. Legacy: ``GapFillStateGroup``. Reuses the shared session ``sess_open`` (first
+    open) + ``window.session['prev_close']``."""
+
+    name = "gap_fill_state"
+    input_cols = ("open", "high", "low", "close", "volume")
+    feature_names = ("gap_fill_fraction", "gap_extended")
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        acc = _update_session_cumulative(window)
+        sess_open, close = acc["sess_open"], acc["close"]
+        prev_close = window.session.get("prev_close")
+        if prev_close is None:
+            prev_close = np.full(window.n, np.nan)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            denom = prev_close - sess_open
+            ok = np.abs(denom) > 1e-9
+            fill = np.where(ok, (close - sess_open) / denom, np.nan)
+            extended = np.where(ok, (fill < 0).astype(np.float64), np.nan)
+        return {"gap_fill_fraction": fill, "gap_extended": extended}
+
+
 class TechnicalClean:
     """TECHNICAL: RSI (windowed gain/loss), MACD (recursive ADJUSTED EWM), Bollinger (windowed sma/std),
     SMA distances (windowed mean). rsi_14m, macd_line/signal/hist, bb_position_20m, bb_width_20m, sma_dist_{w}m.
