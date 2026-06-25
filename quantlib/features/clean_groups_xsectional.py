@@ -66,16 +66,28 @@ def _cross_sectional_percentile(values: np.ndarray, present: np.ndarray) -> np.n
     return (ranks - 1.0) / (n - 1.0)
 
 
+def _polars_quantile(sorted_vals: np.ndarray, q: float) -> float:
+    """polars' DEFAULT quantile (the legacy IQR's exact rule): ``sorted[floor(q·(n−1) + 0.5)]`` — round-HALF-UP
+    of the fractional index. This is NOT numpy ``method='nearest'`` (round-half-to-EVEN) — they diverge exactly
+    when ``q·(n−1)`` lands on x.5 (e.g. n=7, q=0.75 → 4.5 → polars index 5, numpy index 4). Matching polars
+    exactly is parity-critical: the historical vectors were polars-computed, so a numpy-nearest IQR is
+    train/serve-skewed."""
+    n = len(sorted_vals)
+    idx = int(np.floor(q * (n - 1) + 0.5))
+    idx = max(0, min(n - 1, idx))
+    return float(sorted_vals[idx])
+
+
 def _xsec_std_iqr(returns: np.ndarray, present: np.ndarray) -> tuple[float, float]:
-    """Cross-sectional std (ddof=1) + IQR (p75−p25, polars 'nearest' interpolation) of the PRESENT+finite
+    """Cross-sectional std (ddof=1) + IQR (p75−p25, polars' default quantile rule) of the PRESENT+finite
     returns. Returns ``(std, iqr)``, NaN where fewer than 2 present-finite values. Broadcast by the caller.
     """
     masked = returns[present & np.isfinite(returns)]
     if masked.size < 2:
         return np.nan, np.nan
     std = float(np.std(masked, ddof=1))
-    # polars default quantile interpolation is 'nearest' (NOT numpy's default 'linear') — match it exactly.
-    iqr = float(np.quantile(masked, 0.75, method="nearest") - np.quantile(masked, 0.25, method="nearest"))
+    sorted_vals = np.sort(masked)
+    iqr = _polars_quantile(sorted_vals, 0.75) - _polars_quantile(sorted_vals, 0.25)
     return std, iqr
 
 
