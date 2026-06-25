@@ -45,7 +45,7 @@ from quantlib.features.declarative import (
     emit_rust_unified,
     resolve_points,
 )
-from quantlib.features.point_ring import PointRing, point_frame_from_ring, point_specs
+from quantlib.features.point_ring import PointRing, ValueInputRing, point_frame_from_ring, point_specs
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
@@ -464,6 +464,15 @@ class IncrementalEngine:
         # to ring, and ``_latest_frame`` keeps the resolve_points path (which returns an empty __pt_ frame).
         self._use_point_ring = bool(self.point_specs)
         self.point_ring: PointRing | None = None
+        # FP_MATRIX_RING: carry the per-symbol last-``max_lag+1``-rows of the RAW input columns in a positional
+        # row-ring (the SAME primitive as PointRing, depth max_lag+1 over input cols) instead of re-slicing the
+        # whole buffer every minute in ``_matrix_at`` (filter+sort+group_by+tail, ~the slice-derive cost). The
+        # ring reconstructs the SAME (symbol, minute) tail the slice produces, so ``_derived_row`` is byte-
+        # identical (tests/test_fp_value_input_ring.py). Only the slice-derived ``safe_value_cols`` path uses it;
+        # the stateful-regressor aux (OBV/time-OLS) is rebuilt from running state as before. OFF by default.
+        self._matrix_ring_cols = [c for c in self.input_cols if c not in ("symbol", "minute")]
+        self._use_matrix_ring = os.environ.get("FP_MATRIX_RING") == "1"
+        self.matrix_ring: ValueInputRing | None = None
 
     def _collect_stateful_specs(self) -> dict[str, dict[str, StatefulRegressor]]:
         specs: dict[str, dict[str, StatefulRegressor]] = {}
@@ -604,6 +613,20 @@ class IncrementalEngine:
         rebuilds stateful regression columns from running state; otherwise (seed) it derives over ``frame`` as
         given. Asserts a fixed symbol set (V1)."""
         source = frame
+        if slice_derive and self.matrix_ring is not None:
+            # FP_MATRIX_RING: the carried ring already holds each symbol's last ``max_lag+1`` present rows, so
+            # reconstruct the tail instead of re-slicing the whole buffer. Byte-identical to the slice below
+            # (``_derived_row`` re-sorts; only the (symbol, minute) row set + values matter) —
+            # tests/test_fp_value_input_ring.py. Live ``step`` only (``minute`` is the buffer's latest, which the
+            # ring's latest fold matches); the seed path keeps the explicit slice (it folds historical minutes).
+            if minute == frame["minute"].max():
+                source = self.matrix_ring.materialize_tail(frame.schema["minute"])
+                row = (
+                    self._derived_row_rust(source, minute)
+                    if self.rust_slice
+                    else self._derived_row(source, minute)
+                )
+                return self._assemble_value_matrix(row, minute)
         if slice_derive:
             # Positional lags (``shift(k).over("symbol")``) need each present symbol's last ``max_lag+1`` ROWS
             # AT OR BEFORE ``minute``, not a fixed minute window. A sparse symbol's prior bar can be arbitrarily
@@ -628,6 +651,13 @@ class IncrementalEngine:
         row = (
             self._derived_row_rust(source, minute) if self.rust_slice else self._derived_row(source, minute)
         )
+        return self._assemble_value_matrix(row, minute)
+
+    def _assemble_value_matrix(self, row: pl.DataFrame, minute: object) -> np.ndarray:
+        """Align the derived ``row`` to the fixed session index and write the (n_symbols, n_value_cols) matrix:
+        the slice-derived ``safe_value_cols`` directly, the stateful-regression aux from running state. Shared
+        by the buffer-slice path and the FP_MATRIX_RING reconstruction (they differ only in how ``row`` was
+        derived — identical row by construction)."""
         n_sym = len(self.symbols or [])
         # Live capture delivers only the minute's ACTIVE symbols — a fluctuating SUBSET of the fixed session
         # index. Align the present rows to the full index: absent symbols contribute 0 to every windowed sum
@@ -714,6 +744,9 @@ class IncrementalEngine:
             # Seed the point ring by folding every buffered minute (== resolve_points over the buffer at each
             # minute, carried), so the live ring state == the backfill points the instant seed returns.
             self.point_ring = PointRing(self.symbols, self.point_specs)
+        # The matrix ring is built AFTER the seed loop (below), so during seed ``_matrix_at`` always takes the
+        # explicit slice path (the seed folds HISTORICAL minutes, where ``minute != frame.max()`` and the ring
+        # tail would not apply) — ``self.matrix_ring`` stays None through the loop.
         for minute in sorted(buffer_frame["minute"].unique()):
             minute_epoch = int(minute.timestamp())
             self._roll_time_origin(minute_epoch)
@@ -721,6 +754,14 @@ class IncrementalEngine:
             self.state.trim()
             if self.point_ring is not None:
                 self.point_ring.fold(buffer_frame.filter(pl.col("minute") == minute))
+        if self._use_matrix_ring:
+            # Build the matrix ring from the seed buffer so the live ``step`` reads the tail from it. Each
+            # symbol's last ``max_lag+1`` PRESENT rows are exactly what the buffer-slice would produce — fold
+            # minute by minute (the ring keeps the latest ``depth`` per symbol).
+            self.matrix_ring = ValueInputRing(self.symbols, self._matrix_ring_cols, self.max_lag + 1)
+            for minute in sorted(buffer_frame["minute"].unique()):
+                rows = buffer_frame.filter(pl.col("minute") == minute)
+                self.matrix_ring.fold(rows.select(["symbol", "minute", *self._matrix_ring_cols]))
         # The internal invariants are cheap (O(windows)) and run by DEFAULT at init — a corrupted fold/expire
         # surfaces immediately, on every seed, not only on the warm-start path. The deep O(buffer) sum-vs-
         # buffer reconstruction is opt-in (FP_INCREMENT_DEEP_CHECK=1) so steady-state throughput is unaffected.
@@ -780,6 +821,11 @@ class IncrementalEngine:
         try:
             minute_epoch = int(latest.timestamp())  # type: ignore[attr-defined]
             self._roll_time_origin(minute_epoch)
+            # The matrix ring must contain THIS minute's rows BEFORE ``_matrix_at`` reads the tail (the tail
+            # ends at ``latest``), so fold it first; ``_matrix_at`` then reconstructs from the ring.
+            if self.matrix_ring is not None:
+                latest_rows = frame.filter(pl.col("minute") == latest)
+                self.matrix_ring.fold(latest_rows.select(["symbol", "minute", *self._matrix_ring_cols]))
             self.state.update(minute_epoch, self._matrix_at(frame, latest, slice_derive=slice_derive))
             self.state.trim()
             if self.point_ring is not None:
