@@ -150,6 +150,23 @@ def _windowed_min(values: np.ndarray, w: int) -> np.ndarray:
     return np.where(all_nan, np.nan, out)
 
 
+def _row_nanmax(mat: np.ndarray) -> np.ndarray:
+    """Per-row max over a full ``(n, k)`` matrix ignoring NaN; NaN where a row is all-NaN. For an already
+    TIME-windowed matrix (from ``trailing_time``) — every finite cell is in the window."""
+    all_nan = ~np.isfinite(mat).any(axis=1)
+    with np.errstate(invalid="ignore"):
+        out = np.nanmax(np.where(np.isfinite(mat), mat, -np.inf), axis=1)
+    return np.where(all_nan, np.nan, out)
+
+
+def _row_nanmin(mat: np.ndarray) -> np.ndarray:
+    """Per-row min over a full ``(n, k)`` matrix ignoring NaN; NaN where a row is all-NaN."""
+    all_nan = ~np.isfinite(mat).any(axis=1)
+    with np.errstate(invalid="ignore"):
+        out = np.nanmin(np.where(np.isfinite(mat), mat, np.inf), axis=1)
+    return np.where(all_nan, np.nan, out)
+
+
 _RANGE_REL_EPS = 1e-9
 
 
@@ -169,13 +186,14 @@ class PriceLevelsClean:
     )
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
-        high = window.trailing("high")
-        low = window.trailing("low")
         close = window.latest("close")
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
-            high_w = _windowed_max(high, w)
-            low_w = _windowed_min(low, w)
+            # TIME window (legacy rolling_max_by/rolling_min_by over minute): the trailing-w-MINUTE matrix.
+            high_mat = window.trailing_time("high", w)
+            low_mat = window.trailing_time("low", w)
+            high_w = _row_nanmax(high_mat)
+            low_w = _row_nanmin(low_mat)
             band = high_w - low_w
             with np.errstate(invalid="ignore", divide="ignore"):
                 pos = np.where(band > _RANGE_REL_EPS * np.abs(high_w), (close - low_w) / band, np.nan)
