@@ -433,69 +433,199 @@ class IntradaySeasonalityClean:
         return {"volume_vs_session_mean": np.where(present & (state["cnt"] > 0), ratio, np.nan)}
 
 
+_SWING_THETA = 0.005  # legacy THETA — reversal threshold (0.5% fractional return) confirms a pivot
+_SWING_RING_K = 8  # confirmed legs kept for persistence / alternation / resolved
+_SWING_DAY_SECS = 86_400
+_SWING_FIB_MAX_ABS = 10.0  # fib degenerate guard: |fib| beyond this → undefined (NULL)
+
+
+class _SwingLeg:
+    """One symbol's ZigZag leg-state — a faithful Python port of legacy ``swing_state._SymbolLeg``. ``advance``
+    folds ONE bar point-in-time and returns the 9 features; resets the whole leg at a session-day boundary
+    (per-day-backfill parity)."""
+
+    __slots__ = (
+        "cur_day",
+        "direction",
+        "leg_start_price",
+        "leg_start_min",
+        "extreme",
+        "extreme_min",
+        "hi",
+        "hi_min",
+        "lo",
+        "lo_min",
+        "prev_leg_start",
+        "prev_leg_end",
+        "have_prev_leg",
+        "n_pivots_today",
+        "n_alternations",
+        "leg_returns",
+        "leg_steeps",
+    )
+
+    def __init__(self) -> None:
+        self.cur_day: int | None = None
+        self.direction = 0
+        self.leg_start_price = float("nan")
+        self.leg_start_min = 0
+        self.extreme = float("nan")
+        self.extreme_min = 0
+        self.hi = float("nan")
+        self.hi_min = 0
+        self.lo = float("nan")
+        self.lo_min = 0
+        self.prev_leg_start = float("nan")
+        self.prev_leg_end = float("nan")
+        self.have_prev_leg = False
+        self.n_pivots_today = 0.0
+        self.n_alternations = 0.0
+        self.leg_returns: list[float] = []
+        self.leg_steeps: list[float] = []
+
+    def _push_pivot(self, pivot_price: float, start_price: float, span_secs: int) -> None:
+        signed_ret = (pivot_price - start_price) / start_price if start_price > 0.0 else 0.0
+        mins = span_secs // 60
+        steep = signed_ret / mins if mins > 0 else 0.0
+        self.prev_leg_start = start_price
+        self.prev_leg_end = pivot_price
+        self.have_prev_leg = True
+        self.leg_returns.append(signed_ret)
+        self.leg_steeps.append(steep)
+        del self.leg_returns[:-_SWING_RING_K]
+        del self.leg_steeps[:-_SWING_RING_K]
+
+    def advance(self, close: float, minute: int) -> tuple[float, ...]:
+        day = minute // _SWING_DAY_SECS
+        if self.cur_day is not None and day != self.cur_day:
+            # CONTINUOUS-FOLD (the Rust swing_fold / backfill compute(), which the clean engine matches) only
+            # resets the PER-DAY pivot COUNT at the day boundary — the leg geometry, the pivot ring
+            # (n_alternations / leg_returns / leg_steeps / persistence), and minutes_since_pivot all CARRY
+            # across the overnight gap. (The full _reset_for_new_session is the STATEFUL-LIVE per-day twin, a
+            # DIFFERENT semantic that matches a per-day-materialized backfill; the clean engine is one
+            # continuous replay = the whole-buffer fold, so it must NOT full-reset here.)
+            self.n_pivots_today = 0.0
+        self.cur_day = day
+        if self.leg_start_price != self.leg_start_price:  # NaN → first bar of the (re)started session block
+            self.leg_start_price = close
+            self.leg_start_min = minute
+            self.extreme = close
+            self.extreme_min = minute
+            self.hi = self.lo = close
+            self.hi_min = self.lo_min = minute
+        elif self.direction == 0:
+            if close > self.hi:
+                self.hi, self.hi_min = close, minute
+            if close < self.lo:
+                self.lo, self.lo_min = close, minute
+            down_rev = (self.hi - close) / self.hi if self.hi > 0.0 else 0.0
+            up_rev = (close - self.lo) / self.lo if self.lo > 0.0 else 0.0
+            if down_rev >= _SWING_THETA and down_rev >= up_rev:
+                self._push_pivot(self.hi, self.leg_start_price, self.hi_min - self.leg_start_min)
+                self.n_pivots_today += 1.0
+                self.n_alternations += 1.0
+                self.direction = -1
+                self.leg_start_price, self.leg_start_min = self.hi, self.hi_min
+                self.extreme, self.extreme_min = close, minute
+            elif up_rev >= _SWING_THETA:
+                self._push_pivot(self.lo, self.leg_start_price, self.lo_min - self.leg_start_min)
+                self.n_pivots_today += 1.0
+                self.n_alternations += 1.0
+                self.direction = 1
+                self.leg_start_price, self.leg_start_min = self.lo, self.lo_min
+                self.extreme, self.extreme_min = close, minute
+        elif self.direction == 1:
+            if close >= self.extreme:
+                self.extreme, self.extreme_min = close, minute
+            elif self.extreme > 0.0 and (self.extreme - close) / self.extreme >= _SWING_THETA:
+                self._push_pivot(self.extreme, self.leg_start_price, self.extreme_min - self.leg_start_min)
+                self.n_pivots_today += 1.0
+                self.n_alternations += 1.0
+                self.direction = -1
+                self.leg_start_price, self.leg_start_min = self.extreme, self.extreme_min
+                self.extreme, self.extreme_min = close, minute
+        else:  # direction == -1
+            if close <= self.extreme:
+                self.extreme, self.extreme_min = close, minute
+            elif self.extreme > 0.0 and (close - self.extreme) / self.extreme >= _SWING_THETA:
+                self._push_pivot(self.extreme, self.leg_start_price, self.extreme_min - self.leg_start_min)
+                self.n_pivots_today += 1.0
+                self.n_alternations += 1.0
+                self.direction = 1
+                self.leg_start_price, self.leg_start_min = self.extreme, self.extreme_min
+                self.extreme, self.extreme_min = close, minute
+        len_pct = (
+            (close - self.leg_start_price) / self.leg_start_price if self.leg_start_price > 0.0 else 0.0
+        )
+        mins = (minute - self.leg_start_min) // 60
+        steep = len_pct / mins if mins > 0 else 0.0
+        msp = float(mins) if self.direction != 0 else float("nan")
+        persistence = sum(self.leg_returns) + len_pct
+        if self.have_prev_leg and abs(self.prev_leg_start - self.prev_leg_end) > 0.0:
+            fib = (close - self.prev_leg_end) / (self.prev_leg_start - self.prev_leg_end)
+            fib = fib if abs(fib) <= _SWING_FIB_MAX_ABS else float("nan")
+        else:
+            fib = float("nan")
+        resolved = 0.0
+        if len(self.leg_returns) >= 2 and self.direction != 0:
+            max_prior_len = max(abs(x) for x in self.leg_returns)
+            max_prior_steep = max(abs(x) for x in self.leg_steeps)
+            persists = (len_pct > 0.0 and self.direction == 1) or (len_pct < 0.0 and self.direction == -1)
+            if persists and abs(len_pct) > max_prior_len and abs(steep) > max_prior_steep:
+                resolved = 1.0
+        return (
+            float(self.direction),
+            steep,
+            len_pct,
+            msp,
+            self.n_pivots_today,
+            self.n_alternations,
+            persistence,
+            fib,
+            resolved,
+        )
+
+
 class SwingClean:
-    """STATEFUL / swing: a ZigZag leg-state machine per symbol — the current leg direction + running extreme,
-    a pivot when price reverses by >= theta from the leg extreme. O(1) per bar, carried in ``window.state``
-    (no buffer re-scan) — proving the small-per-symbol-state-machine kind. (Simplified single-leg ZigZag; the
-    production group adds the Fibonacci leg sequence, same carried-state shape.)"""
+    """TREND_QUALITY / STATEFUL: a point-in-time ZigZag swing/leg state machine per symbol. The 9 swing features
+    (swing_dir/steepness/len_pct, minutes_since_pivot, n_pivots_today/alternations, swing_persistence,
+    fib_retracement, trend_resolved) from a per-symbol carried ``_SwingLeg`` advanced one bar per present minute
+    (O(1)/bar, no buffer re-scan). Resets the leg at the session-day boundary (per-day-backfill parity). A
+    faithful port of legacy ``SwingGroup`` + ``swing_state._SymbolLeg``."""
 
     name = "swing"
     input_cols = ("close",)
-    feature_names = ("swing_direction", "swing_leg_return", "swing_pivot")
-    _THETA = 0.01  # 1% reversal confirms a pivot
+    feature_names = (
+        "swing_dir",
+        "swing_steepness",
+        "swing_len_pct",
+        "minutes_since_pivot",
+        "n_pivots_today",
+        "n_alternations",
+        "swing_persistence",
+        "fib_retracement",
+        "trend_resolved",
+    )
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.latest("close")
-        present = window.present()  # the REAL delivery mask — the leg must NOT advance on an absent minute
-        state = window.state
+        present = window.present()  # the leg advances ONLY on a present bar (absent → carries state, no row)
+        minute_epoch = window.minute_epoch
         n = window.n
-        if state.get("extreme") is None:
-            state["extreme"] = np.where(present, close, np.nan)  # the running leg extreme
-            state["dir"] = np.zeros(n)  # +1 up-leg, -1 down-leg, 0 undecided
-            state["leg_start"] = np.where(present, close, np.nan)
-        extreme = state["extreme"]
-        direction = state["dir"]
-        pivot = np.zeros(n)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            up_move = (close - extreme) / extreme  # vs the current extreme
-        # up-leg: extreme tracks the high; a fall of >= theta from it confirms a down pivot (and vice versa).
-        new_extreme = extreme.copy()
-        new_dir = direction.copy()
-        new_leg_start = state["leg_start"].copy()
+        legs_obj = window.state.get("legs")
+        if legs_obj is None:
+            # one carried _SwingLeg per symbol, held in an object-dtype array (fits the state dict's ndarray
+            # contract while carrying the per-symbol Python state machines).
+            legs_obj = np.array([_SwingLeg() for _ in range(n)], dtype=object)
+            window.state["legs"] = legs_obj
+        rows = np.full((n, len(self.feature_names)), np.nan)
         for i in range(n):
-            if not present[i] or not np.isfinite(extreme[i]):
-                if present[i] and not np.isfinite(extreme[i]):
-                    new_extreme[i] = close[i]
-                    new_leg_start[i] = close[i]
-                continue
-            d = direction[i]
-            mv = up_move[i]
-            if d >= 0 and close[i] >= extreme[i]:
-                new_extreme[i] = close[i]  # extending the up-leg's high
-                new_dir[i] = 1
-            elif d <= 0 and close[i] <= extreme[i]:
-                new_extreme[i] = close[i]  # extending the down-leg's low
-                new_dir[i] = -1
-            elif d == 1 and mv <= -self._THETA:  # up-leg reversed down by theta → down pivot
-                pivot[i] = 1.0
-                new_dir[i] = -1
-                new_leg_start[i] = extreme[i]
-                new_extreme[i] = close[i]
-            elif d == -1 and mv >= self._THETA:  # down-leg reversed up by theta → up pivot
-                pivot[i] = 1.0
-                new_dir[i] = 1
-                new_leg_start[i] = extreme[i]
-                new_extreme[i] = close[i]
-        state["extreme"] = new_extreme
-        state["dir"] = new_dir
-        state["leg_start"] = new_leg_start
-        with np.errstate(invalid="ignore", divide="ignore"):
-            leg_return = close / new_leg_start - 1.0
-        return {
-            "swing_direction": np.where(present, new_dir, np.nan),
-            "swing_leg_return": np.where(present, leg_return, np.nan),
-            "swing_pivot": np.where(present, pivot, np.nan),
-        }
+            if present[i] and np.isfinite(close[i]):
+                rows[i] = legs_obj[i].advance(float(close[i]), int(minute_epoch))
+        out: dict[str, np.ndarray] = {}
+        for j, name in enumerate(self.feature_names):
+            out[name] = np.where(present, rows[:, j], np.nan)
+        return out
 
 
 _PRIOR_DAY_PIVOTS = ("p", "r1", "s1", "r2", "s2")
