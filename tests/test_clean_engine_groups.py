@@ -664,3 +664,41 @@ def test_cumulative_duplicate_minute_does_not_double_count() -> None:
     engine.step(_vbar(1000.0, 60))  # SAME minute re-delivered
     cnt = engine._group_state["intraday_seasonality"]["cnt"][0]
     assert cnt == pytest.approx(1.0), "duplicate minute double-counted the cumulative cnt (needs epoch dedup)"
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# intraday_seasonality two-session reset + prior_day compute-once — present()-independent, validatable now.
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def test_intraday_seasonality_session_reset_two_days() -> None:
+    """CUMULATIVE/reset: the since-open running mean is correct mid-session AND resets at the day boundary —
+    session 2 starts fresh (ratio back to base), not carried across. (The cnt double-count on a DUPLICATE
+    minute is a separate footgun, covered by test_cumulative_duplicate_minute_does_not_double_count.)"""
+    def _vbar(vol, epoch):
+        return {"symbol": np.array(["A"]), "volume": np.array([vol]),
+                "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    day = 86400
+    engine = CleanEngine([IntradaySeasonalityClean()], ["A"], WINDOW)
+    engine.step(_vbar(1000.0, 0))
+    engine.step(_vbar(2000.0, 60))
+    out1 = engine.step(_vbar(3000.0, 120))["intraday_seasonality"]  # mean(1000,2000,3000)=2000, 3000/2000=1.5
+    assert out1["volume_vs_session_mean"][0] == pytest.approx(1.5)
+    out2 = engine.step(_vbar(500.0, day))["intraday_seasonality"]  # new session: mean=500, ratio=1.0
+    assert out2["volume_vs_session_mean"][0] == pytest.approx(1.0), "session did not reset at the day boundary"
+    assert engine._group_state["intraday_seasonality"]["cnt"][0] == pytest.approx(1.0), "reset did not clear cnt"
+
+
+def test_prior_day_compute_once_stable_across_steps() -> None:
+    """SNAPSHOT: window.session is set ONCE per session and read every minute — the gap value tracks the
+    minute's close against the FIXED prior_close, and the session memo is not recomputed per step (else it
+    would be a windowed group in disguise)."""
+    engine = CleanEngine([PriorDayClean()], ["A"], WINDOW)
+    engine.set_session({"prior_close": np.array([100.0])})
+    g1 = engine.step(_close_bars(["A"], [105.0]))["prior_day"]["gap_from_prior_close"][0]
+    g2 = engine.step(_close_bars(["A"], [110.0]))["prior_day"]["gap_from_prior_close"][0]
+    assert g1 == pytest.approx(0.05)
+    assert g2 == pytest.approx(0.10)
+    # the snapshot memo is unchanged across steps — proof it's compute-once, not per-minute
+    np.testing.assert_array_equal(engine.session["prior_close"], np.array([100.0]))
