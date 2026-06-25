@@ -1172,3 +1172,84 @@ def test_liquidity_amihud_nonneg_and_contract() -> None:
         a = out[f"amihud_illiq_{w}m"][0]
         assert np.isnan(a) or a >= 0.0, "amihud must be >= 0"
     _assert_feature_spec_contract(out, LiquidityGroup().declare(), "liquidity ")
+
+
+# ========================================================================================================= #
+# Silent-divergence-trap adversarial checks (ArchOverhaul's flagged risks) + the shared regression kernel
+# (_windowed_ols_slope / _windowed_cov), which backs kyle_lambda/roll_spread now and obv_slope/pv_corr/
+# distribution/technical next — so validating it once covers all future regression groups.
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_windowed import (  # noqa: E402
+    _windowed_cov,
+    _windowed_ols_slope,
+)
+
+
+def test_realized_vol_is_ddof1_not_ddof0() -> None:
+    """SILENT-DIVERGENCE TRAP: realized_vol must be SAMPLE std (ddof=1), not numpy default ddof=0. On a known
+    return series the two differ by sqrt(n/(n-1)); assert it equals ddof=1 and is NOT ddof=0."""
+    closes = [100.0, 102.0, 101.0, 104.0, 103.0, 106.0]
+    eng = CleanEngine([VolatilityClean()], ["A"], WINDOW)
+    out = {}
+    for ep, c in enumerate(closes):
+        out = eng.step(_ohlcv_bar(["A"], [c], [c + 1], [c - 1], [c], 60 + ep * 60))["volatility"]
+    rets = np.diff(closes) / np.array(closes[:-1])
+    ddof1 = np.std(rets, ddof=1)
+    ddof0 = np.std(rets, ddof=0)
+    assert ddof1 != pytest.approx(ddof0)  # the trap is real: they differ
+    assert out["realized_vol_5m"][0] == pytest.approx(ddof1, rel=1e-9)
+    assert out["realized_vol_5m"][0] != pytest.approx(ddof0, rel=1e-9)
+
+
+def test_amihud_zero_dollar_bar_excluded_not_inf() -> None:
+    """SILENT-DIVERGENCE TRAP: a zero-volume (dollar<=0) minute must be EXCLUDED from the amihud mean, not
+    poison it to Inf/NaN. A window with some zero-volume bars and some valid bars → the finite mean of ONLY
+    the valid bars; an all-zero-volume window → NaN (no valid bars)."""
+    # mixed: alternate valid (vol>0) and zero-volume bars
+    eng = CleanEngine([LiquidityClean()], ["A"], WINDOW)
+    out = {}
+    for ep in range(12):
+        vol = 0.0 if ep % 2 == 1 else 1000.0
+        out = eng.step(_liq_bar(["A"], [100.0 + ep], [vol], [0.0], 60 + ep * 60))["liquidity"]
+    a = out["amihud_illiq_10m"][0]
+    assert np.isfinite(a), "zero-volume bars poisoned the amihud mean to non-finite"
+    assert a >= 0.0
+    # all zero-volume → NaN (no valid bars in the window)
+    z = CleanEngine([LiquidityClean()], ["A"], WINDOW)
+    oz = {}
+    for ep in range(12):
+        oz = z.step(_liq_bar(["A"], [100.0 + ep], [0.0], [0.0], 60 + ep * 60))["liquidity"]
+    assert np.isnan(oz["amihud_illiq_10m"][0]), "all-zero-volume window must be NaN, not 0/Inf"
+
+
+def test_shared_ols_kernel_known_slope_gap_and_underdetermined() -> None:
+    """The shared regression kernel backs every future regression group — validate it directly: (a) recovers a
+    known slope, (b) a NaN gap in the middle is masked (slope still correct over the present pairs), (c) <2
+    finite pairs → NaN, (d) zero variance in x → NaN."""
+    n = 10
+    x = np.arange(n, dtype=np.float64)[None, :]
+    y = 0.5 * x + 3.0  # slope 0.5, intercept 3
+    # (a) known slope over the full window
+    assert _windowed_ols_slope(x, y, n)[0] == pytest.approx(0.5, rel=1e-9)
+    # (b) a gap in the middle (NaN one pair) — slope unchanged over the remaining present pairs
+    xg = x.copy(); yg = y.copy(); xg[0, 4] = np.nan
+    assert _windowed_ols_slope(xg, yg, n)[0] == pytest.approx(0.5, rel=1e-9)
+    # (c) only 1 finite pair → NaN
+    x1 = np.full((1, n), np.nan); y1 = np.full((1, n), np.nan); x1[0, -1] = 1.0; y1[0, -1] = 2.0
+    assert np.isnan(_windowed_ols_slope(x1, y1, n)[0])
+    # (d) zero variance in x (all x equal) → NaN (var_x == 0)
+    xc = np.full((1, n), 5.0); yc = np.arange(n, dtype=np.float64)[None, :]
+    assert np.isnan(_windowed_ols_slope(xc, yc, n)[0])
+
+
+def test_shared_cov_kernel_known_and_underdetermined() -> None:
+    """_windowed_cov: known covariance + <2 pairs → NaN. cov(x, 2x) over n points = 2·var(x)."""
+    n = 8
+    x = np.arange(n, dtype=np.float64)[None, :]
+    y = 2.0 * x
+    var_x = np.mean((x - x.mean()) ** 2)  # population var (kernel uses Σxy/n − x̄ȳ)
+    assert _windowed_cov(x, y, n)[0] == pytest.approx(2.0 * var_x, rel=1e-9)
+    # 1 finite pair → NaN
+    x1 = np.full((1, n), np.nan); y1 = np.full((1, n), np.nan); x1[0, -1] = 3.0; y1[0, -1] = 6.0
+    assert np.isnan(_windowed_cov(x1, y1, n)[0])
