@@ -365,24 +365,19 @@ def test_macd_histogram_is_line_minus_signal() -> None:
     assert out["macd_histogram"][0] == pytest.approx(out["macd_line"][0] - out["macd_signal"][0])
 
 
-@pytest.mark.xfail(
-    reason="INTERFACE GAP (reported to ArchOverhaul): MacdClean infers presence from "
-    "window.latest('close') being finite, but latest() returns a symbol's CARRIED last close on an absent "
-    "minute → present is wrongly True → the EMA re-decays on every gap. Window has no per-minute presence "
-    "accessor; the EMA fork kind cannot express presence-decay correctly until one is added.",
-    strict=True,
-)
 def test_macd_decays_on_presence_not_clock() -> None:
-    """THE hard EMA property: a symbol absent for minutes must HOLD its EMA (decay on bar presence, not wall
-    clock), and resume from the held value. A present every-bar series and a sparse series with the SAME
-    present closes (just gaps between) must yield the IDENTICAL EMA — gaps don't decay it."""
+    """THE hard EMA property: a symbol absent for minutes must HOLD its EMA, not decay across the gap. PASSES
+    on the current engine — two routes give the correct result:
+      (a) an ALL-ABSENT (empty) minute is a no-op via the C4 watermark (epoch <= watermark), so macd.compute
+          never runs on it → no decay;
+      (b) a PER-SYMBOL absence (some symbols deliver, one doesn't, with an advancing epoch) → the absent
+          symbol's EMA holds (verified directly: B's ema12 unchanged on a minute B was absent while A delivered).
+    Both the dense and the sparse-same-present series therefore yield the IDENTICAL EMA."""
     dense_closes = [100.0, 102.0, 104.0, 106.0]
-    # dense: A present every minute
     dense_engine = CleanEngine([MacdClean()], ["A"], WINDOW)
     dense_out = {}
     for c in dense_closes:
         dense_out = dense_engine.step({"symbol": np.array(["A"]), "close": np.array([c])})["macd"]
-    # sparse: A present only on the SAME 4 close-bars, with empty (A-absent) minutes interleaved
     sparse_engine = CleanEngine([MacdClean()], ["A"], WINDOW)
     sparse_out = {}
     for i, c in enumerate(dense_closes):
@@ -390,7 +385,23 @@ def test_macd_decays_on_presence_not_clock() -> None:
         if i < len(dense_closes) - 1:
             sparse_engine.step({"symbol": np.array([], dtype="<U4"), "close": np.array([])})  # A absent
     assert sparse_out["macd_line"][0] == pytest.approx(dense_out["macd_line"][0], rel=1e-9), \
-        "EMA must decay on PRESENCE not clock — gaps changed the value"
+        "EMA decayed across the gap (should hold)"
+
+
+def test_macd_per_symbol_absence_holds_ema() -> None:
+    """The PRODUCTION-relevant sparse case: A and B present, then a minute where only A delivers (advancing
+    epoch). B's EMA must HOLD across the minute it was absent (not re-decay toward its carried close)."""
+    def _bar(symbols, closes, epoch):
+        return {"symbol": np.array(symbols), "close": np.array(closes, dtype=np.float64),
+                "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    engine = CleanEngine([MacdClean()], ["A", "B"], WINDOW)
+    engine.step(_bar(["A", "B"], [100.0, 200.0], 60))
+    engine.step(_bar(["A", "B"], [100.0, 260.0], 120))  # B EMA moves off its seed
+    b_before = engine._group_state["macd"]["ema12"][1]
+    engine.step(_bar(["A"], [110.0], 180))  # B ABSENT (A-only, epoch advances)
+    b_after = engine._group_state["macd"]["ema12"][1]
+    assert b_after == pytest.approx(b_before), "B's EMA re-updated on a minute B was absent (presence leak)"
 
 
 def test_macd_seeds_to_first_present_value() -> None:
@@ -697,3 +708,30 @@ def test_prior_day_compute_once_stable_across_steps() -> None:
     assert g2 == pytest.approx(0.10)
     # the snapshot memo is unchanged across steps — proof it's compute-once, not per-minute
     np.testing.assert_array_equal(engine.session["prior_close"], np.array([100.0]))
+
+
+def test_watermark_out_of_order_and_multi_group_multi_symbol() -> None:
+    """Extend the C4 watermark proof (ArchOverhaul's ask): an OUT-OF-ORDER minute (epoch < watermark) is a
+    no-op, and a duplicate is idempotent across MULTIPLE groups + symbols at once. The engine owns idempotency
+    once for every carried-state kind, so all of them must be unchanged by a stale/duplicate delivery."""
+    def _multi(symbols, vols, closes, epoch):
+        return {"symbol": np.array(symbols), "volume": np.array(vols, dtype=np.float64),
+                "close": np.array(closes, dtype=np.float64), "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    syms = ["A", "B"]
+    groups = [IntradaySeasonalityClean(), MacdClean(), SwingClean()]
+    engine = CleanEngine(groups, syms, WINDOW)
+    engine.step(_multi(syms, [1000.0, 2000.0], [100.0, 50.0], 60))
+    engine.step(_multi(syms, [1500.0, 2500.0], [101.0, 51.0], 120))
+    # snapshot every carried-state array across all 3 groups
+    before = {g.name: {k: v.copy() for k, v in engine._group_state[g.name].items()} for g in groups}
+
+    engine.step(_multi(syms, [9999.0, 9999.0], [200.0, 200.0], 120))  # DUPLICATE epoch 120 → no-op
+    engine.step(_multi(syms, [9999.0, 9999.0], [200.0, 200.0], 30))   # OUT-OF-ORDER epoch 30 < 120 → no-op
+
+    for g in groups:
+        for key, arr in engine._group_state[g.name].items():
+            np.testing.assert_array_equal(
+                np.nan_to_num(arr), np.nan_to_num(before[g.name][key]),
+                err_msg=f"{g.name}.{key} changed on a duplicate/out-of-order minute (watermark leak)",
+            )
