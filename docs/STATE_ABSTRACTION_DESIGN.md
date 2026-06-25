@@ -65,7 +65,9 @@ those to reach for. That's the overhead. The state itself is simple; the number 
 
 ### What exists today (the count Ben is reacting to)
 
-The state/engine machinery is **~4,086 lines across 10 files**. Inside it:
+The state/engine code spans ~4,000 lines across 10 files, of which the **state/engine *core* — the part this
+design replaces — is ~1,700 lines** (the two engines + the kind classes; the rest is feature math and glue that
+stays). Inside that core:
 
 - **7 state mechanisms:** `SessionCache`, `WindowedSumState`, `ReductionFoldState`, `CumulativeState`,
   `PointRing`/`ValueInputRing`, the `StatefulEngine` kinds (`EMAState` / `LastKState` / `ExtremaState`), and the
@@ -165,22 +167,39 @@ honest set is **one container + ~3-4 fold-kinds**, each declared per group, all 
 
 ## The collapse map — from 7+2+4 to 1+3
 
-| today | lines (approx) | becomes |
-|---|---|---|
-| `IncrementalEngine` + `StatefulEngine` (2 engines, 2 seed loops, 2 drive loops) | ~1,300 | **ONE container drive loop** (seed + fold + read, churn/idempotency in one place) |
-| `step` / `step_numpy` / `step_rust` / `step_rust_unified` (4 twins) | ~250 | **ONE fold dispatch** (numpy default; Rust where it pays — one path, not four) |
-| `PointRing` + `ValueInputRing` (2 positional rings) | ~260 | **the row-ring fold** (one base; the two are configs `depth=121/cols=points` vs `depth=6/cols=values`) — already proven (#26) |
-| `WindowedSumState` + `ReductionFoldState` | ~970 | **row-ring + a windowed-sum read** (the sum is a read over the ring's in-window rows; the conditioning the parked groups need rides here) |
-| `CumulativeState` + `ExtremaState` | ~250 | **the accumulator-reduce fold** (reset-on-key) |
-| `EMAState` + `LastKState` | ~250 | **the recursive fold** (EMA) + **a time-keyed read** of the row-ring (Last-K) |
-| `StatefulEngine` stable-set assert (`stateful.py:733`) | 1 line | **deleted** — churn handled by the spine |
-| `SessionCache` / `DailySnapshotGroup` | ~250 | **the snapshot degenerate fold** (kept; it's already the minimal form) |
+These are **measured** line counts against the current tree (merged main), and we're careful to separate **what
+deletes** (the duplicated drive/seed/churn machinery — the real win) from **what stays but moves** (the per-kind
+math, which keeps doing the same arithmetic, just plugged into one container instead of carrying its own loop).
 
-**Net:** the **7 mechanisms + 2 engines + 4 step twins** become **1 container + ~3-4 fold-kinds + 1 fold
-dispatch.** A new feature author declares `{state, fold, read}` and never touches the drive loop, the churn
-rule, the seed logic, or a `step` variant. Conservatively this removes **well over 1,000 lines** of duplicated
-drive/seed/churn/dispatch machinery; the exact number CriticalProfiler will pin against the tree, but the win is
-the **count of concepts**, not just lines: *one* way to hold state instead of seven.
+**What DELETES — the duplication (≈900 lines):**
+
+| today | measured LOC | becomes |
+|---|---|---|
+| `IncrementalEngine` + `StatefulEngine` (two engines doing the SAME seed/fold/emit lifecycle on different payloads) | **787** (543 + 244) | **ONE container drive loop** (seed + fold + read; churn + idempotency in one place) |
+| the 4 `step*` twins + emit drive (`step`/`step_numpy`/`step_rust`/`step_rust_unified` + `_fold_latest`/`_latest_frame`/`_running_long`) | **~107** | **ONE read-surface dispatch** (numpy default, Rust where it pays — one path, not four) |
+| `StatefulEngine`'s churn wrapper (`_fold_minute` / `_prepared_latest` / the stable-set assert `stateful.py:733` / the per-kind seed branches) | (part of the 244) | **deleted** — churn + seed handled once by the spine (the C3 win) |
+
+**What STAYS but plugs into the container — the per-kind math (≈524 lines, loses its wrappers, keeps its arithmetic):**
+
+| today (a "state mechanism") | measured LOC | becomes a container PAYLOAD |
+|---|---|---|
+| `PointRing` + `ValueInputRing` (positional) | ~202 (+ValueInputRing on #454) | **row-ring** payload; reads `{scalar-at-lag, materialize-tail}` — proven one base (#26) |
+| `WindowedSumState` (additive Σ + expire) | **232** | **time-windowed row-buffer** payload; the sum is a *read* over the in-window rows (carries the Class-A/B conditioning the parked groups need) |
+| `ReductionFoldState` | 75 | folds into WindowedSum (it already *is* a `WindowedSumState` wrapper) |
+| `CumulativeState` (session reduce) + `ExtremaState` | 69 + 63 | **accumulator-reduce** payload (fold = reduce, reset-on-key) |
+| `EMAState` (recursive) | 50 | **recursive** payload (`v = α·new + (1−α)·v`; decay gated on bar-presence) |
+| `LastKState` (time-lag) | 35 | **time-keyed read** of the row-ring (+ `fill_nan(None)`) |
+| `SessionCache` (snapshot) | 43 | **snapshot** payload (state = today's snapshot; fold = no-op; read = broadcast) — already minimal |
+| `swing` `_SymbolLeg` (state machine) | — | **opaque state-machine** payload (`advance(value, minute) → row`) — already implements the lifecycle |
+
+**Net (measured):** the demolition target is **~1,700 lines of state/engine core**. Of that, the **~900 lines of
+duplicated drive/seed/churn/dispatch** (the two engines + the four `step*` twins + the churn wrappers) **collapse
+to one container drive loop + one dispatch** — that is the real deletion. The **~524 lines of per-kind math stay**
+(same arithmetic) but lose their bespoke seed/churn/lifecycle wrappers and become payloads behind one interface.
+So the honest claim is **not** "delete 1,000+ lines of features" — it's "**remove ~900 lines of duplicated
+plumbing and the seven-way fork**, and reduce the per-kind code to declared payloads." The win Ben cares about is
+the **count of concepts**: a feature author declares `{state, fold, read}` and never touches a drive loop, a
+churn rule, a seed path, or a `step` variant — *one* way to hold state instead of seven.
 
 ## How we migrate safely — the value gate makes the teardown fearless
 
@@ -190,13 +209,22 @@ isolated and co-resident (shared-engine) configurations**, that the live statefu
 values to the backfill source of truth**, on a deliberately gappy tape, with the degenerate cells exercised. So
 the migration is mechanical and safe:
 
-1. Build the one container + the ~3-4 folds (the positional row-ring base already exists and is proven, #26/#454).
-2. Move one fold-kind's groups onto it at a time; re-run #451; green means values survived. Red means stop.
-3. When all groups are on it, delete the two engines, the four step twins, and the redundant state classes.
+The order (lowest-risk first, each green before the next, confirmed against the real dependency edges):
 
-Each step is value-gated by #451 and changes no feature output. Suggested order (lowest risk first, each green
-before the next): **snapshot → row-ring (points already live) → windowed-sum (carries the conditioning) →
-accumulator/recursive → swing.** CriticalProfiler will confirm the exact order against the dependency edges.
+1. **Build the shared spine + the positional row-ring payload.** The spine = the symbol-index + count/minute
+   channel + watermark + the existing `RunningState` lifecycle. Port `PointRing` + `ValueInputRing` onto it first
+   — convergence already proven (#26), two consumers, lowest risk.
+2. **WindowedSum payload onto the spine** (the big one). Re-point the incremental reductions; carry the Class-A/B
+   conditioning; gate the co-resident case (the straddle the gate covers).
+3. **EMA / Lag / Extrema / Cumulative payloads.** Port the `StatefulEngine` kinds and **delete the stable-set
+   assert + the `_prepared_latest` wrapper** — the two churn riders (fill-null, presence-gated decay) bake into
+   the container fold here.
+4. **swing opaque-state-machine payload** — it already implements the lifecycle + watermark, so it's the
+   lowest-effort port.
+5. **Collapse the four `step*` twins into one read-surface dispatch and delete the second engine.**
+
+Each step re-runs #451 before the next; green means values survived, red means stop and fix. No feature output
+changes at any step, and the fingerprint is unchanged throughout.
 
 ## What this is NOT
 
