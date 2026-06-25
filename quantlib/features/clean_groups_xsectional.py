@@ -143,21 +143,42 @@ _SECTOR_MIN_PAIRS = 5  # legacy sector_beta MIN_PAIRS — fewer paired returns o
 _SECTOR_BETA_MAX = 15.0  # |beta| above this → NULL (legacy BETA_MAX)
 
 
-def _sector_equal_weight_returns(ret_mat: np.ndarray, sector: np.ndarray) -> np.ndarray:
-    """Per-(minute, sector) equal-weight mean of the finite returns, broadcast back to each symbol's row →
-    a ``(n_symbols, buffer)`` matrix where cell [i,t] = the mean return of symbol i's sector at minute t (over
-    the symbols present+finite in that sector that minute). NaN where the symbol's return is NaN or its sector
-    is empty that minute. ``sector`` is the per-symbol integer label (UNKNOWN handled by the caller)."""
+def _sector_equal_weight_returns(ret_mat: np.ndarray, minute: np.ndarray, sector: np.ndarray) -> np.ndarray:
+    """Per-(minute, sector) equal-weight mean of the finite returns, mapped back to each symbol's row →
+    a ``(n_symbols, buffer)`` matrix where cell [i,t] = the mean return of symbol i's sector AT THE MINUTE of
+    that bar (``minute[i,t]``), over the sector members present+finite at that SAME minute. NaN where the
+    symbol's return is NaN or its sector has no member at that minute.
+
+    The mean is keyed by MINUTE, not by buffer position — each symbol's ring column is its OWN present minute,
+    so a sparse member's column t is a different minute than a dense peer's column t; averaging across symbols
+    per POSITION (the old bug) mixes different minutes and corrupts the OLS on every mixed-sparsity sector.
+    Same minute-alignment footgun as the cross-symbol SPY broadcast (``_align_market_return``)."""
     out = np.full_like(ret_mat, np.nan)
     for sec in np.unique(sector):
         rows = np.where(sector == sec)[0]
-        block = ret_mat[rows]  # (n_in_sector, buffer)
-        mask = np.isfinite(block)
-        n = mask.sum(axis=0)  # present-finite count per minute in this sector
+        block_ret = ret_mat[rows]  # (n_in_sector, buffer)
+        block_min = minute[rows]
+        # accumulate per-minute sum + count over the sector's finite returns (keyed by the bar's MINUTE).
+        finite = np.isfinite(block_ret) & (block_min >= 0)
+        mins = block_min[finite]
+        rets = block_ret[finite]
+        if mins.size == 0:
+            continue
+        uniq_min, inv = np.unique(mins, return_inverse=True)
+        sum_by = np.zeros(uniq_min.size)
+        cnt_by = np.zeros(uniq_min.size)
+        np.add.at(sum_by, inv, rets)
+        np.add.at(cnt_by, inv, 1.0)
         with np.errstate(invalid="ignore", divide="ignore"):
-            mean = np.where(mask, block, 0.0).sum(axis=0) / n
-        mean = np.where(n > 0, mean, np.nan)  # (buffer,)
-        out[rows] = mean[None, :]  # broadcast the sector mean to each member row
+            mean_by = sum_by / cnt_by  # the sector mean AT each minute
+        # map each member's bar back to its minute's sector mean (searchsorted on the sorted unique minutes).
+        for local_i, global_i in enumerate(rows):
+            col_min = block_min[local_i]
+            valid = col_min >= 0
+            pos = np.searchsorted(uniq_min, col_min)
+            pos = np.clip(pos, 0, uniq_min.size - 1)
+            hit = valid & (uniq_min[pos] == col_min)
+            out[global_i] = np.where(hit, mean_by[pos], np.nan)
     return out
 
 
@@ -195,10 +216,27 @@ def _trailing_window(mat: np.ndarray, w: int) -> np.ndarray:
 
 
 def _buffer_returns(close: np.ndarray) -> np.ndarray:
-    """Per-bar close-to-close return matrix over the trailing buffer; first column NaN (no prior bar)."""
+    """Per-bar POSITIONAL close-to-close return matrix over the trailing buffer (close[t]/close[t-1]−1 over ring
+    positions = the prior PRESENT bar); first column NaN. Matches a legacy ``close.shift(1).over(symbol)``
+    return (market_beta). NOT a strict 1-minute return — on a sparse symbol it spans the gap (use
+    ``_buffer_1m_returns`` for the groups whose legacy return is time-based)."""
     with np.errstate(invalid="ignore", divide="ignore"):
         ret = close[:, 1:] / close[:, :-1] - 1.0
     return np.concatenate([np.full((close.shape[0], 1), np.nan), ret], axis=1)
+
+
+def _buffer_1m_returns(close: np.ndarray, minute: np.ndarray) -> np.ndarray:
+    """Per-bar STRICT 1-MINUTE return matrix: close[t]/close[t−1]−1 ONLY when the prior bar is EXACTLY one
+    minute earlier (``minute[t] − minute[t−1] == 60``), else NaN — matching a legacy time-based 1-minute return
+    (``_own_minute_return``: a gap yields a null return, never a multi-minute jump treated as one minute). First
+    column NaN. Used by sector_beta (whose legacy own/sector returns are strict-time, unlike market_beta's
+    positional shift)."""
+    n_sym = close.shape[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = close[:, 1:] / close[:, :-1] - 1.0
+    exact_step = (minute[:, 1:] >= 0) & (minute[:, :-1] >= 0) & ((minute[:, 1:] - minute[:, :-1]) == 60)
+    ret = np.where(exact_step, ratio, np.nan)
+    return np.concatenate([np.full((n_sym, 1), np.nan), ret], axis=1)
 
 
 def _sector_mean_vector(values: np.ndarray, sector: np.ndarray, present: np.ndarray) -> np.ndarray:
@@ -415,8 +453,9 @@ class SectorBetaClean:
         sector = window.static.get("sector")
         if sector is None:
             sector = np.full(n_sym, self._UNKNOWN)
-        own_ret = _buffer_returns(close)
-        sec_ret = _sector_equal_weight_returns(own_ret, sector)
+        minute = window.trailing_minute()
+        own_ret = _buffer_1m_returns(close, minute)  # legacy sector_beta uses a STRICT 1-minute return
+        sec_ret = _sector_equal_weight_returns(own_ret, minute, sector)
         is_unknown = sector == self._UNKNOWN
         out: dict[str, np.ndarray] = {}
         for w in self._WINDOWS:
