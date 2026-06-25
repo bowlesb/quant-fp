@@ -148,7 +148,6 @@ class PriceVolumeClean:
         close = window.trailing("close")
         volume = window.trailing("volume")
         latest_close = window.latest("close")
-        n_sym = close.shape[0]
         # per-bar one-minute return (first column NaN, no prior bar)
         ret = _returns(close)
         # money-flow multiplier (2c−h−l)/(h−l), 0 when range is 0; weighted by volume
