@@ -53,6 +53,60 @@ def _cross_sectional_percentile(values: np.ndarray, present: np.ndarray) -> np.n
     return (ranks - 1.0) / (n - 1.0)
 
 
+def _xsec_std_iqr(returns: np.ndarray, present: np.ndarray) -> tuple[float, float]:
+    """Cross-sectional std (ddof=1) + IQR (p75−p25, polars 'nearest' interpolation) of the PRESENT+finite
+    returns. Returns ``(std, iqr)``, NaN where fewer than 2 present-finite values. Broadcast by the caller.
+    """
+    masked = returns[present & np.isfinite(returns)]
+    if masked.size < 2:
+        return np.nan, np.nan
+    std = float(np.std(masked, ddof=1))
+    # polars default quantile interpolation is 'nearest' (NOT numpy's default 'linear') — match it exactly.
+    iqr = float(np.quantile(masked, 0.75, method="nearest") - np.quantile(masked, 0.25, method="nearest"))
+    return std, iqr
+
+
+class ReturnDispersionClean:
+    """CROSS_SECTIONAL: per intraday horizon, the std + IQR of the universe's returns that minute — a
+    market-wide scalar broadcast to every present symbol (high = stock-picking regime). present()-gated:
+    only this-minute-present symbols enter the dispersion. Legacy: ``ReturnDispersionGroup``.
+
+    NOTE: the legacy also ships daily-horizon dispersions (``_1d``/``_5d``) read from the settled daily
+    snapshot; those are wired via ``window.session`` in the daily-snapshot batch — emitted NaN here until then.
+    """
+
+    name = "return_dispersion"
+    input_cols = ("close",)
+    _MINUTE_WINDOWS: tuple[int, ...] = (5, 30, 60)
+    _DAY_WINDOWS: tuple[int, ...] = (1, 5)
+    feature_names = tuple(
+        f"return_dispersion_{stat}_{w}m" for w in _MINUTE_WINDOWS for stat in ("std", "iqr")
+    ) + tuple(f"return_dispersion_{stat}_{w}d" for w in _DAY_WINDOWS for stat in ("std", "iqr"))
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        present = window.present()
+        latest_close = window.latest("close")
+        n_sym = close.shape[0]
+        out: dict[str, np.ndarray] = {}
+        for w in self._MINUTE_WINDOWS:
+            if close.shape[1] > w:
+                prior = close[:, -(w + 1)]
+            else:
+                prior = np.full(n_sym, np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ret = latest_close / prior - 1.0
+            std, iqr = _xsec_std_iqr(ret, present)
+            # broadcast the market-wide scalar to every present symbol; absent → NaN (sparse).
+            out[f"return_dispersion_std_{w}m"] = np.where(present, std, np.nan)
+            out[f"return_dispersion_iqr_{w}m"] = np.where(present, iqr, np.nan)
+        # daily horizons deferred to the snapshot batch (window.session); NaN for now.
+        for w in self._DAY_WINDOWS:
+            out[f"return_dispersion_std_{w}d"] = np.full(n_sym, np.nan)
+            out[f"return_dispersion_iqr_{w}d"] = np.full(n_sym, np.nan)
+        return out
+
+
 class CrossSectionalRankClean:
     """CROSS_SECTIONAL: percentile rank (0-1) of each present symbol's trailing return / volume / dollar-volume
     across the present cross-section that minute. return_rank over (5,15,30,60), volume_rank_1m,
