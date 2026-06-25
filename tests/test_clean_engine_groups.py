@@ -1483,6 +1483,52 @@ def test_price_volume_sparse_time_window_matches_legacy() -> None:
         )
 
 
+def test_trend_quality_sparse_time_ols_matches_legacy() -> None:
+    """RE-GATE trend_quality (#60 re-port, 12ee077) on the SPARSE axis. The earlier green was DENSE-ONLY: clean
+    used x=np.arange(w) (positional), but legacy regresses close on the REBASED MINUTE axis over the trailing
+    w MINUTES. Head-to-head a gappy uptrend symbol: price_slope (slope-per-MINUTE) + price_r2 match legacy
+    time-OLS; and a FLAT-price warmed window → slope=0, r2=0 (not NaN — flat is a perfectly-explained
+    zero-trend)."""
+    import datetime  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    rng = np.random.default_rng(21)
+    closes = 100.0 + np.arange(len(offsets)) * 0.3 + rng.standard_normal(len(offsets)) * 0.2
+    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
+    eng = CleanEngine([TrendQualityClean()], ["A"], 400)
+    out = {}
+    for i in range(len(offsets)):
+        out = eng.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
+                        "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})["trend_quality"]
+    for w in (15, 30):
+        idx = [i for i, o in enumerate(offsets) if (offsets[-1] - o) < w]
+        axis = np.array([float(offsets[i]) for i in idx])
+        axis = axis - axis.min()  # rebased minute axis
+        y = np.array([closes[i] for i in idx])
+        n = len(axis)
+        cov = n * (axis * y).sum() - axis.sum() * y.sum()
+        var_x = n * (axis * axis).sum() - axis.sum() ** 2
+        slope = cov / var_x
+        leg_slope = slope / y.mean()  # fractional move per minute (legacy normalization)
+        intercept = (y.sum() - slope * axis.sum()) / n
+        yhat = slope * axis + intercept
+        ss_res = ((y - yhat) ** 2).sum()
+        ss_tot = ((y - y.mean()) ** 2).sum()
+        leg_r2 = 1.0 - ss_res / ss_tot
+        assert out[f"price_slope_{w}m"][0] == pytest.approx(leg_slope, rel=1e-5), f"price_slope_{w}m sparse time-OLS"
+        assert out[f"price_r2_{w}m"][0] == pytest.approx(leg_r2, rel=1e-5), f"price_r2_{w}m sparse time-OLS"
+
+    flat = CleanEngine([TrendQualityClean()], ["A"], 400)
+    of = {}
+    for o in offsets:
+        of = flat.step({"symbol": np.array(["A"]), "close": np.array([100.0]),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
+                                                 dtype=np.int64)})["trend_quality"]
+    assert of["price_slope_15m"][0] == pytest.approx(0.0), "flat price → slope 0"
+    assert of["price_r2_15m"][0] == pytest.approx(0.0), "flat price → r2 0 (perfectly-explained zero-trend, not NaN)"
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
