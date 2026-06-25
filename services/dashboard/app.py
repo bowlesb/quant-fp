@@ -39,6 +39,7 @@ from status_grid import read_grid as read_status_grid
 from store_grid_cache import read_drill as read_grid_drill
 from store_grid_cache import read_grid_gzip
 from store_grid_cache import read_meta as read_grid_meta
+from ticker_coverage_route import ticker_coverage_snapshot
 
 app = FastAPI(title="Quant Coverage Grid")
 
@@ -182,6 +183,34 @@ def lifecycle_trend_route() -> JSONResponse:
             {"booting": True, "detail": f"trust DB unreachable: {exc}"},
             status_code=503,
         )
+
+
+@app.get("/api/ticker-coverage/{symbol}")
+def ticker_coverage(symbol: str, with_trust: bool = False) -> JSONResponse:
+    """PER-TICKER feature-store coverage — the human-visible wrapper over ops/ticker_coverage (#463). For one
+    symbol: which feature GROUPS cover it, on which SOURCES (stream / backfill / both), how far back (earliest→
+    latest backfill date + span), the group's feature columns, and the per-ticker LIVE GAP (groups settled in
+    backfill but absent from the live stream — the FP_TICK_SYMBOLS gap for one name). Pass ``?with_trust=1`` to
+    additionally join feature_trust for each covered feature's TRUSTED / DIVERGENT state.
+
+    Reads the read-only /store mount directly (a bounded set of partition reads for the one symbol), short-TTL
+    cached off the request path. SLIM-SAFE: the default (store-only) path pulls NO feature engine; the trust
+    join uses a lazy call-time DB import, so it never affects dashboard boot. Returns 503 ``booting`` if the
+    store is not mounted yet or (with ``with_trust``) the trust DB is unreachable, mirroring the grid's
+    first-boot convention rather than 500-ing."""
+    try:
+        snapshot = ticker_coverage_snapshot(symbol, with_trust=with_trust)
+    except FileNotFoundError as exc:
+        return JSONResponse(
+            {"booting": True, "detail": f"feature store not mounted yet: {exc}"},
+            status_code=503,
+        )
+    except psycopg.OperationalError as exc:
+        return JSONResponse(
+            {"booting": True, "detail": f"trust DB unreachable: {exc}"},
+            status_code=503,
+        )
+    return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/healthz")
