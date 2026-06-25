@@ -132,6 +132,59 @@ def _masked_std(values: np.ndarray, w: int) -> np.ndarray:
     return np.where(n > 1.0, std, np.nan)
 
 
+def _windowed_max(values: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window max ignoring NaN; NaN where the window has no present bar."""
+    win = _trailing_window(values, w)
+    all_nan = ~np.isfinite(win).any(axis=1)
+    with np.errstate(invalid="ignore"):
+        out = np.nanmax(np.where(np.isfinite(win), win, -np.inf), axis=1)
+    return np.where(all_nan, np.nan, out)
+
+
+def _windowed_min(values: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window min ignoring NaN; NaN where the window has no present bar."""
+    win = _trailing_window(values, w)
+    all_nan = ~np.isfinite(win).any(axis=1)
+    with np.errstate(invalid="ignore"):
+        out = np.nanmin(np.where(np.isfinite(win), win, np.inf), axis=1)
+    return np.where(all_nan, np.nan, out)
+
+
+_RANGE_REL_EPS = 1e-9
+
+
+class PriceLevelsClean:
+    """PRICE: where close sits in its trailing high-low range. position_in_range_{w}m = (close − min_low)/
+    (max_high − min_low), NULL on a flat window (band ≤ 1e-9·|high|); dist_from_high_{w}m = close/max_high − 1
+    (≤0); dist_from_low_{w}m = close/min_low − 1 (≥0). Trailing max/min over w bars. Legacy: ``PriceLevelGroup``
+    (StatefulGroup base, but the math is a windowed max/min read)."""
+
+    name = "price_levels"
+    input_cols = ("close", "high", "low")
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 30, 60, 120, 240)
+    feature_names = tuple(
+        f"{prefix}_{w}m"
+        for w in _WINDOWS
+        for prefix in ("position_in_range", "dist_from_high", "dist_from_low")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        high = window.trailing("high")
+        low = window.trailing("low")
+        close = window.latest("close")
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            high_w = _windowed_max(high, w)
+            low_w = _windowed_min(low, w)
+            band = high_w - low_w
+            with np.errstate(invalid="ignore", divide="ignore"):
+                pos = np.where(band > _RANGE_REL_EPS * np.abs(high_w), (close - low_w) / band, np.nan)
+                out[f"position_in_range_{w}m"] = pos
+                out[f"dist_from_high_{w}m"] = close / high_w - 1.0
+                out[f"dist_from_low_{w}m"] = close / low_w - 1.0
+        return out
+
+
 def _returns(close: np.ndarray) -> np.ndarray:
     """Per-bar close-to-close return matrix ``close[t]/close[t-1] - 1`` over the trailing buffer; the first
     column (no prior bar) is NaN. Matches ``close/close.shift(1) - 1``."""
