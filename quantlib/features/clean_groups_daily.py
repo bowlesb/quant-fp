@@ -6,11 +6,17 @@ The engine carries the daily history in the per-session memo (``window.session``
 session boundary via ``CleanEngine.set_session`` — the daily analogue of the minute trailing buffer.
 
 SESSION SCHEMA (the shared plumbing — built once, read by every daily-snapshot group):
-  ``session["daily_close"]`` : ``(n_symbols, n_days)`` matrix, settled daily closes, newest column LAST. The
-      newest column is the ``_asof`` reference (the prior completed day's close — the point-in-time anchor an
-      intraday feature reads). NaN-padded on the left where a symbol has fewer days.
-  ``session["daily_high"]``  : ``(n_symbols, n_days)`` settled daily highs (for N-day-high distances).
-  ``session["daily_volume"]``: ``(n_symbols, n_days)`` settled daily volumes (for ADV / dollar-volume).
+  ``session["daily_close"]`` : ``(n_symbols, n_days)`` matrix of daily closes, newest column LAST. CONVENTION
+      (Lead ruling, [-1]=TODAY): the newest column ``[:, -1]`` is TODAY's (partial/current) daily bar — the
+      faithful image of legacy, whose ``daily`` source frame includes today and each group does its own
+      ``shift(1)`` for the prior completed day. So the prior COMPLETED day D-1 = ``[:, -2]`` (the ``_asof``
+      anchor a point-in-time daily feature reads), and a w-completed-day reference = ``[:, -(w+2)]``. The
+      ``_completed(...)`` helper (``[:, :-1]``) is the today-excluded series for the multi-day vol / high
+      windows. (prior_day's gap_open / overnight_split's today reads use ``[:, -1]`` directly — that's why
+      today MUST be present.) NaN-padded on the left where a symbol has fewer days.
+  ``session["daily_high"]``  : ``(n_symbols, n_days)`` daily highs (for N-day-high distances), same convention.
+  ``session["daily_open"]``  : ``(n_symbols, n_days)`` daily opens (today's open = ``[:, -1]`` for gap_open).
+  ``session["daily_volume"]``: ``(n_symbols, n_days)`` daily volumes (for ADV / dollar-volume).
 A group derives its features from these matrices exactly as a windowed group derives from the trailing buffer.
 """
 
@@ -30,20 +36,30 @@ def _daily_window(mat: np.ndarray, w: int) -> np.ndarray:
     return mat[:, -w:]
 
 
+def _completed(daily_close: np.ndarray) -> np.ndarray:
+    """The settled daily-close matrix EXCLUDING today's (partial/current) bar — the prior-completed-day series
+    the point-in-time daily features read. Under the session convention newest col [:, -1] = TODAY (the partial
+    bar), so the completed history is everything up to and INCLUDING D-1 = ``daily_close[:, :-1]`` (its own
+    newest col is then D-1). A group's _asof = D-1 = ``_completed(...)[:, -1]`` = ``daily_close[:, -2]``."""
+    return daily_close[:, :-1]
+
+
 def _asof(daily_close: np.ndarray) -> np.ndarray:
-    """The prior completed day's close (the newest daily column) — the point-in-time daily anchor. NaN where
-    the symbol has no daily history."""
-    if daily_close.shape[1] == 0:
+    """The prior COMPLETED day's close (D-1) — the point-in-time daily anchor (legacy ``close.shift(1)``). Under
+    [-1]=today this is ``daily_close[:, -2]`` (the col before today). NaN where the symbol has <2 daily bars.
+    """
+    if daily_close.shape[1] < 2:
         return np.full(daily_close.shape[0], np.nan)
-    return daily_close[:, -1]
+    return daily_close[:, -2]
 
 
 def _daily_return(daily_close: np.ndarray, w: int) -> np.ndarray:
-    """Return over the last ``w`` completed days: ``_asof / close[D-1-w] − 1`` (newest col / w cols back)."""
+    """Return over the last ``w`` COMPLETED days: ``_asof / close[D-1-w] − 1`` (legacy _asof/_asof.shift(w),
+    anchored at D-1 = [:, -2], so close[D-1-w] = [:, -(w+2)]). NaN where the symbol lacks w+2 daily bars."""
     n_sym, n_days = daily_close.shape
     asof = _asof(daily_close)
-    if n_days > w:
-        ref = daily_close[:, -(w + 1)]
+    if n_days > w + 1:
+        ref = daily_close[:, -(w + 2)]
     else:
         ref = np.full(n_sym, np.nan)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -51,9 +67,12 @@ def _daily_return(daily_close: np.ndarray, w: int) -> np.ndarray:
 
 
 def _daily_vol(daily_close: np.ndarray, w: int) -> np.ndarray:
-    """Std (ddof=1) of the last ``w`` daily returns ending at the prior close."""
+    """Std (ddof=1) of the last ``w`` COMPLETED-day returns ending at the prior close (D-1). Computed over the
+    completed series only (today's partial bar excluded — it would splice an incomplete (today/D-1) return).
+    """
+    completed = _completed(daily_close)  # exclude today's partial bar
     with np.errstate(invalid="ignore", divide="ignore"):
-        rets = daily_close[:, 1:] / daily_close[:, :-1] - 1.0  # (n_sym, n_days-1)
+        rets = completed[:, 1:] / completed[:, :-1] - 1.0  # (n_sym, n_completed-1)
     win = _daily_window(rets, w)
     mask = np.isfinite(win)
     n = mask.sum(axis=1).astype(np.float64)
@@ -67,14 +86,19 @@ def _daily_vol(daily_close: np.ndarray, w: int) -> np.ndarray:
 
 
 def _dist_from_high(daily_close: np.ndarray, w: int) -> np.ndarray:
-    """Prior close relative to its trailing ``w``-day high: ``_asof / max(close over w days) − 1`` (≤ 0)."""
+    """Prior close (D-1) relative to its trailing ``w``-COMPLETED-day high: ``_asof / max(close over w completed
+    days) − 1`` (≤ 0). The high window is over the completed series (today's partial bar excluded). NULL until
+    the full ``w``-day window is present (legacy rolling_max min_periods=w — a short history can't form the
+    w-day high)."""
+    completed = _completed(daily_close)
     asof = _asof(daily_close)
-    win = _daily_window(daily_close, w)
-    all_nan = ~np.isfinite(win).any(axis=1)
+    win = _daily_window(completed, w)  # completed days only (today excluded)
+    n_present = np.isfinite(win).sum(axis=1)
     with np.errstate(invalid="ignore", divide="ignore"):
         high = np.nanmax(np.where(np.isfinite(win), win, -np.inf), axis=1)
         dist = asof / high - 1.0
-    return np.where(all_nan, np.nan, dist)
+    # require the FULL w-day completed window (legacy rolling_max NULLs a short window).
+    return np.where(n_present >= w, dist, np.nan)
 
 
 class MultiDayClean:

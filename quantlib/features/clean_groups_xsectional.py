@@ -43,14 +43,15 @@ def _average_rank(values: np.ndarray) -> np.ndarray:
 
 
 def _daily_return_xsec(daily_close: np.ndarray, w: int) -> np.ndarray:
-    """Per-symbol ``w``-day return from the daily snapshot: ``_asof / close[w days back] − 1`` (newest daily
-    column / w cols back). NaN where the symbol lacks w+1 daily bars. Used by the daily-horizon cross-sectional
-    dispersion."""
+    """Per-symbol ``w``-COMPLETED-day return from the daily snapshot: ``_asof / close[D-1-w] − 1`` (legacy
+    _asof/_asof.shift(w), anchored at the prior COMPLETED day D-1). Under the session convention newest col
+    [:, -1] = TODAY (partial bar), D-1 = [:, -2] and close[D-1-w] = [:, -(w+2)]. NaN where the symbol lacks w+2
+    daily bars. Used by the daily-horizon cross-sectional dispersion (return_dispersion)."""
     n_sym, n_days = daily_close.shape
-    if n_days == 0:
+    if n_days < 2:
         return np.full(n_sym, np.nan)
-    asof = daily_close[:, -1]
-    ref = daily_close[:, -(w + 1)] if n_days > w else np.full(n_sym, np.nan)
+    asof = daily_close[:, -2]  # prior completed day D-1 (today [:, -1] excluded)
+    ref = daily_close[:, -(w + 2)] if n_days > w + 1 else np.full(n_sym, np.nan)
     with np.errstate(invalid="ignore", divide="ignore"):
         return asof / ref - 1.0
 
