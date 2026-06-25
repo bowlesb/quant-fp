@@ -93,8 +93,9 @@ framing: dropped because the design removes what it guarded, not because we stop
   feature VALID (2+ unique values; binary both 0/1; events real).
 ### CP independent validation — all 6 kinds GREEN
 
-CP (separate agent, its own adversarial sparse/gap shapes, NOT my tests) validated the engine at `1198b82`:
-**44 pass / 0 xfail**, every kind green, no regression. Per kind:
+CP (separate agent, its own adversarial sparse/gap shapes, NOT my tests) validated the engine: **57 pass / 0
+xfail** (46 group + 11 keystone, including CP's 2 production-marshaled omit-absence pins), every kind green, no
+regression. Per kind:
 
 | kind | group | what CP checked | result |
 |---|---|---|---|
