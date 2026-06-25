@@ -1670,6 +1670,76 @@ def test_return_dispersion_deferred_ledger_empty_and_contract() -> None:
     assert set(ReturnDispersionClean().feature_names) == declared
 
 
+def test_market_turbulence_sparse_matches_legacy() -> None:
+    """GATE market_turbulence (#60 time-window cross-sectional) on the SPARSE axis. mkt_absret_W uses a STRICT
+    exact-minute lag (legacy lagged(close,W): the close at EXACTLY T−W, NaN if no bar there — NOT the nearest
+    bar); mkt_rv_30m = universe-mean of per-symbol std of 1m logrets over (T−30,T] gated to EXACT 1m steps.
+    Head-to-head a dense + a sparse symbol vs legacy lagged + rolling_std_by."""
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.base import lagged  # type: ignore  # noqa: PLC0415
+    from quantlib.features.clean_groups_xsectional import MarketTurbulenceClean  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    rng = np.random.default_rng(6)
+    a_off = list(range(0, 40))
+    b_off = [0, 1, 2, 5, 8, 12, 15, 18, 22, 25, 28, 31, 34, 37, 38, 39]  # sparse
+    a_cl = 100.0 + np.cumsum(rng.standard_normal(len(a_off)) * 0.3)
+    b_cl = 50.0 + np.cumsum(rng.standard_normal(len(b_off)) * 0.3)
+    rows = ([{"symbol": "A", "minute": base + datetime.timedelta(minutes=o), "close": float(c)}
+             for o, c in zip(a_off, a_cl)]
+            + [{"symbol": "B", "minute": base + datetime.timedelta(minutes=o), "close": float(c)}
+               for o, c in zip(b_off, b_cl)])
+    df = pl.DataFrame(rows).sort(["symbol", "minute"])
+    last_min = base + datetime.timedelta(minutes=39)
+
+    fr = lagged(df, "close", 5, "_lag").with_columns((pl.col("close") / pl.col("_lag") - 1.0).abs().alias("_ar"))
+    leg_absret5 = fr.group_by("minute").agg(pl.col("_ar").mean().alias("m")).filter(pl.col("minute") == last_min)["m"][0]
+    fr2 = df.with_columns(
+        (pl.col("close").log() - pl.col("close").shift(1).over("symbol").log()).alias("_lr"),
+        (pl.col("minute") - pl.col("minute").shift(1).over("symbol")).alias("_dt"))
+    fr2 = fr2.with_columns(
+        pl.when(pl.col("_dt") == pl.duration(minutes=1)).then(pl.col("_lr")).otherwise(None).alias("_lr1"))
+    fr2 = fr2.with_columns(pl.col("_lr1").rolling_std_by(
+        "minute", window_size="30m", min_samples=10, closed="right").over("symbol").alias("_rv"))
+    leg_rv = fr2.group_by("minute").agg(pl.col("_rv").mean().alias("m")).filter(pl.col("minute") == last_min)["m"][0]
+
+    events: dict[int, dict[str, float]] = {}
+    for o, c in zip(a_off, a_cl):
+        events.setdefault(o, {})["A"] = float(c)
+    for o, c in zip(b_off, b_cl):
+        events.setdefault(o, {})["B"] = float(c)
+    eng = CleanEngine([MarketTurbulenceClean()], ["A", "B"], 400)
+    out = {}
+    for o in sorted(events):
+        pm = events[o]
+        out = eng.step({"symbol": np.array(list(pm)), "close": np.array([pm[s] for s in pm], dtype=np.float64),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
+                                                 dtype=np.int64)})["market_turbulence"]
+    assert out["mkt_absret_5m"][0] == pytest.approx(leg_absret5), "sparse mkt_absret_5m != legacy lagged"
+    assert out["mkt_rv_30m"][0] == pytest.approx(leg_rv), "sparse mkt_rv_30m != legacy rolling_std_by"
+
+
+def test_market_turbulence_exact_lag_nan_when_no_bar_at_lag_minute() -> None:
+    """The STRICT-lag semantic: a symbol with no bar exactly W minutes ago contributes NO |return| (NaN), not
+    a return off its nearest bar. One symbol, bars at minutes 0 and 7 only — at T=7, the 5m lag minute (2) has
+    no bar → that symbol's absret_5m is undefined; with only that symbol present the universe mean is NaN."""
+    import datetime  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_xsectional import MarketTurbulenceClean  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    eng = CleanEngine([MarketTurbulenceClean()], ["A"], 400)
+    eng.step({"symbol": np.array(["A"]), "close": np.array([100.0]),
+              "minute_epoch": np.array([int(base.timestamp())], dtype=np.int64)})  # minute 0
+    out = eng.step({"symbol": np.array(["A"]), "close": np.array([105.0]),
+                    "minute_epoch": np.array([int((base + datetime.timedelta(minutes=7)).timestamp())],
+                                             dtype=np.int64)})["market_turbulence"]  # minute 7, lag-5 = minute 2 (no bar)
+    assert np.isnan(out["mkt_absret_5m"][0]), "no bar at exactly T−5 → strict lag is NaN (not nearest-bar return)"
+
+
 def _step_return_dispersion_with_daily(daily_close: np.ndarray, syms: list[str]) -> dict[str, np.ndarray]:
     """Drive ReturnDispersionClean through the engine with a daily snapshot set, all symbols present one minute,
     so the daily horizons compute from window.session['daily_close']."""
