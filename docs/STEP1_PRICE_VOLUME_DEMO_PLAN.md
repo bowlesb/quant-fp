@@ -93,6 +93,25 @@ capture the **real before→after on live fc bars** (not the throwaway), cpuset-
 3. **Per-shard delta** — price_volume's contribution to the shard's per-minute cost before vs after: the first
    concrete proof on real data that one feature's polars-free conversion moves the shard number (a slice of the
    ~95%-eliminable tax — the `<300ms` story's first real-data evidence).
+4. **The op-count table (the headline Ben asked for)** — from cProfile on the live armed compute path, the count
+   of the framework operations the per-minute path runs. Ben audited the live form and called out not just the
+   re-sort but the per-minute **joins**: `compute_latest` does a `wide.join(pivot_stat(...))` **per stat per
+   reduction and per stat per regression every minute** (`declarative.py:541–560`), plus the 2×/minute sort
+   (`declarative.py:524`, `incremental.py:573`) — "a join for every new minute ... all this tax built right into
+   the damn thing." The numpy hot path writes index-positions into the fixed `(n_symbols, n_features)` array, so
+   these go to zero **by construction** (fixed positions → no pivot; no per-stat frame → no join; no re-derive →
+   no sort):
+
+   | op | BEFORE (per minute) | AFTER (`FP_STATE_SPINE` on) |
+   |---|---|---|
+   | `sort` | ≥ 2 | **0** |
+   | `join` | one per (stat × reduction) + per (stat × regression) | **0** |
+   | `pivot` | one per stat | **0** |
+   | `collect` | many | **0** on compute / tiny output-frame |
+
+   AFTER = 0 is a *consequence* of the engine-step-hook design (the numpy derive feeds the existing `emit_numpy`,
+   which already has no pivot — `incremental.py:918`), not extra work. The table just surfaces it for Ben:
+   here are the joins / pivots / sorts, and here they are gone.
 
 The PR reports **measured truth** on real bars, not the throwaway's 2.0ms.
 
