@@ -864,3 +864,64 @@ def test_intraday_omitted_symbol_does_not_count_exact() -> None:
                  "minute_epoch": np.array([180], dtype=np.int64)})  # BBB OMITTED
     assert engine._group_state["intraday_seasonality"]["cnt"][0] == pytest.approx(2.0), \
         "cumulative cnt counted an omitted (carried) minute — present() gate not effective"
+
+
+# ========================================================================================================= #
+# REFERENCE TEMPLATE for the bulk port (the pattern every future kind-batch follows).
+#
+# For a REAL ported group (one carrying its legacy FeatureSpec list via group.declare()), assert the new
+# engine's output against the LEGACY CONTRACT — valid_range + nan_policy — not a hand-guessed range. A feature
+# that violates its own declared FeatureSpec.valid_range is a real port bug to surface. The example groups in
+# clean_groups_example.py are simplified demos (feature_names tuples, no FeatureSpec) → assert from definition
+# (r2 in [0,1] etc.); the bulk-port groups → use _assert_feature_spec_contract below.
+# ========================================================================================================= #
+
+
+def _assert_feature_spec_contract(output: dict[str, np.ndarray], specs, label: str = "") -> None:
+    """Assert a ported group's compute() output against its LEGACY FeatureSpec contract (the authoritative
+    source — quantlib/features/base.py FeatureSpec.valid_range + nan_policy). ``specs`` is the legacy group's
+    ``declare()`` list. For each declared feature:
+      * the column EXISTS in the output (no silently-dropped/renamed feature),
+      * every finite value is within ``valid_range`` (a violation = a real port bug),
+      * nan_policy is consistent: "none" → no NaN; "warmup"/"sparse" → NaN allowed (warm-up / absent-minute).
+    This pins the new engine's contract to the DECLARED one, so a port can't drift the range or the policy.
+    """
+    by_name = {s.name: s for s in specs}
+    for fname, arr in output.items():
+        spec = by_name.get(fname)
+        assert spec is not None, f"{label}{fname}: not in the legacy FeatureSpec set"
+        finite = arr[np.isfinite(arr)]
+        if spec.valid_range is not None and finite.size:
+            low, high = spec.valid_range
+            if low is not None:
+                assert finite.min() >= low, f"{label}{fname}: {finite.min()} < valid_range low {low}"
+            if high is not None:
+                assert finite.max() <= high, f"{label}{fname}: {finite.max()} > valid_range high {high}"
+        if spec.nan_policy == "none":
+            assert not np.any(np.isnan(arr)), f"{label}{fname}: NaN present but nan_policy='none'"
+    declared = set(by_name)
+    produced = set(output)
+    assert produced == declared, (
+        f"{label}: feature set mismatch — missing {declared - produced}, extra {produced - declared}"
+    )
+
+
+def test_reference_template_docstring_example() -> None:
+    """REFERENCE for the bulk port: the example groups have no legacy FeatureSpec, so _assert_feature_spec_
+    contract is exercised against a small inline spec set here to PIN THE HELPER ITSELF (so the template the
+    real-group batches rely on is itself tested). A real ported group passes its own group.declare() instead."""
+    from quantlib.features.base import FeatureSpec  # noqa: PLC0415  (template demo only)
+
+    specs = [
+        FeatureSpec(name="r2", description="", dtype="Float64", valid_range=(0.0, 1.0), nan_policy="warmup"),
+        FeatureSpec(name="slope", description="", dtype="Float64", valid_range=(-1.0, 1.0), nan_policy="warmup"),
+    ]
+    # in-range + warmup-NaN allowed → passes
+    _assert_feature_spec_contract({"r2": np.array([0.5, np.nan]), "slope": np.array([0.2, -0.3])}, specs)
+    # out-of-range → caught
+    with pytest.raises(AssertionError, match="valid_range"):
+        _assert_feature_spec_contract({"r2": np.array([1.5]), "slope": np.array([0.0])}, specs)
+    # nan_policy='none' violated → caught
+    none_specs = [FeatureSpec(name="x", description="", dtype="Float64", valid_range=None, nan_policy="none")]
+    with pytest.raises(AssertionError, match="nan_policy"):
+        _assert_feature_spec_contract({"x": np.array([1.0, np.nan])}, none_specs)
