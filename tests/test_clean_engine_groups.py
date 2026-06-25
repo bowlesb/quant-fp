@@ -3066,98 +3066,89 @@ def test_daily_vol_short_matrix_warmup_nulls_like_legacy() -> None:
     assert np.isnan(_daily_vol(short, 10)[0]), "daily_vol_10d on 8 days must be NULL (legacy full-window warmup)"
 
 
-@pytest.mark.xfail(strict=True, reason="#69 NOT wired: no live producer pivots backfill_daily into the clean "
-                                       "session (set_session is called only by tests) → daily groups all-NaN live")
 def test_live_daily_session_is_populated_from_backfill_daily() -> None:
-    """#69 LIVE-WIRING gate (Lead: test-green != live-wired — this gate proves the live wiring EXISTS). The
-    daily-snapshot clean groups read window.session['daily_close'/...]; nothing on the LIVE path populates them
-    yet (real_capture.py loads snapshots['daily'] = backfill_daily(...) but never pivots it to the (n_sym,
-    n_days) numpy matrices nor calls engine.set_session). Until #69 lands, daily_return/vol/dist/daily_beta/
-    multi_day_vwap/overnight_beta are ALL-NaN live (honest, not wrong).
-
-    This asserts the DELIVERABLE: a per-session pivot from the held backfill_daily polars frame
-    (symbol,date,o,h,l,c,v,vwap; trailing days ENDING AT today so today's bar IS the last date) into the clean
-    session, in the #68 (a) convention (today = [:, -1], D-1 = [:, -2]). XFAIL(strict) until the builder exists
-    — it FAILS LOUDLY if #69 is claimed done without the live producer, and the strict xfail forces this test
-    flipped to a real assertion (remove the marker) the moment the builder lands. Wire it to the REAL builder
-    name when ArchOverhaul ships it; do NOT satisfy it with a hand-fed set_session (that would re-create the
-    test-only path this gate exists to forbid)."""
+    """#69 LIVE-WIRING gate (Lead: test-green != live-wired — this gate proves the live wiring EXISTS), now
+    FLIPPED to a real pass: the #69 builder landed (clean_session.build_daily_matrices, a251014). Asserts the
+    REAL production pivot from the held backfill_daily polars frame (symbol,date,o,h,l,c,v,vwap; trailing days
+    ENDING AT today so today's bar IS the last date) into the clean session, in the #68 (a) convention
+    (today = [:, -1], D-1 = [:, -2]). NOT satisfied by a hand-fed set_session — it calls the production builder
+    directly. Also pins the NaN-left-pad for a short-history symbol (the builder's documented behavior)."""
     import datetime  # noqa: PLC0415
 
     import polars as pl  # noqa: PLC0415
 
+    from quantlib.features.clean_session import build_daily_matrices  # noqa: PLC0415
+
     # the held frame, exactly as real_capture builds it (backfill_daily schema), today = the LAST date
     today = datetime.date(2026, 6, 25)
     syms = ["A", "B", "SPY"]
+    dates = [today - datetime.timedelta(days=4 - dd) for dd in range(5)]
     rows = []
     for s in syms:
-        for dd in range(5):  # 5 trailing trading days ending today
-            rows.append({"symbol": s, "date": today - datetime.timedelta(days=4 - dd),
-                         "open": 100.0 + dd, "high": 101.0 + dd, "low": 99.0 + dd,
-                         "close": 100.5 + dd, "volume": 1e6, "vwap": 100.4 + dd})
+        # SPY has a SHORT history (only the last 3 dates) → its first 2 columns must NaN-pad
+        sym_dates = dates if s != "SPY" else dates[2:]
+        for date in sym_dates:
+            dd = dates.index(date)
+            rows.append({"symbol": s, "date": date, "open": 100.0 + dd, "high": 101.0 + dd,
+                         "low": 99.0 + dd, "close": 100.5 + dd, "volume": 1e6, "vwap": 100.4 + dd})
     daily_frame = pl.DataFrame(rows).sort(["symbol", "date"])
 
-    # the not-yet-existing live builder (the #69 deliverable). When it lands, point this import at the real
-    # symbol and DROP the xfail marker above.
-    from quantlib.features.daily_session_builder import (  # type: ignore  # noqa: PLC0415
-        build_clean_daily_session,
-    )
-
-    session = build_clean_daily_session(daily_frame, syms)
+    session = build_daily_matrices(daily_frame, syms)
     daily_close = session["daily_close"]
     assert daily_close.shape == (3, 5), "daily_close must be (n_symbols, n_days)"
     # (a) convention: today is the LAST column; D-1 = [:, -2]
     a_today = float(daily_frame.filter((pl.col("symbol") == "A") & (pl.col("date") == today))["close"][0])
     assert daily_close[syms.index("A"), -1] == pytest.approx(a_today), "today's close must be the [:, -1] column"
+    # SPY's short history → its left 2 columns NaN-padded, today still populated at [:, -1]
+    spy = syms.index("SPY")
+    assert np.isnan(daily_close[spy, 0]) and np.isnan(daily_close[spy, 1]), "short-history symbol left-NaN-padded"
+    assert np.isfinite(daily_close[spy, -1]), "SPY's today column populated despite short history"
     for key in ("daily_open", "daily_high", "daily_low", "daily_volume", "daily_vwap"):
         assert key in session and session[key].shape == (3, 5), f"{key} matrix must be populated (n_sym, n_days)"
 
 
-@pytest.mark.xfail(strict=True, reason="#73 step-4 NOT wired: no live producer pivots load_news_features/"
-                                       "load_filings into the session CSR (news_at/off/sentiment, edgar_at/off/"
-                                       "form) → news_sentiment + edgar_filing_frequency emit NaN/0 defaults live")
 def test_live_event_tape_session_csr_is_populated_from_loaders() -> None:
     """#75 LAYER A — event-tape live-wiring gate (Lead: news/edgar input is the SESSION surface, reloaded
-    per-session; #69 daily-pivot + this CSR-pivot are ONE builder = #73 step 4). Same durable enforcement as
-    the #69 daily gate, CSR instead of matrix: the news_sentiment/edgar_filing_frequency clean groups read the
-    per-symbol CSR tapes (news_at/news_off/news_sentiment, edgar_at/edgar_off/edgar_form) from window.session;
-    nothing on the LIVE path pivots loaders.load_news_features / loaders.load_filings into that layout yet
-    (set_session is test-only), so both groups emit their NaN/0 defaults live.
-
-    Asserts the #73-step-4 DELIVERABLE: a per-session pivot from the held loader frames
-    (load_news_features = symbol/available_at/sentiment; load_filings = symbol/form_type/available_at) into the
-    session CSR — flat ascending-by-(symbol,available_at) arrays + per-symbol offsets. XFAIL(strict) until the
-    builder exists: FAILS LOUDLY if step-4 is claimed done without the CSR pivot, and the strict marker forces
-    this flipped to a real assertion when it lands. NOT satisfiable by a hand-fed set_session (the test-only
-    path this gate forbids — the same self-consistent-bubble trap #75 Layer B must also avoid). LAYER B (the
-    look-ahead <= boundary + per-cell value diff vs real compute()) gates the REAL CSR build once this lands."""
+    per-session; #69 daily-pivot + this CSR-pivot are ONE builder), now FLIPPED to a real pass: the builder
+    landed (clean_session.build_event_tape, a251014). Asserts the REAL production pivot from the held loader
+    frames (load_news_features = symbol/available_at/sentiment; load_filings = symbol/form_type/available_at)
+    into the session CSR — per-symbol ascending-by-available_at arrays + offsets; the empty-tape symbol gets a
+    zero-width slice; the edgar form_type maps to its int code. NOT satisfied by a hand-fed set_session — it
+    calls the production builder directly. (Layer B = the look-ahead <= boundary + per-cell value diff vs real
+    compute() over the full clean group; follows once the per-minute gate is added.)"""
     import datetime  # noqa: PLC0415
 
     import polars as pl  # noqa: PLC0415
 
+    from quantlib.features.clean_groups_reference import _EDGAR_FORM_CODE  # noqa: PLC0415
+    from quantlib.features.clean_session import build_event_tape  # noqa: PLC0415
+
     syms = ["A", "B", "C"]  # C is the EMPTY-TAPE symbol (no events) — must still get a valid offset slice
     avail = datetime.datetime(2026, 6, 25, 14, 32, tzinfo=datetime.timezone.utc)
+    later = avail + datetime.timedelta(hours=1)
+    # A has 2 news, delivered OUT of order so the builder's ascending-by-available_at sort is exercised
     news_frame = pl.DataFrame(
-        {"symbol": ["A", "A", "B"], "available_at": [avail, avail + datetime.timedelta(hours=1), avail],
-         "sentiment": [0.4, -0.2, 0.1]},
+        {"symbol": ["A", "A", "B"], "available_at": [later, avail, avail], "sentiment": [-0.2, 0.4, 0.1]},
         schema={"symbol": pl.String, "available_at": pl.Datetime("us", "UTC"), "sentiment": pl.Float64})
     filings_frame = pl.DataFrame(
         {"symbol": ["A", "B"], "form_type": ["8-K", "10-Q"], "available_at": [avail, avail]},
         schema={"symbol": pl.String, "form_type": pl.String, "available_at": pl.Datetime("us", "UTC")})
 
-    # the not-yet-existing live builder (#73 step 4). When it lands, point this at the real symbol + DROP xfail.
-    from quantlib.features.event_tape_session_builder import (  # type: ignore  # noqa: PLC0415
-        build_clean_event_tape_session,
-    )
+    news = build_event_tape(news_frame, syms, "sentiment")
+    edgar = build_event_tape(filings_frame, syms, "form_type", payload_fn=_EDGAR_FORM_CODE.__getitem__)
+    a, b, c = syms.index("A"), syms.index("B"), syms.index("C")
 
-    session = build_clean_event_tape_session(news_frame, filings_frame, syms)
-    for key in ("news_at", "news_off", "news_sentiment", "edgar_at", "edgar_off", "edgar_form"):
-        assert key in session, f"session CSR missing {key} (event-tape pivot not wired)"
-    # CSR offsets: len == n_symbols + 1, monotonic; symbol A has 2 news rows, C (empty) has a zero-width slice
-    assert session["news_off"].shape == (len(syms) + 1,), "news_off must be (n_symbols+1,) CSR offsets"
-    a, c = syms.index("A"), syms.index("C")
-    assert session["news_off"][a + 1] - session["news_off"][a] == 2, "symbol A must have 2 news rows in the CSR"
-    assert session["news_off"][c + 1] - session["news_off"][c] == 0, "empty-tape symbol C → zero-width CSR slice"
+    # CSR offsets: len == n_symbols + 1; symbol A has 2 news rows; C (empty) is a zero-width slice
+    assert news["off"].shape == (len(syms) + 1,), "news off must be (n_symbols+1,) CSR offsets"
+    assert news["off"][a + 1] - news["off"][a] == 2, "symbol A must have 2 news rows in the CSR"
+    assert news["off"][c + 1] - news["off"][c] == 0, "empty-tape symbol C → zero-width CSR slice"
+    # A's two events ascend by available_at (avail then later) — the sentiment payload follows that order
+    a_slice = slice(int(news["off"][a]), int(news["off"][a + 1]))
+    assert list(news["at"][a_slice]) == sorted(news["at"][a_slice]), "A's news CSR must be ascending by available_at"
+    assert news["payload"][a_slice][0] == pytest.approx(0.4), "ascending sort: avail's sentiment first, not later's"
+    # edgar form_type → int code in the payload
+    assert edgar["payload"][int(edgar["off"][a])] == pytest.approx(float(_EDGAR_FORM_CODE["8-K"])), "edgar 8-K code"
+    assert edgar["payload"][int(edgar["off"][b])] == pytest.approx(float(_EDGAR_FORM_CODE["10-Q"])), "edgar 10-Q code"
 
 
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
@@ -3696,26 +3687,24 @@ _NON_STANDALONE_CLEAN = {"macd", "vwap_deviation"}
 
 def test_completeness_gate_covers_every_clean_group() -> None:
     """The completeness gate is only as good as its coverage: a clean group NOT in _LEGACY_GROUP_OF would
-    escape the stub check entirely. This self-check fails if ANY ported clean group (other than the known
-    sub-feature demos) is missing from the map — so a new/regressed group can't hide outside the gate."""
-    import quantlib.features.clean_groups_daily as cd  # noqa: PLC0415
-    import quantlib.features.clean_groups_example as ce  # noqa: PLC0415
-    import quantlib.features.clean_groups_pointwise as cp  # noqa: PLC0415
-    import quantlib.features.clean_groups_reference as cr  # noqa: PLC0415
-    import quantlib.features.clean_groups_stateful as cs  # noqa: PLC0415
-    import quantlib.features.clean_groups_windowed as cw  # noqa: PLC0415
-    import quantlib.features.clean_groups_xsectional as cx  # noqa: PLC0415
+    escape the stub check entirely. This self-check asserts the gate map EXACTLY covers the PRODUCTION REGISTRY
+    (clean_registry.ALL_CLEAN_GROUPS — the authoritative list the live engine is built from), so a new/regressed
+    group can't hide outside the gate. Anchoring on the registry (not a per-module dir() scan) closes the
+    gate-hole class for good: a group landing in a NEW module the scan didn't import (the clean_groups_reference
+    miss) is impossible to overlook — it's in the registry the moment it's live, and this fails loud until it's
+    mapped. Also catches the reverse: a stale/renamed map entry not in the registry."""
+    from quantlib.features.clean_registry import ALL_CLEAN_GROUPS  # noqa: PLC0415
 
-    all_clean: set[str] = set()
-    for mod in (cw, ce, cx, cd, cs, cp, cr):
-        for attr in dir(mod):
-            obj = getattr(mod, attr)
-            if isinstance(obj, type) and hasattr(obj, "name") and hasattr(obj, "feature_names") \
-                    and isinstance(getattr(obj, "name", None), str):
-                all_clean.add(obj.name)
-    uncovered = all_clean - set(_LEGACY_GROUP_OF) - _NON_STANDALONE_CLEAN
+    registry = {group.name for group in ALL_CLEAN_GROUPS}
+    mapped = set(_LEGACY_GROUP_OF) | _NON_STANDALONE_CLEAN
+    uncovered = registry - mapped
     assert not uncovered, (
-        f"clean groups not covered by the completeness gate (add to _LEGACY_GROUP_OF): {sorted(uncovered)}"
+        f"production-registry clean groups not covered by the completeness gate (add to _LEGACY_GROUP_OF): "
+        f"{sorted(uncovered)}"
+    )
+    stale = set(_LEGACY_GROUP_OF) - registry
+    assert not stale, (
+        f"gate map has entries NOT in the production registry (stale/renamed — remove or fix): {sorted(stale)}"
     )
 
 
