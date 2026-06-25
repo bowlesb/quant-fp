@@ -30,6 +30,69 @@ def _masked_mean(values: np.ndarray, w: int) -> tuple[np.ndarray, np.ndarray]:
     return np.where(n_present > 0, mean, np.nan), n_present
 
 
+def _masked_std(values: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window SAMPLE std (ddof=1, matching the legacy ``std_`` reduction) of ``values`` ignoring
+    NaN. NaN where fewer than 2 present bars (the count>1 guard). std = sqrt((Σx² − (Σx)²/n)/(n−1))."""
+    win = _trailing_window(values, w)
+    mask = np.isfinite(win)
+    n = mask.sum(axis=1).astype(np.float64)
+    x = np.where(mask, win, 0.0)
+    sum_x = x.sum(axis=1)
+    sum_x2 = (x * x).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        var = (sum_x2 - sum_x * sum_x / n) / (n - 1.0)
+        std = np.sqrt(np.clip(var, 0.0, None))
+    return np.where(n > 1.0, std, np.nan)
+
+
+def _returns(close: np.ndarray) -> np.ndarray:
+    """Per-bar close-to-close return matrix ``close[t]/close[t-1] - 1`` over the trailing buffer; the first
+    column (no prior bar) is NaN. Matches ``close/close.shift(1) - 1``."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ret = close[:, 1:] / close[:, :-1] - 1.0
+    return np.concatenate([np.full((close.shape[0], 1), np.nan), ret], axis=1)
+
+
+_FOUR_LN2 = 2.772588722239781
+
+
+class VolatilityClean:
+    """VOLATILITY: point-in-time high_low_range_1m = (high-low)/close; realized_vol_{w}m = sample std (ddof=1)
+    of one-minute close-to-close returns; parkinson_vol_{w}m = sqrt(clip(mean(ln(H/L)²)/(4ln2), ≥0)). Legacy:
+    ``VolatilityGroup`` (ReductionGroup, volatility.py)."""
+
+    name = "volatility"
+    input_cols = ("high", "low", "close")
+    _VOL_WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
+    _RANGE_WINDOWS: tuple[int, ...] = (15, 30, 60, 120)
+    feature_names = (
+        ("high_low_range_1m",)
+        + tuple(f"realized_vol_{w}m" for w in _VOL_WINDOWS)
+        + tuple(f"parkinson_vol_{w}m" for w in _RANGE_WINDOWS)
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        high = window.trailing("high")
+        low = window.trailing("low")
+        close = window.trailing("close")
+        latest_high = window.latest("high")
+        latest_low = window.latest("low")
+        latest_close = window.latest("close")
+        ret = _returns(close)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            hl2 = np.log(high / low) ** 2
+        out: dict[str, np.ndarray] = {
+            "high_low_range_1m": (latest_high - latest_low) / latest_close,
+        }
+        for w in self._VOL_WINDOWS:
+            out[f"realized_vol_{w}m"] = _masked_std(ret, w)
+        for w in self._RANGE_WINDOWS:
+            mean_hl2, _ = _masked_mean(hl2, w)
+            with np.errstate(invalid="ignore"):
+                out[f"parkinson_vol_{w}m"] = np.sqrt(np.clip(mean_hl2 / _FOUR_LN2, 0.0, None))
+        return out
+
+
 class QuoteSpreadClean:
     """QUOTE_SPREAD (Layer B): point-in-time last-minute spread/imbalance/depth + trailing means of spread and
     imbalance over each window. ``spread_bps_1m``/``quote_imbalance_1m`` = latest; ``book_depth_1m`` =
