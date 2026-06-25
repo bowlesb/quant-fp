@@ -520,3 +520,55 @@ def test_seed_replay_equals_live_carried_state() -> None:
                 np.nan_to_num(arr), np.nan_to_num(live_out[gname][fname]), rtol=1e-12,
                 err_msg=f"{gname}.{fname} output diverged seed-replay vs live",
             )
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# swing (state-machine) + prior_day (snapshot) — formula + sanity.
+# --------------------------------------------------------------------------------------------------------- #
+
+from quantlib.features.clean_groups_example import PriorDayClean  # noqa: E402
+
+
+def test_swing_uptrend_direction_positive() -> None:
+    """A steady uptrend keeps the leg direction = +1 (up-leg), no pivot."""
+    engine = CleanEngine([SwingClean()], ["A"], WINDOW)
+    out = {}
+    for c in [100.0, 101.0, 102.0, 103.0, 104.0]:
+        out = engine.step(_close_bars(["A"], [c]))["swing"]
+    assert out["swing_direction"][0] == pytest.approx(1.0)
+    assert out["swing_pivot"][0] == pytest.approx(0.0)  # no reversal yet
+
+
+def test_swing_reversal_fires_pivot_and_flips_direction() -> None:
+    """An up-leg to 110, then a drop of >= 1% (theta) to 108 confirms a DOWN pivot: pivot flag 1, direction −1."""
+    engine = CleanEngine([SwingClean()], ["A"], WINDOW)
+    for c in [100.0, 105.0, 110.0]:  # up-leg, extreme=110
+        engine.step(_close_bars(["A"], [c]))
+    out = engine.step(_close_bars(["A"], [108.0]))["swing"]  # (108-110)/110 = -1.8% <= -theta → down pivot
+    assert out["swing_pivot"][0] == pytest.approx(1.0)
+    assert out["swing_direction"][0] == pytest.approx(-1.0)
+
+
+def test_swing_small_move_no_pivot() -> None:
+    """A move smaller than theta (1%) does NOT fire a pivot — the leg holds."""
+    engine = CleanEngine([SwingClean()], ["A"], WINDOW)
+    for c in [100.0, 105.0, 110.0]:
+        engine.step(_close_bars(["A"], [c]))
+    out = engine.step(_close_bars(["A"], [109.5]))["swing"]  # -0.45% > -theta → no pivot
+    assert out["swing_pivot"][0] == pytest.approx(0.0)
+    assert out["swing_direction"][0] == pytest.approx(1.0)
+
+
+def test_prior_day_gap_from_session_memo() -> None:
+    """gap_from_prior_close = latest_close / prior_close − 1, read from the per-session snapshot memo."""
+    engine = CleanEngine([PriorDayClean()], ["A"], WINDOW)
+    engine.set_session({"prior_close": np.array([100.0])})
+    out = engine.step(_close_bars(["A"], [103.0]))["prior_day"]
+    assert out["gap_from_prior_close"][0] == pytest.approx(103.0 / 100.0 - 1.0)
+
+
+def test_prior_day_no_session_is_nan() -> None:
+    """No session memo set → the snapshot feature is NaN (not a crash, not a wrong number)."""
+    engine = CleanEngine([PriorDayClean()], ["A"], WINDOW)
+    out = engine.step(_close_bars(["A"], [103.0]))["prior_day"]
+    assert np.isnan(out["gap_from_prior_close"][0])
