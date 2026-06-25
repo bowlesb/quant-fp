@@ -206,6 +206,7 @@ class CleanEngine:
         self._last_out: dict[str, dict[str, np.ndarray]] = (
             {}
         )  # cached output, returned on a stale re-delivery
+        self._present = np.zeros(len(self.symbols), dtype=bool)  # last minute's delivery mask (for emit())
 
     def set_session(self, session: dict[str, np.ndarray]) -> None:
         """Set the per-session snapshot memo (prior-day levels, etc.) — called once at each session boundary.
@@ -226,10 +227,32 @@ class CleanEngine:
             rows = np.empty((len(syms), 0), dtype=np.float64)
         return rows, pos
 
+    def emit(self, minute_bars: dict[str, np.ndarray]) -> tuple[list[str], dict[str, dict[str, np.ndarray]]]:
+        """Fold a minute (via ``step``) and return the PERSISTENCE-READY output: the present symbols for this
+        minute + every group's features with ABSENT symbols' rows NaN'd. This is the one ROW-EMISSION boundary
+        — the legacy capture persists one (symbol, minute) row per PRESENT symbol (``ring.materialize()`` is the
+        present-row set), so the clean engine matches that emission by present-filtering here, ONCE, uniformly
+        across all groups. A group's per-symbol VALUE gate (a cross-sectional NaN where the value is genuinely
+        undefined for an absent name) is separate and stays in the group; this only governs which symbols emit a
+        row. ``present_symbols`` is the list a persistence layer writes; the returned arrays are still
+        ``(n_symbols,)`` aligned to the engine index, NaN outside ``present`` — slice by ``present_symbols`` to
+        write the sparse rows."""
+        out = self.step(minute_bars)
+        present_mask = self._present
+        present_symbols = [self.symbols[i] for i in np.where(present_mask)[0]]
+        filtered: dict[str, dict[str, np.ndarray]] = {}
+        for group_name, feats in out.items():
+            filtered[group_name] = {
+                fname: np.where(present_mask, arr, np.nan) for fname, arr in feats.items()
+            }
+        return present_symbols, filtered
+
     def step(self, minute_bars: dict[str, np.ndarray]) -> dict[str, dict[str, np.ndarray]]:
         """Fold ONE minute into the carried buffer, then read every group's features for it. Each group sees its
         OWN carried state + the static labels; a fork-kind group (EMA / cumulative / swing) reads and updates
-        ``window.state`` in place. Returns ``{group_name: {feature_name: (n_symbols,) array}}``."""
+        ``window.state`` in place. Returns ``{group_name: {feature_name: (n_symbols,) array}}`` — the RAW
+        all-symbol output (absent symbols carry stale/broadcast values). The persistence-ready, present-filtered
+        form is ``emit()``."""
         minute_epoch = (
             int(np.asarray(minute_bars["minute_epoch"]).flat[0]) if "minute_epoch" in minute_bars else 0
         )
@@ -247,6 +270,7 @@ class CleanEngine:
             self._watermark = minute_epoch
         present = np.zeros(self.ring.n, dtype=bool)  # the REAL delivery mask for this minute
         present[pos] = True
+        self._present = present  # stored for emit()'s row-emission filter (and cached with _last_out)
         out: dict[str, dict[str, np.ndarray]] = {}
         for group in self.groups:
             window = Window(
