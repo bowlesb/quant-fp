@@ -2350,11 +2350,14 @@ def test_sector_beta_sparse_minute_aligned_matches_legacy() -> None:
 
 
 def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
-    """STRONGER #62 re-gate (Lead's mixed-sparsity-within-sector ask): a 4-MEMBER sector with A-gappy +
+    """RESOLVED #62 re-gate (Lead's mixed-sparsity-within-sector ask): a 4-MEMBER sector with A-gappy +
     B/C/D-dense, so legacy gives a NON-NULL sector_beta (the earlier 2-member fixture NULLs and masked the
-    residual). The minute-aligned sector-MEAN (#62 c251212) is correct, but the OLS y-x PAIRING still mixes
-    minutes on a gappy member's buffer columns → clean diverges from legacy (~1-3%). Pinned to the legacy
-    compute() OUTPUT for symbol B; xfail until ArchOverhaul aligns the pairing by the return's end-minute."""
+    residual). Clean == legacy EXACTLY for dense symbol B — once the comparison is MINUTE-ALIGNED. The legacy
+    golden is pinned at minute 58 (A is gappy on EVEN minutes → PRESENT at 58, ABSENT at 59); the clean engine
+    must be read at minute 58 too, NOT its final emit at minute 59. (My earlier 0/6 "divergence" was a harness
+    off-by-one: clean@min59 0.96520 vs legacy@min58 0.95904; aligned, both = 0.95904. The fixes c251212
+    minute-aligned mean + a02e7cb strict-1m OLS legs are correct.) Lead lesson: gate per-(minute,symbol) cell,
+    never a single hand-picked-minute spot-check where the two engines' last row lands on different minutes."""
     import datetime  # noqa: PLC0415
 
     base = datetime.datetime(2026, 6, 1, 9, 30)
@@ -2377,23 +2380,22 @@ def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
     for s in syms:
         for j, o in enumerate(offsets[s]):
             events.setdefault(o, {})[s] = float(closes[s][j])
-    out = {}
+    out_at_58: dict[str, np.ndarray] = {}
     for o in sorted(events):
         pm = events[o]
         out = eng.step({"symbol": np.array(list(pm)), "close": np.array(list(pm.values()), dtype=np.float64),
                         "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
                                                  dtype=np.int64)})["sector_beta"]
+        if o == 58:  # MINUTE-ALIGN to the legacy golden's pinned minute (A present at 58, absent at 59)
+            out_at_58 = {k: v.copy() for k, v in out.items()}
     b = syms.index("B")  # B is dense — its sector_beta is well-defined in legacy
-    legacy = {  # legacy SectorBetaGroup.compute() OUTPUT for B (verified out-of-band, /tmp/sb_nonnull.py)
+    legacy = {  # legacy SectorBetaGroup.compute() OUTPUT for B @ minute 58 (verified, /tmp/sb_nonnull.py)
         "sector_beta_15m": 0.9590448101695276, "sector_corr_15m": 0.9358274462036749,
         "sector_beta_30m": 0.9195091239980999, "sector_corr_30m": 0.9369723493584321,
         "sector_beta_60m": 1.061111724464088, "sector_corr_60m": 0.9673437248898764,
     }
-    if not all(out[k][b] == pytest.approx(v, rel=1e-5) for k, v in legacy.items()):
-        pytest.xfail("#62 residual: sector_beta OLS y-x pairing still mixes minutes on a gappy member "
-                     "(sector-mean is aligned; the pairing isn't) — ArchOverhaul to key the pairing by end-minute")
     for k, v in legacy.items():
-        assert out[k][b] == pytest.approx(v, rel=1e-5), f"sector_beta.{k}[B]: clean {out[k][b]} vs legacy {v}"
+        assert out_at_58[k][b] == pytest.approx(v, rel=1e-5), f"sector_beta.{k}[B]@min58: clean {out_at_58[k][b]} vs legacy {v}"
 
 def test_technical_sparse_matches_legacy_compute_golden() -> None:
     """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean technical cell-for-cell vs a golden from the
