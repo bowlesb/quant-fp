@@ -644,17 +644,12 @@ def test_swing_duplicate_minute_does_not_double_advance() -> None:
         "duplicate minute double-advanced swing leg-state — needs a last-epoch dedup guard beyond present()"
 
 
-@pytest.mark.xfail(
-    reason="IDEMPOTENCY FOOTGUN (Lead, verified): a DUPLICATE same-minute delivery DOUBLE-ADVANCES the "
-    "cumulative cnt (1->2) — the session-mean denominator is corrupted by a re-delivered minute. present() "
-    "alone does NOT fix this (the re-delivery reads present=True); the cumulative/recursive kinds need a "
-    "LAST-EPOCH DEDUP GUARD (only fold a minute whose epoch > last folded), separate from presence.",
-    strict=True,
-)
 def test_cumulative_duplicate_minute_does_not_double_count() -> None:
-    """The cumulative kind is where the duplicate-minute footgun actually bites: intraday_seasonality's running
-    count must increment ONCE per distinct minute, not per delivery. A re-delivered minute_epoch double-counts
-    (cnt 1->2), corrupting the since-open mean. This is the dedup-guard finding, distinct from presence."""
+    """The cumulative kind is where the duplicate-minute footgun bites: intraday_seasonality's running count
+    must increment ONCE per distinct minute, not per delivery. FIXED by the engine's C4 absorbed-minute
+    watermark (5d5f564): a re-delivered minute_epoch (<= watermark) is a no-op — no re-append, no group
+    compute — so the cnt stays 1. The dedup guard is at the ENGINE level (owns it once for every carried-state
+    kind), separate from presence — exactly as scoped."""
     def _vbar(vol, epoch):
         return {"symbol": np.array(["A"]), "volume": np.array([vol]),
                 "minute_epoch": np.array([epoch], dtype=np.int64)}
