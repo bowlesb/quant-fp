@@ -24,7 +24,8 @@ Three things, instead of the 90-file machinery sprawl:
 
 2. **The ~68 feature-math groups (KEPT)** — each becomes one small numpy `compute(window)`. Their legacy
    `reduced()/regressions()/assemble()` (or bespoke polars `compute()`) collapses to the same arithmetic over
-   the carried window, framework-free. *(Ported so far: see "Ported groups" below.)*
+   the carried window, framework-free. *(9 ported + CP-validated so far — one+ per kind; see the generalization
+   section. The remaining ~59 wait on the morning greenlight.)*
 
 3. **Validation = correctness** — formula tests (known synthetic inputs → assert the closed form / intuition),
    sanity (valid ranges, no all-NaN/all-zero, monotonicity), and the golden-set quality checks. **Not**
@@ -32,13 +33,13 @@ Three things, instead of the 90-file machinery sprawl:
 
 ## File / LOC — BEFORE → AFTER (honest framing)
 
-**Do NOT read this as "32k → 224 LOC."** The 32,160-LOC codebase is two layers, and only the MACHINERY
+**Do NOT read this as "32k → 265 LOC."** The 32,160-LOC codebase is two layers, and only the MACHINERY
 layer collapses — the feature MATH stays (it's the actual features, just ported to the new interface).
 CodeAudit's locked baseline:
 
 | layer | BEFORE | what happens |
 |---|---|---|
-| **machinery** (the sprawl) | **89 files / 22,275 LOC** — two engines + `step*` twins + per-kind wrappers + the ring/building-block constellation | **collapses** toward: the **224-LOC engine** + ~894 LOC of absorbed building-blocks + the trust/capture that STAYS. The ~3,182-LOC engine-collapse lands group-by-group as the port proceeds. |
+| **machinery** (the sprawl) | **89 files / 22,275 LOC** — two engines + `step*` twins + per-kind wrappers + the ring/building-block constellation | **collapses** toward: the **265-LOC engine** + ~894 LOC of absorbed building-blocks + the trust/capture that STAYS. The ~3,182-LOC engine-collapse lands group-by-group as the port proceeds. |
 | **feature math** | **67 files / 9,885 LOC** | **STAYS** — these are the features. Each group ports to the one `compute(window)` interface (its math is unchanged, just re-expressed). |
 | **total** | **156 files / 32,160 LOC** | machinery shrinks; math stays; trust/capture stays. |
 
@@ -81,14 +82,30 @@ framing: dropped because the design removes what it guarded, not because we stop
   step(m)` produces byte-identical output to a continuous `step` over the whole `H+m` sequence — across
   windowed / cross-sectional / recursive-EMA / cumulative / swing kinds in one multi-group engine. This
   **proves the design's central claim** — live and backfill are the *same replay*, so they cannot diverge —
-  which is exactly what makes the legacy second-form + the entire parity machinery unnecessary. (7 tests pass.)
+  which is exactly what makes the legacy second-form + the entire parity machinery unnecessary. (11 keystone
+  tests + 44 group tests pass; CP validated independently — see the status table below.)
 - **Formula/unit tests** per group: synthetic inputs with a known answer → assert the math (trend OLS r²=1 on a
   line; breadth K/N cross-sectional; macd EMA presence-decay — an absent symbol HOLDS its EMA; swing pivot;
   cumulative reset; ring gap-safe window).
 - **Sanity**: per-feature `valid_range`, no degenerate all-NaN/all-zero, expected monotonicity.
 - **Golden-set quality**: the existing `app.features.quality` validation re-pointed at the new engine — every
   feature VALID (2+ unique values; binary both 0/1; events real).
-- _<CP's validation results>_
+### CP independent validation — all 6 kinds GREEN
+
+CP (separate agent, its own adversarial sparse/gap shapes, NOT my tests) validated the engine at `1198b82`:
+**44 pass / 0 xfail**, every kind green, no regression. Per kind:
+
+| kind | group | what CP checked | result |
+|---|---|---|---|
+| windowed | `trend_quality` / `vwap` / `realized_range` / `candlestick` | formula on known inputs (OLS r²=1, range mean, engulfing) | **GREEN** |
+| cross-sectional | `breadth` | sparse minute: 2 present-up / 2 absent-carried-down → `breadth_up=1.0` not `0.5` (absent excluded from denominator) | **GREEN** |
+| recursive-EMA | `macd` | EMA holds across a per-symbol gap (presence-decay), no decay-to-zero on an absent minute | **GREEN** |
+| cumulative | `intraday_seasonality` | since-open count does NOT increment on an absent minute; resets at session boundary | **GREEN** |
+| swing | `swing` | ZigZag pivot from carried leg-state; idempotent on a re-delivered minute (watermark, not present) | **GREEN** |
+| daily-snapshot | `prior_day` | compute-once / broadcast from `window.session` | **GREEN** |
+
+Plus CP independently re-derived the **keystone** (`seed(H)+step(m) == step(H+m)`, carried state bit-identical) and
+both engine-level concerns (presence + idempotency) with no regression to the per-symbol kinds.
 
 ## Does the ONE interface generalize, or fork? (the real test)
 
@@ -135,13 +152,27 @@ interface generalizes — one `compute(window)` reads through five accessors ove
 4. **session** (the daily-snapshot memo, set once per session),
 5. **present()** (the real current-minute delivery mask — the one correct presence source).
 
-No kind needed a second engine or a forked step. The remaining ~59 groups are instances of these six shapes;
-each is ported + correctness-checked individually (not assumed) as the port proceeds — _<count as it lands>_.
+No kind needed a second engine or a forked step. The 9 ported groups (one+ per kind) are CP-validated green;
+the remaining ~59 groups are instances of these same six shapes and will each be ported + correctness-checked
+individually (not assumed) once the approach is approved — that bulk port is the work the morning gate unblocks.
 
 **Two engine-level concerns owned ONCE (not per-group):** *presence* (`window.present()` — did a bar arrive
-this minute; a presence-gated read must NOT infer presence from `isfinite(latest())`, which returns the carried
-value on an absent minute) and *idempotency* (a minute-epoch watermark — a re-delivered/stale minute is a
-no-op, so carried state never double-advances). These are orthogonal; the engine owns each once for every kind.
+this minute) and *idempotency* (a minute-epoch watermark — a re-delivered/stale minute is a no-op, so carried
+state never double-advances). These are orthogonal; the engine owns each once for every kind.
+
+**Why `present()` is the one correct presence source.** A presence-gated read must NOT infer presence from
+`isfinite(latest(col))`: `latest()` returns the *carried* value for a symbol that delivered no bar this minute,
+so `isfinite()` reads True even on an absent symbol. That mis-inference is wrong for *any* gated kind — it would
+advance an absent symbol's EMA, increment its cumulative count, or (most visibly) inflate the cross-sectional
+denominator. **Cross-sectional `breadth` was the case that surfaced the bug** (a stale name visibly shifts a
+market-wide fraction), but the fix is general: every group that builds a count / denominator / mask gates on
+`window.present()`, the engine's real delivery mask, not on `isfinite()` of a carried read.
+
+**Commit history (accurate):** `f3ff4bc` added `window.present()` to the engine and switched the four gated
+groups that were then in play — `macd` / `intraday_seasonality` / `swing` / `prior_day`. `1198b82` caught the
+**missed** cross-sectional case (`breadth`, in `clean_groups_example.py`, not under `groups/`) by reproducing
+its adversarial sparse rep rather than assuming "present() exists everywhere" — and switched it too. The watermark
+(idempotency) landed separately at `5d5f564`; it fixes the *duplicate* axis and is independent of presence.
 
 ## Taking it live (when you approve)
 
@@ -152,10 +183,36 @@ The trust system is unchanged; it grades the new engine's output exactly as it g
 
 ## Honest status (no inflation)
 
-- DONE: the clean engine core (verified), the interface, 2 representative groups ported + verified end-to-end,
-  the deletion guardrail (trust system carved out, all deletions = branch proposals).
-- IN PROGRESS: porting the remaining groups; CP's correctness validation; CodeAudit's deletion PRs + the final
-  BEFORE→AFTER numbers.
-- The headline is the SHAPE: the ~22k-LOC / 89-file machinery layer collapses toward one ~265-LOC engine +
-  absorbed building-blocks; the 9,885-LOC feature math STAYS (ported to the one interface); trust/capture STAYS.
-  The exact LOC delta fills in as the deletions land; the engine + the proven interface are the substance.
+- **DONE + validated:** the clean engine core (CleanEngine + RingBuffer + Window + EngineGroup), the one
+  `compute(window)` interface, **9 groups across all 6 structurally-distinct kinds ported + independently
+  CP-validated green** (windowed / cross-sectional / recursive-EMA / cumulative / swing / daily-snapshot), the
+  keystone invariant proven, both engine-level concerns (presence + idempotency) owned once and tested, the
+  deletion guardrail (trust/cert system carved out as HARD KEEP, all deletions = branch proposals).
+- **NOT done (waits on your greenlight):** porting the remaining ~59 groups; CodeAudit's deletion PRs landing;
+  the go-live wiring. None of this is started — it's the work your morning decision unblocks.
+- The headline is the SHAPE: the ~22k-LOC / 89-file machinery layer collapses toward one **265-LOC engine** +
+  absorbed building-blocks; the 9,885-LOC feature math STAYS (ported to the one interface, math unchanged);
+  trust/capture STAYS. Tonight's *actual* delete = 602 LOC (`parity_audit.py`); the ~3,182-LOC engine-collapse
+  is the migration headline that accrues group-by-group once you approve the approach — not claimed as tonight.
+
+## What you (Ben) decide in the morning
+
+This is a **design-approval gate**, not a "ship it" gate. Nothing is live; nothing is merged. Three decisions:
+
+1. **Approve the approach?** The shape is: one `compute(window)` interface + five accessors (trailing/latest,
+   state, static, session, present()) + one `seed/step` engine, with backfill==replay as the structural reason
+   the entire byte-parity machinery is obsolete. 6 kinds prove it generalizes (no fork). **If yes →** it
+   becomes the target architecture and we port the rest to it. **If no / changes →** the engine is ~265 LOC +
+   9 example groups on a branch, cheap to revise before any bulk port.
+2. **Full-port scope + order?** ~59 groups remain, each an instance of one of the 6 proven shapes. Recommended:
+   port in kind-batches (windowed first — the bulk and simplest; cross-sectional next — present()-gated;
+   recursive/cumulative/swing last — carried-state), each group correctness-checked individually (not assumed),
+   re-pointing the golden-set at the new engine as the rolling oracle. Decide whether you want all ~59 or a
+   representative slice first.
+3. **Go-live path?** When ported + golden-set-green, wire `CleanEngine` into capture behind a default-off flag,
+   seed from the live buffer, soak on a canary shard under the existing deploy seam, then widen — the same
+   staged, reversible rollout as every prior step. The trust/cert system is unchanged and grades the new
+   engine's output exactly as it grades today's. **Cert retirement (if ever) is a separate, later decision
+   AFTER the new engine is live and proven against settled reality — never bundled into this.**
+
+Until you decide: the new engine stays **OFF-live**, `fc` runs the OLD engine, nothing is self-merged.
