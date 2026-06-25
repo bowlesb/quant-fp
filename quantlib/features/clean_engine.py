@@ -116,11 +116,27 @@ class Window:
     """The read surface a group's ``compute`` sees — a thin view over the ``RingBuffer`` (+ optional
     per-session state for Class-A groups). Keeps the group math decoupled from the buffer internals."""
 
-    def __init__(self, ring: RingBuffer, session: dict[str, np.ndarray] | None = None) -> None:
+    def __init__(
+        self,
+        ring: RingBuffer,
+        state: dict[str, np.ndarray] | None = None,
+        static: dict[str, np.ndarray] | None = None,
+        minute_epoch: int = 0,
+    ) -> None:
         self._ring = ring
         self.symbols = ring.symbols
         self.n = ring.n
-        self.session = session or {}
+        # ``state`` is the group's OWN carried per-symbol state (mutated in place across steps): the engine holds
+        # one dict per group and hands it back each minute. This is how the "fork" kinds that a windowed ring
+        # can't express live on the one spine — an EMA group keeps its decayed value, a cumulative group its
+        # session running sum, a swing group its leg-state — each a small per-symbol array the group reads and
+        # updates in ``compute``. The engine owns the lifecycle (creation, seed-replay, hand-back); the group
+        # owns the math. (Empty for a pure windowed group, which reads only the ring.)
+        self.state = state if state is not None else {}
+        # Static per-symbol labels that never change intraday (sector id, the symbol index itself) — for the
+        # cross-sectional groups that reduce/group over the symbol axis (breadth by sector, sector_beta).
+        self.static = static or {}
+        self.minute_epoch = minute_epoch  # for session-reset / time-of-day groups (cumulative, seasonality)
 
     def trailing(self, col: str) -> np.ndarray:
         return self._ring.trailing(col)
@@ -136,7 +152,13 @@ class CleanEngine:
     """The one engine: a fixed symbol index + a carried ``RingBuffer`` + the groups, with one ``step`` that
     folds a minute and reads every group's features. No second form, no parity gate, no per-minute polars."""
 
-    def __init__(self, groups: list[EngineGroup], symbols: list[str], window: int) -> None:
+    def __init__(
+        self,
+        groups: list[EngineGroup],
+        symbols: list[str],
+        window: int,
+        static: dict[str, np.ndarray] | None = None,
+    ) -> None:
         self.groups = list(groups)
         self.symbols = list(symbols)
         cols: list[str] = []
@@ -146,6 +168,13 @@ class CleanEngine:
                     cols.append(col)
         self.cols = tuple(cols)
         self.ring = RingBuffer(self.symbols, window, self.cols)
+        # One carried-state dict per group, owned by the engine and handed back each minute. A group's
+        # ``compute`` reads + mutates its own ``window.state`` (its EMA value / session running sum / swing
+        # leg-state); a pure windowed group leaves it empty. Created lazily so a group declares no state-machine
+        # boilerplate — it just writes into the dict the first time it needs to.
+        self._group_state: dict[str, dict[str, np.ndarray]] = {g.name: {} for g in self.groups}
+        # Static per-symbol labels for the cross-sectional groups (sector id, etc.), constant intraday.
+        self.static = static or {}
 
     def _marshal(self, minute_bars: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Turn the current minute's bars (``{col: (n_present,) array}`` + a ``symbol`` array) into the
@@ -157,17 +186,22 @@ class CleanEngine:
         return rows, pos
 
     def step(self, minute_bars: dict[str, np.ndarray]) -> dict[str, dict[str, np.ndarray]]:
-        """Fold ONE minute into the carried buffer, then read every group's features for it. Returns
-        ``{group_name: {feature_name: (n_symbols,) array}}``."""
+        """Fold ONE minute into the carried buffer, then read every group's features for it. Each group sees its
+        OWN carried state + the static labels; a fork-kind group (EMA / cumulative / swing) reads and updates
+        ``window.state`` in place. Returns ``{group_name: {feature_name: (n_symbols,) array}}``."""
+        minute_epoch = int(minute_bars["minute_epoch"]) if "minute_epoch" in minute_bars else 0
         rows, pos = self._marshal(minute_bars)
         self.ring.append(rows, pos)
-        window = Window(self.ring)
-        return {group.name: group.compute(window) for group in self.groups}
+        out: dict[str, dict[str, np.ndarray]] = {}
+        for group in self.groups:
+            window = Window(self.ring, self._group_state[group.name], self.static, minute_epoch)
+            out[group.name] = group.compute(window)
+        return out
 
     def seed(self, history: list[dict[str, np.ndarray]]) -> None:
-        """Replay warm-up history minute-by-minute (== backfill over the buffer): fold each historical minute so
-        the carried state on the first live ``step`` is exactly what it would be having processed that history.
-        Same code as ``step`` (minus the read), so live state == backfill state by construction."""
+        """Replay warm-up history minute-by-minute (== backfill over the buffer): fold each historical minute AND
+        run every group's ``compute`` so the carried state — the ring AND each fork-kind group's EMA / cumulative
+        / swing state — is exactly what it would be having processed that history. This is just ``step`` with the
+        output discarded; live state == backfill state by construction (it is the same replay)."""
         for minute_bars in history:
-            rows, pos = self._marshal(minute_bars)
-            self.ring.append(rows, pos)
+            self.step(minute_bars)

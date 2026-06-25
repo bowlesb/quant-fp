@@ -170,3 +170,77 @@ class CandlestickClean:
             "is_doji": is_doji,
             "pattern_engulfing_bullish": engulf.astype(np.float64),
         }
+
+
+class BreadthClean:
+    """CROSS-SECTIONAL: what fraction of the universe is moving up/down over each window. A reduce over the
+    SYMBOL axis (not a per-symbol window) — a market-wide scalar broadcast to every ticker. Proves the
+    interface covers the cross-sectional "fork" kind: ``compute`` already sees all symbols' matrices, so the
+    reduce is a numpy ``mean`` over axis 0. (The sector-grouped variant uses ``window.static['sector']``.)"""
+
+    name = "breadth"
+    input_cols = ("close",)
+    feature_names = tuple(f"breadth_{d}_{w}" for w in (5, 10, 30) for d in ("up", "down", "net"))
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        out: dict[str, np.ndarray] = {}
+        for w in (5, 10, 30):
+            cw = _trailing_window(close, w)
+            # per-symbol return over the window (newest / oldest-present − 1)
+            newest = cw[:, -1]
+            oldest = cw[:, 0]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ret = newest / oldest - 1.0
+            valid = np.isfinite(ret)
+            band = 1e-4  # dead-band: a name within ±band is neither up nor down (robust count, breadth.py)
+            up = (ret > band) & valid
+            down = (ret < -band) & valid
+            n = max(int(valid.sum()), 1)
+            frac_up = float(up.sum()) / n  # market-wide scalar
+            frac_down = float(down.sum()) / n
+            full = np.full(window.n, np.nan)  # broadcast the scalar to every symbol
+            out[f"breadth_up_{w}"] = np.where(valid, frac_up, np.nan) if valid.any() else full
+            out[f"breadth_down_{w}"] = np.where(valid, frac_down, np.nan) if valid.any() else full
+            out[f"breadth_net_{w}"] = np.where(valid, frac_up - frac_down, np.nan) if valid.any() else full
+        return out
+
+
+class MacdClean:
+    """EMA / RECURSIVE (the carried-scalar "fork" kind): MACD = 12/26-span EMAs of close + a 9-span EMA of the
+    macd line. NOT a windowed read — a carried decayed value per symbol, updated each present bar. Lives in
+    ``window.state`` (the group's own carried state the engine hands back each minute), decayed on bar
+    PRESENCE not clock — proving the interface covers the recursive kind via per-group carried state."""
+
+    name = "macd"
+    input_cols = ("close",)
+    feature_names = ("macd_line", "macd_signal", "macd_histogram")
+
+    @staticmethod
+    def _ema(
+        state: dict[str, np.ndarray], key: str, value: np.ndarray, span: int, present: np.ndarray
+    ) -> np.ndarray:
+        """Carried EMA: ``v = (1−α)·v + α·value`` per present symbol; absent symbols hold (decay on presence,
+        not clock). Seeds to the first present value. Stored in ``state`` so it persists across steps."""
+        alpha = 2.0 / (span + 1.0)
+        prev = state.get(key)
+        if prev is None:
+            prev = np.full(len(value), np.nan)
+        updated = np.where(np.isnan(prev), value, (1.0 - alpha) * prev + alpha * value)
+        new = np.where(present, updated, prev)  # absent symbols keep their last EMA (presence-decay)
+        state[key] = new
+        return new
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.latest("close")
+        present = np.isfinite(close)
+        state = window.state
+        ema12 = self._ema(state, "ema12", np.where(present, close, 0.0), 12, present)
+        ema26 = self._ema(state, "ema26", np.where(present, close, 0.0), 26, present)
+        macd_line = ema12 - ema26
+        signal = self._ema(state, "signal", np.where(present, macd_line, 0.0), 9, present)
+        return {
+            "macd_line": macd_line,
+            "macd_signal": signal,
+            "macd_histogram": macd_line - signal,
+        }
