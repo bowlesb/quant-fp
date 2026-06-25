@@ -214,9 +214,15 @@ class BreadthClean:
 
 class MacdClean:
     """EMA / RECURSIVE (the carried-scalar "fork" kind): MACD = 12/26-span EMAs of close + a 9-span EMA of the
-    macd line. NOT a windowed read — a carried decayed value per symbol, updated each present bar. Lives in
-    ``window.state`` (the group's own carried state the engine hands back each minute), decayed on bar
-    PRESENCE not clock — proving the interface covers the recursive kind via per-group carried state."""
+    macd line. A carried decayed value per symbol, updated each present bar, in ``window.state`` — decayed on
+    bar PRESENCE not clock.
+
+    ⚠️ The PRODUCTION macd is ``technical`` (clean_groups_stateful.py, TechnicalClean) — use THAT as the value
+    reference, not this. This is an interface demonstration. Both now use the ADJUSTED EWM (polars ewm_mean
+    adjust=True: num/den running form), the live/legacy convention. An EARLIER version of this example used the
+    SIMPLE recurrence ``(1−α)·prev + α·value`` which DIVERGES from legacy in warm-up — the convention footgun
+    (the present-decay test gates on PRESENCE, not the EMA formula, so it didn't catch the wrong convention).
+    Do NOT reuse the simple form."""
 
     name = "macd"
     input_cols = ("close",)
@@ -226,16 +232,23 @@ class MacdClean:
     def _ema(
         state: dict[str, np.ndarray], key: str, value: np.ndarray, span: int, present: np.ndarray
     ) -> np.ndarray:
-        """Carried EMA: ``v = (1−α)·v + α·value`` per present symbol; absent symbols hold (decay on presence,
-        not clock). Seeds to the first present value. Stored in ``state`` so it persists across steps."""
+        """ADJUSTED EWM (polars ewm_mean adjust=True, the live/legacy convention): ``num = value + (1−α)·num``,
+        ``den = 1 + (1−α)·den``, ``ema = num/den`` per PRESENT symbol; absent symbols hold their accumulators
+        (presence-decay). First present bar seeds ema = value (num=value, den=1). NOT the simple
+        ``(1−α)·prev + α·value`` recurrence — that diverges from legacy in warm-up."""
         alpha = 2.0 / (span + 1.0)
-        prev = state.get(key)
-        if prev is None:
-            prev = np.full(len(value), np.nan)
-        updated = np.where(np.isnan(prev), value, (1.0 - alpha) * prev + alpha * value)
-        new = np.where(present, updated, prev)  # absent symbols keep their last EMA (presence-decay)
-        state[key] = new
-        return new
+        one_minus = 1.0 - alpha
+        num = state.get(f"{key}__num")
+        den = state.get(f"{key}__den")
+        if num is None:
+            num = np.zeros(len(value))
+            den = np.zeros(len(value))
+        new_num = np.where(present, value + one_minus * num, num)
+        new_den = np.where(present, 1.0 + one_minus * den, den)
+        state[f"{key}__num"] = new_num
+        state[f"{key}__den"] = new_den
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(new_den > 0.0, new_num / new_den, np.nan)
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.latest("close")
@@ -243,10 +256,10 @@ class MacdClean:
             window.present()
         )  # the REAL delivery mask — NOT isfinite(latest), which is the carried value
         state = window.state
-        ema12 = self._ema(state, "ema12", np.where(present, close, 0.0), 12, present)
-        ema26 = self._ema(state, "ema26", np.where(present, close, 0.0), 26, present)
+        ema12 = self._ema(state, "ema12", np.where(present, close, np.nan), 12, present)
+        ema26 = self._ema(state, "ema26", np.where(present, close, np.nan), 26, present)
         macd_line = ema12 - ema26
-        signal = self._ema(state, "signal", np.where(present, macd_line, 0.0), 9, present)
+        signal = self._ema(state, "signal", np.where(present, macd_line, np.nan), 9, present)
         return {
             "macd_line": macd_line,
             "macd_signal": signal,

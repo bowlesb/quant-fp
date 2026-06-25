@@ -373,12 +373,17 @@ def test_breadth_in_unit_range() -> None:
 
 
 def _ema_ref(values: list[float], span: int) -> float:
-    """Reference EMA seeded to the first value, v = (1-a)v + a*x — the macd group's exact recurrence."""
+    """Reference ADJUSTED EWM (polars ewm_mean adjust=True, the live/legacy macd convention): num = x + (1-a)num,
+    den = 1 + (1-a)den, ema = num/den. NOT the simple (1-a)v + a*x recurrence (that diverges from legacy in
+    warm-up) — the macd group (MacdClean) and TechnicalClean both carry this num/den form, decayed on presence."""
     alpha = 2.0 / (span + 1.0)
-    v = values[0]
-    for x in values[1:]:
-        v = (1.0 - alpha) * v + alpha * x
-    return v
+    one_minus = 1.0 - alpha
+    num = 0.0
+    den = 0.0
+    for x in values:
+        num = x + one_minus * num
+        den = 1.0 + one_minus * den
+    return num / den
 
 
 def test_macd_line_matches_ema_recurrence() -> None:
@@ -440,10 +445,14 @@ def test_macd_per_symbol_absence_holds_ema() -> None:
     engine = CleanEngine([MacdClean()], ["A", "B"], WINDOW)
     engine.step(_bar(["A", "B"], [100.0, 200.0], 60))
     engine.step(_bar(["A", "B"], [100.0, 260.0], 120))  # B EMA moves off its seed
-    b_before = engine._group_state["macd"]["ema12"][1]
+    # adjusted EWM carries (num, den) accumulators; "holds" = BOTH unchanged on B's absent minute
+    num_before = engine._group_state["macd"]["ema12__num"][1]
+    den_before = engine._group_state["macd"]["ema12__den"][1]
     engine.step(_bar(["A"], [110.0], 180))  # B ABSENT (A-only, epoch advances)
-    b_after = engine._group_state["macd"]["ema12"][1]
-    assert b_after == pytest.approx(b_before), "B's EMA re-updated on a minute B was absent (presence leak)"
+    num_after = engine._group_state["macd"]["ema12__num"][1]
+    den_after = engine._group_state["macd"]["ema12__den"][1]
+    assert num_after == pytest.approx(num_before), "B's EMA num re-updated on a minute B was absent (presence leak)"
+    assert den_after == pytest.approx(den_before), "B's EMA den re-updated on a minute B was absent (presence leak)"
 
 
 def test_macd_seeds_to_first_present_value() -> None:
@@ -671,13 +680,14 @@ def test_macd_seed_equals_live_WITH_gaps() -> None:
     for bars in seq:
         live_out = live_engine.step(bars)
 
-    # seed-replay and live must produce the IDENTICAL carried EMA + output across the gapped sequence
-    np.testing.assert_allclose(
-        np.nan_to_num(seed_engine._group_state["macd"]["ema12"]),
-        np.nan_to_num(live_engine._group_state["macd"]["ema12"]),
-        rtol=1e-12,
-        err_msg="macd ema12 carried state diverged seed-replay vs live ACROSS GAPS",
-    )
+    # seed-replay and live must produce the IDENTICAL carried EMA accumulators (num+den) across the gapped seq
+    for accum in ("ema12__num", "ema12__den"):
+        np.testing.assert_allclose(
+            np.nan_to_num(seed_engine._group_state["macd"][accum]),
+            np.nan_to_num(live_engine._group_state["macd"][accum]),
+            rtol=1e-12,
+            err_msg=f"macd {accum} carried state diverged seed-replay vs live ACROSS GAPS",
+        )
     np.testing.assert_allclose(
         np.nan_to_num(seed_out["macd"]["macd_line"]),
         np.nan_to_num(live_out["macd"]["macd_line"]),
@@ -830,8 +840,9 @@ def test_watermark_out_of_order_and_multi_group_multi_symbol() -> None:
 
 def test_macd_omitted_symbol_holds_ema_exact_value() -> None:
     """BBB present 200/201/202, OMITTED at min3 (carries 202), present 204 at min4. present()-gated ema12 must
-    HOLD across the omitted minute and resume → 200.9859 (the head-to-head value; the isfinite(latest) bug gives
-    201.1892 by wrongly advancing on the carried 202)."""
+    HOLD across the omitted minute and resume → the ADJUSTED EWM over the PRESENT bars [200,201,202,204] only.
+    The isfinite(latest) bug would instead advance on the carried 202 (a 5th pseudo-bar), giving a larger value —
+    so this pins the present()-gate is effective AND the adjusted convention."""
     def _bar(present_map, epoch):
         return {"symbol": np.array(list(present_map.keys())),
                 "close": np.array(list(present_map.values()), dtype=np.float64),
@@ -843,10 +854,15 @@ def test_macd_omitted_symbol_holds_ema_exact_value() -> None:
     engine.step(_bar({"BBB": 202.0}, 180))
     engine.step({"symbol": np.array([], dtype="<U4"), "close": np.array([]),
                  "minute_epoch": np.array([240], dtype=np.int64)})  # BBB OMITTED — carries 202
-    out = engine.step(_bar({"BBB": 204.0}, 300))["macd"]
-    # ema12 must be the present-gated value (BBB seen at 200,201,202,204 — the omitted minute did NOT advance it)
-    assert engine._group_state["macd"]["ema12"][0] == pytest.approx(200.9859, abs=1e-3), \
+    engine.step(_bar({"BBB": 204.0}, 300))
+    ema12 = (engine._group_state["macd"]["ema12__num"][0]
+             / engine._group_state["macd"]["ema12__den"][0])
+    expected_present = _ema_ref([200.0, 201.0, 202.0, 204.0], 12)  # PRESENT bars only (omitted minute holds)
+    expected_if_leaked = _ema_ref([200.0, 201.0, 202.0, 202.0, 204.0], 12)  # bug: carried 202 advances it
+    assert ema12 == pytest.approx(expected_present, abs=1e-6), \
         "EMA advanced on the omitted (carried) minute — present() gate not effective"
+    assert ema12 != pytest.approx(expected_if_leaked, abs=1e-6), \
+        "fixture must distinguish the present-gated value from the leaked (carried-bar) value"
 
 
 def test_intraday_omitted_symbol_does_not_count_exact() -> None:
@@ -1535,27 +1551,50 @@ from quantlib.features.clean_groups_xsectional import ReturnDispersionClean, _xs
 
 # DEFERRED FEATURE TALLY (Lead's guardrail): {group: [features emitted NaN-by-design, NOT validated-correct]}.
 # all-68-green is NOT satisfied until these compute real values. Updated as deferred features are wired.
-DEFERRED_NAN_FEATURES = {
-    "return_dispersion": [
-        "return_dispersion_std_1d", "return_dispersion_iqr_1d",
-        "return_dispersion_std_5d", "return_dispersion_iqr_5d",
-    ],  # daily horizons → window.session (snapshot batch #55); NaN until then.
-}
+# DRAINED (batch #55, 8a33705/1d96c8a): the 4 return_dispersion daily horizons now compute from the daily
+# snapshot (window.session['daily_close']) — no longer NaN-by-design. Ledger EMPTY.
+DEFERRED_NAN_FEATURES: dict[str, list[str]] = {}
 
 
-def test_xsec_std_iqr_quantile_is_nearest_not_linear() -> None:
-    """SILENT-DIVERGENCE TRAP (ArchOverhaul): the IQR uses polars-default quantile interpolation = 'nearest',
-    NOT numpy-default 'linear'. Verified independently: on [1,2,3,4] polars q75=3.0 (==np nearest) vs 3.25
-    (linear). Confirm the clean _xsec_std_iqr IQR matches polars/'nearest', not 'linear'."""
+def test_xsec_iqr_matches_polars_default_on_half_integer_position() -> None:
+    """SILENT-DIVERGENCE GATE (the bug f20d8cc fixed): the legacy IQR is polars ``col.quantile(0.75/0.25)`` with
+    polars DEFAULT interpolation. Polars default ('nearest') uses ROUND-HALF-UP of ``q*(n-1)``, NOT numpy
+    ``method='nearest'`` (round-half-to-EVEN). They diverge exactly when ``q*(n-1)`` lands on x.5.
+
+    The PRIOR fixture ([1,2,3,4]) was a FALSE GREEN — there polars-nearest, numpy-nearest and numpy-higher all
+    coincide. This pins a DIVERGENT shape: n=7, q=0.75 → q*(n-1)=4.5 → polars picks sorted index 5, numpy
+    'nearest' picks index 4. The clean _xsec_std_iqr MUST match legacy polars, or every captured IQR feature is
+    train/serve-skewed vs the historical (polars-computed) vectors."""
     import polars as pl  # noqa: PLC0415
 
-    vals = np.array([1.0, 2.0, 3.0, 4.0])
-    present = np.array([True, True, True, True])
+    vals = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 10.0, 20.0])  # q*(n-1)=4.5 for q=0.75 → polars idx5, numpy idx4
+    present = np.full(vals.shape, True)
     _std, iqr = _xsec_std_iqr(vals, present)
-    polars_iqr = pl.Series(vals).quantile(0.75) - pl.Series(vals).quantile(0.25)  # polars default
-    linear_iqr = np.quantile(vals, 0.75, method="linear") - np.quantile(vals, 0.25, method="linear")
-    assert iqr == pytest.approx(polars_iqr)  # matches polars 'nearest' (the legacy path)
-    assert iqr != pytest.approx(linear_iqr)  # and is NOT the numpy-default 'linear' (the trap)
+    legacy_iqr = float(pl.Series(vals).quantile(0.75) - pl.Series(vals).quantile(0.25))  # polars default
+    numpy_nearest_iqr = float(
+        np.quantile(vals, 0.75, method="nearest") - np.quantile(vals, 0.25, method="nearest")
+    )
+    assert legacy_iqr != pytest.approx(numpy_nearest_iqr), (
+        "fixture must be a DIVERGENT shape (polars-default != numpy-nearest), else the test is vacuous"
+    )
+    assert iqr == pytest.approx(legacy_iqr), (
+        f"clean IQR {iqr} != legacy polars IQR {legacy_iqr} — _xsec_std_iqr must use polars' round-half-up rule"
+    )
+
+
+def test_xsec_iqr_matches_polars_across_random_universes() -> None:
+    """Stronger pin: the clean IQR must match legacy polars over MANY random cross-sections (varied n, including
+    the half-integer positions that expose the round-half-up vs round-half-even gap)."""
+    import polars as pl  # noqa: PLC0415
+
+    rng = np.random.default_rng(99)
+    for _ in range(300):
+        n = int(rng.integers(2, 120))
+        vals = rng.standard_normal(n) * float(rng.uniform(1e-4, 0.2))
+        present = np.full(vals.shape, True)
+        _std, iqr = _xsec_std_iqr(vals, present)
+        legacy_iqr = float(pl.Series(vals).quantile(0.75) - pl.Series(vals).quantile(0.25))
+        assert iqr == pytest.approx(legacy_iqr, abs=1e-15), f"n={n}: clean IQR {iqr} != legacy polars {legacy_iqr}"
 
 
 def test_xsec_std_is_ddof1() -> None:
@@ -1589,22 +1628,74 @@ def test_return_dispersion_intraday_present_gated_and_nonnan() -> None:
     assert np.isnan(out["return_dispersion_std_5m"][3]), "absent D → NaN (present()-gated)"
 
 
-def test_return_dispersion_intraday_contract_daily_deferred_flagged() -> None:
-    """Contract on the INTRADAY 6; the 4 daily are DEFERRED-NaN by design (in DEFERRED_NAN_FEATURES). This
-    asserts the deferred set is EXACTLY the daily horizons (so a real feature can't silently slip into the
-    deferred bucket) AND the intraday 6 are NOT in it (they must genuinely compute)."""
+def test_return_dispersion_deferred_ledger_empty_and_contract() -> None:
+    """LEDGER-DRAIN gate (batch #55): the 4 daily horizons now compute from the daily snapshot, so the
+    DEFERRED_NAN_FEATURES ledger MUST be empty (no feature emitted NaN-by-design). produced == declared."""
     import sys  # noqa: PLC0415
     sys.path.insert(0, "/home/ben/quant-fp")
     from quantlib.features.groups.return_dispersion import ReturnDispersionGroup  # type: ignore  # noqa: PLC0415,E501
 
-    deferred = set(DEFERRED_NAN_FEATURES["return_dispersion"])
+    assert DEFERRED_NAN_FEATURES == {}, "deferred ledger must be empty for all-68-green"
     declared = {s.name for s in ReturnDispersionGroup().declare()}
-    intraday = {f for f in declared if f.endswith("m")}
-    daily = {f for f in declared if f.endswith("d")}
-    assert deferred == daily, "deferred set must be exactly the daily horizons"
-    assert not (deferred & intraday), "no intraday feature may be deferred-NaN"
-    # produced set == declared (the daily exist-as-NaN, which the contract allows under nan_policy=sparse)
     assert set(ReturnDispersionClean().feature_names) == declared
+
+
+def _step_return_dispersion_with_daily(daily_close: np.ndarray, syms: list[str]) -> dict[str, np.ndarray]:
+    """Drive ReturnDispersionClean through the engine with a daily snapshot set, all symbols present one minute,
+    so the daily horizons compute from window.session['daily_close']."""
+    eng = CleanEngine([ReturnDispersionClean()], syms, WINDOW)
+    eng.set_session({"daily_close": daily_close})
+    rng = np.random.default_rng(5)
+    for ep in range(8):
+        eng.step({"symbol": np.array(syms),
+                  "close": np.array([100.0 + rng.standard_normal() for _ in syms], dtype=np.float64),
+                  "volume": np.zeros(len(syms), dtype=np.float64),
+                  "minute_epoch": np.array([60 + ep * 60], dtype=np.int64)})
+    return eng.step({"symbol": np.array(syms),
+                     "close": np.array([101.0 + i for i in range(len(syms))], dtype=np.float64),
+                     "volume": np.zeros(len(syms), dtype=np.float64),
+                     "minute_epoch": np.array([600], dtype=np.int64)})["return_dispersion"]
+
+
+def test_return_dispersion_daily_horizons_compute_real_xsec_dispersion() -> None:
+    """FULL-GREEN gate for the daily horizons: with a daily snapshot set, return_dispersion_{std,iqr}_{1d,5d}
+    equal the cross-sectional std(ddof=1)/IQR of the universe's w-day returns from the snapshot — a real value
+    (no longer deferred-NaN), present()-gated and broadcast."""
+    import polars as pl  # noqa: PLC0415
+
+    syms = ["A", "B", "C", "D", "E"]
+    daily_close = np.array([  # (n_sym, n_days), newest col LAST; 1d return = col[-1]/col[-2]-1
+        [98.0, 100.0, 102.0],
+        [49.0, 50.0, 51.5],
+        [201.0, 200.0, 198.0],
+        [78.0, 80.0, 84.0],
+        [9.9, 10.0, 10.1],
+    ])
+    out = _step_return_dispersion_with_daily(daily_close, syms)
+    ret_1d = daily_close[:, -1] / daily_close[:, -2] - 1.0
+    hand_std_1d = float(np.std(ret_1d, ddof=1))
+    hand_iqr_1d = float(pl.Series(ret_1d).quantile(0.75) - pl.Series(ret_1d).quantile(0.25))
+    for i in range(len(syms)):  # broadcast to every present symbol
+        assert out["return_dispersion_std_1d"][i] == pytest.approx(hand_std_1d)
+        assert out["return_dispersion_iqr_1d"][i] == pytest.approx(hand_iqr_1d)
+    # only 3 daily columns → 5d return needs 6 → warm-up NaN (a real, correct NaN, not deferred-NaN)
+    assert np.all(np.isnan(out["return_dispersion_std_5d"])), "5d warm-up NaN with only 3 daily columns"
+
+
+def test_return_dispersion_daily_warmup_and_present_gating() -> None:
+    """daily horizons NaN where snapshot lacks w+1 days (warm-up), and absent symbols → NaN (present-gated)."""
+    syms = ["A", "B", "C"]
+    daily_close = np.array([[100.0, 102.0], [50.0, 51.0], [200.0, 199.0]])  # 2 days → 1d ok, 5d warm-up
+    eng = CleanEngine([ReturnDispersionClean()], syms, WINDOW)
+    eng.set_session({"daily_close": daily_close})
+    eng.step({"symbol": np.array(syms), "close": np.array([100.0, 50.0, 200.0]),
+              "volume": np.zeros(3), "minute_epoch": np.array([60], dtype=np.int64)})
+    out = eng.step({"symbol": np.array(["A", "B"]),  # C absent this minute
+                    "close": np.array([101.0, 51.0]), "volume": np.zeros(2),
+                    "minute_epoch": np.array([120], dtype=np.int64)})["return_dispersion"]
+    assert np.isfinite(out["return_dispersion_std_1d"][0]), "1d computes (2 days)"
+    assert np.isnan(out["return_dispersion_std_5d"][0]), "5d warm-up → NaN (only 2 days)"
+    assert np.isnan(out["return_dispersion_std_1d"][2]), "absent C → NaN (present-gated)"
 
 
 # ========================================================================================================= #
@@ -2156,3 +2247,80 @@ def test_price_levels_contract_and_seed_equals_live() -> None:
         np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(lo["price_levels"][fname]), rtol=1e-12,
                                    err_msg=f"price_levels.{fname} seed != live")
     _assert_feature_spec_contract(so["price_levels"], PriceLevelGroup().declare(), "price_levels ")
+
+
+# ========================================================================================================= #
+# DAILY-SNAPSHOT — batch #55: multi_day (MultiDayReturnGroup). Intraday-INVARIANT: daily_return/vol/dist-from-
+# high computed ONCE from the settled daily closes in window.session['daily_close'] (newest col = prior close,
+# the _asof anchor) and broadcast to every minute. Gated head-to-head vs legacy polars (rolling_std=ddof=1,
+# _asof=shift(1), dist uses rolling_max of CLOSES not highs — both legacy & clean).
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_daily import (  # noqa: E402
+    MultiDayClean,
+    _daily_return,
+    _daily_vol,
+    _dist_from_high,
+)
+
+
+def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
+    """daily_return_{w}d / daily_vol_{w}d / dist_from_{w}d_high equal legacy polars exactly on a known series:
+    return = close[-1]/close[-(w+1)]-1, vol = rolling_std(ddof=1) of daily returns, dist = close[-1]/rolling_max
+    -1. The newest daily column IS the prior close (_asof), matching legacy shift(1)."""
+    import polars as pl  # noqa: PLC0415
+
+    closes = np.array([100.0, 102.0, 101.0, 105.0, 103.0, 107.0, 110.0, 108.0, 111.0, 115.0])
+    mat = closes.reshape(1, -1)  # 1 symbol, newest LAST
+    df = pl.DataFrame({"symbol": ["X"] * len(closes), "_asof": closes})
+    for w in (1, 2, 5):
+        df = df.with_columns((pl.col("_asof") / pl.col("_asof").shift(w).over("symbol") - 1.0).alias(f"r{w}"))
+        assert _daily_return(mat, w)[0] == pytest.approx(df[f"r{w}"].to_list()[-1])
+    df = df.with_columns((pl.col("_asof") / pl.col("_asof").shift(1).over("symbol") - 1.0).alias("_dret"))
+    for w in (5,):
+        df = df.with_columns(pl.col("_dret").rolling_std(window_size=w).over("symbol").alias(f"v{w}"))
+        assert _daily_vol(mat, w)[0] == pytest.approx(df[f"v{w}"].to_list()[-1])
+    falling = np.array([100.0, 120.0, 110.0, 105.0, 108.0]).reshape(1, -1)  # high=120, asof=108
+    assert _dist_from_high(falling, 5)[0] == pytest.approx(108.0 / 120.0 - 1.0)  # -10%, non-trivial
+
+
+def test_multi_day_warmup_nan_when_insufficient_days() -> None:
+    """A horizon needing more days than the snapshot holds → NaN (warm-up)."""
+    short = np.array([100.0, 102.0, 101.0]).reshape(1, -1)  # 3 days
+    assert np.isnan(_daily_return(short, 5)[0]), "daily_return_5d on 3 days → NaN"
+    assert _daily_return(short, 2)[0] == pytest.approx(101.0 / 100.0 - 1.0), "daily_return_2d on 3 days computes"
+
+
+def test_multi_day_contract_and_no_session_is_nan() -> None:
+    """produced == declared with legacy valid_range/nan_policy; no daily snapshot → all-NaN (not a crash)."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.multi_day import MultiDayReturnGroup  # type: ignore  # noqa: PLC0415
+
+    syms = ["A", "B"]
+    daily_close = np.array([[98.0, 100.0, 102.0, 104.0, 106.0, 108.0], [49.0, 50.0, 50.5, 51.0, 51.5, 52.0]])
+    eng = CleanEngine([MultiDayClean()], syms, WINDOW)
+    eng.set_session({"daily_close": daily_close})
+    out = eng.step({"symbol": np.array(syms), "close": np.array([102.0, 50.0]),
+                    "volume": np.zeros(2), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day"]
+    _assert_feature_spec_contract(out, MultiDayReturnGroup().declare(), "multi_day ")
+    eng2 = CleanEngine([MultiDayClean()], syms, WINDOW)  # no session → all-NaN, no crash
+    out2 = eng2.step({"symbol": np.array(syms), "close": np.array([102.0, 50.0]),
+                      "volume": np.zeros(2), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day"]
+    assert all(np.all(np.isnan(arr)) for arr in out2.values()), "no daily snapshot → all-NaN"
+
+
+def test_multi_day_broadcasts_same_value_across_minutes() -> None:
+    """INTRADAY-INVARIANT: the daily features are identical every minute of the session (compute-once,
+    broadcast) — the snapshot is fixed for the day."""
+    syms = ["A", "B", "C"]
+    daily_close = np.array([[98.0, 100.0, 103.0], [49.0, 50.0, 52.0], [201.0, 200.0, 198.0]])
+    eng = CleanEngine([MultiDayClean()], syms, WINDOW)
+    eng.set_session({"daily_close": daily_close})
+    first = eng.step({"symbol": np.array(syms), "close": np.array([103.0, 52.0, 198.0]),
+                      "volume": np.zeros(3), "minute_epoch": np.array([60], dtype=np.int64)})["multi_day"]
+    later = eng.step({"symbol": np.array(syms), "close": np.array([104.0, 53.0, 197.0]),
+                      "volume": np.zeros(3), "minute_epoch": np.array([120], dtype=np.int64)})["multi_day"]
+    for fname in first:
+        np.testing.assert_allclose(np.nan_to_num(first[fname]), np.nan_to_num(later[fname]), rtol=1e-12,
+                                   err_msg=f"multi_day.{fname} drifted across minutes (must be intraday-invariant)")

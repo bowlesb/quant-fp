@@ -109,10 +109,12 @@ def test_macd_recursive_ema_presence_decay() -> None:
     for _ in range(40):
         eng.step({"symbol": np.array(["A", "B"]), "close": np.array([100.0, 100.0])})
     # A jumps, B is ABSENT this minute → B's macd must be unchanged (held), A's must move +
-    before_b = eng._group_state["macd"]["ema12"][1]
+    # adjusted EWM carries (num, den); "held" = BOTH unchanged for the absent symbol.
+    before_b = (eng._group_state["macd"]["ema12__num"][1], eng._group_state["macd"]["ema12__den"][1])
     out = eng.step({"symbol": np.array(["A"]), "close": np.array([110.0])})
     assert out["macd"]["macd_line"][0] > 0  # A reacted
-    assert eng._group_state["macd"]["ema12"][1] == before_b  # B held (presence-decay)
+    after_b = (eng._group_state["macd"]["ema12__num"][1], eng._group_state["macd"]["ema12__den"][1])
+    assert after_b == before_b  # B held (presence-decay)
 
 
 def test_swing_state_machine() -> None:
@@ -162,7 +164,7 @@ def test_idempotent_on_duplicate_minute() -> None:
         }
     )
     sum_before = float(eng._group_state["intraday_seasonality"]["sum"][0])
-    ema_before = float(eng._group_state["macd"]["ema12"][0])
+    ema_before = (eng._group_state["macd"]["ema12__num"][0], eng._group_state["macd"]["ema12__den"][0])
     # RE-DELIVER minute 60 — must be a no-op on all carried state
     eng.step(
         {
@@ -173,7 +175,8 @@ def test_idempotent_on_duplicate_minute() -> None:
         }
     )
     assert float(eng._group_state["intraday_seasonality"]["sum"][0]) == sum_before
-    assert float(eng._group_state["macd"]["ema12"][0]) == ema_before
+    ema_after = (eng._group_state["macd"]["ema12__num"][0], eng._group_state["macd"]["ema12__den"][0])
+    assert ema_after == ema_before
 
 
 def test_swing_idempotent_via_epoch_guard_not_presence() -> None:
@@ -247,7 +250,9 @@ def test_presence_gated_on_real_delivery_not_carried_value() -> None:
                         "minute_epoch": np.array([t * 60]),
                     }
                 )
-        return float(eng._group_state["macd"]["ema12"][0])  # A's EMA
+        num = eng._group_state["macd"]["ema12__num"][0]  # A's adjusted-EWM accumulators
+        den = eng._group_state["macd"]["ema12__den"][0]
+        return float(num / den)  # A's EMA
 
     assert abs(run(False) - run(True)) < 1e-12  # A delivered the same bars → identical EMA either way
 
@@ -262,7 +267,7 @@ def test_presence_gated_on_real_delivery_not_carried_value() -> None:
                 "minute_epoch": np.array([t * 60]),
             }
         )
-    b_ema = float(eng._group_state["macd"]["ema12"][1])
+    b_ema = (eng._group_state["macd"]["ema12__num"][1], eng._group_state["macd"]["ema12__den"][1])
     b_cnt = float(eng._group_state["intraday_seasonality"]["cnt"][1])
     for t in range(20, 25):  # B absent
         eng.step(
@@ -273,5 +278,6 @@ def test_presence_gated_on_real_delivery_not_carried_value() -> None:
                 "minute_epoch": np.array([t * 60]),
             }
         )
-    assert float(eng._group_state["macd"]["ema12"][1]) == b_ema  # B's EMA held
+    b_ema_after = (eng._group_state["macd"]["ema12__num"][1], eng._group_state["macd"]["ema12__den"][1])
+    assert b_ema_after == b_ema  # B's EMA held (both num + den accumulators unchanged)
     assert float(eng._group_state["intraday_seasonality"]["cnt"][1]) == b_cnt  # B's count held
