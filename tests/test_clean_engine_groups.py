@@ -1840,6 +1840,58 @@ def test_sector_beta_near_constant_sector_return_matches_legacy_batch() -> None:
     assert np.isnan(beta[0]), "near-constant-sector beta must be NULLed (BETA_MAX), matching legacy"
 
 
+def test_sector_beta_sparse_time_window_matches_legacy() -> None:
+    """RE-GATE sector_beta on the SPARSE axis (#60 re-port to time-windows; my earlier green was DENSE-only).
+    3 names in one sector, all gappy (every-other-minute). The 30m OLS of own-return on the sector
+    equal-weight return must use the TIME window (legacy rolling_sum_by('minute','30m')), not the last 30
+    positional bars (which would span 60 wall-minutes on this sparse tape). Head-to-head replicates legacy
+    _ols_from_sums over the true-minute rolling sums."""
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    syms = ["A", "B", "C"]
+    sector = np.array([0, 0, 0])
+    offsets = list(range(0, 60, 2))  # sparse: every other wall-minute, spans 58 min > 30m
+    rng = np.random.default_rng(8)
+    closes = {s: 100.0 * np.cumprod(1.0 + rng.standard_normal(len(offsets)) * 0.002) for s in syms}
+
+    # legacy: per-(minute,sector) equal-weight own-return = the regressor; time-windowed OLS at the last minute.
+    rows = [{"symbol": s, "minute": base + datetime.timedelta(minutes=o), "close": float(closes[s][j])}
+            for s in syms for j, o in enumerate(offsets)]
+    df = pl.DataFrame(rows).sort(["symbol", "minute"]).with_columns(
+        (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("_oret"))
+    sret = df.group_by("minute").agg(pl.col("_oret").mean().alias("_sret"))
+    df = df.join(sret, on="minute", how="left").sort(["symbol", "minute"]).with_columns(
+        (pl.col("_oret") * pl.col("_sret")).alias("_xy"), (pl.col("_sret") ** 2).alias("_xx"),
+        (pl.col("_oret") ** 2).alias("_yy"),
+        pl.when(pl.col("_oret").is_not_null() & pl.col("_sret").is_not_null()).then(1).otherwise(0).alias("_n1"))
+
+    def _rsum(col: str) -> pl.Expr:
+        return pl.col(col).rolling_sum_by("minute", window_size="30m").over("symbol")
+
+    df = df.with_columns(_rsum("_oret").alias("sy"), _rsum("_sret").alias("sx"), _rsum("_xy").alias("sxy"),
+                         _rsum("_xx").alias("sxx"), _rsum("_yy").alias("syy"), _rsum("_n1").alias("n"))
+    last = df.filter((pl.col("symbol") == "A") & (pl.col("minute") == base + datetime.timedelta(minutes=offsets[-1])))
+    nn, sx, sy = last["n"][0], last["sx"][0], last["sy"][0]
+    sxy, sxx, syy = last["sxy"][0], last["sxx"][0], last["syy"][0]
+    cov, vx, vy = sxy - sx * sy / nn, sxx - sx * sx / nn, syy - sy * sy / nn
+    legacy_beta = cov / vx if (nn >= 5 and vx > 0 and vy > 0 and abs(cov / vx) <= 15.0) else np.nan
+    legacy_corr = float(np.clip(cov / np.sqrt(vx * vy), -1, 1)) if (nn >= 5 and vx > 0 and vy > 0) else np.nan
+
+    eng = CleanEngine([SectorBetaClean()], syms, 400)
+    eng.static = {"sector": sector}
+    out = {}
+    for j, o in enumerate(offsets):
+        out = eng.step({"symbol": np.array(syms), "close": np.array([closes[s][j] for s in syms]),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
+                                                 dtype=np.int64)})["sector_beta"]
+    assert nn == 15, "the 30m TIME window holds 15 paired returns on this every-other-minute tape (not 30)"
+    assert out["sector_beta_30m"][0] == pytest.approx(legacy_beta, rel=1e-7), "sparse 30m beta != legacy time-OLS"
+    assert out["sector_corr_30m"][0] == pytest.approx(legacy_corr, rel=1e-7), "sparse 30m corr != legacy time-OLS"
+
+
 # ========================================================================================================= #
 # CROSS-SECTIONAL — batch 2d: sector_return (TWO present() gates: DENOMINATOR (absent not in sector mean) AND
 # OUTPUT (absent symbol's own row → NaN). Both must hold.
