@@ -1411,3 +1411,30 @@ def test_distribution_moment_floor_matches_legacy() -> None:
         out = eng.step(_ohlcv_bar(["A"], [c], [c + 1], [c - 1], [c], 60 + ep * 60))["distribution"]
     assert np.isnan(out["ret_skew_10m"][0]), "near-constant m2<1e-12 → skew NaN (matches legacy)"
     assert np.isnan(out["ret_kurt_10m"][0]), "near-constant m2<1e-12 → kurt NaN (matches legacy)"
+
+
+def test_windowed_corr_near_constant_y_matches_batch_not_anchored() -> None:
+    """ANCHORED-Y NUANCE resolved (ArchOverhaul): legacy pv_correlation anchors y ONLY under FP_RUST_REDUCE
+    (the incremental path), using a 1e-9·(b·syy) centered floor to clear incremental running-sum noise. The
+    clean engine is FRESH-SUM (recomputes Σy/Σy² every minute, no accumulation), so it matches the legacy
+    BATCH/backfill path — also fresh-sum, also the non-anchored 1e-12·(Σy)² floor — which is value-truth.
+    Confirm on a near-constant-VOLUME window: clean == legacy batch corr_, NOT the stricter anchored reject.
+    (The anchored refinement is an incremental-vs-batch reconciliation artifact, unnecessary in one fresh-sum
+    path — the general principle for every remaining regression group: port the BATCH math, not the anchoring.)
+    """
+    n = 10
+    rets = np.linspace(-0.005, 0.008, n)
+    vols = 1e6 + np.linspace(0.0, 5.0, n)  # near-constant volume (CoV_y² tiny)
+    clean = _windowed_corr(rets[None, :], vols[None, :], n)[0]
+    # legacy BATCH corr_ (non-anchored, fresh-sum): n>=2 & denom_x>1e-12·(Σx)² & denom_x>1e-9·b·Σx² &
+    # denom_y>1e-12·(Σy)²  (declarative.py:213-217 with FP_RUST_REDUCE unset)
+    sx, sy = rets.sum(), vols.sum()
+    sxx, syy, sxy = (rets * rets).sum(), (vols * vols).sum(), (rets * vols).sum()
+    b = float(n)
+    denom_x, denom_y, cov_n = b * sxx - sx * sx, b * syy - sy * sy, b * sxy - sx * sy
+    defined = (b >= 2) and (denom_x > 1e-12 * sx * sx) and (denom_x > 1e-9 * b * sxx) and (denom_y > 1e-12 * sy * sy)
+    legacy_batch = (cov_n / np.sqrt(denom_x * denom_y)) if defined else np.nan
+    assert clean == pytest.approx(legacy_batch, rel=1e-12), "clean corr must match legacy BATCH (fresh-sum 1e-12)"
+    # and it is a finite value here (the non-anchored floor passes), proving clean does NOT over-reject like
+    # the anchored 1e-9·b·syy floor would (which is incremental-only, not the batch truth the clean engine is).
+    assert np.isfinite(clean)
