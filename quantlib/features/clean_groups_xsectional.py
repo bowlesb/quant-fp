@@ -107,6 +107,95 @@ class ReturnDispersionClean:
         return out
 
 
+_SECTOR_MIN_PAIRS = 5  # legacy sector_beta MIN_PAIRS — fewer paired returns over the window → undefined fit
+_SECTOR_BETA_MAX = 15.0  # |beta| above this → NULL (legacy BETA_MAX)
+
+
+def _sector_equal_weight_returns(ret_mat: np.ndarray, sector: np.ndarray) -> np.ndarray:
+    """Per-(minute, sector) equal-weight mean of the finite returns, broadcast back to each symbol's row →
+    a ``(n_symbols, buffer)`` matrix where cell [i,t] = the mean return of symbol i's sector at minute t (over
+    the symbols present+finite in that sector that minute). NaN where the symbol's return is NaN or its sector
+    is empty that minute. ``sector`` is the per-symbol integer label (UNKNOWN handled by the caller)."""
+    out = np.full_like(ret_mat, np.nan)
+    for sec in np.unique(sector):
+        rows = np.where(sector == sec)[0]
+        block = ret_mat[rows]  # (n_in_sector, buffer)
+        mask = np.isfinite(block)
+        n = mask.sum(axis=0)  # present-finite count per minute in this sector
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean = np.where(mask, block, 0.0).sum(axis=0) / n
+        mean = np.where(n > 0, mean, np.nan)  # (buffer,)
+        out[rows] = mean[None, :]  # broadcast the sector mean to each member row
+    return out
+
+
+def _windowed_sector_ols(own_ret: np.ndarray, sec_ret: np.ndarray, w: int) -> tuple[np.ndarray, np.ndarray]:
+    """sector_beta's windowed OLS of own return (y) on sector return (x) over the trailing ``w`` minutes,
+    paired where BOTH finite. Matches legacy ``_ols_from_sums`` EXACTLY: cov=sxy−sx·sy/n, var=sxx−sx²/n;
+    defined = n≥MIN_PAIRS(5) & var_x>0 & var_y>0; beta NULL when |beta|>BETA_MAX(15); corr clipped to [-1,1].
+    """
+    xw = _trailing_window(sec_ret, w)
+    yw = _trailing_window(own_ret, w)
+    mask = np.isfinite(xw) & np.isfinite(yw)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, xw, 0.0)
+    yf = np.where(mask, yw, 0.0)
+    sx, sy = xf.sum(axis=1), yf.sum(axis=1)
+    sxx, syy, sxy = (xf * xf).sum(axis=1), (yf * yf).sum(axis=1), (xf * yf).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = sxy - sx * sy / n
+        var_x = sxx - sx * sx / n
+        var_y = syy - sy * sy / n
+        beta = cov / var_x
+        corr = cov / (np.sqrt(var_x) * np.sqrt(var_y))
+    defined = (n >= _SECTOR_MIN_PAIRS) & (var_x > 0.0) & (var_y > 0.0)
+    beta_out = np.where(defined & (np.abs(beta) <= _SECTOR_BETA_MAX), beta, np.nan)
+    corr_out = np.where(defined, np.clip(corr, -1.0, 1.0), np.nan)
+    return beta_out, corr_out
+
+
+def _trailing_window(mat: np.ndarray, w: int) -> np.ndarray:
+    """Last ``w`` columns of a ``(n_symbols, buffer)`` matrix."""
+    return mat[:, -w:]
+
+
+def _buffer_returns(close: np.ndarray) -> np.ndarray:
+    """Per-bar close-to-close return matrix over the trailing buffer; first column NaN (no prior bar)."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ret = close[:, 1:] / close[:, :-1] - 1.0
+    return np.concatenate([np.full((close.shape[0], 1), np.nan), ret], axis=1)
+
+
+class SectorBetaClean:
+    """CROSS_SECTIONAL: per window, the rolling OLS of each name's one-minute return on its OWN GICS sector's
+    equal-weight one-minute return — sector_beta_{w} (slope) + sector_corr_{w} (corr in [-1,1]). The sector
+    aggregate is a per-(minute,sector) present-symbol equal-weight mean. Unmapped-sector names → NULL. Legacy:
+    ``SectorBetaGroup``. Reads ``window.static['sector']`` for the per-symbol GICS label."""
+
+    name = "sector_beta"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (15, 30, 60)
+    _UNKNOWN = -1  # the unmapped-sector sentinel
+    feature_names = tuple(f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("sector_beta", "sector_corr"))
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        n_sym = close.shape[0]
+        sector = window.static.get("sector")
+        if sector is None:
+            sector = np.full(n_sym, self._UNKNOWN)
+        own_ret = _buffer_returns(close)
+        sec_ret = _sector_equal_weight_returns(own_ret, sector)
+        is_unknown = sector == self._UNKNOWN
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            beta, corr = _windowed_sector_ols(own_ret, sec_ret, w)
+            # unmapped-sector names → NULL (no sector series to regress on)
+            out[f"sector_beta_{w}m"] = np.where(is_unknown, np.nan, beta)
+            out[f"sector_corr_{w}m"] = np.where(is_unknown, np.nan, corr)
+        return out
+
+
 class CrossSectionalRankClean:
     """CROSS_SECTIONAL: percentile rank (0-1) of each present symbol's trailing return / volume / dollar-volume
     across the present cross-section that minute. return_rank over (5,15,30,60), volume_rank_1m,
