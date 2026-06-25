@@ -1897,3 +1897,101 @@ def test_peer_relative_contract_and_seed_equals_live() -> None:
         np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(lo["peer_relative"][fname]),
                                    rtol=1e-12, err_msg=f"peer_relative.{fname} seed != live")
     _assert_feature_spec_contract(so["peer_relative"], PeerRelativeReturnGroup().declare(), "peer_relative ")
+
+
+# ========================================================================================================= #
+# POINT-IN-TIME — batch 3a: calendar (input_cols=(), timestamp-only) + the ENGINE CHANGE regression pass.
+# The Lead's blast-radius check: input_cols=() altered _marshal — confirm it did NOT regress present()/
+# watermark/seed==live on the existing green groups (cross-sectional sparse + carried-state dedup).
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_pointwise import CalendarClean  # noqa: E402
+
+
+def _et_epoch(y, mo, d, h, mi):
+    import datetime as _dt  # noqa: PLC0415
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+    return int(_dt.datetime(y, mo, d, h, mi, tzinfo=ZoneInfo("America/New_York")).timestamp())
+
+
+def test_calendar_known_timestamps() -> None:
+    """calendar from minute_epoch (ET): 08:00 → since_open=-90, is_regular=0; 10:00 → 30, 1; day_of_week ISO."""
+    eng = CleanEngine([CalendarClean()], ["A"], WINDOW)
+    # 2026-06-25 is a Thursday → ISO day_of_week 4
+    out = eng.step({"symbol": np.array(["A"]), "minute_epoch": np.array([_et_epoch(2026, 6, 25, 8, 0)],
+                                                                        dtype=np.int64)})["calendar"]
+    assert out["minute_of_day_et"][0] == pytest.approx(480.0)       # 08:00 = 480
+    assert out["minutes_since_open"][0] == pytest.approx(-90.0)     # 480 - 570
+    assert out["is_regular_session"][0] == pytest.approx(0.0)       # pre-market
+    assert out["day_of_week"][0] == pytest.approx(4.0)              # Thursday ISO
+    out2 = eng.step({"symbol": np.array(["A"]), "minute_epoch": np.array([_et_epoch(2026, 6, 25, 10, 0)],
+                                                                         dtype=np.int64)})["calendar"]
+    assert out2["minutes_since_open"][0] == pytest.approx(30.0)     # 600 - 570
+    assert out2["is_regular_session"][0] == pytest.approx(1.0)
+
+
+def test_calendar_contract() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.calendar import CalendarGroup  # type: ignore  # noqa: PLC0415
+
+    eng = CleanEngine([CalendarClean()], ["A", "B"], WINDOW)
+    out = eng.step({"symbol": np.array(["A", "B"]),
+                    "minute_epoch": np.array([_et_epoch(2026, 6, 25, 11, 30)], dtype=np.int64)})["calendar"]
+    _assert_feature_spec_contract(out, CalendarGroup().declare(), "calendar ")
+
+
+# --- ENGINE-CHANGE REGRESSION PASS (the Lead's cross-group blast-radius check) --- #
+
+
+def test_engine_change_no_regression_present_gating_co_resident() -> None:
+    """REGRESSION: with calendar (input_cols=()) CO-RESIDENT in the engine, a present()-gated cross-sectional
+    group's sparse behavior must STILL hold — the input-less _marshal path must not corrupt present()/the ring
+    for the other group. cross_sectional_rank: A,B,C present / D absent → rank over n=3, D=NaN (unchanged)."""
+    syms = ["A", "B", "C", "D"]
+    eng = CleanEngine([CalendarClean(), CrossSectionalRankClean()], syms, WINDOW)
+    ep = _et_epoch(2026, 6, 25, 10, 0)
+    eng.step({"symbol": np.array(syms), "close": np.array([100.0] * 4), "volume": np.array([9999.0] * 4),
+              "minute_epoch": np.array([ep], dtype=np.int64)})
+    out = eng.step({"symbol": np.array(["A", "B", "C"]), "close": np.array([100.0, 100.0, 100.0]),
+                    "volume": np.array([1500.0, 2500.0, 3500.0]),
+                    "minute_epoch": np.array([ep + 60], dtype=np.int64)})
+    rank = out["cross_sectional_rank"]
+    assert rank["volume_rank_1m"][0] == pytest.approx(0.0)   # present-only denom unchanged
+    assert rank["volume_rank_1m"][2] == pytest.approx(1.0)
+    assert np.isnan(rank["volume_rank_1m"][3])               # absent D NaN
+    # calendar still broadcasts correctly co-resident
+    assert out["calendar"]["is_regular_session"][0] == pytest.approx(1.0)
+
+
+def test_engine_change_no_regression_watermark_dedup_co_resident() -> None:
+    """REGRESSION: with calendar co-resident, the watermark dedup must STILL no-op a duplicate/stale minute on
+    a carried-state group. intraday_seasonality cnt must stay correct under a duplicate epoch."""
+    syms = ["A"]
+    eng = CleanEngine([CalendarClean(), IntradaySeasonalityClean()], syms, WINDOW)
+    eng.step({"symbol": np.array(["A"]), "volume": np.array([1000.0]), "minute_epoch": np.array([60], dtype=np.int64)})
+    eng.step({"symbol": np.array(["A"]), "volume": np.array([1000.0]), "minute_epoch": np.array([120], dtype=np.int64)})
+    cnt_before = eng._group_state["intraday_seasonality"]["cnt"][0]
+    eng.step({"symbol": np.array(["A"]), "volume": np.array([1000.0]), "minute_epoch": np.array([120], dtype=np.int64)})  # DUP
+    cnt_after = eng._group_state["intraday_seasonality"]["cnt"][0]
+    assert cnt_after == cnt_before, "duplicate epoch double-counted with calendar co-resident (watermark regressed)"
+
+
+def test_calendar_broadcasts_to_absent_BEHAVIORAL_NOTE() -> None:
+    """BEHAVIORAL DIFFERENCE flagged to ArchOverhaul (not a hard fail — depends on the output contract): the
+    clean calendar broadcasts its symbol-independent value to EVERY index symbol, including ABSENT ones; legacy
+    emits a calendar row ONLY for symbols present that minute (computes from minute_agg's (symbol,minute) frame
+    = present rows). So an absent symbol gets the calendar value in clean but NO row in legacy. This matters IFF
+    the clean engine's per-minute output is NOT present-filtered before persistence/fingerprint. calendar is
+    nan_policy=none (always-defined) so it's not the sparse-null case — but the present()-OUTPUT question (like
+    sector_return's output gate) applies: should absent symbols get NaN calendar? Pinned as the current
+    behavior; resolution = ArchOverhaul's call on whether point-in-time groups output-gate on present()."""
+    import datetime as _dt  # noqa: PLC0415
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    ep = int(_dt.datetime(2026, 6, 25, 10, 0, tzinfo=ZoneInfo("America/New_York")).timestamp())
+    eng = CleanEngine([CalendarClean()], ["A", "B"], WINDOW)
+    out = eng.step({"symbol": np.array(["A"]), "minute_epoch": np.array([ep], dtype=np.int64)})["calendar"]
+    # CURRENT clean behavior: absent B gets the broadcast value (documents the difference; flip to NaN-assert
+    # if ArchOverhaul decides point-in-time groups should output-gate on present()).
+    assert out["minute_of_day_et"][1] == pytest.approx(600.0)  # absent B currently gets the value
