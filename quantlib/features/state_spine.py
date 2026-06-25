@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
+
 # Default OFF. Mergeable without changing live behaviour: when unset/"0" the engine takes today's exact polars
 # ``_derived_row`` path (byte-identical by construction), so this can merge and ride the warm-start deploy seam
 # exactly like FP_POINT_RING — armed + relaunched separately under the live parity gate. Same idiom as
@@ -46,3 +48,88 @@ def spine_active(group_names: frozenset[str] | set[str]) -> bool:
     holds other groups is a no-op, not a silent wrong path. Widened deliberately, group by group, only as each
     is value-gated onto the carried path."""
     return USE_STATE_SPINE and frozenset(group_names) == SPINE_GROUPS
+
+
+def price_volume_safe_cols(
+    close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    volume: np.ndarray,
+    anchor_volume: np.ndarray,
+    prior_close: np.ndarray,
+    present: np.ndarray,
+    *,
+    y_anchored: bool,
+) -> dict[str, np.ndarray]:
+    """Numpy derive of ``price_volume``'s SAFE value columns at the latest minute — the polars-free equivalent of
+    the safe-col half of ``IncrementalEngine._derived_row`` for this one group.
+
+    All inputs are ``(n_symbols,)`` arrays aligned to the fixed session index: the latest minute's ``close /
+    high / low / volume`` and per-symbol-constant ``anchor_volume``, each symbol's ``prior_close`` (the bar
+    immediately before the latest — ``NaN`` if the symbol has no prior bar, exactly as ``close.shift(1).over``
+    leaves it), and ``present`` (did this symbol deliver a bar this minute). Returns ``{col_name: (n_symbols,)
+    array}`` for the columns ``_matrix_at`` reads off ``self.safe_value_cols``. The OBV slope's paired columns are
+    NOT produced here — they are rebuilt from the engine's carried ``obv_running`` by ``_stateful_matrix`` (the
+    already-numpy stateful path), unchanged.
+
+    Reproduces the declarative exprs cell-for-cell (``price_volume.reduced()`` + ``regressions()['pv']`` via
+    ``_ols_derived``):
+      * ``ret = close/prior_close − 1`` (NaN where no prior bar — null, as the batch ``shift`` leaves it)
+      * ``rng = high − low``; ``mfm = (2·close − high − low)/rng`` where ``rng > 0`` else ``0``
+      * reduced bases: ``vol``, presence ``vol__p``, ``cv = close·vol``, ``mfv = mfm·vol``,
+        ``up = vol where ret>0 else 0``, ``dn = vol where ret<0 else 0``
+      * pv-corr OLS pairs (x = ``ret``, y = ``volume − anchor_volume`` when ``y_anchored`` i.e. FP_RUST_REDUCE,
+        else raw ``volume``): ``both = x present & y present``, then ``x/y`` zeroed off-pair and the products.
+
+    An ABSENT symbol (``present`` False) has no bar in the batch, so it contributes nothing: its reduced bases are
+    null/zero by the absent-as-zero rule the caller already applies (the matrix is pre-zeroed), and its pv pair is
+    masked to ``b=0`` here via ``present`` so the running OLS count matches the batch (which has no row for it).
+    """
+    finite_prior = np.isfinite(prior_close) & (prior_close != 0.0) & present
+    ret = np.where(finite_prior, close / np.where(finite_prior, prior_close, 1.0) - 1.0, np.nan)
+    rng = high - low
+    mfm = np.where(rng > 0.0, (2.0 * close - high - low) / np.where(rng > 0.0, rng, 1.0), 0.0)
+
+    vol = np.where(present, volume, np.nan)  # absent symbol has a null base (no bar), matching the batch
+    cv = close * vol
+    mfv = mfm * vol
+    up = np.where(ret > 0.0, vol, np.where(present, 0.0, np.nan))
+    dn = np.where(ret < 0.0, vol, np.where(present, 0.0, np.nan))
+
+    # pv-corr OLS paired columns (x = ret, y = volume centered on the per-symbol anchor under FP_RUST_REDUCE).
+    # _ols_derived: both = x.is_not_null() & y.is_not_null(); paired = where(both, val, 0); products.
+    pv_y = (volume - anchor_volume) if y_anchored else volume
+    pv_y = np.where(present, pv_y, np.nan)  # absent symbol: no y row
+    both = np.isfinite(ret) & np.isfinite(pv_y)
+    x_paired = np.where(both, ret, 0.0)
+    y_paired = np.where(both, pv_y, 0.0)
+
+    return {
+        "__b0_vol": vol,
+        "__b0_vol__p": np.where(np.isfinite(vol), 1.0, 0.0),
+        "__b0_cv": cv,
+        "__b0_mfv": mfv,
+        "__b0_up": up,
+        "__b0_dn": dn,
+        "__rd_0_pv_b": both.astype(np.float64),
+        "__rd_0_pv_x": x_paired,
+        "__rd_0_pv_y": y_paired,
+        "__rd_0_pv_xy": x_paired * y_paired,
+        "__rd_0_pv_xx": x_paired * x_paired,
+        "__rd_0_pv_yy": y_paired * y_paired,
+    }
+
+
+def obv_increment(
+    close: np.ndarray, prior_close: np.ndarray, volume: np.ndarray, present: np.ndarray
+) -> np.ndarray:
+    """The OBV cumulative's per-minute increment (``__inc_0_obv``): ``+vol`` on an up-bar, ``−vol`` on a down-bar,
+    ``0`` flat — the ``signed`` expr from ``price_volume.stateful_regressors()``. Zero for an absent symbol (no
+    bar this minute), matching the batch ``cum_sum`` over present rows. This is the ONLY thing the carried OBV
+    state needs each minute; ``_stateful_matrix`` adds it to ``obv_running`` and forms the time-OLS pairs, exactly
+    as it does today off the polars-derived ``__inc`` column — so the carried OBV path is byte-unchanged, only its
+    increment is sourced from numpy instead of a polars expr."""
+    finite_prior = np.isfinite(prior_close) & (prior_close != 0.0) & present
+    ret = np.where(finite_prior, close / np.where(finite_prior, prior_close, 1.0) - 1.0, np.nan)
+    signed = np.where(ret > 0.0, volume, np.where(ret < 0.0, -volume, 0.0))
+    return np.where(present, signed, 0.0)
