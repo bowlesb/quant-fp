@@ -112,7 +112,7 @@ class MultiDayClean:
     ``window.session['daily_close']``. Legacy: ``MultiDayReturnGroup`` (name "multi_day_returns")."""
 
     name = "multi_day_returns"
-    input_cols = ()  # reads only the daily snapshot, not the minute bars
+    input_cols: tuple[str, ...] = ()  # reads only the daily snapshot, not the minute bars
     _DAY_WINDOWS: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 90, 120, 180, 240)
     _VOL_DAYS: tuple[int, ...] = (5, 10, 20, 30, 60)
     _HIGH_DAYS: tuple[int, ...] = (10, 20, 60, 120, 250)
@@ -163,7 +163,7 @@ class MultiDayVwapClean:
     Reads ``window.session['daily_vwap'/'daily_volume'/'daily_close']``. Legacy: ``MultiDayVwapGroup``."""
 
     name = "multi_day_vwap"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = tuple(
         col for days in _VWAP_DAYS for col in (f"dist_from_vwap_{days}d", f"above_vwap_{days}d")
     )
@@ -206,7 +206,7 @@ class DailyBetaClean:
     ``DailyBetaGroup``."""
 
     name = "daily_beta"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = ("daily_beta_60d", "daily_corr_60d", "daily_idio_vol_60d")
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
@@ -275,7 +275,7 @@ class OvernightBetaClean:
     + the SPY row from ``window.static['spy_row']``. Legacy: ``OvernightBetaGroup``."""
 
     name = "overnight_beta"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = ("overnight_beta_60d", "intraday_beta_60d", "beta_overnight_minus_intraday")
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
@@ -313,7 +313,7 @@ class OvernightIntradaySplitClean:
     ``window.session['daily_open'/'daily_close']``. Legacy: ``OvernightIntradaySplitGroup``."""
 
     name = "overnight_intraday_split"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = ("intraday_ret", "overnight_minus_intraday", "overnight_share")
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
@@ -345,7 +345,7 @@ class LiquidityRankClean:
     ``window.session['daily_close'/'daily_volume']``. Legacy: ``LiquidityRankGroup`` (DailySnapshotGroup)."""
 
     name = "liquidity_rank"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = ("adv_dollar_log_20d", "liquidity_rank")
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:

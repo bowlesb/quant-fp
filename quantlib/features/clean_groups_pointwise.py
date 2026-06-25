@@ -29,7 +29,7 @@ class CalendarClean:
     Legacy: ``CalendarGroup``."""
 
     name = "calendar"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = ("minute_of_day_et", "day_of_week", "minutes_since_open", "is_regular_session")
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
@@ -86,7 +86,7 @@ class CalendarEventsClean:
     ``CalendarEventsGroup``."""
 
     name = "calendar_events"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = (
         "day_of_month_norm",
         "week_of_month",
@@ -139,7 +139,7 @@ class SectorOneHotClean:
     ``SectorOneHotGroup``."""
 
     name = "sector"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = tuple(f"sector_is_{sector}" for sector in _SECTORS) + ("sector_is_unknown",)
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
@@ -173,7 +173,7 @@ class AssetFlagsClean:
     ``AssetFlagsGroup``."""
 
     name = "asset_flags"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = tuple(feature for feature, _ in _ASSET_FLAGS)
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:

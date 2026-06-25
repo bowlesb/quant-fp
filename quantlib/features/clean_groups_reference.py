@@ -55,7 +55,7 @@ class NewsSentimentClean:
     ``NewsSentimentGroup``."""
 
     name = "news_sentiment"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = (
         tuple(f"news_sentiment_mean_{s}" for s in _NEWS_WINDOWS_M)
         + tuple(f"news_sentiment_sum_{s}" for s in _NEWS_COUNT_WINDOWS_M)
@@ -109,7 +109,7 @@ class EdgarFilingFrequencyClean:
     ``EdgarFilingFrequencyGroup``."""
 
     name = "edgar_filing_frequency"
-    input_cols = ()
+    input_cols: tuple[str, ...] = ()
     feature_names = (
         tuple(f"edgar_filing_count_{w}d" for w in _EDGAR_COUNT_WINDOWS_D)
         + ("edgar_minutes_since_last_filing", "edgar_minutes_since_last_8k")
