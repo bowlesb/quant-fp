@@ -818,3 +818,49 @@ def test_watermark_out_of_order_and_multi_group_multi_symbol() -> None:
                 np.nan_to_num(before[g.name][key]),
                 err_msg=f"{g.name}.{key} changed on a duplicate/out-of-order minute (watermark leak)",
             )
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# PRODUCTION-marshaled per-symbol absence (absent = OMITTED, carries last close — NOT fed NaN). These pin the
+# exact present()-gated values and would FAIL on the pre-fix isfinite(latest()) behavior. The engine computes
+# EVERY symbol each step (no per-symbol skip), so an omitted symbol's carried bar reads finite — present() is
+# what makes the carried-scalar kinds (EMA, cumulative) correct, not "the engine skips absent symbols".
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def test_macd_omitted_symbol_holds_ema_exact_value() -> None:
+    """BBB present 200/201/202, OMITTED at min3 (carries 202), present 204 at min4. present()-gated ema12 must
+    HOLD across the omitted minute and resume → 200.9859 (the head-to-head value; the isfinite(latest) bug gives
+    201.1892 by wrongly advancing on the carried 202)."""
+    def _bar(present_map, epoch):
+        return {"symbol": np.array(list(present_map.keys())),
+                "close": np.array(list(present_map.values()), dtype=np.float64),
+                "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    engine = CleanEngine([MacdClean()], ["BBB"], WINDOW)
+    engine.step(_bar({"BBB": 200.0}, 60))
+    engine.step(_bar({"BBB": 201.0}, 120))
+    engine.step(_bar({"BBB": 202.0}, 180))
+    engine.step({"symbol": np.array([], dtype="<U4"), "close": np.array([]),
+                 "minute_epoch": np.array([240], dtype=np.int64)})  # BBB OMITTED — carries 202
+    out = engine.step(_bar({"BBB": 204.0}, 300))["macd"]
+    # ema12 must be the present-gated value (BBB seen at 200,201,202,204 — the omitted minute did NOT advance it)
+    assert engine._group_state["macd"]["ema12"][0] == pytest.approx(200.9859, abs=1e-3), \
+        "EMA advanced on the omitted (carried) minute — present() gate not effective"
+
+
+def test_intraday_omitted_symbol_does_not_count_exact() -> None:
+    """BBB present×2, OMITTED at min3 (carries volume). present()-gated cnt must stay 2 (the head-to-head value;
+    the isfinite(latest) bug gives 3 by counting the carried volume as a phantom bar)."""
+    def _vbar(present_map, epoch):
+        return {"symbol": np.array(list(present_map.keys())),
+                "volume": np.array(list(present_map.values()), dtype=np.float64),
+                "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    engine = CleanEngine([IntradaySeasonalityClean()], ["BBB"], WINDOW)
+    engine.step(_vbar({"BBB": 1000.0}, 60))
+    engine.step(_vbar({"BBB": 1000.0}, 120))
+    engine.step({"symbol": np.array([], dtype="<U4"), "volume": np.array([]),
+                 "minute_epoch": np.array([180], dtype=np.int64)})  # BBB OMITTED
+    assert engine._group_state["intraday_seasonality"]["cnt"][0] == pytest.approx(2.0), \
+        "cumulative cnt counted an omitted (carried) minute — present() gate not effective"
