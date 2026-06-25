@@ -42,7 +42,7 @@ def _adjusted_ema(
     n = len(value)
     num = state.get(f"{key}__num")
     den = state.get(f"{key}__den")
-    if num is None:
+    if num is None or den is None:
         num = np.zeros(n)
         den = np.zeros(n)
     new_num = np.where(present, value + one_minus * num, num)
@@ -255,12 +255,21 @@ class TechnicalClean:
         macd_signal = _adjusted_ema(state, "signal", np.where(present, macd_line, np.nan), 9, present)
 
         # RSI_14m — gain/loss sums over the trailing 14-MINUTE window (legacy rolling_sum_by('minute','14m')).
-        # The per-bar diff is between consecutive PRESENT bars (positional, = close - close.shift(1)); the SUM
-        # is over the bars whose minute is within the 14m window.
+        # The per-bar diff is the EXACT 1-MINUTE close change (legacy diff = close − lagged(close, 1)): defined
+        # ONLY when the prior bar is exactly one minute earlier, NULL across a gap (a sparse symbol's consecutive
+        # present bars >1 min apart yield NO diff, so they contribute nothing). NOT the positional close.shift(1)
+        # diff between consecutive present bars (which would splice a gap into a finite RSI).
         close_full = window.trailing("close")
+        minute_full = window.trailing_minute()
         close_14 = window.trailing_time("close", 14)  # bars in the last 14 minutes (the rest NaN)
         with np.errstate(invalid="ignore"):
-            diff = close_full[:, 1:] - close_full[:, :-1]
+            raw_diff = close_full[:, 1:] - close_full[:, :-1]
+            exact_step = (
+                (minute_full[:, 1:] >= 0)
+                & (minute_full[:, :-1] >= 0)
+                & ((minute_full[:, 1:] - minute_full[:, :-1]) == 60)
+            )
+            diff = np.where(exact_step, raw_diff, np.nan)  # NULL across a gap (no exact prior-minute close)
             diff = np.concatenate([np.full((close_full.shape[0], 1), np.nan), diff], axis=1)
             in14 = np.isfinite(close_14)  # the time-window mask, aligned to close_full columns
             gain = np.where(in14 & (diff > 0.0), diff, np.where(in14 & np.isfinite(diff), 0.0, np.nan))
