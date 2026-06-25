@@ -1977,21 +1977,24 @@ def test_engine_change_no_regression_watermark_dedup_co_resident() -> None:
     assert cnt_after == cnt_before, "duplicate epoch double-counted with calendar co-resident (watermark regressed)"
 
 
-def test_calendar_broadcasts_to_absent_BEHAVIORAL_NOTE() -> None:
-    """BEHAVIORAL DIFFERENCE flagged to ArchOverhaul (not a hard fail — depends on the output contract): the
-    clean calendar broadcasts its symbol-independent value to EVERY index symbol, including ABSENT ones; legacy
-    emits a calendar row ONLY for symbols present that minute (computes from minute_agg's (symbol,minute) frame
-    = present rows). So an absent symbol gets the calendar value in clean but NO row in legacy. This matters IFF
-    the clean engine's per-minute output is NOT present-filtered before persistence/fingerprint. calendar is
-    nan_policy=none (always-defined) so it's not the sparse-null case — but the present()-OUTPUT question (like
-    sector_return's output gate) applies: should absent symbols get NaN calendar? Pinned as the current
-    behavior; resolution = ArchOverhaul's call on whether point-in-time groups output-gate on present()."""
+def test_calendar_value_always_defined_row_emission_is_boundary_concern() -> None:
+    """RESOLVED (ArchOverhaul + verified vs legacy capture.py:333-348): two DISTINCT gates, don't conflate.
+    (1) VALUE gate (per-group, value-dependent): a feature whose VALUE is undefined for an absent symbol self-
+        gates to NaN — the cross-sectional denominators (return_dispersion/sector_return/peer_relative). KEEP.
+    (2) ROW-EMISSION gate (ONE boundary, uniform): which symbols' ROWS persist — absent → not persisted, for
+        EVERY group incl calendar. Owned at the engine/capture seam (#57), NOT per-group (legacy filters once:
+        'only the persisted rows are filtered, so feature VALUES are unchanged — parity-neutral').
+    calendar's VALUE is symbol-independent + ALWAYS DEFINED → it must NOT self-output-gate; the absent-row drop
+    is the boundary filter's job (#57). So calendar correctly broadcasts a defined value to every index symbol;
+    the absent-row drop happens uniformly at the boundary. Pins calendar's VALUE always-defined (correct
+    per-group behavior); the absent-row-emission is gated by the #57 boundary-filter tests when it lands."""
     import datetime as _dt  # noqa: PLC0415
     from zoneinfo import ZoneInfo  # noqa: PLC0415
 
     ep = int(_dt.datetime(2026, 6, 25, 10, 0, tzinfo=ZoneInfo("America/New_York")).timestamp())
     eng = CleanEngine([CalendarClean()], ["A", "B"], WINDOW)
     out = eng.step({"symbol": np.array(["A"]), "minute_epoch": np.array([ep], dtype=np.int64)})["calendar"]
-    # CURRENT clean behavior: absent B gets the broadcast value (documents the difference; flip to NaN-assert
-    # if ArchOverhaul decides point-in-time groups should output-gate on present()).
-    assert out["minute_of_day_et"][1] == pytest.approx(600.0)  # absent B currently gets the value
+    # VALUE always defined for every index symbol (correct — calendar is symbol-independent). Absent B's ROW is
+    # dropped by the #57 boundary filter, NOT by calendar self-gating.
+    assert out["minute_of_day_et"][0] == pytest.approx(600.0)
+    assert out["minute_of_day_et"][1] == pytest.approx(600.0)  # defined; row-drop is the boundary's job (#57)
