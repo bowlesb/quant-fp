@@ -1774,6 +1774,69 @@ def test_momentum_family_sparse_matches_legacy() -> None:
         "return_dynamics.autocorr_1_15m sparse (value-OLS)"
 
 
+def test_volume_drawrange_momentumconsistency_sparse_matches_legacy() -> None:
+    """GATE volume / draw_range / momentum_consistency (#60 fresh time-window ports) on the SPARSE axis vs
+    legacy BATCH on a gappy symbol (70 min):
+      - volume.volume_zscore_15m = (vol[T] − mean(vol,15m)) / std(vol,15m, ddof=1)
+      - draw_range.draw_range_60m = max-drawdown + max-drawup over the closes in the 60m TIME window
+      - momentum_consistency.reversal_count_15m = Σ(sign-flip)(15m) / 15, where flip uses the per-minute return
+        (close/close.shift(1) on the sparse minute frame = prior present ROW; NaN at the first bar).
+    """
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_windowed import (  # noqa: PLC0415
+        DrawRangeClean,
+        MomentumConsistencyClean,
+        VolumeClean,
+    )
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    rng = np.random.default_rng(51)
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
+    vols = (rng.random(len(offsets)) * 1e5 + 1e4).round()
+    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
+    t_last = mins[-1]
+    col_map = {"close": closes, "volume": vols.astype(float)}
+
+    def _feed(group: object) -> dict[str, np.ndarray]:
+        eng = CleanEngine([group], ["A"], 400)
+        out: dict[str, np.ndarray] = {}
+        for i in range(len(offsets)):
+            bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)}
+            for c in group.input_cols:  # type: ignore[attr-defined]
+                bar[c] = np.array([col_map[c][i]], dtype=np.float64)
+            out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
+        return out
+
+    df = pl.DataFrame({"minute": mins, "close": closes, "volume": vols.astype(float)}).sort("minute")
+    df = df.with_columns(pl.col("volume").rolling_mean_by("minute", window_size="15m").alias("vm15"),
+                         pl.col("volume").rolling_std_by("minute", window_size="15m").alias("vs15"))
+    last = df.tail(1)
+    vout = _feed(VolumeClean())
+    assert vout["volume_zscore_15m"][0] == pytest.approx((vols[-1] - last["vm15"][0]) / last["vs15"][0], rel=1e-6), \
+        "volume_zscore_15m sparse"
+
+    win = df.filter((pl.col("minute") > t_last - datetime.timedelta(minutes=60)) & (pl.col("minute") <= t_last))
+    c = win["close"].to_numpy()
+    maxdd = -(c / np.maximum.accumulate(c) - 1.0).min()
+    maxdu = (c / np.minimum.accumulate(c) - 1.0).max()
+    dout = _feed(DrawRangeClean())
+    assert dout["draw_range_60m"][0] == pytest.approx(maxdd + maxdu, rel=1e-6), "draw_range_60m sparse"
+
+    dfm = df.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"))
+    dfm = dfm.with_columns(pl.col("ret").shift(1).alias("rp"))
+    dfm = dfm.with_columns(
+        (pl.col("ret").is_not_null() & pl.col("rp").is_not_null() & (pl.col("ret") != 0) & (pl.col("rp") != 0)
+         & ((pl.col("ret") > 0) != (pl.col("rp") > 0))).cast(pl.Float64).alias("flip"))
+    dfm = dfm.with_columns(pl.col("flip").rolling_sum_by("minute", window_size="15m").alias("fsum"))
+    mc = _feed(MomentumConsistencyClean())
+    assert mc["reversal_count_15m"][0] == pytest.approx(dfm.tail(1)["fsum"][0] / 15.0, rel=1e-7), \
+        "reversal_count_15m sparse (per-minute return = prior present row on the sparse frame)"
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
