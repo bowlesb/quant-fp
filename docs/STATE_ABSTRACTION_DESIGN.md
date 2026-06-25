@@ -291,6 +291,10 @@ The per-kind math (~553 lines: WindowedSum 232, ReductionFold 75, Cumulative 69,
 SessionCache 29) **stays** — it's the `(state, fold)` each group declares, now behind one interface instead of
 seven.
 
+Stated as one line: **≈900 lines of duplicated plumbing (the two engines ~800 + four `step*` twins ~112)
+collapse into a single ~210-line container drive loop + dispatch — a net reduction of ~680 lines, and seven
+mechanisms to one.**
+
 But the honest headline is **not the line count — it's the count of concepts.** Seven ways to hold state, two
 engines, and four `step*` variants become **one container + a handful of declared folds.** A feature author
 writes `{state, fold, read, ready}` and never touches a drive loop, a churn rule, a seed path, a readiness check,
