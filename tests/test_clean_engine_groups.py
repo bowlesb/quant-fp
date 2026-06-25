@@ -1628,51 +1628,39 @@ def test_ohlcvol_rangeexp_distribution_sparse_matches_legacy() -> None:
 
 
 def test_liquidity_quote_spread_sparse_matches_legacy() -> None:
-    """RE-GATE liquidity + quote_spread (#60 re-ports, enriched trade/quote inputs) on the SPARSE axis vs
-    legacy BATCH time-windows on a gappy symbol (70 min):
-      - quote_spread.spread_bps_15m = rolling_mean_by(mean_spread_bps, 15m)
-      - liquidity.amihud_illiq_15m = rolling_mean_by(|ret|/(close·volume), 15m)
-    """
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean liquidity + quote_spread cell-for-cell vs
+    goldens from the REAL legacy *Group.compute() on a shared gappy fixture (tests/liq_in.json, with the
+    non-OHLCV inputs these groups need: signed_volume, mean_spread_bps, quote_imbalance, bid/ask sizes).
+    Replaces the prior in-line polars re-derivation (rolling_mean_by amihud / spread) — the sector_beta/RSI
+    mutual-false-green class. Audited the FULL feature set: liquidity 15/15 (incl the Kyle-lambda value-OLS on
+    signed_volume), quote_spread 21/21 match legacy compute() on the sparse axis."""
     import datetime  # noqa: PLC0415
-
-    import polars as pl  # noqa: PLC0415
+    import json  # noqa: PLC0415
 
     from quantlib.features.clean_groups_windowed import LiquidityClean, QuoteSpreadClean  # noqa: PLC0415
 
     base = datetime.datetime(2026, 6, 1, 9, 30)
     offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
-    rng = np.random.default_rng(31)
-    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
-    spread = 10.0 + rng.random(len(offsets)) * 5
-    imb = rng.standard_normal(len(offsets)) * 0.2
-    bid = 1000.0 + rng.random(len(offsets)) * 500
-    ask = 1000.0 + rng.random(len(offsets)) * 500
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
-    vols = (rng.random(len(offsets)) * 1e5 + 1e4).round()
-    sv = rng.standard_normal(len(offsets)) * vols
+    liq_in = json.load(open(os.path.join(os.path.dirname(__file__), "liq_in.json")))
 
-    qs = CleanEngine([QuoteSpreadClean()], ["A"], 400)
-    qout = {}
-    for i in range(len(offsets)):
-        qout = qs.step({"symbol": np.array(["A"]), "mean_spread_bps": np.array([spread[i]]),
-                        "quote_imbalance": np.array([imb[i]]), "mean_bid_size": np.array([bid[i]]),
-                        "mean_ask_size": np.array([ask[i]]),
-                        "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})["quote_spread"]
-    df = pl.DataFrame({"minute": mins, "sp": spread}).sort("minute")
-    df = df.with_columns(pl.col("sp").rolling_mean_by("minute", window_size="15m").alias("sp15"))
-    assert qout["spread_bps_15m"][0] == pytest.approx(df.tail(1)["sp15"][0], rel=1e-7), "spread_bps_15m sparse"
-
-    liq = CleanEngine([LiquidityClean()], ["A"], 400)
-    lout = {}
-    for i in range(len(offsets)):
-        lout = liq.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
-                         "volume": np.array([vols[i]]), "signed_volume": np.array([sv[i]]),
-                         "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})["liquidity"]
-    df2 = pl.DataFrame({"minute": mins, "close": closes, "volume": vols.astype(float)}).sort("minute")
-    df2 = df2.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).abs().alias("aret"),
-                           (pl.col("close") * pl.col("volume")).alias("dv"))
-    df2 = df2.with_columns((pl.col("aret") / pl.col("dv")).rolling_mean_by("minute", window_size="15m").alias("am15"))
-    assert lout["amihud_illiq_15m"][0] == pytest.approx(df2.tail(1)["am15"][0], rel=1e-6), "amihud_illiq_15m sparse"
+    for group, golden_name in ((LiquidityClean(), "liquidity_golden"), (QuoteSpreadClean(), "quote_spread_golden")):
+        golden = json.load(open(os.path.join(os.path.dirname(__file__), f"{golden_name}.json")))
+        eng = CleanEngine([group], ["A"], 400)
+        out: dict[str, np.ndarray] = {}
+        for i, off in enumerate(offsets):
+            bar = {"symbol": np.array(["A"]),
+                   "minute_epoch": np.array([int((base + datetime.timedelta(minutes=off)).timestamp())],
+                                            dtype=np.int64)}
+            for col in group.input_cols:  # type: ignore[attr-defined]
+                bar[col] = np.array([float(liq_in[col][i])], dtype=np.float64)
+            out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
+        assert set(out) == set(golden), f"{golden_name}: feature set != legacy compute()"
+        for fname, gv in golden.items():
+            cv = float(out[fname][0])
+            if gv is None:
+                assert np.isnan(cv), f"{golden_name}.{fname}: legacy NULL, clean {cv}"
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"{golden_name}.{fname}: legacy {gv} clean {cv}"
 
 
 def test_momentum_family_sparse_matches_legacy() -> None:
@@ -2023,12 +2011,16 @@ def test_xsec_std_is_ddof1() -> None:
 
 def test_return_dispersion_intraday_present_gated_and_nonnan() -> None:
     """INTRADAY 6: present()-gated (absent excluded from the dispersion + → NaN) AND COMPUTES A REAL VALUE on
-    well-conditioned inputs (the Lead's non-deferred-NaN check — a real dispersion, not a placeholder)."""
+    well-conditioned inputs (the Lead's non-deferred-NaN check — a real dispersion, not a placeholder).
+    ON-GRID epochs (60s steps): after the #67-class fix (15a64ef), the intraday own_ret uses a STRICT
+    exact-minute lag (legacy lagged(close, w)), so the 5m-prior bar must exist at EXACTLY now−5m — an off-grid
+    final epoch (the old 700, 100s after 600) would make the 5m lag absent → correctly NaN. Final minute 720 is
+    on grid so the 5m lag (epoch 360) is present and the dispersion computes, matching legacy compute()."""
     syms = ["A", "B", "C", "D"]
     eng = CleanEngine([ReturnDispersionClean()], syms, WINDOW)
-    # 10 minutes, all 4 present with varied returns, then a minute where only A,B,C deliver (D absent)
+    # 11 minutes (epochs 60..660, on the 60s grid), all 4 present, then minute 720 where only A,B,C deliver
     rng = np.random.default_rng(22)
-    for ep in range(10):
+    for ep in range(11):
         present = {s: (100.0 + rng.standard_normal() * (1 + i), 0.0) for i, s in enumerate(syms)}
         eng.step({"symbol": np.array(list(present)),
                   "close": np.array([present[s][0] for s in present], dtype=np.float64),
@@ -2037,7 +2029,7 @@ def test_return_dispersion_intraday_present_gated_and_nonnan() -> None:
     out = eng.step({"symbol": np.array(["A", "B", "C"]),
                     "close": np.array([101.0, 99.0, 103.0], dtype=np.float64),
                     "volume": np.array([0.0, 0.0, 0.0], dtype=np.float64),
-                    "minute_epoch": np.array([700], dtype=np.int64)})["return_dispersion"]
+                    "minute_epoch": np.array([60 + 11 * 60], dtype=np.int64)})["return_dispersion"]
     # intraday std/iqr compute a REAL value for present A,B,C (non-NaN) and NaN for absent D
     assert np.isfinite(out["return_dispersion_std_5m"][0]), "intraday std must compute, not deferred-NaN"
     assert np.isfinite(out["return_dispersion_iqr_5m"][0]), "intraday iqr must compute"
@@ -2057,55 +2049,43 @@ def test_return_dispersion_deferred_ledger_empty_and_contract() -> None:
 
 
 def test_market_turbulence_sparse_matches_legacy() -> None:
-    """GATE market_turbulence (#60 time-window cross-sectional) on the SPARSE axis. mkt_absret_W uses a STRICT
-    exact-minute lag (legacy lagged(close,W): the close at EXACTLY T−W, NaN if no bar there — NOT the nearest
-    bar); mkt_rv_30m = universe-mean of per-symbol std of 1m logrets over (T−30,T] gated to EXACT 1m steps.
-    Head-to-head a dense + a sparse symbol vs legacy lagged + rolling_std_by."""
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean market_turbulence cell-for-cell vs a golden
+    from the REAL legacy MarketTurbulenceGroup.compute() on a shared 2-symbol fixture (tests/mt_in.json: A
+    dense 40 min, B sparse). Replaces the prior in-line cross-symbol re-derivation (lagged + group_by.mean +
+    rolling_std_by) — market_turbulence is a cross-symbol GATHER like sector_beta, the highest-risk class for
+    a mutual-false-green. Audited the FULL feature set: 5/5 (mkt_absret_{5,15,30,60}m exact-minute lag +
+    mkt_rv_30m universe-mean of per-symbol strict-1m-logret std) match legacy compute() on the sparse axis."""
     import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
 
-    import polars as pl  # noqa: PLC0415
-
-    from quantlib.features.base import lagged  # type: ignore  # noqa: PLC0415
     from quantlib.features.clean_groups_xsectional import MarketTurbulenceClean  # noqa: PLC0415
 
     base = datetime.datetime(2026, 6, 1, 9, 30)
-    rng = np.random.default_rng(6)
     a_off = list(range(0, 40))
-    b_off = [0, 1, 2, 5, 8, 12, 15, 18, 22, 25, 28, 31, 34, 37, 38, 39]  # sparse
-    a_cl = 100.0 + np.cumsum(rng.standard_normal(len(a_off)) * 0.3)
-    b_cl = 50.0 + np.cumsum(rng.standard_normal(len(b_off)) * 0.3)
-    rows = ([{"symbol": "A", "minute": base + datetime.timedelta(minutes=o), "close": float(c)}
-             for o, c in zip(a_off, a_cl)]
-            + [{"symbol": "B", "minute": base + datetime.timedelta(minutes=o), "close": float(c)}
-               for o, c in zip(b_off, b_cl)])
-    df = pl.DataFrame(rows).sort(["symbol", "minute"])
-    last_min = base + datetime.timedelta(minutes=39)
-
-    fr = lagged(df, "close", 5, "_lag").with_columns((pl.col("close") / pl.col("_lag") - 1.0).abs().alias("_ar"))
-    leg_absret5 = fr.group_by("minute").agg(pl.col("_ar").mean().alias("m")).filter(pl.col("minute") == last_min)["m"][0]
-    fr2 = df.with_columns(
-        (pl.col("close").log() - pl.col("close").shift(1).over("symbol").log()).alias("_lr"),
-        (pl.col("minute") - pl.col("minute").shift(1).over("symbol")).alias("_dt"))
-    fr2 = fr2.with_columns(
-        pl.when(pl.col("_dt") == pl.duration(minutes=1)).then(pl.col("_lr")).otherwise(None).alias("_lr1"))
-    fr2 = fr2.with_columns(pl.col("_lr1").rolling_std_by(
-        "minute", window_size="30m", min_samples=10, closed="right").over("symbol").alias("_rv"))
-    leg_rv = fr2.group_by("minute").agg(pl.col("_rv").mean().alias("m")).filter(pl.col("minute") == last_min)["m"][0]
+    b_off = [0, 1, 2, 5, 8, 12, 15, 18, 22, 25, 28, 31, 34, 37, 38, 39]
+    mt_in = json.load(open(os.path.join(os.path.dirname(__file__), "mt_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "market_turbulence_golden.json")))
 
     events: dict[int, dict[str, float]] = {}
-    for o, c in zip(a_off, a_cl):
-        events.setdefault(o, {})["A"] = float(c)
-    for o, c in zip(b_off, b_cl):
-        events.setdefault(o, {})["B"] = float(c)
+    for off, close in zip(a_off, mt_in["a"]):
+        events.setdefault(off, {})["A"] = float(close)
+    for off, close in zip(b_off, mt_in["b"]):
+        events.setdefault(off, {})["B"] = float(close)
     eng = CleanEngine([MarketTurbulenceClean()], ["A", "B"], 400)
-    out = {}
-    for o in sorted(events):
-        pm = events[o]
-        out = eng.step({"symbol": np.array(list(pm)), "close": np.array([pm[s] for s in pm], dtype=np.float64),
-                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
+    out: dict[str, np.ndarray] = {}
+    for off in sorted(events):
+        present = events[off]
+        out = eng.step({"symbol": np.array(list(present)),
+                        "close": np.array([present[s] for s in present], dtype=np.float64),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=off)).timestamp())],
                                                  dtype=np.int64)})["market_turbulence"]
-    assert out["mkt_absret_5m"][0] == pytest.approx(leg_absret5), "sparse mkt_absret_5m != legacy lagged"
-    assert out["mkt_rv_30m"][0] == pytest.approx(leg_rv), "sparse mkt_rv_30m != legacy rolling_std_by"
+    assert set(out) == set(golden), "market_turbulence feature set != legacy compute()"
+    for fname, gv in golden.items():  # market-wide scalar — symbol A (index 0) carries it
+        cv = float(out[fname][0])
+        if gv is None:
+            assert np.isnan(cv), f"market_turbulence.{fname}: legacy NULL, clean {cv}"
+        else:
+            assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"market_turbulence.{fname}: legacy {gv} clean {cv}"
 
 
 def test_market_turbulence_exact_lag_nan_when_no_bar_at_lag_minute() -> None:
@@ -2146,11 +2126,12 @@ def _step_return_dispersion_with_daily(daily_close: np.ndarray, syms: list[str])
 def test_return_dispersion_daily_horizons_compute_real_xsec_dispersion() -> None:
     """FULL-GREEN gate for the daily horizons: with a daily snapshot set, return_dispersion_{std,iqr}_{1d,5d}
     equal the cross-sectional std(ddof=1)/IQR of the universe's w-day returns from the snapshot — a real value
-    (no longer deferred-NaN), present()-gated and broadcast."""
+    (no longer deferred-NaN), present()-gated and broadcast. #68 [-1]=today convention: the w-day return anchors
+    at the last COMPLETED day _asof=[:,-2], so the 1d return = col[-2]/col[-3]−1 (NOT [-1]/[-2])."""
     import polars as pl  # noqa: PLC0415
 
     syms = ["A", "B", "C", "D", "E"]
-    daily_close = np.array([  # (n_sym, n_days), newest col LAST; 1d return = col[-1]/col[-2]-1
+    daily_close = np.array([  # (n_sym, n_days), newest col LAST = today; _asof = [:, -2] (last completed day)
         [98.0, 100.0, 102.0],
         [49.0, 50.0, 51.5],
         [201.0, 200.0, 198.0],
@@ -2158,20 +2139,21 @@ def test_return_dispersion_daily_horizons_compute_real_xsec_dispersion() -> None
         [9.9, 10.0, 10.1],
     ])
     out = _step_return_dispersion_with_daily(daily_close, syms)
-    ret_1d = daily_close[:, -1] / daily_close[:, -2] - 1.0
+    ret_1d = daily_close[:, -2] / daily_close[:, -3] - 1.0  # #68: _asof[-2] / ref[-3]
     hand_std_1d = float(np.std(ret_1d, ddof=1))
     hand_iqr_1d = float(pl.Series(ret_1d).quantile(0.75) - pl.Series(ret_1d).quantile(0.25))
     for i in range(len(syms)):  # broadcast to every present symbol
         assert out["return_dispersion_std_1d"][i] == pytest.approx(hand_std_1d)
         assert out["return_dispersion_iqr_1d"][i] == pytest.approx(hand_iqr_1d)
-    # only 3 daily columns → 5d return needs 6 → warm-up NaN (a real, correct NaN, not deferred-NaN)
+    # only 3 daily columns → 5d return needs the asof + 5 back = 7 columns → warm-up NaN (a real, correct NaN)
     assert np.all(np.isnan(out["return_dispersion_std_5d"])), "5d warm-up NaN with only 3 daily columns"
 
 
 def test_return_dispersion_daily_warmup_and_present_gating() -> None:
-    """daily horizons NaN where snapshot lacks w+1 days (warm-up), and absent symbols → NaN (present-gated)."""
+    """daily horizons NaN where snapshot lacks w+2 days (warm-up; #68 [-1]=today → 1d needs asof[-2] + ref[-3]
+    = 3 columns), and absent symbols → NaN (present-gated)."""
     syms = ["A", "B", "C"]
-    daily_close = np.array([[100.0, 102.0], [50.0, 51.0], [200.0, 199.0]])  # 2 days → 1d ok, 5d warm-up
+    daily_close = np.array([[100.0, 102.0, 101.5], [50.0, 51.0, 50.5], [200.0, 199.0, 201.0]])  # 3 days → 1d ok
     eng = CleanEngine([ReturnDispersionClean()], syms, WINDOW)
     eng.set_session({"daily_close": daily_close})
     eng.step({"symbol": np.array(syms), "close": np.array([100.0, 50.0, 200.0]),
@@ -2179,8 +2161,8 @@ def test_return_dispersion_daily_warmup_and_present_gating() -> None:
     out = eng.step({"symbol": np.array(["A", "B"]),  # C absent this minute
                     "close": np.array([101.0, 51.0]), "volume": np.zeros(2),
                     "minute_epoch": np.array([120], dtype=np.int64)})["return_dispersion"]
-    assert np.isfinite(out["return_dispersion_std_1d"][0]), "1d computes (2 days)"
-    assert np.isnan(out["return_dispersion_std_5d"][0]), "5d warm-up → NaN (only 2 days)"
+    assert np.isfinite(out["return_dispersion_std_1d"][0]), "1d computes (3 days under #68 asof[-2]/ref[-3])"
+    assert np.isnan(out["return_dispersion_std_5d"][0]), "5d warm-up → NaN (only 3 days)"
     assert np.isnan(out["return_dispersion_std_1d"][2]), "absent C → NaN (present-gated)"
 
 
@@ -2920,37 +2902,14 @@ def test_trailing_time_window_edge_matches_polars_rolling_by() -> None:
 
 
 def test_price_levels_sparse_time_window_matches_legacy_rolling_by() -> None:
-    """RE-GATE price_levels on the SPARSE axis (the #60 re-port to time-windows; my earlier green was dense-
-    only). On a gappy symbol, position_in_range/dist_from_high/dist_from_low over the 30m TIME window must equal
-    legacy rolling_max_by/rolling_min_by — NOT the positional last-30-bars (which would reach hours back)."""
-    import datetime  # noqa: PLC0415
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean price_levels cell-for-cell vs a golden from
+    the REAL legacy PriceLevelGroup.compute() on the shared gappy fixture. Replaces the prior in-line
+    rolling_max_by/rolling_min_by re-derivation (the sector_beta/RSI mutual-false-green class). Audited the FULL
+    feature set: 21/21 (position_in_range / dist_from_high / dist_from_low over the 30m TIME window, NOT the
+    positional last-30-bars) match legacy compute() on the sparse axis."""
+    from quantlib.features.clean_groups_windowed import PriceLevelsClean  # noqa: PLC0415
 
-    import polars as pl  # noqa: PLC0415
-
-    base = datetime.datetime(2026, 6, 1, 9, 30)
-    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38]  # sparse, spans 38 min > 30m window
-    rng = np.random.default_rng(4)
-    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)))
-    highs = closes + np.abs(rng.standard_normal(len(offsets))) + 0.5
-    lows = closes - np.abs(rng.standard_normal(len(offsets))) - 0.5
-    minutes = [base + datetime.timedelta(minutes=o) for o in offsets]
-    df = pl.DataFrame({"minute": minutes, "close": closes, "high": highs, "low": lows}).sort("minute")
-    df = df.with_columns(pl.col("high").rolling_max_by("minute", window_size="30m").alias("hi"),
-                         pl.col("low").rolling_min_by("minute", window_size="30m").alias("lo"))
-    last = df.tail(1)
-    hi30, lo30, cl = last["hi"][0], last["lo"][0], closes[-1]
-    leg_pos = (cl - lo30) / (hi30 - lo30)
-
-    eng = CleanEngine([PriceLevelsClean()], ["A"], 400)
-    out = {}
-    for off, c, h, low_v in zip(offsets, closes, highs, lows):
-        out = eng.step(_ohlcv_bar(["A"], [c], [h], [low_v], [c], int((base + datetime.timedelta(minutes=off)).timestamp())))[
-            "price_levels"]
-    assert out["position_in_range_30m"][0] == pytest.approx(leg_pos), "sparse 30m position != legacy rolling_*_by"
-    assert out["dist_from_high_30m"][0] == pytest.approx(cl / hi30 - 1.0)
-    assert out["dist_from_low_30m"][0] == pytest.approx(cl / lo30 - 1.0)
-    in_window_max = max(highs[i] for i, o in enumerate(offsets) if (38 - o) < 30)
-    assert hi30 == pytest.approx(in_window_max), "legacy 30m high is over the TIME window (offset>8), not all bars"
+    _assert_clean_matches_golden(PriceLevelsClean(), "price_levels_golden")
 
 
 # ========================================================================================================= #
@@ -2972,30 +2931,42 @@ from quantlib.features.clean_groups_daily import (  # noqa: E402
 
 
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
-    """daily_return_{w}d / daily_vol_{w}d / dist_from_{w}d_high equal legacy polars exactly on a known series:
-    return = close[-1]/close[-(w+1)]-1, vol = rolling_std(ddof=1) of daily returns, dist = close[-1]/rolling_max
-    -1. The newest daily column IS the prior close (_asof), matching legacy shift(1)."""
-    import polars as pl  # noqa: PLC0415
+    """RE-ANCHORED (#66 + #68): diff clean multi_day_returns cell-for-cell vs a golden from the REAL legacy
+    MultiDayReturnGroup.compute() on a 70-day fixture (tests/md_in.json). This CAUGHT the #68 stale-convention
+    mutual-false-green: the prior in-line test set its polars ``_asof`` = the RAW closes (treating the newest
+    column [-1] as the settled close), agreeing with the OLD clean helper; but legacy ``_asof = close.shift(1)``
+    (D-1 = the last COMPLETED day, since [-1] is today-in-progress), so the clean helper now anchors at [:,-2].
+    The old in-line expectation (115/111−1) is wrong; legacy compute() = 111/108−1. Audited the FULL feature
+    set: 28/28 (daily_return/daily_vol/dist_from_*_d_high across all in-range DAY_WINDOWS) match legacy."""
+    import json  # noqa: PLC0415
 
-    closes = np.array([100.0, 102.0, 101.0, 105.0, 103.0, 107.0, 110.0, 108.0, 111.0, 115.0])
-    mat = closes.reshape(1, -1)  # 1 symbol, newest LAST
-    df = pl.DataFrame({"symbol": ["X"] * len(closes), "_asof": closes})
-    for w in (1, 2, 5):
-        df = df.with_columns((pl.col("_asof") / pl.col("_asof").shift(w).over("symbol") - 1.0).alias(f"r{w}"))
-        assert _daily_return(mat, w)[0] == pytest.approx(df[f"r{w}"].to_list()[-1])
-    df = df.with_columns((pl.col("_asof") / pl.col("_asof").shift(1).over("symbol") - 1.0).alias("_dret"))
-    for w in (5,):
-        df = df.with_columns(pl.col("_dret").rolling_std(window_size=w).over("symbol").alias(f"v{w}"))
-        assert _daily_vol(mat, w)[0] == pytest.approx(df[f"v{w}"].to_list()[-1])
-    falling = np.array([100.0, 120.0, 110.0, 105.0, 108.0]).reshape(1, -1)  # high=120, asof=108
-    assert _dist_from_high(falling, 5)[0] == pytest.approx(108.0 / 120.0 - 1.0)  # -10%, non-trivial
+    md_in = json.load(open(os.path.join(os.path.dirname(__file__), "md_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "multi_day_golden.json")))
+    daily_close = np.array(md_in["closes"]).reshape(1, -1)
+
+    eng = CleanEngine([MultiDayClean()], ["X"], WINDOW)
+    eng.set_session({"daily_close": daily_close})
+    out = eng.step({"symbol": np.array(["X"]), "close": daily_close[:, -1], "volume": np.zeros(1),
+                    "minute_epoch": np.array([570 * 60], dtype=np.int64)})["multi_day_returns"]
+    assert set(out) == set(golden), "multi_day_returns feature set != legacy compute()"
+    for fname, gv in golden.items():
+        cv = float(out[fname][0])
+        if gv is None:
+            assert np.isnan(cv), f"multi_day_returns.{fname}: legacy NULL, clean {cv}"
+        else:
+            assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"multi_day_returns.{fname}: legacy {gv} clean {cv}"
 
 
 def test_multi_day_warmup_nan_when_insufficient_days() -> None:
-    """A horizon needing more days than the snapshot holds → NaN (warm-up)."""
-    short = np.array([100.0, 102.0, 101.0]).reshape(1, -1)  # 3 days
-    assert np.isnan(_daily_return(short, 5)[0]), "daily_return_5d on 3 days → NaN"
-    assert _daily_return(short, 2)[0] == pytest.approx(101.0 / 100.0 - 1.0), "daily_return_2d on 3 days computes"
+    """Warm-up boundary on the #68 [-1]=today convention: ``_asof`` = the last COMPLETED day ([:, -2]), so
+    daily_return_w needs ``w + 2`` daily columns (asof + the w-back reference [:, -(w+2)]). A horizon needing
+    more columns than the snapshot holds → NaN; an in-range one computes off the COMPLETED days."""
+    short = np.array([100.0, 102.0, 101.0]).reshape(1, -1)  # 3 days → asof=[-2]=102
+    assert np.isnan(_daily_return(short, 5)[0]), "daily_return_5d on 3 days → NaN (needs 7 columns)"
+    assert np.isnan(_daily_return(short, 2)[0]), "daily_return_2d on 3 days → NaN (needs 4 columns)"
+    assert _daily_return(short, 1)[0] == pytest.approx(102.0 / 100.0 - 1.0), "daily_return_1d: asof[-2]/ref[-3]"
+    five = np.array([100.0, 102.0, 101.0, 105.0, 103.0]).reshape(1, -1)  # asof=[-2]=105, ref(w=2)=[-4]=102
+    assert _daily_return(five, 2)[0] == pytest.approx(105.0 / 102.0 - 1.0), "daily_return_2d on 5 days computes"
 
 
 def test_multi_day_contract_and_no_session_is_nan() -> None:
@@ -3067,33 +3038,30 @@ def _step_daily_beta(daily_close: np.ndarray, syms: list[str], spy_row: int = 2)
 
 
 def test_daily_beta_matches_legacy_rolling_ols() -> None:
-    """daily_beta_60d/corr/idio = legacy polars rolling_cov/var/corr/std over the trailing 60 daily returns on
-    SPY. beta/corr are ratios (ddof cancels); idio = ret_std(ddof=1)·sqrt(1−corr²) — clean's n/(n-1) matches
-    legacy rolling_std. Head-to-head on a high-beta + a low-beta name."""
-    import polars as pl  # noqa: PLC0415
+    """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean daily_beta cell-for-cell vs a golden from the
+    REAL legacy DailyBetaGroup.compute() (tests/daily_beta_golden.json, captured with a daily(symbol,date,close)
+    frame + minute_agg join on the 80-day fixture tests/db_in.json: A=1.5x SPY, B=0.3x). Replaces the prior
+    in-line polars re-derivation (rolling_cov/var/corr/std) — the sector_beta/RSI mutual-false-green class.
+    Audited the FULL feature set for both a high-beta (A) and low-beta (B) name: daily_beta_60d / daily_corr_60d
+    / daily_idio_vol_60d match legacy compute() (3/3 each)."""
+    import json  # noqa: PLC0415
 
-    n_days = 80
-    daily_close, syms = _daily_close_with_beta(n_days, beta=1.5, seed=11)
-    rows = [{"symbol": s, "date": d, "close": float(daily_close[i, d])}
-            for i, s in enumerate(syms) for d in range(n_days)]
-    daily = pl.DataFrame(rows).sort(["symbol", "date"]).with_columns(
-        (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("ret"))
-    market = daily.filter(pl.col("symbol") == "SPY").select(["date", pl.col("ret").alias("mkt_ret")]).sort("date")
-    joined = daily.join(market, on="date", how="left").sort(["symbol", "date"])
-    mkt_var = pl.col("mkt_ret").rolling_var(window_size=60, min_samples=20).over("symbol")
-    cov_roll = pl.rolling_cov(pl.col("ret"), pl.col("mkt_ret"), window_size=60, min_samples=20).over("symbol")
-    corr = pl.rolling_corr(pl.col("ret"), pl.col("mkt_ret"), window_size=60, min_samples=20).over("symbol").clip(-1.0, 1.0)
-    ret_std = pl.col("ret").rolling_std(window_size=60, min_samples=20).over("symbol")
-    beta = pl.when(mkt_var > 0).then(cov_roll / mkt_var).otherwise(None)
-    idio = pl.when(corr.is_not_null()).then(ret_std * (1.0 - corr * corr).clip(0.0).sqrt()).otherwise(None)
-    joined = joined.with_columns(beta.alias("b"), corr.alias("c"), idio.alias("i"))
+    daily_close, syms = _daily_close_with_beta(80, beta=1.5, seed=11)
+    db_in = json.load(open(os.path.join(os.path.dirname(__file__), "db_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "daily_beta_golden.json")))
+    # rebuild the EXACT matrix the golden was captured from (db_in.json), not the seed (guards drift)
+    daily_close = np.vstack([np.array(db_in["a"]), np.array(db_in["b"]), np.array(db_in["spy"])])
 
-    out = _step_daily_beta(daily_close, syms)
-    for i, s in enumerate(["A", "B"]):
-        last = joined.filter((pl.col("symbol") == s) & (pl.col("date") == n_days - 1))
-        assert out["daily_beta_60d"][i] == pytest.approx(last["b"][0], rel=1e-9)
-        assert out["daily_corr_60d"][i] == pytest.approx(last["c"][0], rel=1e-9)
-        assert out["daily_idio_vol_60d"][i] == pytest.approx(last["i"][0], rel=1e-9)
+    out = _step_daily_beta(daily_close, ["A", "B", "SPY"])
+    for si, sym in enumerate(("A", "B")):
+        gold = golden[sym]
+        assert set(out) == set(gold), f"daily_beta feature set != legacy compute() ({sym})"
+        for fname, gv in gold.items():
+            cv = float(out[fname][si])
+            if gv is None:
+                assert np.isnan(cv), f"daily_beta[{sym}].{fname}: legacy NULL, clean {cv}"
+            else:
+                assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"daily_beta[{sym}].{fname}: legacy {gv} clean {cv}"
 
 
 def test_daily_beta_own_guard_warmup_var0_perfectfit() -> None:
@@ -3404,6 +3372,9 @@ _LEGACY_GROUP_OF = {
     "sector_return": ("sector_return", "SectorReturnGroup"),
     "peer_relative": ("peer_relative", "PeerRelativeReturnGroup"),
     "calendar": ("calendar", "CalendarGroup"),
+    "calendar_events": ("calendar_events", "CalendarEventsGroup"),
+    "sector": ("sector", "SectorOneHotGroup"),
+    "asset_flags": ("asset_flags", "AssetFlagsGroup"),
     "multi_day_returns": ("multi_day", "MultiDayReturnGroup"),
     "daily_beta": ("daily_beta", "DailyBetaGroup"),
     "overnight_intraday_split": ("overnight_intraday_split", "OvernightIntradaySplitGroup"),
