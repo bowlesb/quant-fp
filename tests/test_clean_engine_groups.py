@@ -572,3 +572,95 @@ def test_prior_day_no_session_is_nan() -> None:
     engine = CleanEngine([PriorDayClean()], ["A"], WINDOW)
     out = engine.step(_close_bars(["A"], [103.0]))["prior_day"]
     assert np.isnan(out["gap_from_prior_close"][0])
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# Staged for window.present(): macd seed==live WITH GAPS + swing duplicate-minute idempotency.
+# These prove seed and live treat ABSENCE identically (not just agree) once present() gates the fork kinds.
+# --------------------------------------------------------------------------------------------------------- #
+
+
+def _empty_minute():
+    return {"symbol": np.array([], dtype="<U4"), "close": np.array([])}
+
+
+def test_macd_seed_equals_live_WITH_gaps() -> None:
+    """The carried-scalar kind where a seed-vs-live presence mismatch would surface: a sequence WITH absent
+    minutes (gaps), seeded via replay vs fed live one-at-a-time → the carried EMA must be bit-identical AND
+    (once present() lands) match the hand-rolled present-bars-only recurrence. Today both paths share the same
+    presence bug so they AGREE but are WRONG; after present() they agree AND are right. The agreement half is
+    asserted now (seed==live), the correctness half flips in when present() lands (see the xfail gap test)."""
+    present_closes = [100.0, 110.0, 120.0, 115.0]
+    # sequence with a gap after each present bar (except the last)
+    seq = []
+    for i, c in enumerate(present_closes):
+        seq.append(_close_bars(["A"], [c]))
+        if i < len(present_closes) - 1:
+            seq.append(_empty_minute())
+
+    seed_engine = CleanEngine([MacdClean()], ["A"], WINDOW)
+    seed_engine.seed(seq[:-1])
+    seed_out = seed_engine.step(seq[-1])
+
+    live_engine = CleanEngine([MacdClean()], ["A"], WINDOW)
+    live_out = {}
+    for bars in seq:
+        live_out = live_engine.step(bars)
+
+    # seed-replay and live must produce the IDENTICAL carried EMA + output across the gapped sequence
+    np.testing.assert_allclose(
+        np.nan_to_num(seed_engine._group_state["macd"]["ema12"]),
+        np.nan_to_num(live_engine._group_state["macd"]["ema12"]),
+        rtol=1e-12, err_msg="macd ema12 carried state diverged seed-replay vs live ACROSS GAPS",
+    )
+    np.testing.assert_allclose(
+        np.nan_to_num(seed_out["macd"]["macd_line"]), np.nan_to_num(live_out["macd"]["macd_line"]),
+        rtol=1e-12, err_msg="macd_line diverged seed vs live across gaps",
+    )
+
+
+def test_swing_duplicate_minute_does_not_double_advance() -> None:
+    """IDEMPOTENCY FOOTGUN (Lead): a DUPLICATE delivery of the same minute must NOT double-advance the swing
+    leg-state. Feed a bar, then RE-deliver the same minute_epoch — the extreme/pivot must be the same as if it
+    were delivered once. A plain present() bool does NOT cover this (the re-delivery still reads present=True);
+    catching it here flags whether a last-epoch dedup guard is needed beyond presence."""
+    def _bar(close, epoch):
+        return {"symbol": np.array(["A"]), "close": np.array([close]),
+                "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    once = CleanEngine([SwingClean()], ["A"], WINDOW)
+    once.step(_bar(100.0, 60))
+    once.step(_bar(110.0, 120))
+    once_extreme = once._group_state["swing"]["extreme"][0]
+
+    dup = CleanEngine([SwingClean()], ["A"], WINDOW)
+    dup.step(_bar(100.0, 60))
+    dup.step(_bar(110.0, 120))
+    dup.step(_bar(110.0, 120))  # SAME minute re-delivered
+    dup_extreme = dup._group_state["swing"]["extreme"][0]
+
+    # re-delivering an already-seen minute must not change the leg-state (extreme already at 110 either way)
+    assert dup_extreme == pytest.approx(once_extreme), \
+        "duplicate minute double-advanced swing leg-state — needs a last-epoch dedup guard beyond present()"
+
+
+@pytest.mark.xfail(
+    reason="IDEMPOTENCY FOOTGUN (Lead, verified): a DUPLICATE same-minute delivery DOUBLE-ADVANCES the "
+    "cumulative cnt (1->2) — the session-mean denominator is corrupted by a re-delivered minute. present() "
+    "alone does NOT fix this (the re-delivery reads present=True); the cumulative/recursive kinds need a "
+    "LAST-EPOCH DEDUP GUARD (only fold a minute whose epoch > last folded), separate from presence.",
+    strict=True,
+)
+def test_cumulative_duplicate_minute_does_not_double_count() -> None:
+    """The cumulative kind is where the duplicate-minute footgun actually bites: intraday_seasonality's running
+    count must increment ONCE per distinct minute, not per delivery. A re-delivered minute_epoch double-counts
+    (cnt 1->2), corrupting the since-open mean. This is the dedup-guard finding, distinct from presence."""
+    def _vbar(vol, epoch):
+        return {"symbol": np.array(["A"]), "volume": np.array([vol]),
+                "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    engine = CleanEngine([IntradaySeasonalityClean()], ["A"], WINDOW)
+    engine.step(_vbar(1000.0, 60))
+    engine.step(_vbar(1000.0, 60))  # SAME minute re-delivered
+    cnt = engine._group_state["intraday_seasonality"]["cnt"][0]
+    assert cnt == pytest.approx(1.0), "duplicate minute double-counted the cumulative cnt (needs epoch dedup)"
