@@ -218,6 +218,41 @@ class SectorReturnClean:
         return out
 
 
+class PeerRelativeClean:
+    """CROSS_SECTIONAL: peer_relative_ret_{w}m = the symbol's trailing-w return minus the equal-weight mean
+    trailing-w return of its BEHAVIORAL-PEER cluster (the SVD co-movement cluster) at that minute — the
+    idiosyncratic move not explained by its co-movement group. Same shape as sector_excess but grouped by
+    ``window.static['cluster_id']``. NULL cluster → NULL; absent symbol → NULL (sparse). present()-gated.
+    Legacy: ``PeerRelativeGroup``."""
+
+    name = "peer_relative"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 15, 30)
+    _UNKNOWN = -1
+    feature_names = tuple(f"peer_relative_ret_{w}m" for w in _WINDOWS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        present = window.present()
+        latest_close = window.latest("close")
+        n_sym = close.shape[0]
+        cluster = window.static.get("cluster_id")
+        if cluster is None:
+            cluster = np.full(n_sym, self._UNKNOWN)
+        keep = present & (cluster != self._UNKNOWN)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            if close.shape[1] > w:
+                prior = close[:, -(w + 1)]
+            else:
+                prior = np.full(n_sym, np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                own_ret = latest_close / prior - 1.0
+            peer_mean = _sector_mean_vector(own_ret, cluster, present)
+            out[f"peer_relative_ret_{w}m"] = np.where(keep, own_ret - peer_mean, np.nan)
+        return out
+
+
 class SectorBetaClean:
     """CROSS_SECTIONAL: per window, the rolling OLS of each name's one-minute return on its OWN GICS sector's
     equal-weight one-minute return — sector_beta_{w} (slope) + sector_corr_{w} (corr in [-1,1]). The sector
