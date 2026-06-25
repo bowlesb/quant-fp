@@ -675,3 +675,68 @@ class RangeExpansionClean:
                 ratio = np.where(denom > 0.0, num / denom, np.nan)
             out[f"range_expansion_{recent}_{trailing}m"] = np.where(np.isfinite(ratio), ratio, np.nan)
         return out
+
+
+class MomentumClean:
+    """MOMENTUM: per window of one-minute returns — up_ratio_{w}m = fraction of the trailing w minutes with a
+    positive 1m return; mean_abs_ret_{w}m = mean |1m return| (choppiness). Both are TIME-windowed means of a
+    per-bar quantity (the 1m return = close/prior-present-close − 1). Legacy: ``MomentumGroup`` (ReductionGroup).
+    """
+
+    name = "momentum"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
+    feature_names = tuple(f"up_ratio_{w}m" for w in _WINDOWS) + tuple(f"mean_abs_ret_{w}m" for w in _WINDOWS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        ret = _returns(close)  # per-bar 1m return vs the prior PRESENT bar (positional shift(1))
+        up = np.where(ret > 0.0, 1.0, 0.0)  # 1 on an up-minute (matches (ret>0).cast(Float64))
+        abs_ret = np.abs(ret)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            # TIME window (legacy mean_ = rolling_mean_by("minute")): the mean is over the return bars in the
+            # last w minutes. ``up``/``abs_ret`` are NaN where ret is NaN (the leading no-prior-bar column),
+            # which the masked mean drops — matching the legacy reduction over present returns.
+            in_window = np.isfinite(window.trailing_time("close", w)) & np.isfinite(ret)
+            out[f"up_ratio_{w}m"], _ = _row_mean(np.where(in_window, up, np.nan))
+            out[f"mean_abs_ret_{w}m"], _ = _row_mean(np.where(in_window, abs_ret, np.nan))
+        return out
+
+
+class EfficiencyClean:
+    """MOMENTUM: Kaufman path-efficiency per window — efficiency_ratio_{w}m = |net change| / total absolute
+    travel; directional_efficiency_{w}m = signed (net change / travel) in [-1,1]. MIXED semantics: the travel
+    ``path`` is a TIME-windowed sum of |1m move|, but the net-change reference ``close.shift(w)`` is a
+    POSITIONAL w-bar lookback (the w-th prior PRESENT bar) — verified against legacy on a sparse symbol. Legacy:
+    ``EfficiencyGroup`` (ReductionGroup)."""
+
+    name = "efficiency"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120)
+    feature_names = tuple(f"efficiency_ratio_{w}m" for w in _WINDOWS) + tuple(
+        f"directional_efficiency_{w}m" for w in _WINDOWS
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        latest_close = window.latest("close")
+        n_sym = close.shape[0]
+        # |minute-to-minute move| per bar (NaN leading column, no prior bar) — the legacy ``step`` reduction.
+        step = np.full_like(close, np.nan)
+        step[:, 1:] = np.abs(close[:, 1:] - close[:, :-1])
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            # path = TIME-windowed sum of |step| over the last w minutes.
+            in_window = np.isfinite(window.trailing_time("close", w))
+            path = _row_sum(np.where(in_window, step, np.nan))
+            # net change = close[T] − close.shift(w) = the w-th prior PRESENT bar (POSITIONAL, legacy pt_(l{w})).
+            if close.shape[1] > w:
+                prior = close[:, -(w + 1)]
+            else:
+                prior = np.full(n_sym, np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ratio = np.where(path > 0.0, (latest_close - prior) / path, np.nan)
+            out[f"efficiency_ratio_{w}m"] = np.abs(ratio)
+            out[f"directional_efficiency_{w}m"] = ratio
+        return out
