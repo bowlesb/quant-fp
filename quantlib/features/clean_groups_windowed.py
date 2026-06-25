@@ -30,25 +30,52 @@ def _masked_mean(values: np.ndarray, w: int) -> tuple[np.ndarray, np.ndarray]:
     return np.where(n_present > 0, mean, np.nan), n_present
 
 
-def _windowed_ols_slope(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
-    """Trailing ``w``-window OLS slope of ``y`` on ``x`` per symbol, masked to bars where BOTH are finite —
-    matching the legacy ``slope_`` reduction: slope = (n·Σxy − Σx·Σy) / (n·Σx² − (Σx)²), NaN where n<2 or
-    var_x==0. ``x_mat``/``y_mat`` are ``(n_symbols, buffer)``."""
+# Legacy OLS denominator floors (quant-fp declarative.py:104-146): the X-side conditioning that gates a
+# well-posed regression. A plain ``denom_x > 0`` is NOT enough — on a near-constant (but non-zero) x window,
+# denom_x is a tiny float-noise residue whose ratio is a SPURIOUS slope/corr; legacy NaNs it. BOTH floors must
+# hold (relative to (Σx)² AND to the scale-invariant b·Σx² CoV²). This is the #402/#122/#131 corr-denom footgun
+# — match it EXACTLY or the clean engine emits a spurious correlation where backfill emits NaN on flat/illiquid
+# names (a fingerprint-corrupting live==backfill divergence).
+_OLS_DENOM_X_REL_EPS = 1e-12
+_OLS_DENOM_X_CENTERED_REL_EPS = 1e-9
+_OLS_DENOM_Y_REL_EPS = 1e-12  # corr y-side floor (non-anchored)
+_OLS_PERFECT_FIT_COUNT = 2.0  # a line through exactly 2 points: r2==1, corr==sign(cov)
+
+
+def _ols_sums(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> tuple[np.ndarray, ...]:
+    """Masked power sums for a trailing ``w``-window OLS of ``y`` on ``x`` (bars where BOTH finite). Returns
+    ``(n, sx, sy, sxx, syy, sxy, denom_x, cov)`` — the shared front-half of slope/corr."""
     xw = _trailing_window(x_mat, w)
     yw = _trailing_window(y_mat, w)
     mask = np.isfinite(xw) & np.isfinite(yw)
     n = mask.sum(axis=1).astype(np.float64)
     xf = np.where(mask, xw, 0.0)
     yf = np.where(mask, yw, 0.0)
-    sx = xf.sum(axis=1)
-    sy = yf.sum(axis=1)
-    sxx = (xf * xf).sum(axis=1)
-    sxy = (xf * yf).sum(axis=1)
+    sx, sy = xf.sum(axis=1), yf.sum(axis=1)
+    sxx, syy, sxy = (xf * xf).sum(axis=1), (yf * yf).sum(axis=1), (xf * yf).sum(axis=1)
     with np.errstate(invalid="ignore", divide="ignore"):
+        denom_x = n * sxx - sx * sx
         cov = n * sxy - sx * sy
-        var_x = n * sxx - sx * sx
-        slope = cov / var_x
-    return np.where((n >= 2.0) & (var_x > 0.0), slope, np.nan)
+    return n, sx, sy, sxx, syy, sxy, denom_x, cov
+
+
+def _denom_x_defined(n: np.ndarray, sx: np.ndarray, sxx: np.ndarray, denom_x: np.ndarray) -> np.ndarray:
+    """The legacy X-side well-posedness gate: n≥2 AND both relative denom_x floors hold (vs (Σx)² and n·Σx²)."""
+    return (
+        (n >= 2.0)
+        & (denom_x > _OLS_DENOM_X_REL_EPS * (sx * sx))
+        & (denom_x > _OLS_DENOM_X_CENTERED_REL_EPS * (n * sxx))
+    )
+
+
+def _windowed_ols_slope(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window OLS slope of ``y`` on ``x`` per symbol — matching the legacy ``slope_`` reduction:
+    slope = cov / denom_x, defined ONLY when the legacy X-side floors hold (n≥2 AND denom_x > 1e-12·(Σx)² AND
+    denom_x > 1e-9·n·Σx²). NaN otherwise — a near-constant x window is not a well-posed regression."""
+    n, sx, _sy, sxx, _syy, _sxy, denom_x, cov = _ols_sums(x_mat, y_mat, w)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        slope = cov / denom_x
+    return np.where(_denom_x_defined(n, sx, sxx, denom_x), slope, np.nan)
 
 
 def _windowed_cov(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
@@ -67,23 +94,20 @@ def _windowed_cov(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
 
 
 def _windowed_corr(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
-    """Trailing ``w``-window Pearson correlation of ``x`` and ``y`` per symbol over bars where BOTH finite —
-    matching the legacy ``corr_`` reduction: r = (n·Σxy−Σx·Σy)/sqrt((n·Σx²−(Σx)²)(n·Σy²−(Σy)²)), NaN where n<2
-    or either variance is non-positive."""
-    xw = _trailing_window(x_mat, w)
-    yw = _trailing_window(y_mat, w)
-    mask = np.isfinite(xw) & np.isfinite(yw)
-    n = mask.sum(axis=1).astype(np.float64)
-    xf = np.where(mask, xw, 0.0)
-    yf = np.where(mask, yw, 0.0)
-    sx, sy = xf.sum(axis=1), yf.sum(axis=1)
-    sxx, syy, sxy = (xf * xf).sum(axis=1), (yf * yf).sum(axis=1), (xf * yf).sum(axis=1)
+    """Trailing ``w``-window Pearson correlation of ``x`` and ``y`` per symbol — matching the legacy ``corr_``
+    reduction EXACTLY: r = cov / sqrt(denom_x·denom_y), defined ONLY when the X-side floors hold AND
+    denom_y > 1e-12·(Σy)². A line through exactly 2 present points (perfect fit) returns sign(cov), not the
+    ratio. A near-constant x OR y window is NaN — never a spurious correlation of float noise (the corr-denom
+    footgun that gates ``incremental_safe``)."""
+    n, sx, sy, sxx, syy, _sxy, denom_x, cov = _ols_sums(x_mat, y_mat, w)
     with np.errstate(invalid="ignore", divide="ignore"):
-        cov = n * sxy - sx * sy
-        var_x = n * sxx - sx * sx
-        var_y = n * syy - sy * sy
-        corr = cov / np.sqrt(var_x * var_y)
-    return np.where((n >= 2.0) & (var_x > 0.0) & (var_y > 0.0), corr, np.nan)
+        denom_y = n * syy - sy * sy
+        defined_corr = _denom_x_defined(n, sx, sxx, denom_x) & (denom_y > _OLS_DENOM_Y_REL_EPS * (sy * sy))
+        corr = cov / np.sqrt(denom_x * denom_y)
+    corr = np.where(defined_corr, corr, np.nan)
+    # perfect fit (exactly 2 present points): |corr| == 1, the sign of the covariance.
+    perfect = defined_corr & (n == _OLS_PERFECT_FIT_COUNT)
+    return np.where(perfect, np.sign(cov), corr)
 
 
 def _windowed_sum(values: np.ndarray, w: int) -> np.ndarray:
