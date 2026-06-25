@@ -74,10 +74,14 @@ so plainly because the design below is the same instinct, finished:
 We read `automated-day-trading` and his approach is clear and good — and two of its ideas are *already*
 load-bearing in our design, which is the strongest sign we're on the right track:
 
-- **The ring buffer itself — his deliberate state structure (the heart of the design).** Ben's real
-  ring lives in `scode/buffer/tracker.py` (`CircularBufferOnDisk`) and its richer production sibling
-  `scode/buffer/vector_store.pyx` (`VectorStore`, Cython). This is what made "every feature a lookup + a few
-  ops" actually true, and it is **exactly the `row-ring` fold-kind our container declares**:
+- **The ring buffer — read it for the DISCIPLINE, not as an abstraction to mirror.** Ben's real ring lives in
+  `scode/buffer/tracker.py` (`CircularBufferOnDisk`) and its richer production sibling
+  `scode/buffer/vector_store.pyx` (`VectorStore`, Cython). Ben is explicit it was *not* beautifully designed —
+  what is worth extracting is the **hot-path hygiene**, made literal: *maintain aggregates incrementally on add,
+  read O(1) off them, and never recompute over the buffer per minute* — plus relocating the heavy invariant work
+  off the minute boundary. His `CircularBufferOnDisk` kept the hot path to ring-lookups off carried aggregates;
+  the container **generalizes that discipline to every fold-kind, per-symbol, uniformly** — it does not revere or
+  copy his class. Concretely, what that discipline looks like in his code (and how it maps to our fold-kinds):
   - *Positional ring with a write cursor + wraparound* — `current_position = (current_position + 1) % size`;
     physical slots, logical (time) order reconstructed as `(last_index + 1 + i) % num_rows`
     (`tracker.py:add_row`/`to_dataframe`). That is precisely our positional-row-ring (the #26 convergence
@@ -271,14 +275,36 @@ depth 1" would *add* machinery they never use — the exact over-engineering Ben
 honest set is **one container + ~3-4 fold-kinds**, each declared per group, all sharing the one spine. That *is*
 "no more implementations than we actually need."
 
-### Where Rust and pre-minute work fit (Ben's other two asks)
+### The two fix levers — and where Rust fits
 
-- **Rust where a minute can't reduce to a few ops:** unchanged from today's good parts — the tape/tick kernels
-  and the reduction kernels that already pay off stay; the design just gives them one fold interface to plug
-  into instead of four `step_*` twins.
-- **Pre-minute-boundary work for intraday-invariants:** a Class-A "snapshot" group (daily levels, sector, etc.)
-  computes once per session and broadcasts — already true via `SessionCache`/`DailySnapshotGroup`; in the unified
-  shape it's simply the degenerate fold ("state = today's snapshot; fold = no-op; read = broadcast").
+A "violator" is **any non-trivial per-minute computation that didn't have to be there** — not just whole-buffer
+or whole-universe recompute, but any work on the minute critical path beyond a lookup or a few ops. There are
+**two first-class ways to fix one**, and they are peers — some violators are best folded, others are best
+relocated:
+
+- **L1 — fold to the ring (O(1) per minute).** The violator carries running state and folds only the new minute,
+  so the read is a lookup off a maintained aggregate. This is the windowed-sum / accumulator / recursive /
+  row-ring / state-machine fold-kinds above. Most violators are L1 (the parked reductions, the StatefulGroups,
+  swing, momentum_run).
+- **L2 — move off the hot path (precompute the intraday-invariant once, then look it up).** If the heavy part is
+  *invariant across the minute* — a sector→symbol map, universe membership, a time-of-day seasonality baseline,
+  daily levels — compute it **once before the minute boundary**, cache it, and let the per-minute path do nothing
+  but read it. This is **not a fallback; it is a first-class lever** — the right fix for a whole class of
+  violators is to *relocate* the work, not fold it. In the container this is the **snapshot payload**
+  (`state = today's precomputed snapshot; fold = no-op; read = broadcast/lookup`), already realized by
+  `SessionCache` / `DailySnapshotGroup`. We call it out as the L2 peer of the folds, not a degenerate corner.
+
+  Several violators are **L1 + L2 together**: the cross-sectional Gathers (`sector_beta`, `sector_return`,
+  `breadth`, `market_turbulence`, `cross_sectional_rank`) and `intraday_seasonality` have an intraday-invariant
+  *input* (the sector map / membership / seasonality baseline → **L2 precompute**) and a genuinely per-minute
+  *cross-sectional reduce* over the live universe (→ **L1 fold**, computed once per minute on a shared base and
+  broadcast). Fixing them means doing both, and the container needs the snapshot lever as a peer so the L2 half
+  has a home.
+
+- **Rust where a minute still can't reduce to a few ops:** unchanged from today's good parts — the tape/tick
+  kernels and the reduction kernels that already pay off stay; the design just gives them one fold interface to
+  plug into instead of four `step_*` twins. Rust is the *implementation* of an L1 fold when the fold itself is
+  heavy, not a third lever.
 
 ## The collapse map — from 7+2+4 to 1+3
 
