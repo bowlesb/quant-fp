@@ -1588,6 +1588,72 @@ def test_reduction_groups_sparse_time_window_matches_legacy() -> None:
     assert vd_out["vwap_deviation_15m"][0] == pytest.approx(leg_vwap, rel=1e-7), "vwap_deviation_15m sparse"
 
 
+def test_ohlcvol_rangeexp_distribution_sparse_matches_legacy() -> None:
+    """RE-GATE ohlc_vol / range_expansion / distribution (#60 re-ports) on the SPARSE axis vs legacy BATCH
+    time-windows on a gappy symbol (70 min):
+      - ohlc_vol.garman_klass_vol_15m = sqrt(rolling_mean_by(GK, 15m)), GK = 0.5·ln(h/l)² − (2ln2−1)·ln(c/o)²
+      - range_expansion.range_expansion_5_30m = mean((h−l)/c, 5m) / mean(·, 30m)
+      - distribution.ret_skew_10m = biased skew of the 1m returns in the last 10 wall-minutes
+    """
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_windowed import (  # noqa: PLC0415
+        DistributionClean,
+        OhlcVolClean,
+        RangeExpansionClean,
+    )
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    rng = np.random.default_rng(31)
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
+    highs = closes + np.abs(rng.standard_normal(len(offsets))) * 0.4 + 0.2
+    lows = closes - np.abs(rng.standard_normal(len(offsets))) * 0.4 - 0.2
+    opens = closes + rng.standard_normal(len(offsets)) * 0.1
+    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
+    col_map = {"open": opens, "high": highs, "low": lows, "close": closes}
+
+    def _feed(group: object) -> dict[str, np.ndarray]:
+        eng = CleanEngine([group], ["A"], 400)
+        out: dict[str, np.ndarray] = {}
+        for i in range(len(offsets)):
+            bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)}
+            for c in group.input_cols:  # type: ignore[attr-defined]
+                bar[c] = np.array([col_map[c][i]], dtype=np.float64)
+            out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
+        return out
+
+    df = pl.DataFrame({"minute": mins, "close": closes, "high": highs, "low": lows, "open": opens}).sort("minute")
+    df = df.with_columns(
+        (0.5 * (pl.col("high") / pl.col("low")).log() ** 2
+         - (2 * np.log(2) - 1) * (pl.col("close") / pl.col("open")).log() ** 2).alias("gk"),
+        ((pl.col("high") - pl.col("low")) / pl.col("close")).alias("hlr"),
+        (pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"))
+    df = df.with_columns(pl.col("gk").rolling_mean_by("minute", window_size="15m").alias("gkm15"),
+                         pl.col("hlr").rolling_mean_by("minute", window_size="5m").alias("r5"),
+                         pl.col("hlr").rolling_mean_by("minute", window_size="30m").alias("r30"))
+    last = df.tail(1)
+
+    ov = _feed(OhlcVolClean())
+    assert ov["garman_klass_vol_15m"][0] == pytest.approx(np.sqrt(max(last["gkm15"][0], 0.0)), rel=1e-6), \
+        "ohlc_vol.garman_klass_vol_15m sparse"
+    re_out = _feed(RangeExpansionClean())
+    assert re_out["range_expansion_5_30m"][0] == pytest.approx(last["r5"][0] / last["r30"][0], rel=1e-6), \
+        "range_expansion_5_30m sparse"
+
+    dist = _feed(DistributionClean())
+    t_last = mins[-1]
+    win = df.filter((pl.col("minute") > t_last - datetime.timedelta(minutes=10)) & (pl.col("minute") <= t_last))
+    r = win["ret"].drop_nulls().to_numpy()
+    n = len(r)
+    mean_r = r.mean()
+    std_r = np.sqrt(((r - mean_r) ** 2).sum() / n)
+    hand_skew = ((r - mean_r) ** 3).sum() / n / std_r ** 3
+    assert dist["ret_skew_10m"][0] == pytest.approx(hand_skew, rel=1e-5), "distribution.ret_skew_10m sparse"
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
