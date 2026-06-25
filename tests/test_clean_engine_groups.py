@@ -3016,6 +3016,53 @@ def test_multi_day_vwap_overnight_beta_shared_session_matches_legacy() -> None:
                     )
 
 
+@pytest.mark.xfail(strict=True, reason="#69 NOT wired: no live producer pivots backfill_daily into the clean "
+                                       "session (set_session is called only by tests) → daily groups all-NaN live")
+def test_live_daily_session_is_populated_from_backfill_daily() -> None:
+    """#69 LIVE-WIRING gate (Lead: test-green != live-wired — this gate proves the live wiring EXISTS). The
+    daily-snapshot clean groups read window.session['daily_close'/...]; nothing on the LIVE path populates them
+    yet (real_capture.py loads snapshots['daily'] = backfill_daily(...) but never pivots it to the (n_sym,
+    n_days) numpy matrices nor calls engine.set_session). Until #69 lands, daily_return/vol/dist/daily_beta/
+    multi_day_vwap/overnight_beta are ALL-NaN live (honest, not wrong).
+
+    This asserts the DELIVERABLE: a per-session pivot from the held backfill_daily polars frame
+    (symbol,date,o,h,l,c,v,vwap; trailing days ENDING AT today so today's bar IS the last date) into the clean
+    session, in the #68 (a) convention (today = [:, -1], D-1 = [:, -2]). XFAIL(strict) until the builder exists
+    — it FAILS LOUDLY if #69 is claimed done without the live producer, and the strict xfail forces this test
+    flipped to a real assertion (remove the marker) the moment the builder lands. Wire it to the REAL builder
+    name when ArchOverhaul ships it; do NOT satisfy it with a hand-fed set_session (that would re-create the
+    test-only path this gate exists to forbid)."""
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    # the held frame, exactly as real_capture builds it (backfill_daily schema), today = the LAST date
+    today = datetime.date(2026, 6, 25)
+    syms = ["A", "B", "SPY"]
+    rows = []
+    for s in syms:
+        for dd in range(5):  # 5 trailing trading days ending today
+            rows.append({"symbol": s, "date": today - datetime.timedelta(days=4 - dd),
+                         "open": 100.0 + dd, "high": 101.0 + dd, "low": 99.0 + dd,
+                         "close": 100.5 + dd, "volume": 1e6, "vwap": 100.4 + dd})
+    daily_frame = pl.DataFrame(rows).sort(["symbol", "date"])
+
+    # the not-yet-existing live builder (the #69 deliverable). When it lands, point this import at the real
+    # symbol and DROP the xfail marker above.
+    from quantlib.features.daily_session_builder import (  # type: ignore  # noqa: PLC0415
+        build_clean_daily_session,
+    )
+
+    session = build_clean_daily_session(daily_frame, syms)
+    daily_close = session["daily_close"]
+    assert daily_close.shape == (3, 5), "daily_close must be (n_symbols, n_days)"
+    # (a) convention: today is the LAST column; D-1 = [:, -2]
+    a_today = float(daily_frame.filter((pl.col("symbol") == "A") & (pl.col("date") == today))["close"][0])
+    assert daily_close[syms.index("A"), -1] == pytest.approx(a_today), "today's close must be the [:, -1] column"
+    for key in ("daily_open", "daily_high", "daily_low", "daily_volume", "daily_vwap"):
+        assert key in session and session[key].shape == (3, 5), f"{key} matrix must be populated (n_sym, n_days)"
+
+
 def test_multi_day_return_vol_dist_match_legacy_polars() -> None:
     """RE-ANCHORED (#66 + #68): diff clean multi_day_returns cell-for-cell vs a golden from the REAL legacy
     MultiDayReturnGroup.compute() on a 70-day fixture (tests/md_in.json). This CAUGHT the #68 stale-convention
