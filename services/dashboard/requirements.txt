@@ -17,4 +17,10 @@ pyyaml>=6,<7
 # The hourly status dashboard's append-only JSON store is shared between the HOST Lead loop and the container's
 # reaction POST; filelock serializes the read-modify-write so neither writer clobbers the other's append.
 filelock>=3.13,<4
+# The quantlib.features import chain (pulled at boot by store_grid_cache, news_edgar, and lifecycle_state)
+# loads quantlib/features/metrics.py, which imports prometheus_client unconditionally. The dashboard only
+# READS the registry/store/trust DB — it never serves /metrics — but the import must resolve or the whole
+# app fails to boot. Same constraint the ingestor uses. (CI has this dep transitively; the runtime image
+# did not — hence the boot crash CI never saw.)
+prometheus-client>=0.20,<1.0
 
