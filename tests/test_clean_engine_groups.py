@@ -659,19 +659,42 @@ def test_swing_small_move_no_pivot() -> None:
     assert out["swing_direction"][0] == pytest.approx(1.0)
 
 
-def test_prior_day_gap_from_session_memo() -> None:
-    """gap_from_prior_close = latest_close / prior_close − 1, read from the per-session snapshot memo."""
-    engine = CleanEngine([PriorDayClean()], ["A"], WINDOW)
-    engine.set_session({"prior_close": np.array([100.0])})
-    out = engine.step(_close_bars(["A"], [103.0]))["prior_day"]
-    assert out["gap_from_prior_close"][0] == pytest.approx(103.0 / 100.0 - 1.0)
+def test_prior_day_pivots_and_distances_known() -> None:
+    """prior_day reads the daily snapshot: prior day = the next-newest daily col ([:, -2]), today's open =
+    the newest col ([:, -1]). Floor-trader pivots from the prior day (H=105,L=99,C=102): P=(H+L+C)/3=102,
+    R1=2P−L=105, S1=2P−H=99, R2=P+(H−L)=108, S2=P−(H−L)=96; plus gap_open + dist-from-prior + above_pivot.
+    Latest close 103.5. Hand-verified all 10."""
+    daily_open = np.array([[100.0, 101.0, 103.0]])
+    daily_high = np.array([[101.0, 105.0, 104.0]])
+    daily_low = np.array([[99.0, 99.0, 102.5]])
+    daily_close = np.array([[100.5, 102.0, 103.5]])
+    eng = CleanEngine([PriorDayClean()], ["A"], WINDOW)
+    eng.set_session({"daily_open": daily_open, "daily_high": daily_high, "daily_low": daily_low,
+                     "daily_close": daily_close})
+    out = eng.step(_close_bars(["A"], [103.5]))["prior_day"]
+    high, low, close, today_open, latest = 105.0, 99.0, 102.0, 103.0, 103.5
+    pivot = (high + low + close) / 3.0  # 102
+    expected = {
+        "gap_open": today_open / close - 1.0,
+        "dist_from_prior_high": latest / high - 1.0,
+        "dist_from_prior_low": latest / low - 1.0,
+        "dist_from_prior_close": latest / close - 1.0,
+        "above_pivot": 1.0,
+        "dist_from_pivot_p": latest / pivot - 1.0,
+        "dist_from_pivot_r1": latest / (2 * pivot - low) - 1.0,
+        "dist_from_pivot_s1": latest / (2 * pivot - high) - 1.0,
+        "dist_from_pivot_r2": latest / (pivot + (high - low)) - 1.0,
+        "dist_from_pivot_s2": latest / (pivot - (high - low)) - 1.0,
+    }
+    for name, val in expected.items():
+        assert out[name][0] == pytest.approx(val), f"prior_day.{name}"
 
 
 def test_prior_day_no_session_is_nan() -> None:
-    """No session memo set → the snapshot feature is NaN (not a crash, not a wrong number)."""
+    """No daily snapshot set → all prior_day features NaN (not a crash, not a wrong number)."""
     engine = CleanEngine([PriorDayClean()], ["A"], WINDOW)
     out = engine.step(_close_bars(["A"], [103.0]))["prior_day"]
-    assert np.isnan(out["gap_from_prior_close"][0])
+    assert all(np.isnan(out[name][0]) for name in PriorDayClean().feature_names), "no snapshot → all-NaN"
 
 
 # --------------------------------------------------------------------------------------------------------- #
@@ -846,13 +869,17 @@ def test_prior_day_compute_once_stable_across_steps() -> None:
     minute's close against the FIXED prior_close, and the session memo is not recomputed per step (else it
     would be a windowed group in disguise)."""
     engine = CleanEngine([PriorDayClean()], ["A"], WINDOW)
-    engine.set_session({"prior_close": np.array([100.0])})
-    g1 = engine.step(_close_bars(["A"], [105.0]))["prior_day"]["gap_from_prior_close"][0]
-    g2 = engine.step(_close_bars(["A"], [110.0]))["prior_day"]["gap_from_prior_close"][0]
+    daily_close = np.array([[98.0, 100.0, 100.0]])  # prior-day close ([:, -2]) = 100
+    engine.set_session({"daily_open": np.array([[97.0, 99.0, 100.0]]),
+                        "daily_high": np.array([[99.0, 101.0, 101.0]]),
+                        "daily_low": np.array([[96.0, 98.0, 99.0]]), "daily_close": daily_close})
+    # dist_from_prior_close tracks the MINUTE's close against the FIXED prior close (100):
+    g1 = engine.step(_close_bars(["A"], [105.0]))["prior_day"]["dist_from_prior_close"][0]
+    g2 = engine.step(_close_bars(["A"], [110.0]))["prior_day"]["dist_from_prior_close"][0]
     assert g1 == pytest.approx(0.05)
     assert g2 == pytest.approx(0.10)
     # the snapshot memo is unchanged across steps — proof it's compute-once, not per-minute
-    np.testing.assert_array_equal(engine.session["prior_close"], np.array([100.0]))
+    np.testing.assert_array_equal(engine.session["daily_close"], daily_close)
 
 
 def test_watermark_out_of_order_and_multi_group_multi_symbol() -> None:
@@ -3513,6 +3540,7 @@ _LEGACY_GROUP_OF = {
     "draw_range": ("draw_range", "DrawRangeGroup"),
     "residual_analysis": ("residual_analysis", "ResidualAnalysisGroup"),
     "clean_momentum": ("clean_momentum", "CleanMomentumScoreGroup"),
+    "momentum_run": ("momentum_run", "MomentumRunGroup"),
     # STUBS (clean declares fewer than legacy) — xfailed below until filled:
     "breadth": ("breadth", "BreadthGroup"),
     "prior_day": ("prior_day", "PriorDayGroup"),
@@ -3522,7 +3550,7 @@ _LEGACY_GROUP_OF = {
 }
 
 # Known stubs (06-25 sweep): clean feature-set ⊊ legacy. xfail-tracked until ArchOverhaul fills them.
-_KNOWN_STUBS = {"breadth", "prior_day", "swing", "intraday_seasonality"}  # trend_quality + volume FILLED
+_KNOWN_STUBS = {"breadth", "swing", "intraday_seasonality"}  # trend_quality, volume, prior_day FILLED
 
 
 def _clean_group_instance(name):  # type: ignore[no-untyped-def]
@@ -3565,3 +3593,32 @@ def test_feature_set_completeness_vs_legacy(clean_name: str) -> None:
                          f"missing {sorted(missing)[:4]}; extra {sorted(extra)[:3]} — ArchOverhaul to fill")
     assert not missing, f"{clean_name}: STUB — missing {len(missing)} legacy features: {sorted(missing)[:8]}"
     assert not extra, f"{clean_name}: clean has EXTRA features not in legacy: {sorted(extra)[:8]}"
+
+
+# Sub-feature demos that are NOT standalone legacy groups (their features live in a parent group):
+#   macd → technical, vwap_deviation → price_volume.
+_NON_STANDALONE_CLEAN = {"macd", "vwap_deviation"}
+
+
+def test_completeness_gate_covers_every_clean_group() -> None:
+    """The completeness gate is only as good as its coverage: a clean group NOT in _LEGACY_GROUP_OF would
+    escape the stub check entirely. This self-check fails if ANY ported clean group (other than the known
+    sub-feature demos) is missing from the map — so a new/regressed group can't hide outside the gate."""
+    import quantlib.features.clean_groups_daily as cd  # noqa: PLC0415
+    import quantlib.features.clean_groups_example as ce  # noqa: PLC0415
+    import quantlib.features.clean_groups_pointwise as cp  # noqa: PLC0415
+    import quantlib.features.clean_groups_stateful as cs  # noqa: PLC0415
+    import quantlib.features.clean_groups_windowed as cw  # noqa: PLC0415
+    import quantlib.features.clean_groups_xsectional as cx  # noqa: PLC0415
+
+    all_clean: set[str] = set()
+    for mod in (cw, ce, cx, cd, cs, cp):
+        for attr in dir(mod):
+            obj = getattr(mod, attr)
+            if isinstance(obj, type) and hasattr(obj, "name") and hasattr(obj, "feature_names") \
+                    and isinstance(getattr(obj, "name", None), str):
+                all_clean.add(obj.name)
+    uncovered = all_clean - set(_LEGACY_GROUP_OF) - _NON_STANDALONE_CLEAN
+    assert not uncovered, (
+        f"clean groups not covered by the completeness gate (add to _LEGACY_GROUP_OF): {sorted(uncovered)}"
+    )
