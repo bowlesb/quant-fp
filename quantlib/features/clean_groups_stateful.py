@@ -11,10 +11,23 @@ THE ADJUSTED-EWM CONVENTION (the recursive kind): the live/legacy EMA is polars 
 
 from __future__ import annotations
 
+import datetime as dt
+from zoneinfo import ZoneInfo
+
 import numpy as np
 
 from quantlib.features.clean_engine import Window
 from quantlib.features.clean_groups_windowed import _masked_mean, _masked_std, _windowed_sum
+
+_ET = ZoneInfo("America/New_York")
+_OPEN_MINUTE = 570  # 09:30 ET — the session-cumulative groups confine to RTH (et_minute_of_day >= this)
+
+
+def _et_session(minute_epoch: int) -> tuple[int, int]:
+    """The (ET ordinal-date, ET minute-of-day) for ``minute_epoch`` — the session-reset key + the RTH gate.
+    Date ordinal changes → a new ET session → the cumulative accumulators reset."""
+    et = dt.datetime.fromtimestamp(minute_epoch, _ET)
+    return et.toordinal(), et.hour * 60 + et.minute
 
 
 def _adjusted_ema(
@@ -42,6 +55,89 @@ def _adjusted_ema(
 
 _SMA_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 50, 100, 200)
 _BB_REL_EPS = 1e-6
+
+_RUNNER_BAND_LO = 2.0
+_RUNNER_BAND_HI = 20.0
+_RUNNER_ACTIVE_EARLY_MOVE = 0.30
+
+
+class RunnerStateClean:
+    """CUMULATIVE SESSION-RESET (the small-cap-runner regime): per (symbol, ET-session), the running max-high /
+    cum dollar-volume / first session open since the 09:30 ET open, vs the prior-day close. Resets every
+    session. runner_early_move = run_high/prev_close−1; runner_gap_open = sess_open/prev_close−1;
+    runner_pullback_from_high = close/run_high−1; runner_log_dollar_vol = log1p(run_dollar); runner_in_band =
+    prev_close ∈ [2,20]; runner_is_active = in_band & early_move≥0.30. Legacy: ``RunnerStateGroup``.
+
+    Carried in window.state: run_high / run_dollar / sess_open / sdate, per symbol. Updated ONLY on a PRESENT
+    RTH bar; RESET on a symbol's FIRST present bar of a new ET session (sdate change). An absent symbol's
+    accumulators are untouched (present-decay) — it carries its session state through an absent minute, and a
+    new session only resets it once it next prints (matching the legacy per-(symbol,sdate) re-reduce). Reads
+    ``window.session['prev_close']`` (the prior-day close)."""
+
+    name = "runner_state"
+    input_cols = ("open", "high", "low", "close", "volume")
+    feature_names = (
+        "runner_early_move",
+        "runner_gap_open",
+        "runner_pullback_from_high",
+        "runner_log_dollar_vol",
+        "runner_in_band",
+        "runner_is_active",
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        state = window.state
+        present = window.present()
+        sdate, etm = _et_session(window.minute_epoch)
+        in_rth = etm >= _OPEN_MINUTE
+        op = window.latest("open")
+        high = window.latest("high")
+        close = window.latest("close")
+        volume = window.latest("volume")
+
+        run_high = state.get("run_high")
+        if run_high is None:
+            run_high = np.full(n, np.nan)
+            state["run_dollar"] = np.zeros(n)
+            state["sess_open"] = np.full(n, np.nan)
+            state["sdate"] = np.full(n, -1.0)
+        run_dollar = state["run_dollar"]
+        sess_open = state["sess_open"]
+        prev_sdate = state["sdate"]
+
+        # a symbol UPDATES only on a present RTH bar; it RESETS (new session) on its first present bar where the
+        # carried sdate differs from today's. Absent symbols (or pre-open minutes) leave their accumulators as-is.
+        update = present & in_rth
+        new_session = update & (prev_sdate != float(sdate))
+        with np.errstate(invalid="ignore"):
+            dollar = close * volume
+            # running max-high: reset to today's high on a new session, else max(carried, high), only on update.
+            new_run_high = np.where(new_session, high, np.where(update, np.fmax(run_high, high), run_high))
+            new_run_dollar = np.where(new_session, dollar, np.where(update, run_dollar + dollar, run_dollar))
+            new_sess_open = np.where(new_session, op, sess_open)
+        new_sdate = np.where(update, float(sdate), prev_sdate)
+        state["run_high"] = new_run_high
+        state["run_dollar"] = new_run_dollar
+        state["sess_open"] = new_sess_open
+        state["sdate"] = new_sdate
+
+        prev_close = window.session.get("prev_close")
+        if prev_close is None:
+            prev_close = np.full(n, np.nan)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            early_move = new_run_high / prev_close - 1.0
+            in_band = (prev_close >= _RUNNER_BAND_LO) & (prev_close <= _RUNNER_BAND_HI)
+            is_active = in_band & (early_move >= _RUNNER_ACTIVE_EARLY_MOVE)
+            out = {
+                "runner_early_move": early_move,
+                "runner_gap_open": new_sess_open / prev_close - 1.0,
+                "runner_pullback_from_high": close / new_run_high - 1.0,
+                "runner_log_dollar_vol": np.log1p(new_run_dollar),
+                "runner_in_band": in_band.astype(np.float64),
+                "runner_is_active": is_active.astype(np.float64),
+            }
+        return out
 
 
 class TechnicalClean:
