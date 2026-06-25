@@ -18,64 +18,77 @@ from __future__ import annotations
 
 from typing import cast
 
+from quantlib.features import REGISTRY
 from quantlib.features.clean_engine import EngineGroup
-from quantlib.features.clean_groups_daily import (DailyBetaClean,
-                                                  LiquidityRankClean,
-                                                  MultiDayClean,
-                                                  MultiDayVwapClean,
-                                                  OvernightBetaClean,
-                                                  OvernightIntradaySplitClean)
-from quantlib.features.clean_groups_example import (BreadthClean,
-                                                    CandlestickClean,
-                                                    IntradaySeasonalityClean,
-                                                    MacdClean, PriorDayClean,
-                                                    RealizedRangeClean,
-                                                    SwingClean,
-                                                    TrendQualityClean,
-                                                    VwapDeviationClean)
-from quantlib.features.clean_groups_pointwise import (AssetFlagsClean,
-                                                      CalendarClean,
-                                                      CalendarEventsClean,
-                                                      RoundLevelsClean,
-                                                      SectorOneHotClean)
-from quantlib.features.clean_groups_reference import (
-    EdgarFilingFrequencyClean, NewsSentimentClean)
-from quantlib.features.clean_groups_stateful import (DumperStateClean,
-                                                     GapFillStateClean,
-                                                     RunnerStateClean,
-                                                     TechnicalClean)
-from quantlib.features.clean_groups_windowed import (CleanMomentumClean,
-                                                     CountFanoClean,
-                                                     DistributionClean,
-                                                     DrawRangeClean,
-                                                     EfficiencyClean,
-                                                     LiquidityClean,
-                                                     MomentumClean,
-                                                     MomentumConsistencyClean,
-                                                     MomentumRunClean,
-                                                     OhlcVolClean,
-                                                     PriceLevelsClean,
-                                                     PriceReturnsClean,
-                                                     PriceVolumeClean,
-                                                     QuoteSpreadClean,
-                                                     RangeExpansionClean,
-                                                     ResidualAnalysisClean,
-                                                     ReturnDynamicsClean,
-                                                     SignedTradeRatioClean,
-                                                     TradeFlowClean,
-                                                     TradeFreqZClean,
-                                                     VolatilityClean,
-                                                     VolumeClean,
-                                                     VolumeExhaustionClean,
-                                                     VolumeLeadsPriceClean)
-from quantlib.features.clean_groups_xsectional import (CrossSectionalRankClean,
-                                                       MarketBetaClean,
-                                                       MarketContextClean,
-                                                       MarketTurbulenceClean,
-                                                       PeerRelativeClean,
-                                                       ReturnDispersionClean,
-                                                       SectorBetaClean,
-                                                       SectorReturnClean)
+from quantlib.features.clean_groups_daily import (
+    DailyBetaClean,
+    LiquidityRankClean,
+    MultiDayClean,
+    MultiDayVwapClean,
+    OvernightBetaClean,
+    OvernightIntradaySplitClean,
+)
+from quantlib.features.clean_groups_example import (
+    BreadthClean,
+    CandlestickClean,
+    IntradaySeasonalityClean,
+    MacdClean,
+    PriorDayClean,
+    RealizedRangeClean,
+    SwingClean,
+    TrendQualityClean,
+    VwapDeviationClean,
+)
+from quantlib.features.clean_groups_pointwise import (
+    AssetFlagsClean,
+    CalendarClean,
+    CalendarEventsClean,
+    RoundLevelsClean,
+    SectorOneHotClean,
+)
+from quantlib.features.clean_groups_reference import EdgarFilingFrequencyClean, NewsSentimentClean
+from quantlib.features.clean_groups_stateful import (
+    DumperStateClean,
+    GapFillStateClean,
+    RunnerStateClean,
+    TechnicalClean,
+)
+from quantlib.features.clean_groups_windowed import (
+    CleanMomentumClean,
+    CountFanoClean,
+    DistributionClean,
+    DrawRangeClean,
+    EfficiencyClean,
+    LiquidityClean,
+    MomentumClean,
+    MomentumConsistencyClean,
+    MomentumRunClean,
+    OhlcVolClean,
+    PriceLevelsClean,
+    PriceReturnsClean,
+    PriceVolumeClean,
+    QuoteSpreadClean,
+    RangeExpansionClean,
+    ResidualAnalysisClean,
+    ReturnDynamicsClean,
+    SignedTradeRatioClean,
+    TradeFlowClean,
+    TradeFreqZClean,
+    VolatilityClean,
+    VolumeClean,
+    VolumeExhaustionClean,
+    VolumeLeadsPriceClean,
+)
+from quantlib.features.clean_groups_xsectional import (
+    CrossSectionalRankClean,
+    MarketBetaClean,
+    MarketContextClean,
+    MarketTurbulenceClean,
+    PeerRelativeClean,
+    ReturnDispersionClean,
+    SectorBetaClean,
+    SectorReturnClean,
+)
 
 # Every ported clean group, grouped by module for readability — the live engine is constructed from this list.
 # Un-annotated: the concrete class union is inferred; ``ALL_CLEAN_GROUPS`` (the instances) carries the
@@ -166,3 +179,19 @@ LEGACY_GROUP_OF: dict[str, str] = {
 
 # Sanity: every name is distinct (a duplicate name would silently drop a group from the live engine).
 assert len({group.name for group in ALL_CLEAN_GROUPS}) == len(ALL_CLEAN_GROUPS), "duplicate clean group name"
+
+# The engine's bar-column set: the UNION of every group's input_cols (the enriched bar columns the groups fold —
+# close/high/low/open/volume + signed_volume / quote spread+imbalance / tick-derived). The live marshal carries
+# exactly these into each minute's numpy dict; the RingBuffer is built ``cols=ALL_CLEAN_INPUT_COLS``. Sorted for
+# a deterministic column order.
+ALL_CLEAN_INPUT_COLS: tuple[str, ...] = tuple(
+    sorted({col for group in ALL_CLEAN_GROUPS for col in group.input_cols})
+)
+
+# A clean group's store ``version`` = its LEGACY parent group's version, so the clean engine writes the store
+# rows at the SAME (group, version, source) path the OLD engine does — the canary store-diff compares like with
+# like, and a flag flip doesn't fork the store layout. (The clean ``EngineGroup`` Protocol carries no version;
+# the store needs one, resolved here from the legacy registry by the legacy-parent name.)
+CLEAN_VERSION_OF: dict[str, str] = {
+    group.name: REGISTRY.get_group(LEGACY_GROUP_OF[group.name]).version for group in ALL_CLEAN_GROUPS
+}

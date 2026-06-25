@@ -3,9 +3,15 @@
 The clean engine speaks numpy: ``emit(minute_bars)`` returns ``(present_symbols, {group: {feature: (n_sym,)
 array}})`` aligned to the engine's fixed symbol index, already NaN'd outside the present mask (#57). The existing
 write loop speaks polars: one ``(symbol, minute, *feature_names)`` frame per group, one row per present symbol.
-This module is the RESHAPE between them — pure plumbing, no compute, unit-testable in isolation, coupled to no
-go-live decision. The marshal in the OTHER direction (this-minute's bars → the engine's numpy minute dict) lives
-beside it once the per-session-rebuild question is settled; this file is the decision-independent half.
+This module holds BOTH directions of the glue: ``minute_frame_to_bars`` marshals THIS minute's bars (the polars
+frame the capture path already materializes) into the engine's numpy minute dict, and ``emit_to_frames``
+reshapes the engine's numpy output back into the per-group ``(symbol, minute, *features)`` frames the write loop
+consumes. Pure plumbing, no compute, unit-testable in isolation.
+
+The engine's column set is the UNION of every clean group's ``input_cols`` (the enriched bar columns the groups
+read — close/high/low/open/volume plus signed_volume / quote spread+imbalance / tick-derived); a column a given
+minute's frame lacks is filled NaN (an honest "not delivered", never fabricated). The bar values come from THIS
+minute's frame, not the materialized buffer — the engine carries its own trailing ring.
 """
 
 from __future__ import annotations
@@ -16,6 +22,29 @@ import numpy as np
 import polars as pl
 
 _UTC = datetime.timezone.utc
+
+
+def minute_frame_to_bars(
+    frame: pl.DataFrame, cols: tuple[str, ...], minute_epoch: int
+) -> dict[str, np.ndarray]:
+    """Marshal THIS minute's bar frame (``symbol`` + the bar columns) into the engine's ``step``/``emit`` input
+    dict: ``{"symbol": (n,) str array, <col>: (n,) float64 array for each col in ``cols``, "minute_epoch":
+    (1,) int64}``. ``cols`` is the engine's column set (the union of every group's ``input_cols``); a column the
+    frame lacks is filled NaN (honest absence). ``frame`` is THIS minute's rows only (one per present symbol) —
+    NOT the trailing buffer, which the engine carries itself. ``minute_epoch`` is epoch-seconds for the watermark
+    + the time-window stamps."""
+    symbols = frame["symbol"].to_numpy()
+    n = len(symbols)
+    minute_bars: dict[str, np.ndarray] = {
+        "symbol": symbols,
+        "minute_epoch": np.array([minute_epoch], dtype=np.int64),
+    }
+    for col in cols:
+        if col in frame.columns:
+            minute_bars[col] = frame[col].to_numpy().astype(np.float64)
+        else:
+            minute_bars[col] = np.full(n, np.nan, dtype=np.float64)
+    return minute_bars
 
 
 def emit_to_frames(
