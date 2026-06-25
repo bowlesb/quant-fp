@@ -406,10 +406,19 @@ The order (lowest-risk first, each green before the next, confirmed against the 
 Every ported kind also carries its **`is_ready`** (step 1 establishes the container check; each later step's kind
 declares its own condition — windowed-sum = window filled, EMA = warmup span, snapshot = snapshot exists, etc.).
 2. **WindowedSum payload onto the spine** (the big one). Re-point the incremental reductions; carry the Class-A/B
-   conditioning. There is one known shared-engine hazard — two groups that share the same engine, where a
-   numerical quirk in one (`price_volume`) could corrupt the other (`return_dynamics`); the value gate catches it.
-   It lives *entirely inside this step* (both are windowed-sum groups), so there's no co-residency constraint that
-   crosses steps — this step just migrates its groups together and stays co-resident-gated by #451 internally.
+   conditioning. **`price_volume` is the proven exemplar for this step**, not a theoretical one: its O(1) fold
+   was spiked at live reference scale (312 tickers / 245-minute window) and ran **122ms batch → 14ms incremental
+   (8.5×, −108ms), byte-identical via #451 (38 tests, isolated + co-resident)**. Crucially, the **Class-A
+   conditioning the parked groups need already exists and is value-gate-proven** — the `regression_y_anchor`
+   centering the volume regressand plus the x-side `_OLS_DENOM_X_CENTERED_REL_EPS` variance guard
+   (`declarative.py`, #402/#416/#418), exercised on the degenerate flat-`Σxx≈0` cell by the co-resident test. So
+   the windowed-sum payload **inherits** the conditioning, it does not reinvent it; the other parked groups
+   (`clean_momentum`/`trend_quality`/`residual_analysis` = Class-A, `range_expansion` = Class-B,
+   `market_beta` = Class-A) ride the same proven route. There is one known shared-engine hazard — two groups that
+   share the same engine, where a numerical quirk in one (`price_volume`) could corrupt the other
+   (`return_dynamics`); the value gate catches it. It lives *entirely inside this step* (all are windowed-sum
+   groups), so there's no co-residency constraint that crosses steps — this step migrates its groups together and
+   stays co-resident-gated by #451 internally.
 3. **EMA / Lag / Extrema / Cumulative payloads.** Port the `StatefulEngine` kinds and **delete the stable-set
    assert + the `_prepared_latest` wrapper** — the two churn riders (fill-null, presence-gated decay) bake into
    the container fold here.
