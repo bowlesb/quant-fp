@@ -10,9 +10,13 @@ of a per-bar derived quantity, and per-bar candlestick geometry + a two-candle l
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import polars as pl
 
 from quantlib.features.clean_engine import Window
+from quantlib.features.clean_groups_stateful import _et_session
 from quantlib.features.clean_groups_windowed import (
     _close_at_lag,
     _denom_x_defined,
@@ -402,35 +406,88 @@ class MacdClean:
         }
 
 
+_INTRADAY_OPEN_MINUTE = 570  # 09:30 ET — RTH open
+_INTRADAY_CLOSE_MINUTE_EXCL = 960  # 16:00 ET — RTH close (exclusive)
+_INTRADAY_BUCKET = 30  # 30-minute time-of-day buckets
+
+
+def _load_intraday_baseline() -> dict[int, tuple[float, float]]:
+    """Eager-load the FROZEN intraday-seasonality baseline (the EXACT file legacy reads, never regenerated):
+    {30-min ET bucket → (baseline_absret, vol_shape)}. Fail loud if the file is missing (house rule: no
+    lazy/try-except — a missing frozen reference is a deploy error to surface, not swallow)."""
+    frame = pl.read_parquet(_INTRADAY_BASELINE_PATH).select(
+        pl.col("bucket").cast(pl.Int64),
+        pl.col("baseline_absret").cast(pl.Float64),
+        pl.col("vol_shape").cast(pl.Float64),
+    )
+    return {
+        int(row["bucket"]): (float(row["baseline_absret"]), float(row["vol_shape"]))
+        for row in frame.iter_rows(named=True)
+    }
+
+
+_INTRADAY_BASELINE_PATH = Path(__file__).resolve().parent / "data" / "intraday_seasonality_v1.parquet"
+_INTRADAY_BASELINE: dict[int, tuple[float, float]] = _load_intraday_baseline()
+
+
 class IntradaySeasonalityClean:
-    """CUMULATIVE / session-reset: volume vs the symbol's running since-open mean volume. A carried running
-    sum + count per symbol, RESET at the session open (``minute_epoch`` crossing a new day). Lives in
-    ``window.state`` like the EMA, but the carry is a running mean that resets — proving the cumulative kind.
-    """
+    """PRICE: seasonality-adjusted activity vs the time-of-day baseline. absret_vs_tod = |close/open−1| /
+    baseline_absret[tod-bucket]; volume_vs_tod = volume / (the symbol's running since-open MEAN volume ·
+    vol_shape[tod-bucket]). The ToD baseline is the FROZEN committed lookup (data/intraday_seasonality_v1.parquet,
+    per-30min ET bucket), loaded eagerly at import. The running since-open mean volume is a per-(symbol,
+    ET-session) cumulative (reset at the ET-date boundary, RTH-only). NULL outside RTH / unmapped bucket. Legacy:
+    ``IntradaySeasonalityGroup``."""
 
     name = "intraday_seasonality"
-    input_cols = ("volume",)
-    feature_names = ("volume_vs_session_mean",)
-    _SESSION_SECONDS = 86400  # day bucket for the reset (a real impl uses the exchange session boundary)
+    input_cols = ("open", "close", "volume")
+    feature_names = ("absret_vs_tod", "volume_vs_tod")
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        nan = np.full(n, np.nan)
+        present = window.present()  # the running mean increments ONLY on a present bar
+        sdate, etm = _et_session(window.minute_epoch)
+        in_rth = _INTRADAY_OPEN_MINUTE <= etm < _INTRADAY_CLOSE_MINUTE_EXCL
+        if not in_rth:
+            return {name: nan for name in self.feature_names}
+        bucket = (
+            (etm - _INTRADAY_OPEN_MINUTE) // _INTRADAY_BUCKET
+        ) * _INTRADAY_BUCKET + _INTRADAY_OPEN_MINUTE
+        baseline = _INTRADAY_BASELINE.get(int(bucket))
+        if baseline is None:
+            return {name: nan for name in self.feature_names}
+        baseline_absret, vol_shape = baseline
+
         volume = window.latest("volume")
-        present = (
-            window.present()
-        )  # the REAL delivery mask — the count must NOT increment on an absent minute
+        open_px = window.latest("open")
+        close_px = window.latest("close")
         state = window.state
-        day = window.minute_epoch // self._SESSION_SECONDS
-        # reset the running sum/count when the session day changes
-        if state.get("day") is None or int(state["day"][0]) != day:
-            state["sum"] = np.zeros(window.n)
-            state["cnt"] = np.zeros(window.n)
-            state["day"] = np.full(window.n, day, dtype=np.float64)
-        state["sum"] = np.where(present, state["sum"] + np.where(present, volume, 0.0), state["sum"])
-        state["cnt"] = np.where(present, state["cnt"] + 1.0, state["cnt"])
+        # per-(symbol, ET-session) running since-open sum/count of volume — reset when the symbol crosses into a
+        # new ET session (sdate change), incremented ONLY on a present RTH bar (matches the legacy cum_sum/len
+        # over the RTH session partition).
+        if state.get("iss_sdate") is None:
+            state["iss_sum"] = np.zeros(n)
+            state["iss_cnt"] = np.zeros(n)
+            state["iss_sdate"] = np.full(n, -1.0)
+        reset = present & (state["iss_sdate"] != float(sdate))
+        state["iss_sum"] = np.where(reset, 0.0, state["iss_sum"])
+        state["iss_cnt"] = np.where(reset, 0.0, state["iss_cnt"])
+        state["iss_sdate"] = np.where(present, float(sdate), state["iss_sdate"])
+        state["iss_sum"] = np.where(
+            present, state["iss_sum"] + np.where(present, volume, 0.0), state["iss_sum"]
+        )
+        state["iss_cnt"] = np.where(present, state["iss_cnt"] + 1.0, state["iss_cnt"])
         with np.errstate(invalid="ignore", divide="ignore"):
-            session_mean = state["sum"] / state["cnt"]
-            ratio = volume / session_mean
-        return {"volume_vs_session_mean": np.where(present & (state["cnt"] > 0), ratio, np.nan)}
+            run_mean_vol = state["iss_sum"] / state["iss_cnt"]
+            absret = np.abs(close_px / open_px - 1.0)
+            absret_vs_tod = np.where(baseline_absret > 0.0, absret / baseline_absret, np.nan)
+            volume_vs_tod = np.where(
+                (run_mean_vol > 0.0) & (vol_shape > 0.0), volume / (run_mean_vol * vol_shape), np.nan
+            )
+        return {
+            "absret_vs_tod": np.where(present, absret_vs_tod, np.nan),
+            "volume_vs_tod": np.where(present, volume_vs_tod, np.nan),
+        }
 
 
 _SWING_THETA = 0.005  # legacy THETA — reversal threshold (0.5% fractional return) confirms a pivot
