@@ -582,3 +582,58 @@ class CrossSectionalRankClean:
             dollar = latest_close * latest_volume
         out["dollar_volume_rank_1m"] = _cross_sectional_percentile(dollar, present)
         return out
+
+
+_MC_INDICES: tuple[tuple[str, str], ...] = (("market", "spy_row"), ("nasdaq", "qqq_row"))
+_MC_RELATIVE_PREFIX = "market"  # relative_return / outperforming are measured vs SPY (the market index)
+
+
+class MarketContextClean:
+    """CROSS_SECTIONAL gather: per window, the index (SPY/QQQ) trailing returns broadcast to every ticker +
+    each ticker's relative return vs SPY. {market,nasdaq}_return_{w}m = the index's trailing-w return (STRICT
+    exact-minute lag), broadcast; relative_return_{w}m = own trailing-w return − SPY's; outperforming_{w}m =
+    1.0 when own > SPY. Own + index returns both use the exact-minute lag (legacy lagged(close, w), NULL on
+    gap); the index broadcast is at-T (a scalar to every present symbol). Reads window.static['spy_row'] +
+    ['qqq_row']. Legacy: ``MarketContextGroup``."""
+
+    name = "market_context"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120)
+    feature_names = tuple(f"{prefix}_return_{w}m" for w in _WINDOWS for prefix, _ in _MC_INDICES) + tuple(
+        f"{stat}_{w}m" for w in _WINDOWS for stat in ("relative_return", "outperforming")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        minute = window.trailing_minute()
+        present = window.present()
+        latest_close = window.latest("close")
+        now_epoch = window.minute_epoch
+        # per-(prefix) the index's row index in the engine; None → that index's features are NaN.
+        index_idx = {prefix: window.static.get(key) for prefix, key in _MC_INDICES}
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            lag_close = _value_at_lag(close, minute, now_epoch, w)  # strict exact-minute lag, per symbol
+            with np.errstate(invalid="ignore", divide="ignore"):
+                own_ret = latest_close / lag_close - 1.0  # per-symbol trailing-w return (NULL on gap)
+            own_ret = np.where(present, own_ret, np.nan)
+            index_ret: dict[str, np.ndarray] = {}
+            for prefix, _ in _MC_INDICES:
+                row = index_idx[prefix]
+                if row is None:
+                    val = np.nan
+                else:
+                    val = own_ret[
+                        int(np.asarray(row).flat[0])
+                    ]  # the index's trailing-w return at T (scalar)
+                index_ret[prefix] = np.where(present, val, np.nan)
+                out[f"{prefix}_return_{w}m"] = index_ret[prefix]
+            with np.errstate(invalid="ignore"):
+                rel = own_ret - index_ret[_MC_RELATIVE_PREFIX]
+            out[f"relative_return_{w}m"] = np.where(present, rel, np.nan)
+            # outperforming is NULL where rel is undefined (legacy (None > 0) = None) — a numpy (NaN>0) gives
+            # False, so gate on rel being finite too.
+            out[f"outperforming_{w}m"] = np.where(
+                present & np.isfinite(rel), (rel > 0.0).astype(np.float64), np.nan
+            )
+        return out
