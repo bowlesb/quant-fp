@@ -1704,6 +1704,39 @@ def test_volume_drawrange_momentumconsistency_sparse_matches_legacy() -> None:
     _assert_clean_matches_golden(MomentumConsistencyClean(), "momentum_consistency_golden")
 
 
+def test_count_fano_sparse_matches_legacy_compute_golden() -> None:
+    """#63 tick-flow gate: count_fano is the one trade-arrival group already a clean ReductionGroup (input is
+    minute_agg(n_trades) = a bar column, NOT the trade tape — so no derived-column decomposition needed).
+    count_fano_60m = var(n_trades,60m)/mean(n_trades,60m) (ddof=1). Diff vs a golden from the REAL legacy
+    CountFanoGroup.compute() on a gappy n_trades fixture (tests/count_fano_in.json, spans 85 min so the 60m
+    time window straddles real gaps — the sparse production shape). 1/1 match. (The trade-TAPE groups
+    print_hhi/size_entropy/subminute_gap_fano land via enrich_bars_with_ticks derived columns — gated
+    separately when those clean ports land.)"""
+    import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_windowed import CountFanoClean  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70, 74, 78, 81, 85]
+    cf_in = json.load(open(os.path.join(os.path.dirname(__file__), "count_fano_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "count_fano_golden.json")))
+
+    eng = CleanEngine([CountFanoClean()], ["A"], 400)
+    out: dict[str, np.ndarray] = {}
+    for i, off in enumerate(offsets):
+        out = eng.step({"symbol": np.array(["A"]), "n_trades": np.array([float(cf_in["n_trades"][i])]),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=off)).timestamp())],
+                                                 dtype=np.int64)})["count_fano"]
+    assert set(out) == set(golden), "count_fano feature set != legacy compute()"
+    for fname, gv in golden.items():
+        cv = float(out[fname][0])
+        if gv is None:
+            assert np.isnan(cv), f"count_fano.{fname}: legacy NULL, clean {cv}"
+        else:
+            assert cv == pytest.approx(gv, rel=1e-6, abs=1e-9), f"count_fano.{fname}: legacy {gv} clean {cv}"
+
+
 def test_residual_analysis_clean_momentum_sparse_match_legacy_output() -> None:
     """GATE residual_analysis + clean_momentum (#60 FRESH time-OLS ports w/ rebased-minute axis) on the SPARSE
     axis. Both are close-vs-TIME OLS (frame-relative minute axis = trend_quality's), so the rebased-minute axis
