@@ -167,6 +167,38 @@ class DailyBetaClean:
         }
 
 
+class OvernightIntradaySplitClean:
+    """DAILY-SNAPSHOT: the overnight/intraday return split of the latest daily bar (broadcast to every minute).
+    intraday_ret = close/open − 1; overnight_minus_intraday = (open/prev_close − 1) − intraday_ret;
+    overnight_share = |overnight| / (|overnight| + |intraday|), NULL when the total move is 0. Reads
+    ``window.session['daily_open'/'daily_close']``. Legacy: ``OvernightIntradaySplitGroup``."""
+
+    name = "overnight_intraday_split"
+    input_cols = ()
+    feature_names = ("intraday_ret", "overnight_minus_intraday", "overnight_share")
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        nan = np.full(n, np.nan)
+        daily_open = window.session.get("daily_open")
+        daily_close = window.session.get("daily_close")
+        if daily_open is None or daily_close is None or daily_close.shape[1] < 2:
+            return {name: nan for name in self.feature_names}
+        op = daily_open[:, -1]  # latest daily open
+        close = daily_close[:, -1]  # latest daily close
+        prev_close = daily_close[:, -2]  # the prior day's close
+        with np.errstate(invalid="ignore", divide="ignore"):
+            overnight = op / prev_close - 1.0
+            intraday = close / op - 1.0
+            abs_total = np.abs(overnight) + np.abs(intraday)
+            overnight_share = np.where(abs_total > 0.0, np.abs(overnight) / abs_total, np.nan)
+        return {
+            "intraday_ret": intraday,
+            "overnight_minus_intraday": overnight - intraday,
+            "overnight_share": overnight_share,
+        }
+
+
 class LiquidityRankClean:
     """DAILY-SNAPSHOT: the slow persistent liquidity TIER. adv_dollar_log_20d = log1p of the trailing-20-day
     mean dollar volume (close·volume), min 10 days; liquidity_rank = the symbol's cross-sectional PERCENTILE

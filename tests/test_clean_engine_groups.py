@@ -2257,6 +2257,7 @@ def test_price_levels_contract_and_seed_equals_live() -> None:
 # ========================================================================================================= #
 
 from quantlib.features.clean_groups_daily import (  # noqa: E402
+    DailyBetaClean,
     MultiDayClean,
     _daily_return,
     _daily_vol,
@@ -2324,6 +2325,111 @@ def test_multi_day_broadcasts_same_value_across_minutes() -> None:
     for fname in first:
         np.testing.assert_allclose(np.nan_to_num(first[fname]), np.nan_to_num(later[fname]), rtol=1e-12,
                                    err_msg=f"multi_day.{fname} drifted across minutes (must be intraday-invariant)")
+
+
+# ========================================================================================================= #
+# DAILY-SNAPSHOT — daily_beta (DailyBetaGroup): rolling 60-DAY OLS beta/corr/idio-vol of the name's daily
+# returns on SPY's (the certified W11 overnight-beta quantity). Daily bars are one-per-day (DENSE), so the
+# positional-vs-time-minute question does NOT apply. OWN guard: var_x>0 + MIN_PAIRS=20 (NOT the minute-OLS
+# relative floors). idio uses ddof=1 std (clean's n/(n-1) on the pop-var matches legacy rolling_std).
+# ========================================================================================================= #
+
+
+def _daily_close_with_beta(n_days: int, beta: float, seed: int) -> tuple[np.ndarray, list[str]]:
+    """A (3, n_days) daily-close matrix: name A = ``beta``×SPY + idio, B = noise, SPY = row 2."""
+    rng = np.random.default_rng(seed)
+    spy = 100.0 + np.cumsum(rng.standard_normal(n_days) * 0.5)
+    spy_ret = spy[1:] / spy[:-1] - 1.0
+    a_ret = beta * spy_ret + rng.standard_normal(n_days - 1) * 0.003
+    b_ret = 0.3 * spy_ret + rng.standard_normal(n_days - 1) * 0.01
+
+    def _to_close(rets: np.ndarray, start: float) -> np.ndarray:
+        close = [start]
+        for r in rets:
+            close.append(close[-1] * (1.0 + r))
+        return np.array(close)
+
+    return np.vstack([_to_close(a_ret, 50.0), _to_close(b_ret, 50.0), spy]), ["A", "B", "SPY"]
+
+
+def _step_daily_beta(daily_close: np.ndarray, syms: list[str], spy_row: int = 2) -> dict[str, np.ndarray]:
+    eng = CleanEngine([DailyBetaClean()], syms, WINDOW)
+    eng.static = {"spy_row": np.array([spy_row])}
+    eng.set_session({"daily_close": daily_close})
+    return eng.step({"symbol": np.array(syms), "close": daily_close[:, -1], "volume": np.zeros(len(syms)),
+                     "minute_epoch": np.array([570 * 60], dtype=np.int64)})["daily_beta"]
+
+
+def test_daily_beta_matches_legacy_rolling_ols() -> None:
+    """daily_beta_60d/corr/idio = legacy polars rolling_cov/var/corr/std over the trailing 60 daily returns on
+    SPY. beta/corr are ratios (ddof cancels); idio = ret_std(ddof=1)·sqrt(1−corr²) — clean's n/(n-1) matches
+    legacy rolling_std. Head-to-head on a high-beta + a low-beta name."""
+    import polars as pl  # noqa: PLC0415
+
+    n_days = 80
+    daily_close, syms = _daily_close_with_beta(n_days, beta=1.5, seed=11)
+    rows = [{"symbol": s, "date": d, "close": float(daily_close[i, d])}
+            for i, s in enumerate(syms) for d in range(n_days)]
+    daily = pl.DataFrame(rows).sort(["symbol", "date"]).with_columns(
+        (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("ret"))
+    market = daily.filter(pl.col("symbol") == "SPY").select(["date", pl.col("ret").alias("mkt_ret")]).sort("date")
+    joined = daily.join(market, on="date", how="left").sort(["symbol", "date"])
+    mkt_var = pl.col("mkt_ret").rolling_var(window_size=60, min_samples=20).over("symbol")
+    cov_roll = pl.rolling_cov(pl.col("ret"), pl.col("mkt_ret"), window_size=60, min_samples=20).over("symbol")
+    corr = pl.rolling_corr(pl.col("ret"), pl.col("mkt_ret"), window_size=60, min_samples=20).over("symbol").clip(-1.0, 1.0)
+    ret_std = pl.col("ret").rolling_std(window_size=60, min_samples=20).over("symbol")
+    beta = pl.when(mkt_var > 0).then(cov_roll / mkt_var).otherwise(None)
+    idio = pl.when(corr.is_not_null()).then(ret_std * (1.0 - corr * corr).clip(0.0).sqrt()).otherwise(None)
+    joined = joined.with_columns(beta.alias("b"), corr.alias("c"), idio.alias("i"))
+
+    out = _step_daily_beta(daily_close, syms)
+    for i, s in enumerate(["A", "B"]):
+        last = joined.filter((pl.col("symbol") == s) & (pl.col("date") == n_days - 1))
+        assert out["daily_beta_60d"][i] == pytest.approx(last["b"][0], rel=1e-9)
+        assert out["daily_corr_60d"][i] == pytest.approx(last["c"][0], rel=1e-9)
+        assert out["daily_idio_vol_60d"][i] == pytest.approx(last["i"][0], rel=1e-9)
+
+
+def test_daily_beta_own_guard_warmup_var0_perfectfit() -> None:
+    """OWN-guard boundary: <20 finite pairs → NaN (warm-up); SPY var=0 → beta NaN (var_x>0 guard); a perfect
+    linear fit → corr clipped to exactly 1.0 (≤1) + idio≈0; no spy_row static → all-NaN (no crash)."""
+    rng = np.random.default_rng(3)
+    short = 100.0 + np.cumsum(rng.standard_normal((3, 15)) * 0.5, axis=1)  # 14 returns < 20
+    out_w = _step_daily_beta(short, ["A", "B", "SPY"])
+    assert np.isnan(out_w["daily_beta_60d"][0]) and np.isnan(out_w["daily_corr_60d"][0]), "<20 pairs → NaN"
+
+    flat_spy = np.vstack([100.0 + np.cumsum(rng.standard_normal(80) * 0.5),
+                          100.0 + np.cumsum(rng.standard_normal(80) * 0.5), np.full(80, 100.0)])  # SPY flat
+    out_v = _step_daily_beta(flat_spy, ["A", "B", "SPY"])
+    assert np.isnan(out_v["daily_beta_60d"][0]), "SPY var=0 → NaN (var_x>0 own-guard)"
+
+    spy = 100.0 + np.cumsum(rng.standard_normal(80) * 0.5)
+    spy_ret = spy[1:] / spy[:-1] - 1.0
+    name = [50.0]
+    for r in spy_ret:
+        name.append(name[-1] * (1.0 + 2.0 * r))  # exactly 2x SPY
+    perfect = np.vstack([np.array(name), 100.0 + np.cumsum(rng.standard_normal(80) * 0.5), spy])
+    out_p = _step_daily_beta(perfect, ["A", "B", "SPY"])
+    assert out_p["daily_beta_60d"][0] == pytest.approx(2.0, rel=1e-6), "perfect 2x fit → beta 2.0"
+    assert out_p["daily_corr_60d"][0] <= 1.0 and out_p["daily_corr_60d"][0] == pytest.approx(1.0), "corr clipped to 1.0"
+    assert out_p["daily_idio_vol_60d"][0] == pytest.approx(0.0, abs=1e-9), "perfect fit → idio ≈ 0"
+
+    eng = CleanEngine([DailyBetaClean()], ["A", "B", "SPY"], WINDOW)  # no spy_row static
+    eng.set_session({"daily_close": perfect})
+    out_n = eng.step({"symbol": np.array(["A", "B", "SPY"]), "close": perfect[:, -1], "volume": np.zeros(3),
+                      "minute_epoch": np.array([570 * 60], dtype=np.int64)})["daily_beta"]
+    assert all(np.all(np.isnan(arr)) for arr in out_n.values()), "no spy_row → all-NaN (no crash)"
+
+
+def test_daily_beta_contract() -> None:
+    """produced == declared with legacy valid_range/nan_policy (corr in [-1,1], idio ≥ 0)."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.daily_beta import DailyBetaGroup  # type: ignore  # noqa: PLC0415
+
+    daily_close, syms = _daily_close_with_beta(80, beta=1.2, seed=7)
+    out = _step_daily_beta(daily_close, syms)
+    _assert_feature_spec_contract(out, DailyBetaGroup().declare(), "daily_beta ")
 
 
 # ========================================================================================================= #
