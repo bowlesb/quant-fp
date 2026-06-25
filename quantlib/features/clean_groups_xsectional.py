@@ -166,6 +166,58 @@ def _buffer_returns(close: np.ndarray) -> np.ndarray:
     return np.concatenate([np.full((close.shape[0], 1), np.nan), ret], axis=1)
 
 
+def _sector_mean_vector(values: np.ndarray, sector: np.ndarray, present: np.ndarray) -> np.ndarray:
+    """Per-symbol broadcast of its sector's equal-weight mean of ``values`` over the PRESENT+finite members of
+    that sector this minute. ``(n_symbols,)``; NaN where the symbol's sector has no present member. Used by the
+    per-window cross-sectional sector aggregates (sector_return)."""
+    out = np.full(values.shape, np.nan)
+    valid = present & np.isfinite(values)
+    for sec in np.unique(sector):
+        rows = sector == sec
+        members = rows & valid
+        if members.any():
+            out[rows] = values[members].mean()
+    return out
+
+
+class SectorReturnClean:
+    """CROSS_SECTIONAL: per window — sector_return_{w}m = the equal-weight mean trailing-w return of the
+    ticker's GICS sector (present members), sector_excess_{w}m = the ticker's own trailing-w return minus that
+    sector mean. Unmapped-sector names → NULL; absent symbols → NULL (sparse). present()-gated (an absent
+    member is not in the sector mean). Legacy: ``SectorReturnGroup``. Reads ``window.static['sector']``."""
+
+    name = "sector_return"
+    input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
+    _UNKNOWN = -1
+    feature_names = tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("sector_return", "sector_excess")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        close = window.trailing("close")
+        present = window.present()
+        latest_close = window.latest("close")
+        n_sym = close.shape[0]
+        sector = window.static.get("sector")
+        if sector is None:
+            sector = np.full(n_sym, self._UNKNOWN)
+        # a row is emitted only for a present, mapped symbol (sparse policy + unmapped→NULL).
+        keep = present & (sector != self._UNKNOWN)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            if close.shape[1] > w:
+                prior = close[:, -(w + 1)]
+            else:
+                prior = np.full(n_sym, np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                own_ret = latest_close / prior - 1.0
+            sec_mean = _sector_mean_vector(own_ret, sector, present)
+            out[f"sector_return_{w}m"] = np.where(keep, sec_mean, np.nan)
+            out[f"sector_excess_{w}m"] = np.where(keep, own_ret - sec_mean, np.nan)
+        return out
+
+
 class SectorBetaClean:
     """CROSS_SECTIONAL: per window, the rolling OLS of each name's one-minute return on its OWN GICS sector's
     equal-weight one-minute return — sector_beta_{w} (slope) + sector_corr_{w} (corr in [-1,1]). The sector
