@@ -2250,6 +2250,73 @@ def test_price_levels_contract_and_seed_equals_live() -> None:
 
 
 # ========================================================================================================= #
+# TIME-Δ WINDOWED RING (#60, Lead ruling b): RingBuffer carries a per-slot minute-epoch + trailing_time(col,
+# minutes, now_epoch) returns bars within (now − Nm, now] (legacy rolling_*_by closed 'right'), NOT the last N
+# positional slots. GATE: on a SPARSE symbol positional ≠ time, and the re-ported time-window groups must
+# match legacy ON THE SPARSE SHAPE — the axis my earlier dense-only greens never exercised.
+# ========================================================================================================= #
+
+
+def test_trailing_time_window_edge_matches_polars_rolling_by() -> None:
+    """trailing_time keeps exactly the bars with (now − bar) < minutes·60 — the polars rolling_*_by closed
+    'right' window (now−Nm, now]. THE off-by-one boundary: a bar at EXACTLY now−Nm is EXCLUDED. Head-to-head
+    a 14m rolling sum on a sparse symbol incl. an edge bar."""
+    import datetime  # noqa: PLC0415
+
+    from quantlib.features.clean_engine import RingBuffer  # noqa: PLC0415
+
+    ring = RingBuffer(["A"], window=300, cols=("close",))
+    base = int(datetime.datetime(2026, 6, 1, 9, 30).timestamp())
+    offsets = [0, 2, 5, 9, 13, 14, 20, 27]  # offset 13 lands EXACTLY at now−14m (excluded)
+    closes = [100.0, 101.0, 103.0, 102.0, 105.0, 106.0, 108.0, 110.0]
+    for off, c in zip(offsets, closes):
+        ring.append(np.array([[c]]), np.array([0]), base + off * 60)
+    now = base + 27 * 60
+    tt = ring.trailing_time("close", 14, now)[0]
+    kept = sorted(tt[np.isfinite(tt)].tolist())
+    assert kept == [106.0, 108.0, 110.0], "only bars in (27−14, 27] = offsets 14,20,27; offset 13 is the edge"
+    import polars as pl  # noqa: PLC0415
+    minutes = [datetime.datetime(2026, 6, 1, 9, 30) + datetime.timedelta(minutes=o) for o in offsets]
+    legacy_sum = pl.DataFrame({"minute": minutes, "close": closes}).sort("minute").with_columns(
+        pl.col("close").rolling_sum_by("minute", window_size="14m").alias("s"))["s"].to_list()[-1]
+    assert float(np.nansum(tt)) == pytest.approx(legacy_sum), "trailing_time nansum != legacy rolling_sum_by"
+
+
+def test_price_levels_sparse_time_window_matches_legacy_rolling_by() -> None:
+    """RE-GATE price_levels on the SPARSE axis (the #60 re-port to time-windows; my earlier green was dense-
+    only). On a gappy symbol, position_in_range/dist_from_high/dist_from_low over the 30m TIME window must equal
+    legacy rolling_max_by/rolling_min_by — NOT the positional last-30-bars (which would reach hours back)."""
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38]  # sparse, spans 38 min > 30m window
+    rng = np.random.default_rng(4)
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)))
+    highs = closes + np.abs(rng.standard_normal(len(offsets))) + 0.5
+    lows = closes - np.abs(rng.standard_normal(len(offsets))) - 0.5
+    minutes = [base + datetime.timedelta(minutes=o) for o in offsets]
+    df = pl.DataFrame({"minute": minutes, "close": closes, "high": highs, "low": lows}).sort("minute")
+    df = df.with_columns(pl.col("high").rolling_max_by("minute", window_size="30m").alias("hi"),
+                         pl.col("low").rolling_min_by("minute", window_size="30m").alias("lo"))
+    last = df.tail(1)
+    hi30, lo30, cl = last["hi"][0], last["lo"][0], closes[-1]
+    leg_pos = (cl - lo30) / (hi30 - lo30)
+
+    eng = CleanEngine([PriceLevelsClean()], ["A"], 400)
+    out = {}
+    for off, c, h, low_v in zip(offsets, closes, highs, lows):
+        out = eng.step(_ohlcv_bar(["A"], [c], [h], [low_v], [c], int((base + datetime.timedelta(minutes=off)).timestamp())))[
+            "price_levels"]
+    assert out["position_in_range_30m"][0] == pytest.approx(leg_pos), "sparse 30m position != legacy rolling_*_by"
+    assert out["dist_from_high_30m"][0] == pytest.approx(cl / hi30 - 1.0)
+    assert out["dist_from_low_30m"][0] == pytest.approx(cl / lo30 - 1.0)
+    in_window_max = max(highs[i] for i, o in enumerate(offsets) if (38 - o) < 30)
+    assert hi30 == pytest.approx(in_window_max), "legacy 30m high is over the TIME window (offset>8), not all bars"
+
+
+# ========================================================================================================= #
 # DAILY-SNAPSHOT — batch #55: multi_day (MultiDayReturnGroup). Intraday-INVARIANT: daily_return/vol/dist-from-
 # high computed ONCE from the settled daily closes in window.session['daily_close'] (newest col = prior close,
 # the _asof anchor) and broadcast to every minute. Gated head-to-head vs legacy polars (rolling_std=ddof=1,
