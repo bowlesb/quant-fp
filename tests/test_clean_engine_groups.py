@@ -1747,3 +1747,89 @@ def test_sector_beta_near_constant_sector_return_matches_legacy_batch() -> None:
     assert (np.isnan(beta[0]) and np.isnan(legacy_beta)) or beta[0] == pytest.approx(legacy_beta)
     assert (np.isnan(corr[0]) and np.isnan(legacy_corr)) or corr[0] == pytest.approx(legacy_corr)
     assert np.isnan(beta[0]), "near-constant-sector beta must be NULLed (BETA_MAX), matching legacy"
+
+
+# ========================================================================================================= #
+# CROSS-SECTIONAL — batch 2d: sector_return (TWO present() gates: DENOMINATOR (absent not in sector mean) AND
+# OUTPUT (absent symbol's own row → NaN). Both must hold.
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_xsectional import SectorReturnClean, _sector_mean_vector  # noqa: E402
+
+
+def test_sector_return_mean_present_gated_denominator() -> None:
+    """DENOMINATOR gate: the sector mean is over PRESENT members only. Sector 0 = {A,B,C}; B absent → the
+    sector mean for A,C is over {A,C}, NOT {A, stale-B, C}."""
+    own_ret = np.array([0.02, np.nan, 0.06])  # A=0.02, B absent (NaN), C=0.06
+    sector = np.array([0, 0, 0])
+    present = np.array([True, False, True])
+    sec_mean = _sector_mean_vector(own_ret, sector, present)
+    assert sec_mean[0] == pytest.approx(0.04)   # (0.02+0.06)/2 over present A,C (B excluded)
+    assert sec_mean[2] == pytest.approx(0.04)
+
+
+def test_sector_return_output_gate_absent_row_nan() -> None:
+    """OUTPUT gate: an absent symbol's OWN row → NaN, even though it has a mapped sector. A,B present, C absent;
+    C's sector_return must be NaN (output-gated), while A,B compute."""
+    syms = ["A", "B", "C"]
+    eng = CleanEngine([SectorReturnClean()], syms, WINDOW)
+    eng.static = {"sector": np.array([0, 0, 0])}
+    # 10 minutes all present, then a minute where only A,B deliver (C absent)
+    for ep in range(10):
+        eng.step(_sec_bar({"A": 100.0 + ep, "B": 101.0 + ep, "C": 99.0 + ep}, 60 + ep * 60))
+    out = eng.step(_sec_bar({"A": 111.0, "B": 112.0}, 700))["sector_return"]
+    assert np.isfinite(out["sector_return_5m"][0])  # A present → computes
+    assert np.isfinite(out["sector_return_5m"][1])  # B present → computes
+    assert np.isnan(out["sector_return_5m"][2])     # C ABSENT → output-gated NaN
+
+
+def test_sector_return_excess_sums_to_zero_within_sector() -> None:
+    """sector_excess = own − sector_mean → within a sector the present members' excess sums to ~0 (mean-centered)."""
+    syms = ["A", "B", "C"]
+    eng = CleanEngine([SectorReturnClean()], syms, WINDOW)
+    eng.static = {"sector": np.array([0, 0, 0])}
+    rng = np.random.default_rng(25)
+    out = {}
+    for ep in range(10):
+        out = eng.step(_sec_bar({s: 100.0 + rng.standard_normal() * 5 for s in syms}, 60 + ep * 60))[
+            "sector_return"]
+    excess = np.array([out["sector_excess_5m"][i] for i in range(3)])
+    assert np.nansum(excess) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_sector_return_unmapped_nan() -> None:
+    """unmapped sector (-1) → both sector_return and sector_excess NaN."""
+    eng = CleanEngine([SectorReturnClean()], ["A"], WINDOW)
+    eng.static = {"sector": np.array([-1])}
+    out = {}
+    for ep in range(8):
+        out = eng.step(_sec_bar({"A": 100.0 + ep}, 60 + ep * 60))["sector_return"]
+    assert np.isnan(out["sector_return_5m"][0]) and np.isnan(out["sector_excess_5m"][0])
+
+
+def test_sector_return_contract_and_seed_equals_live() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.sector_return import SectorReturnGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(26)
+    syms = [f"S{i}" for i in range(6)]
+    sectors = np.array([0, 0, 0, 1, 1, 1])
+    hist = []
+    for t in range(30):
+        present = {s: 100.0 + np.cumsum(rng.standard_normal(1))[0] for s in syms if rng.random() > 0.2}
+        if present:
+            hist.append(_sec_bar(present, 60 + t * 60))
+    se = CleanEngine([SectorReturnClean()], syms, WINDOW)
+    se.static = {"sector": sectors}
+    se.seed(hist[:-1])
+    so = se.step(hist[-1])
+    le = CleanEngine([SectorReturnClean()], syms, WINDOW)
+    le.static = {"sector": sectors}
+    lo = {}
+    for h in hist:
+        lo = le.step(h)
+    for fname, arr in so["sector_return"].items():
+        np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(lo["sector_return"][fname]),
+                                   rtol=1e-12, err_msg=f"sector_return.{fname} seed != live")
+    _assert_feature_spec_contract(so["sector_return"], SectorReturnGroup().declare(), "sector_return ")
