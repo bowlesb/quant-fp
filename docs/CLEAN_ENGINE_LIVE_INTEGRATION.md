@@ -101,6 +101,36 @@ These are NOT correctness-of-math (that's gated per group) — they're the wirin
    OHLCV; the enrich step is unchanged and already a shared live+backfill boundary, so this is parity-neutral.
    The original "reduction-anchor parity" worry does NOT apply — there is no anchor column to thread.
 
+## #69 — premarket session-population build (the expanded scope, Lead ruling)
+
+#69 is now the SINGLE live session-population integration item for ALL of the clean engine's once-per-session
+state — built premarket from the REAL production sources, point-in-time-safe, called at the per-session engine
+rebuild (gap 2). Producer verdict: **every source already exists and is already loaded live** (real_capture.py
+:152-163: `load_reference()`, `backfill_daily(day, symbols)`, `load_universe(day)`, `load_filings(day)`,
+`load_news_features(day)`). #69 is NOT a new data path — it is ONE pivot module turning those held polars frames
+into the clean engine's numpy layout, plus the static labels:
+
+1. **Daily matrices** (`session["daily_close"/"daily_high"/"daily_open"/"daily_volume"/"daily_vwap"]`) — pivot
+   `snapshots["daily"]` (`backfill_daily`, `(symbol,date,o,h,l,c,v,vwap)`, trailing 370d ENDING AT `day` so
+   today is the last column) into `(n_sym, n_days)` matrices, newest col `[:, -1]` = today (the `(a)` convention,
+   already gated). One `pivot(index=symbol, on=date, values=<col>)` per column → numpy, NaN-pad-left on short
+   history. Decide the column/date sort once (ascending date → newest last).
+2. **Event tapes** (`session["news_at"/"news_off"/"news_sentiment"]`, `session["edgar_at"/"edgar_off"/
+   "edgar_form"]`) — pivot `snapshots["news"]` / `snapshots["filings"]` (`(symbol, available_at, <payload>)`)
+   into the ragged CSR layout: per symbol sort by `available_at`, flatten to `<tape>_at` (int64 epoch-secs) +
+   `<tape>_<payload>`, with `<tape>_off` the per-symbol CSR offsets (the schema in
+   `clean_groups_reference.py`'s docstring). edgar payload = `form_type`→int via `_EDGAR_FORM_CODE`.
+3. **Static labels** (`engine.static["sector"]`, `["spy_row"]`) — from `load_reference()`: the per-symbol GICS
+   `sector` int-code (cross_sectional / sector_beta / sector_return read `static["sector"]`) + the SPY row index
+   (daily_beta / overnight_beta read `static["spy_row"]`). These are per-(session, universe) constant, built at
+   the same rebuild boundary.
+
+So the premarket build is: at the session boundary, with the day's universe + the already-loaded snapshots,
+construct `CleanEngine(all_clean_groups, day_universe, window, static=<labels>)`, call `set_session(<matrices +
+tapes>)`, seed from the warm-start ring, and hold it on `CaptureState`. CP's pre-staged gate asserts the LIVE
+path populated session (not just tests). Until #69 lands, the session groups emit NaN defaults (honest) and the
+non-session groups go live first.
+
 ## Cutover mechanics (flag-gated, reversible)
 
 - Add `FP_CLEAN_ENGINE=1` (default off). When off, `process_bars` is byte-identical to today (zero deploy risk).
