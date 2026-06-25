@@ -1177,3 +1177,113 @@ class MomentumRunClean:
             out[f"residual_skew_{w}m"] = _time_ols_resid_skew(x, y)
             out[f"longest_streak_{w}m"] = _windowed_longest_streak(rl, ret, in_window, w)
         return out
+
+
+_TFZ_STD_REL_EPS = (
+    1e-6  # trade_freq_z relative-std floor (small integer counts need a higher floor than volume)
+)
+
+
+class TradeFlowClean:
+    """TRADE_FLOW (Layer B): per-bar signed_volume_1m/trade_freq_1m (latest) + trade_rate_accel_1m (change in
+    trades-per-second vs the prior present bar) + TIME-windowed sums signed_volume_{w}m / trade_freq_{w}m. Reads
+    the enriched minute_agg tick columns. Legacy: ``TradeFlowGroup`` (ReductionGroup)."""
+
+    name = "trade_flow"
+    input_cols = ("n_trades", "signed_volume")
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
+    feature_names = ("signed_volume_1m", "trade_freq_1m", "trade_rate_accel_1m") + tuple(
+        f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("signed_volume", "trade_freq")
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        signed_volume = window.trailing("signed_volume")
+        n_trades = window.trailing("n_trades")
+        latest_nt = window.latest("n_trades")
+        # trade_rate_accel = (n_trades[T] − n_trades[T−1])/60 — POSITIONAL 1-bar diff (legacy n_trades.shift(1)),
+        # the prior PRESENT bar.
+        prior_nt = n_trades[:, -2] if n_trades.shape[1] >= 2 else np.full(window.n, np.nan)
+        with np.errstate(invalid="ignore"):
+            accel = (latest_nt - prior_nt) / 60.0
+        out: dict[str, np.ndarray] = {
+            "signed_volume_1m": window.latest("signed_volume"),
+            "trade_freq_1m": latest_nt,
+            "trade_rate_accel_1m": accel,
+        }
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("n_trades", w))
+            out[f"signed_volume_{w}m"] = _row_sum(np.where(in_window, signed_volume, np.nan))
+            out[f"trade_freq_{w}m"] = _row_sum(np.where(in_window, n_trades, np.nan))
+        return out
+
+
+class CountFanoClean:
+    """TRADE_FLOW (Layer B): count_fano_{w}m = Fano factor (var/mean = std²/mean) of n_trades over the trailing
+    window; NULL on a no-trade window (mean ≤ 0) + is_finite backstop. TIME-windowed. Legacy: ``CountFanoGroup``.
+    """
+
+    name = "count_fano"
+    input_cols = ("n_trades",)
+    _WINDOWS: tuple[int, ...] = (60,)
+    feature_names = tuple(f"count_fano_{w}m" for w in _WINDOWS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n_trades = window.trailing("n_trades")
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("n_trades", w))
+            masked = np.where(in_window, n_trades, np.nan)
+            mean_nt, _ = _row_mean(masked)
+            std_nt = _row_std(masked)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                fano = np.where(mean_nt > 0.0, std_nt**2 / mean_nt, np.nan)
+            out[f"count_fano_{w}m"] = np.where(np.isfinite(fano), fano, np.nan)
+        return out
+
+
+class TradeFreqZClean:
+    """TRADE_FLOW (Layer B): trade_freq_z_{w}m = (n_trades[T] − trailing mean)/trailing std; NULL on warm-up
+    (<2) and on a flat-count window (RELATIVE std floor std > 1e-6·|mean|, not a bare std>0). TIME-windowed.
+    Legacy: ``TradeFreqZGroup``."""
+
+    name = "trade_freq_z"
+    input_cols = ("n_trades",)
+    _WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
+    feature_names = tuple(f"trade_freq_z_{w}m" for w in _WINDOWS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n_trades = window.trailing("n_trades")
+        latest_nt = window.latest("n_trades")
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("n_trades", w))
+            masked = np.where(in_window, n_trades, np.nan)
+            mean_nt, _ = _row_mean(masked)
+            std_nt = _row_std(masked)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                z = (latest_nt - mean_nt) / std_nt
+                out[f"trade_freq_z_{w}m"] = np.where(std_nt > _TFZ_STD_REL_EPS * np.abs(mean_nt), z, np.nan)
+        return out
+
+
+class SignedTradeRatioClean:
+    """TRADE_FLOW (Layer B): signed_trade_ratio_{w}m = Σsigned_volume / Σvolume over the trailing window (net
+    buy/sell imbalance); NULL on a zero/null-volume window (Σvolume ≤ 0). TIME-windowed. Legacy:
+    ``SignedTradeRatioGroup``."""
+
+    name = "signed_trade_ratio"
+    input_cols = ("signed_volume", "volume")
+    _WINDOWS: tuple[int, ...] = (5, 15, 30, 60)
+    feature_names = tuple(f"signed_trade_ratio_{w}m" for w in _WINDOWS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        signed_volume = window.trailing("signed_volume")
+        volume = window.trailing("volume")
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            in_window = np.isfinite(window.trailing_time("volume", w))
+            sum_sv = _row_sum(np.where(in_window, signed_volume, np.nan))
+            sum_vol = _row_sum(np.where(in_window, volume, np.nan))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                out[f"signed_trade_ratio_{w}m"] = np.where(sum_vol > 0.0, sum_sv / sum_vol, np.nan)
+        return out
