@@ -41,6 +41,19 @@ def _average_rank(values: np.ndarray) -> np.ndarray:
     return out
 
 
+def _daily_return_xsec(daily_close: np.ndarray, w: int) -> np.ndarray:
+    """Per-symbol ``w``-day return from the daily snapshot: ``_asof / close[w days back] − 1`` (newest daily
+    column / w cols back). NaN where the symbol lacks w+1 daily bars. Used by the daily-horizon cross-sectional
+    dispersion."""
+    n_sym, n_days = daily_close.shape
+    if n_days == 0:
+        return np.full(n_sym, np.nan)
+    asof = daily_close[:, -1]
+    ref = daily_close[:, -(w + 1)] if n_days > w else np.full(n_sym, np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return asof / ref - 1.0
+
+
 def _cross_sectional_percentile(values: np.ndarray, present: np.ndarray) -> np.ndarray:
     """Percentile rank in [0, 1] of each PRESENT symbol's ``value`` across the present cross-section:
     ``(rank − 1)/(n − 1)`` over present+finite entries, NaN where n<2 or the symbol is absent/non-finite.
@@ -72,7 +85,7 @@ class ReturnDispersionClean:
     only this-minute-present symbols enter the dispersion. Legacy: ``ReturnDispersionGroup``.
 
     NOTE: the legacy also ships daily-horizon dispersions (``_1d``/``_5d``) read from the settled daily
-    snapshot; those are wired via ``window.session`` in the daily-snapshot batch — emitted NaN here until then.
+    snapshot via ``window.session['daily_close']`` (the cross-sectional std/IQR of the universe's w-day returns).
     """
 
     name = "return_dispersion"
@@ -100,10 +113,16 @@ class ReturnDispersionClean:
             # broadcast the market-wide scalar to every present symbol; absent → NaN (sparse).
             out[f"return_dispersion_std_{w}m"] = np.where(present, std, np.nan)
             out[f"return_dispersion_iqr_{w}m"] = np.where(present, iqr, np.nan)
-        # daily horizons deferred to the snapshot batch (window.session); NaN for now.
+        # daily horizons: cross-sectional std/IQR of the universe's w-day returns, from the daily snapshot.
+        daily_close = window.session.get("daily_close")
         for w in self._DAY_WINDOWS:
-            out[f"return_dispersion_std_{w}d"] = np.full(n_sym, np.nan)
-            out[f"return_dispersion_iqr_{w}d"] = np.full(n_sym, np.nan)
+            if daily_close is None:
+                std_d, iqr_d = np.nan, np.nan
+            else:
+                daily_ret = _daily_return_xsec(daily_close, w)
+                std_d, iqr_d = _xsec_std_iqr(daily_ret, present)
+            out[f"return_dispersion_std_{w}d"] = np.where(present, std_d, np.nan)
+            out[f"return_dispersion_iqr_{w}d"] = np.where(present, iqr_d, np.nan)
         return out
 
 
