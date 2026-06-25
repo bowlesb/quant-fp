@@ -91,8 +91,11 @@ builds a **polars frame every minute** (pivot/sort/groupby/`matrix_at`/`resolve_
   a maintained aggregate; a **cross-sectional reduce (the gather L1 halves) is a numpy reduce along the symbol
   axis** — *not* a polars groupby. Frame-vectorization across symbols is kept; the frame is not.
 - **Polars stays — but only OFF the hot path.** Batch, backfill, session load, and pre-minute setup may use
-  polars freely. The per-minute critical path runs **zero** polars: no frame, pivot, sort, groupby, or
-  `matrix_at`.
+  polars freely. The per-minute **compute** runs **zero** polars: no frame, pivot, sort, groupby, or `matrix_at`.
+  (The one residual polars is **output-frame construction at the bus boundary** — the `dict[str, pl.DataFrame]`
+  the bus consumes, measured ~0.02ms — a *contract choice*, not the per-minute tax; if the bus took numpy it goes
+  to zero too. Compute = zero polars is the load-bearing claim; the output boundary is separable and eliminable
+  later.)
 
 This is exactly the `tracker.py` discipline made literal at scale: **his hot path is polars-free numpy**
 (`current_sum += new − evicted`; read = an O(1) lookup off the carried aggregate; nothing recomputes over the
@@ -116,7 +119,10 @@ exercising sum / std / corr-denom / r² / mean_y / OLS — plus the #451 demolit
 co-resident = 39 passed, which exercises the corr-denom straddle on the degenerate flat-`Σxx≈0` cell). So the
 value claim is no longer a projection: **a real group's fully-numpy hot path is 2.0ms (≈7× off its 14ms
 incremental step), compute 0.16ms polars-free, byte-identical to backfill including the conditioning that parked
-it.** The design's value claim therefore stands in its final, *demonstrated* form: **fewer mechanisms AND a
+it.** To be exact about where the polars went: the per-minute **compute** is zero-polars (the 0.16ms — `cProfile`
+shows no `collect` in it); the only remaining polars is the **output-frame for the bus** (~0.02ms, the 350
+`collect`s of `dict[str, pl.DataFrame]` construction) — a bus-contract choice, not the per-minute tax, and itself
+eliminable. The design's value claim therefore stands in its final, *demonstrated* form: **fewer mechanisms AND a
 polars-free hot path — that combination, not fold-conversion alone, is the actual path to `<300ms`.**
 
 1. **ONE abstraction to hold state.**
