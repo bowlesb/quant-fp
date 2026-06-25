@@ -1998,3 +1998,161 @@ def test_calendar_value_always_defined_row_emission_is_boundary_concern() -> Non
     # dropped by the #57 boundary filter, NOT by calendar self-gating.
     assert out["minute_of_day_et"][0] == pytest.approx(600.0)
     assert out["minute_of_day_et"][1] == pytest.approx(600.0)  # defined; row-drop is the boundary's job (#57)
+
+
+# ========================================================================================================= #
+# #57 — present()-ROW-EMISSION boundary (engine.emit()): folds via step() then NaN's absent rows UNIFORMLY
+# across all groups + returns present_symbols. step() stays raw (calendar still broadcasts). The blast-radius
+# check: emit() drops absent rows for EVERY kind; step() unchanged so existing tests hold; dedup uses cached.
+# ========================================================================================================= #
+
+
+def test_emit_drops_absent_rows_uniformly_all_kinds() -> None:
+    """emit() NaN's absent symbols' rows for EVERY group — calendar (point-in-time, always-defined value),
+    cross_sectional_rank (cross-sectional), intraday_seasonality (carried). A,B present / C absent → C's row is
+    NaN in all three; present_symbols = [A,B]."""
+    import datetime as _dt  # noqa: PLC0415
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    syms = ["A", "B", "C"]
+    eng = CleanEngine([CalendarClean(), CrossSectionalRankClean(), IntradaySeasonalityClean()], syms, WINDOW)
+    ep = int(_dt.datetime(2026, 6, 25, 10, 0, tzinfo=ZoneInfo("America/New_York")).timestamp())
+    # warm all three present, then a minute where only A,B deliver (C absent)
+    eng.emit({"symbol": np.array(syms), "close": np.array([100.0] * 3), "volume": np.array([1000.0] * 3),
+              "minute_epoch": np.array([ep], dtype=np.int64)})
+    present_symbols, filtered = eng.emit(
+        {"symbol": np.array(["A", "B"]), "close": np.array([101.0, 102.0]), "volume": np.array([1500.0, 2500.0]),
+         "minute_epoch": np.array([ep + 60], dtype=np.int64)})
+    assert present_symbols == ["A", "B"]  # the persisted-row set
+    # C (index 2) is NaN in EVERY group's every feature — calendar (would otherwise broadcast), xsec, carried
+    assert np.isnan(filtered["calendar"]["minute_of_day_et"][2]), "calendar absent row not dropped by emit()"
+    assert np.isnan(filtered["cross_sectional_rank"]["volume_rank_1m"][2])
+    assert np.isnan(filtered["intraday_seasonality"]["volume_vs_session_mean"][2])
+    # A,B (present) keep their values
+    assert np.isfinite(filtered["calendar"]["minute_of_day_et"][0])
+    assert np.isfinite(filtered["calendar"]["minute_of_day_et"][1])
+
+
+def test_emit_step_raw_calendar_still_broadcasts() -> None:
+    """step() is UNCHANGED — calendar still broadcasts its value to absent symbols in the RAW step() output (the
+    per-group VALUE gate is separate from emit()'s row-emission filter). Only emit() present-filters."""
+    import datetime as _dt  # noqa: PLC0415
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    ep = int(_dt.datetime(2026, 6, 25, 10, 0, tzinfo=ZoneInfo("America/New_York")).timestamp())
+    eng = CleanEngine([CalendarClean()], ["A", "B"], WINDOW)
+    raw = eng.step({"symbol": np.array(["A"]), "minute_epoch": np.array([ep], dtype=np.int64)})["calendar"]
+    assert raw["minute_of_day_et"][1] == pytest.approx(600.0)  # raw step() still broadcasts to absent B
+
+
+def test_emit_dedup_uses_cached_present() -> None:
+    """A re-delivered (stale-epoch) minute is a no-op in step() AND its emit() uses the CACHED present mask — a
+    duplicate epoch emits the same present-row set, no double-fold, no shifted present."""
+    syms = ["A", "B"]
+    eng = CleanEngine([IntradaySeasonalityClean()], syms, WINDOW)
+    eng.emit({"symbol": np.array(["A", "B"]), "volume": np.array([1000.0, 2000.0]),
+              "minute_epoch": np.array([60], dtype=np.int64)})
+    ps1, _ = eng.emit({"symbol": np.array(["A"]), "volume": np.array([1000.0]),
+                       "minute_epoch": np.array([120], dtype=np.int64)})
+    cnt1 = eng._group_state["intraday_seasonality"]["cnt"][0]
+    ps2, _ = eng.emit({"symbol": np.array(["A"]), "volume": np.array([9999.0]),
+                       "minute_epoch": np.array([120], dtype=np.int64)})  # DUP epoch 120
+    cnt2 = eng._group_state["intraday_seasonality"]["cnt"][0]
+    assert ps1 == ps2 == ["A"]              # cached present, same row set
+    assert cnt1 == cnt2                      # no double-fold on the dup
+
+
+# ========================================================================================================= #
+# BATCH #55a — price_returns + price_levels: StatefulGroup-base in legacy but the MATH is WINDOWED (positional-
+# lag returns / rolling max-min, NO carried state machine). Gated as windowed (formula+guards+seed==live), not
+# the carried-state footguns. Confirmed at source: PriceReturnGroup=positional lag, PriceLevelGroup=max/min.
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_windowed import PriceLevelsClean, PriceReturnsClean  # noqa: E402
+
+
+def test_price_returns_known() -> None:
+    """ret_5m = close/close_{-5} − 1, log_ret_5m = ln(close/close_{-5}). Known close path."""
+    closes = [100.0, 102.0, 103.0, 104.0, 105.0, 106.0]  # 6 bars; at the end, close_{-5}=100, close=106
+    eng = CleanEngine([PriceReturnsClean()], ["A"], WINDOW)
+    out = {}
+    for ep, c in enumerate(closes):
+        out = eng.step(_sec_bar({"A": c}, 60 + ep * 60))["price_returns"]
+    assert out["ret_5m"][0] == pytest.approx(106.0 / 100.0 - 1.0)
+    assert out["log_ret_5m"][0] == pytest.approx(np.log(106.0 / 100.0))
+    assert out["ret_1m"][0] == pytest.approx(106.0 / 105.0 - 1.0)
+
+
+def test_price_returns_positional_lag_gap_safe() -> None:
+    """The lag is POSITIONAL — the w-th prior PRESENT bar, not the bar w minutes ago. A absent for a minute →
+    its returns still reference its actual prior present bars (gap-safe), not a stale-minute grid."""
+    eng = CleanEngine([PriceReturnsClean()], ["A"], WINDOW)
+    closes = [100.0, 101.0, 102.0]  # 3 present bars
+    for ep, c in enumerate(closes):
+        eng.step(_sec_bar({"A": c}, 60 + ep * 60))
+    # A absent one minute, then present again at 103 — its 1m return is 103/102-1 (the prior PRESENT bar),
+    # not 103/(stale) — positional, gap-safe.
+    eng.step({"symbol": np.array([], dtype="<U4"), "close": np.array([]),
+              "minute_epoch": np.array([240], dtype=np.int64)})  # A absent (empty minute, close key present)
+    out = eng.step(_sec_bar({"A": 103.0}, 300))["price_returns"]
+    assert out["ret_1m"][0] == pytest.approx(103.0 / 102.0 - 1.0)  # vs the prior PRESENT bar (102), gap-safe
+
+
+def test_price_returns_warmup_and_contract() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.price_returns import PriceReturnGroup  # type: ignore  # noqa: PLC0415
+
+    eng = CleanEngine([PriceReturnsClean()], ["A"], WINDOW)
+    out = eng.step(_sec_bar({"A": 100.0}, 60))["price_returns"]
+    assert np.isnan(out["ret_5m"][0])  # < 6 present bars → warm-up NaN
+    # contract over a filled run
+    eng2 = CleanEngine([PriceReturnsClean()], ["A"], WINDOW)
+    out2 = {}
+    for ep in range(200):
+        out2 = eng2.step(_sec_bar({"A": 100.0 + np.sin(ep * 0.1) * 5}, 60 + ep * 60))["price_returns"]
+    _assert_feature_spec_contract(out2, PriceReturnGroup().declare(), "price_returns ")
+
+
+def test_price_levels_known_position_and_flat_band() -> None:
+    """position_in_range = (close − min_low)/(max_high − min_low). Known window → known position; a FLAT window
+    (band ≤ 1e-9·|high|) → NaN (the _RANGE_REL_EPS guard, matches legacy)."""
+    eng = CleanEngine([PriceLevelsClean()], ["A"], WINDOW)
+    # 5 bars: highs 105..109, lows 95..99, last close 103. max_high=109, min_low=95, pos=(103-95)/(109-95)
+    out = {}
+    for ep in range(5):
+        out = eng.step(_ohlcv_bar(["A"], [100.0 + ep], [105.0 + ep], [95.0 + ep], [103.0], 60 + ep * 60))[
+            "price_levels"]
+    assert out["position_in_range_5m"][0] == pytest.approx((103.0 - 95.0) / (109.0 - 95.0))
+    assert out["dist_from_high_5m"][0] == pytest.approx(103.0 / 109.0 - 1.0)
+    assert out["dist_from_low_5m"][0] == pytest.approx(103.0 / 95.0 - 1.0)
+    # flat window: high==low==close every bar → band 0 ≤ 1e-9·|high| → position NaN
+    flat = CleanEngine([PriceLevelsClean()], ["A"], WINDOW)
+    of = {}
+    for ep in range(5):
+        of = flat.step(_ohlcv_bar(["A"], [100.0], [100.0], [100.0], [100.0], 60 + ep * 60))["price_levels"]
+    assert np.isnan(of["position_in_range_5m"][0]), "flat band must be NaN (_RANGE_REL_EPS guard)"
+
+
+def test_price_levels_contract_and_seed_equals_live() -> None:
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.price_levels import PriceLevelGroup  # type: ignore  # noqa: PLC0415
+
+    rng = np.random.default_rng(30)
+    hist = []
+    for t in range(60):
+        c = 100.0 + np.cumsum(rng.standard_normal(1))[0]
+        hist.append(_ohlcv_bar(["A"], [c], [c + abs(rng.normal()) + 1], [c - abs(rng.normal()) - 1], [c],
+                               60 + t * 60))
+    se = CleanEngine([PriceLevelsClean()], ["A"], WINDOW)
+    se.seed(hist[:-1])
+    so = se.step(hist[-1])
+    le = CleanEngine([PriceLevelsClean()], ["A"], WINDOW)
+    lo = {}
+    for h in hist:
+        lo = le.step(h)
+    for fname, arr in so["price_levels"].items():
+        np.testing.assert_allclose(np.nan_to_num(arr), np.nan_to_num(lo["price_levels"][fname]), rtol=1e-12,
+                                   err_msg=f"price_levels.{fname} seed != live")
+    _assert_feature_spec_contract(so["price_levels"], PriceLevelGroup().declare(), "price_levels ")
