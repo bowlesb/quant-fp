@@ -43,15 +43,16 @@ class TrendQualityClean:
 
     name = "trend_quality"
     input_cols = ("close",)
+    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)  # legacy TrendQualityGroup.WINDOWS
     feature_names = tuple(
-        f"{stat}_{w}m" for w in WINDOWS for stat in ("price_slope", "price_r2", "trend_strength")
+        f"{stat}_{w}m" for w in _WINDOWS for stat in ("price_slope", "price_r2", "trend_strength")
     )
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")  # (n_symbols, window), oldest→newest
         time_axis = _rebased_minute_axis(window.trailing_minute())
         out: dict[str, np.ndarray] = {}
-        for w in WINDOWS:
+        for w in self._WINDOWS:
             in_window = np.isfinite(window.trailing_time("close", w))
             y = np.where(in_window, close, np.nan)
             x = np.where(in_window, time_axis, np.nan)

@@ -1022,7 +1022,7 @@ class VolumeClean:
 
     name = "volume"
     input_cols = ("close", "volume")
-    _WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
+    _WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180)
     feature_names = ("dollar_volume_1m",) + tuple(
         f"{prefix}_{w}m" for w in _WINDOWS for prefix in ("volume_zscore", "volume_ratio")
     )
