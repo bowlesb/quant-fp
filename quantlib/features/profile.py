@@ -61,7 +61,8 @@ def build_frames(
     )
     reference = symbols.with_columns(
         [pl.lit("Technology").alias("sector"), pl.lit(True).alias("shortable"),
-         pl.lit(True).alias("easy_to_borrow"), pl.lit(True).alias("marginable"), pl.lit(False).alias("fractionable")]
+         pl.lit(True).alias("easy_to_borrow"), pl.lit(True).alias("marginable"), pl.lit(False).alias("fractionable"),
+         (pl.int_range(pl.len()) % 4).cast(pl.Int64).alias("cluster_id")]
     )
     # Synthetic EDGAR filings snapshot: a handful per symbol spread across the trailing year (one inside
     # the session window so the same-session look-ahead gate is exercised) so the edgar_filing_frequency
