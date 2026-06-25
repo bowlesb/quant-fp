@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from quantlib.features.clean_engine import Window
+from quantlib.features.clean_groups_windowed import _denom_x_defined, _rebased_minute_axis
 
 WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
 
@@ -24,12 +25,15 @@ def _trailing_window(mat: np.ndarray, w: int) -> np.ndarray:
 
 
 class TrendQualityClean:
-    """Trailing OLS of close on time over each window: normalized slope + R². The same math
-    ``trend_quality`` declared via rolling sums, now one numpy function over the carried close window.
+    """Trailing OLS of close on time over each window: normalized slope + R² + signed strength. Legacy:
+    ``TrendQualityGroup`` (ReductionGroup).
 
-    For each window ``w``: x = 0..w-1 (minutes), y = the trailing ``w`` closes. slope = cov(x,y)/var(x);
-    r2 = cov(x,y)²/(var(x)·var(y)). NaN where the window isn't filled (fewer than ``w`` present bars) — the
-    feature's own warm-up, exactly as a short backfill window leaves it."""
+    TIME-windowed (legacy ``rolling_*_by("minute")``): the OLS is over the bars whose minute is in the last
+    ``w`` minutes (``trailing_time``), NOT the last ``w`` positional slots — sparse symbols diverge otherwise.
+    The time regressor x is the ACTUAL bar minute rebased to the earliest present minute (a ``kind="time"``
+    regression, ``_rebased_minute_axis``), NOT a positional arange. price_slope = slope/mean(close over w);
+    price_r2 = cov²/(var_x·var_y) with the legacy denom floors; FLAT-price-over-a-warmed-window (slope defined,
+    var_y==0) pins R²=0 (a real zero-explained-variance fit), NOT NaN — matching legacy assemble()."""
 
     name = "trend_quality"
     input_cols = ("close",)
@@ -39,21 +43,18 @@ class TrendQualityClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")  # (n_symbols, window), oldest→newest
+        time_axis = _rebased_minute_axis(window.trailing_minute())
         out: dict[str, np.ndarray] = {}
         for w in WINDOWS:
-            y = _trailing_window(close, w)  # (n, w)
-            n_present = np.sum(np.isfinite(y), axis=1)  # per-symbol filled count in this window
-            x = np.arange(w, dtype=np.float64)[None, :]  # (1, w) time axis, broadcast
-            mask = np.isfinite(y)
-            yf = np.where(mask, y, 0.0)
+            in_window = np.isfinite(window.trailing_time("close", w))
+            y = np.where(in_window, close, np.nan)
+            x = np.where(in_window, time_axis, np.nan)
+            mask = np.isfinite(x) & np.isfinite(y)
+            nb = mask.sum(axis=1).astype(np.float64)
             xf = np.where(mask, x, 0.0)
-            nb = n_present.astype(np.float64)
-            # masked sums over the present bars (a bar missing at the window edge drops from the fit)
-            sx = xf.sum(axis=1)
-            sy = yf.sum(axis=1)
-            sxx = (xf * xf).sum(axis=1)
-            syy = (yf * yf).sum(axis=1)
-            sxy = (xf * yf).sum(axis=1)
+            yf = np.where(mask, y, 0.0)
+            sx, sy = xf.sum(axis=1), yf.sum(axis=1)
+            sxx, syy, sxy = (xf * xf).sum(axis=1), (yf * yf).sum(axis=1), (xf * yf).sum(axis=1)
             with np.errstate(invalid="ignore", divide="ignore"):
                 cov = nb * sxy - sx * sy
                 var_x = nb * sxx - sx * sx
@@ -62,9 +63,13 @@ class TrendQualityClean:
                 mean_y = sy / nb
                 norm_slope = slope / mean_y  # fractional move per minute
                 r2 = (cov * cov) / (var_x * var_y)
-            valid = n_present >= 2
-            norm_slope = np.where(valid & (var_x > 0), norm_slope, np.nan)
-            r2 = np.where(valid & (var_x > 0) & (var_y > 0), np.clip(r2, 0.0, 1.0), np.nan)
+            # slope well-posedness = the legacy X-side floors (n≥2 AND both denom_x floors), not a bare var_x>0.
+            slope_defined = _denom_x_defined(nb, sx, sxx, var_x)
+            norm_slope = np.where(slope_defined, norm_slope, np.nan)
+            # R²: defined where var_y>0; FLAT price (slope defined but var_y==0) → R²=0 (legacy assemble pin),
+            # not NaN — a flat line has zero EXPLAINED variance, not an undefined fit.
+            r2 = np.where(slope_defined & (var_y > 0.0), np.clip(r2, 0.0, 1.0), np.nan)
+            r2 = np.where(slope_defined & ~(var_y > 0.0), 0.0, r2)
             out[f"price_slope_{w}m"] = norm_slope
             out[f"price_r2_{w}m"] = r2
             out[f"trend_strength_{w}m"] = norm_slope * r2  # signed quality-weighted strength
@@ -240,7 +245,7 @@ class MacdClean:
         one_minus = 1.0 - alpha
         num = state.get(f"{key}__num")
         den = state.get(f"{key}__den")
-        if num is None:
+        if num is None or den is None:
             num = np.zeros(len(value))
             den = np.zeros(len(value))
         new_num = np.where(present, value + one_minus * num, num)
