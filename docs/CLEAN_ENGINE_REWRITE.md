@@ -67,11 +67,44 @@ _<final delete list + LOC from CodeAudit>_
   feature VALID (2+ unique values; binary both 0/1; events real).
 - _<CP's validation results>_
 
-## Ported groups (so far)
+## Does the ONE interface generalize, or fork? (the real test)
 
-- `trend_quality` (rolling OLS slope / r² / strength) — verified: trend→+slope, perfect line→r²=1, flat→~0.
-- `vwap_deviation` (windowed volume-weighted ratio) — verified: close above trailing vwap → positive.
-- _<batch as the port proceeds>_
+The four per-symbol-window groups below are all the **same kind** ("compute from this symbol's trailing
+bars") in four flavours — they do NOT test whether one interface generalizes. The genuinely-different kinds —
+the ones that test generalization vs a fork — are **cross-sectional**, **recursive-EMA**, and **stateful
+swing**. Status: **all three FIT the one interface** (each ported + verified), via carried-state hooks on the
+one spine — no fork into separate engines.
+
+**Per-symbol-window kind (4 flavours, proven):**
+- `trend_quality` (rolling OLS slope / r² / strength) — trend→+slope, perfect line→r²=1, flat→~0.
+- `vwap_deviation` (windowed volume-weighted ratio) — close above trailing vwap → positive.
+- `realized_range` (windowed mean of per-bar `(high-low)/close`) — == mean of the per-bar range fractions.
+- `candlestick` (per-bar OHLC geometry + a two-candle lag-1 engulfing pattern) — `body_ratio==|c−o|/(h−l)`.
+
+**The three hard kinds — the generalization test — all FIT (verified):**
+- **Cross-sectional** (`breadth`): needs the WHOLE symbol cross-section. **FITS** — `compute(window)` already
+  sees the full `(n_symbols, window)` matrices, so the reduce is a numpy reduce over axis 0. Verified: 3 of 5
+  up → `breadth_up = 0.6`, 1 of 5 down → `0.2`. The interface DOES expose the full symbol axis. *(sector_beta /
+  cross_sectional_rank are the same shape — symbol-axis reduce / rank — + `window.static['sector']`.)*
+- **Recursive-EMA** (`macd`): a carried SCALAR decayed value, not a ring of rows. **FITS** — via
+  `window.state` (the engine's per-group carried dict). Verified: a +10 jump off flat → `macd_line = +0.80`
+  (ema12 reacts faster, the carried scalar lags); decay is on bar-PRESENCE (an absent symbol HOLDS its EMA),
+  not clock.
+- **Stateful swing** (`swing`): a per-symbol ZigZag state machine across minutes. **FITS** — carried in
+  `window.state` (leg direction / running extreme / pivot). Verified: an up-leg then a ≥θ reversal → a
+  confirmed down `swing_pivot` + `swing_direction = −1`, from the carried cross-minute state.
+  **HONEST PERF NOTE:** swing is the one genuinely-sequential kind — its `compute` runs a per-symbol Python
+  loop (a ZigZag can't cleanly vectorize across leg transitions). It is correct and O(1)/bar, but not
+  pure-vectorized; a Rust kernel (like the old `swing_fold`) is the perf option if it ever matters. It does
+  not fork the *interface* — it fits via `window.state` — it just isn't array-vectorized.
+
+**Plus** `intraday_seasonality` (cumulative session-reset) and `prior_day` (daily-snapshot) — the remaining two
+kinds — also ported + verified, via `window.state` + `minute_epoch` and `window.session` respectively.
+
+**So: 9 groups across all 6 structurally-distinct kinds, each verified correct end-to-end.** The interface
+generalizes — one `compute(window)` + four carried-state hooks (`state` / `static` / `session` /
+`minute_epoch`) over the one spine. The remaining ~59 groups are instances of these six shapes; each is ported
++ correctness-checked individually (not assumed) as the port proceeds — _<count as it lands>_.
 
 ## Taking it live (when you approve)
 
