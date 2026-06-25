@@ -2324,3 +2324,143 @@ def test_multi_day_broadcasts_same_value_across_minutes() -> None:
     for fname in first:
         np.testing.assert_allclose(np.nan_to_num(first[fname]), np.nan_to_num(later[fname]), rtol=1e-12,
                                    err_msg=f"multi_day.{fname} drifted across minutes (must be intraday-invariant)")
+
+
+# ========================================================================================================= #
+# SESSION-RESET CUMULATIVE MACHINES — batch #59 (runner/dumper/gap_fill): per (symbol, ET-session) cum-max /
+# cum-min / cum-sum / first-open since the 09:30 ET open, reset each session, RTH-only, present-decay. The NEW
+# footgun axis (Lead): session-reset on a symbol's FIRST present bar of a new session + present-decay through
+# an absent minute + pre-open bars ignored + watermark idempotency on a re-delivered minute.
+# ========================================================================================================= #
+
+import datetime as _dt  # noqa: E402
+from zoneinfo import ZoneInfo as _ZoneInfo  # noqa: E402
+
+from quantlib.features.clean_groups_stateful import (  # noqa: E402
+    DumperStateClean,
+    GapFillStateClean,
+    RunnerStateClean,
+)
+
+_ET = _ZoneInfo("America/New_York")
+
+
+def _et_session_epoch(hour: int, minute: int, day: int = 1) -> int:
+    return int(_dt.datetime(2026, 6, day, hour, minute, tzinfo=_ET).timestamp())
+
+
+def _ohlcv_session_bar(syms: list[str], op: list[float], high: list[float], low: list[float],
+                       close: list[float], volume: list[float], epoch: int) -> dict[str, np.ndarray]:
+    return {"symbol": np.array(syms), "open": np.array(op, dtype=np.float64),
+            "high": np.array(high, dtype=np.float64), "low": np.array(low, dtype=np.float64),
+            "close": np.array(close, dtype=np.float64), "volume": np.array(volume, dtype=np.float64),
+            "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+
+def test_runner_state_math_and_session_reset() -> None:
+    """runner_early_move/gap_open/pullback/log_dollar_vol/in_band/is_active match the hand cumulative-since-open
+    values; a NEW ET session RESETS the running high + dollar (not carried from the prior session)."""
+    eng = CleanEngine([RunnerStateClean()], ["R"], 400)
+    eng.set_session({"prev_close": np.array([10.0])})  # in band [2,20]
+    out = {}
+    for op, hi, lo, cl, vol, hh, mm in [
+        (10.5, 11.0, 10.4, 10.8, 1000, 9, 30), (10.8, 12.0, 10.7, 11.5, 2000, 9, 31),
+        (11.5, 13.0, 11.4, 12.8, 3000, 9, 32), (12.8, 12.9, 12.0, 12.0, 1500, 9, 33),
+    ]:
+        out = eng.step(_ohlcv_session_bar(["R"], [op], [hi], [lo], [cl], [vol], _et_session_epoch(hh, mm)))["runner_state"]
+    run_high, sess_open, prev = 13.0, 10.5, 10.0
+    dollar = 10.8 * 1000 + 11.5 * 2000 + 12.8 * 3000 + 12.0 * 1500
+    assert out["runner_early_move"][0] == pytest.approx(run_high / prev - 1.0)
+    assert out["runner_gap_open"][0] == pytest.approx(sess_open / prev - 1.0)
+    assert out["runner_pullback_from_high"][0] == pytest.approx(12.0 / run_high - 1.0)
+    assert out["runner_log_dollar_vol"][0] == pytest.approx(np.log1p(dollar))
+    assert out["runner_in_band"][0] == pytest.approx(1.0)
+    assert out["runner_is_active"][0] == pytest.approx(1.0)  # early_move 0.30 >= 0.30
+    out2 = eng.step(_ohlcv_session_bar(["R"], [10.2], [10.3], [10.1], [10.25], [500], _et_session_epoch(9, 30, day=2)))[
+        "runner_state"]
+    assert out2["runner_early_move"][0] == pytest.approx(10.3 / 10.0 - 1.0), "new session reset run_high to 10.3"
+    assert out2["runner_log_dollar_vol"][0] == pytest.approx(np.log1p(10.25 * 500)), "dollar reset"
+
+
+def test_runner_state_footguns_preopen_presence_watermark() -> None:
+    """The #59 footgun axis: (1) a PRE-OPEN bar (etm<570) must NOT update the running high; (2) an ABSENT symbol
+    HOLDS its session accumulators (present-decay); (3) a RE-DELIVERED minute (watermark) does NOT double the
+    cumulative dollar volume."""
+    # (1) pre-open ignored
+    eng = CleanEngine([RunnerStateClean()], ["R"], 400)
+    eng.set_session({"prev_close": np.array([10.0])})
+    eng.step(_ohlcv_session_bar(["R"], [10.0], [50.0], [9.0], [10.0], [100], _et_session_epoch(9, 0)))  # premarket high 50
+    out = eng.step(_ohlcv_session_bar(["R"], [10.5], [11.0], [10.4], [10.8], [1000], _et_session_epoch(9, 30)))[
+        "runner_state"]
+    assert out["runner_early_move"][0] == pytest.approx(11.0 / 10.0 - 1.0), "premarket high 50 must not count"
+    # (2) present-decay: B absent holds run_high + run_dollar
+    eng2 = CleanEngine([RunnerStateClean()], ["A", "B"], 400)
+    eng2.set_session({"prev_close": np.array([10.0, 10.0])})
+    eng2.step(_ohlcv_session_bar(["A", "B"], [10.5, 10.5], [11.0, 12.0], [10.4, 10.4], [10.8, 11.5],
+                                 [1000, 1000], _et_session_epoch(9, 30)))
+    rh_before = eng2._group_state["runner_state"]["run_high"][1]
+    dol_before = eng2._group_state["runner_state"]["run_dollar"][1]
+    eng2.step(_ohlcv_session_bar(["A"], [10.8], [13.0], [10.7], [12.0], [2000], _et_session_epoch(9, 31)))  # B absent
+    assert eng2._group_state["runner_state"]["run_high"][1] == rh_before, "B run_high held (present-decay)"
+    assert eng2._group_state["runner_state"]["run_dollar"][1] == dol_before, "B run_dollar held"
+    # (3) watermark: re-delivered minute does not double-count
+    eng3 = CleanEngine([RunnerStateClean()], ["R"], 400)
+    eng3.set_session({"prev_close": np.array([10.0])})
+    eng3.step(_ohlcv_session_bar(["R"], [10.5], [11.0], [10.4], [10.8], [1000], _et_session_epoch(9, 30)))
+    eng3.step(_ohlcv_session_bar(["R"], [10.8], [12.0], [10.7], [11.5], [2000], _et_session_epoch(9, 31)))
+    dol = eng3._group_state["runner_state"]["run_dollar"][0]
+    eng3.step(_ohlcv_session_bar(["R"], [10.8], [12.0], [10.7], [11.5], [2000], _et_session_epoch(9, 31)))  # re-deliver
+    assert eng3._group_state["runner_state"]["run_dollar"][0] == dol, "re-delivered minute double-counted dollar"
+
+
+def test_dumper_state_math_cum_min_mirror() -> None:
+    """dumper is the cum-MIN mirror: early_drop = 1 − run_low/prev_close; bounce_from_low = close/run_low − 1."""
+    eng = CleanEngine([DumperStateClean()], ["D"], 400)
+    eng.set_session({"prev_close": np.array([10.0])})
+    out = {}
+    for op, hi, lo, cl, vol, hh, mm in [
+        (9.8, 9.9, 9.5, 9.6, 1000, 9, 30), (9.6, 9.7, 7.0, 7.5, 3000, 9, 31), (7.5, 8.2, 7.4, 8.0, 2000, 9, 32),
+    ]:
+        out = eng.step(_ohlcv_session_bar(["D"], [op], [hi], [lo], [cl], [vol], _et_session_epoch(hh, mm)))["dumper_state"]
+    run_low, prev = 7.0, 10.0
+    assert out["dumper_early_drop"][0] == pytest.approx(1.0 - run_low / prev)
+    assert out["dumper_bounce_from_low"][0] == pytest.approx(8.0 / run_low - 1.0)
+    assert out["dumper_is_active"][0] == pytest.approx(1.0)  # in_band & drop 0.30 >= 0.30
+
+
+def test_gap_fill_state_fraction_and_zero_gap_nan() -> None:
+    """gap_fill_fraction = (close − sess_open)/(prev_close − sess_open); NULL on a zero-gap day (|denom|≤1e-9);
+    gap_extended = fraction < 0."""
+    eng = CleanEngine([GapFillStateClean()], ["G"], 400)
+    eng.set_session({"prev_close": np.array([10.0])})
+    eng.step(_ohlcv_session_bar(["G"], [11.0], [11.1], [10.9], [11.0], [1000], _et_session_epoch(9, 30)))  # sess_open=11
+    out = eng.step(_ohlcv_session_bar(["G"], [11.0], [11.1], [10.4], [10.5], [1000], _et_session_epoch(9, 31)))[
+        "gap_fill_state"]
+    assert out["gap_fill_fraction"][0] == pytest.approx((10.5 - 11.0) / (10.0 - 11.0)), "half-filled = 0.5"
+    assert out["gap_extended"][0] == pytest.approx(0.0)  # fraction 0.5 >= 0
+    eng2 = CleanEngine([GapFillStateClean()], ["Z"], 400)  # zero-gap: open == prev_close
+    eng2.set_session({"prev_close": np.array([10.0])})
+    outz = eng2.step(_ohlcv_session_bar(["Z"], [10.0], [10.1], [9.9], [10.05], [1000], _et_session_epoch(9, 30)))[
+        "gap_fill_state"]
+    assert np.isnan(outz["gap_fill_fraction"][0]), "zero-gap day → NaN (|denom| ≤ 1e-9)"
+
+
+def test_session_reset_machines_contract() -> None:
+    """produced == declared for all three machines, with legacy valid_range/nan_policy."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.dumper_state import DumperStateGroup  # type: ignore  # noqa: PLC0415
+    from quantlib.features.groups.gap_fill_state import GapFillStateGroup  # type: ignore  # noqa: PLC0415
+    from quantlib.features.groups.runner_state import RunnerStateGroup  # type: ignore  # noqa: PLC0415
+
+    cases = [
+        (RunnerStateClean(), RunnerStateGroup(), [10.0], _et_session_epoch(9, 32)),
+        (DumperStateClean(), DumperStateGroup(), [10.0], _et_session_epoch(9, 32)),
+        (GapFillStateClean(), GapFillStateGroup(), [10.0], _et_session_epoch(9, 32)),
+    ]
+    for clean_group, legacy_group, prev_close, epoch in cases:
+        eng = CleanEngine([clean_group], ["S"], 400)
+        eng.set_session({"prev_close": np.array(prev_close)})
+        eng.step(_ohlcv_session_bar(["S"], [11.0], [12.0], [9.0], [11.5], [1000], _et_session_epoch(9, 30)))
+        out = eng.step(_ohlcv_session_bar(["S"], [11.5], [13.0], [10.0], [12.0], [2000], epoch))[clean_group.name]
+        _assert_feature_spec_contract(out, legacy_group.declare(), f"{clean_group.name} ")
