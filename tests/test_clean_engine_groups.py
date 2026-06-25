@@ -726,6 +726,36 @@ def test_swing_duplicate_minute_does_not_double_advance() -> None:
     ), "duplicate minute double-advanced swing leg-state — needs a last-epoch dedup guard beyond present()"
 
 
+def test_swing_omitted_symbol_leg_state_holds() -> None:
+    """FOOTGUN (highest-risk recursive-state axis, Lead): a multi-symbol swing where one symbol is OMITTED for
+    a minute — its leg-state (extreme/direction) must HOLD, NOT advance on the carried bar. Marshaled the
+    PRODUCTION way (omit the symbol, not feed NaN). Head-to-head: omitting B's minute must give the IDENTICAL
+    B state as a dense run where that minute is a no-op carry — i.e. present() (not isfinite(latest)) gates
+    the leg. This is the macd/intraday omit-marshaling lesson applied to the state-machine kind."""
+    def _bar(present_map: dict[str, float], epoch: int) -> dict[str, np.ndarray]:
+        return {"symbol": np.array(list(present_map)),
+                "close": np.array([present_map[s] for s in present_map], dtype=np.float64),
+                "minute_epoch": np.array([epoch], dtype=np.int64)}
+
+    def _run(omit: bool) -> tuple[dict[str, np.ndarray], float]:
+        eng = CleanEngine([SwingClean()], ["A", "B"], 400)
+        eng.step(_bar({"A": 50.0, "B": 100.0}, 60))
+        eng.step(_bar({"A": 50.0, "B": 101.0}, 120))
+        eng.step(_bar({"A": 50.0, "B": 102.0}, 180))  # B on an up-leg, extreme 102
+        if omit:
+            eng.step(_bar({"A": 55.0}, 240))  # B OMITTED (production absence) — its leg must HOLD
+        else:
+            eng.step(_bar({"A": 55.0, "B": 102.0}, 240))  # dense baseline: B carries 102 (a no-op for the leg)
+        out = eng.step(_bar({"A": 56.0, "B": 103.0}, 300))["swing"]
+        return out, float(eng._group_state["swing"]["extreme"][1])
+
+    out_omit, ext_omit = _run(omit=True)
+    out_dense, ext_dense = _run(omit=False)
+    assert ext_omit == pytest.approx(ext_dense), "B leg extreme advanced on the OMITTED minute (present leak)"
+    assert out_omit["swing_direction"][1] == out_dense["swing_direction"][1], "B direction diverged on omit"
+    assert out_omit["swing_pivot"][1] == out_dense["swing_pivot"][1], "B pivot diverged on omit"
+
+
 def test_cumulative_duplicate_minute_does_not_double_count() -> None:
     """The cumulative kind is where the duplicate-minute footgun bites: intraday_seasonality's running count
     must increment ONCE per distinct minute, not per delivery. FIXED by the engine's C4 absorbed-minute
