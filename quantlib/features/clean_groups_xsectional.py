@@ -111,15 +111,15 @@ class ReturnDispersionClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")
+        minute = window.trailing_minute()
         present = window.present()
         latest_close = window.latest("close")
-        n_sym = close.shape[0]
+        now_epoch = window.minute_epoch
         out: dict[str, np.ndarray] = {}
         for w in self._MINUTE_WINDOWS:
-            if close.shape[1] > w:
-                prior = close[:, -(w + 1)]
-            else:
-                prior = np.full(n_sym, np.nan)
+            # STRICT exact-minute lag (legacy lagged(close, w)) — NULL on a sparse symbol with no bar exactly w
+            # minutes ago, NOT the w-th prior POSITIONAL bar (which spans the gap and skews the dispersion).
+            prior = _value_at_lag(close, minute, now_epoch, w)
             with np.errstate(invalid="ignore", divide="ignore"):
                 ret = latest_close / prior - 1.0
             std, iqr = _xsec_std_iqr(ret, present)
@@ -564,16 +564,17 @@ class CrossSectionalRankClean:
 
     def compute(self, window: Window) -> dict[str, np.ndarray]:
         close = window.trailing("close")
+        minute = window.trailing_minute()
         present = window.present()
         latest_close = window.latest("close")
         latest_volume = window.latest("volume")
+        now_epoch = window.minute_epoch
         out: dict[str, np.ndarray] = {}
         for w in self._RETURN_WINDOWS:
-            # trailing w-minute return: latest close / close w bars back − 1 (per symbol)
-            if close.shape[1] > w:
-                prior = close[:, -(w + 1)]
-            else:
-                prior = np.full(close.shape[0], np.nan)
+            # trailing w-minute return with a STRICT exact-minute lag (legacy lagged(close, w)) — NULL on a
+            # sparse symbol with no bar exactly w minutes ago, NOT the w-th prior POSITIONAL bar (which would
+            # rank a gap-spanning return against the cross-section).
+            prior = _value_at_lag(close, minute, now_epoch, w)
             with np.errstate(invalid="ignore", divide="ignore"):
                 ret = latest_close / prior - 1.0
             out[f"return_rank_{w}m"] = _cross_sectional_percentile(ret, present)
