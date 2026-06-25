@@ -3256,20 +3256,20 @@ def test_live_event_tape_session_csr_is_populated_from_loaders() -> None:
     assert edgar["payload"][int(edgar["off"][b])] == pytest.approx(float(_EDGAR_FORM_CODE["10-Q"])), "edgar 10-Q code"
 
 
-@pytest.mark.xfail(strict=True, reason="#78 condition-B CRASH: a streamed symbol first appearing mid-session "
-                                       "(not in _session_symbols) → clean_engine._marshal KeyError. GO-LIVE "
-                                       "BLOCKER (a crash > a value diff); ArchOverhaul to skip-not-KeyError.")
 def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
-    """#76 canary condition-B (Lead's flagged crash-risk, confirmed). The clean engine's ring.index is built
-    ONCE per session from _session_symbols (snapshot union + the first minute's floor). A symbol that FIRST
-    streams in a LATER minute is absent from ring.index → clean_engine._marshal (clean_engine.py:260,
-    pos=[ring.index[s] for s in syms]) KeyErrors = a live SHARD CRASH, not a value divergence — worse than any
-    diff. The OLD path handles it gracefully (emits the late symbol with its 1-bar warm-up values).
+    """#76 canary condition-B (Lead's flagged crash-risk) — RESOLVED by #78 (7c41007: _marshal SKIPs an unknown
+    symbol instead of KeyError-ing). The clean engine's ring.index is built ONCE per session from
+    _session_symbols (snapshot union + the first minute's floor); a symbol that FIRST streams in a LATER minute
+    is absent from it. The OLD behavior was a KeyError = a live SHARD CRASH (worse than any value diff). The #78
+    fix degrades that to a tolerated missing-feature divergence: the late symbol is DROPPED from that minute's
+    fold (no crash, no row), and the PRESENT symbols still compute normally. Steady state is zero unknowns
+    (subscribed ⊆ universe by construction); this is the belt-and-suspenders.
 
     Drive the REAL process_bars clean branch (FP_CLEAN_ENGINE=1): warm 8 minutes over {AAA,BBB,CCC}, then a 9th
-    minute where ZZZ first appears. INTENDED post-fix behavior (this asserts it, xfail-strict until #78 lands):
-    no crash, and ZZZ gets a row whose feature set matches the OLD path's late-symbol row (short windows finite,
-    long windows warm-up NaN). Harness /tmp/canary_crash.py."""
+    where ZZZ first appears. Assert: (1) NO crash; (2) ZZZ is SKIPPED (no row — the documented skip-not-emit
+    behavior, NOT OLD's emit-with-warmup; a divergence the canary store-diff would surface, deliberately chosen
+    over a crash); (3) the present {AAA,BBB,CCC} still get their min-8 rows (the skip doesn't drop them).
+    Harness /tmp/canary_crash.py."""
     import datetime as dt  # noqa: PLC0415
     import os  # noqa: PLC0415
 
@@ -3295,14 +3295,18 @@ def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
         for mi in range(8):  # engine's ring.index built over {AAA,BBB,CCC} at the first call
             process_bars(state, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cc78", "mock",
                          "2026-06-18", 120, accumulate=True, write=False)
-        # minute 8: ZZZ first appears — must NOT crash the marshal
+        # minute 8: ZZZ first appears — must NOT crash the marshal (the #78 skip-not-KeyError safety)
         process_bars(state, _bars(base + dt.timedelta(minutes=8), extra="ZZZ"), "/tmp/cc78", "mock",
                      "2026-06-18", 120, accumulate=True, write=False)
     finally:
         os.environ.pop("FP_CLEAN_ENGINE", None)
-    # post-fix: ZZZ is present in a windowed group's output (matching the OLD path's graceful late-symbol row)
+    # (1) no crash reaching here; (2) ZZZ SKIPPED (the documented skip-not-emit); (3) present symbols still emit.
     pv = state.accumulated["price_volume"]
-    assert pv.filter(pl.col("symbol") == "ZZZ").height >= 1, "late symbol ZZZ must get a row (not crash/drop)"
+    min8 = base + dt.timedelta(minutes=8)
+    pv_min8 = pv.with_columns(pl.col("minute").dt.replace_time_zone("UTC")).filter(pl.col("minute") == min8)
+    assert pv_min8.filter(pl.col("symbol") == "ZZZ").height == 0, "unknown ZZZ must be SKIPPED (no row), not emitted"
+    present_at_min8 = set(pv_min8["symbol"].to_list())
+    assert {"AAA", "BBB", "CCC"} <= present_at_min8, "the present symbols must still compute despite the skipped ZZZ"
 
 
 def test_news_sentiment_lookahead_boundary_matches_legacy_compute() -> None:
