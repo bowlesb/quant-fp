@@ -82,8 +82,9 @@ framing: dropped because the design removes what it guarded, not because we stop
   step(m)` produces byte-identical output to a continuous `step` over the whole `H+m` sequence — across
   windowed / cross-sectional / recursive-EMA / cumulative / swing kinds in one multi-group engine. This
   **proves the design's central claim** — live and backfill are the *same replay*, so they cannot diverge —
-  which is exactly what makes the legacy second-form + the entire parity machinery unnecessary. (11 keystone
-  tests + 44 group tests pass; CP validated independently — see the status table below.)
+  which is exactly what makes the legacy second-form + the entire parity machinery unnecessary. (57 tests pass:
+  11 keystone + 46 group, including 2 production-marshaled omit-absence pins; CP validated independently — see
+  the status table below.)
 - **Formula/unit tests** per group: synthetic inputs with a known answer → assert the math (trend OLS r²=1 on a
   line; breadth K/N cross-sectional; macd EMA presence-decay — an absent symbol HOLDS its EMA; swing pivot;
   cumulative reset; ring gap-safe window).
@@ -160,13 +161,23 @@ individually (not assumed) once the approach is approved — that bulk port is t
 this minute) and *idempotency* (a minute-epoch watermark — a re-delivered/stale minute is a no-op, so carried
 state never double-advances). These are orthogonal; the engine owns each once for every kind.
 
-**Why `present()` is the one correct presence source.** A presence-gated read must NOT infer presence from
-`isfinite(latest(col))`: `latest()` returns the *carried* value for a symbol that delivered no bar this minute,
-so `isfinite()` reads True even on an absent symbol. That mis-inference is wrong for *any* gated kind — it would
-advance an absent symbol's EMA, increment its cumulative count, or (most visibly) inflate the cross-sectional
-denominator. **Cross-sectional `breadth` was the case that surfaced the bug** (a stale name visibly shifts a
-market-wide fraction), but the fix is general: every group that builds a count / denominator / mask gates on
-`window.present()`, the engine's real delivery mask, not on `isfinite()` of a carried read.
+**Why `present()` is the one correct presence source.** The engine computes EVERY symbol every minute —
+`step()` calls `group.compute(window)` over the full symbol axis, with no per-symbol skip. So an absent symbol
+*is* computed, and the only thing that tells a group it was absent is the presence source. A presence-gated read
+must NOT infer presence from `isfinite(latest(col))`: `latest()` returns the *carried* value for a symbol that
+delivered no bar this minute, so `isfinite()` reads True even on an absent symbol → it reads the absent symbol as
+present. That mis-inference is wrong for *every* gated kind — it advances an absent symbol's EMA, increments its
+cumulative count, or (most visibly) inflates the cross-sectional denominator. `window.present()` (the engine's
+real per-minute delivery mask) fixes presence-inference for ALL of them: EMA (`macd`), cumulative
+(`intraday_seasonality`), state-machine (`swing`), AND cross-sectional (`breadth`). **`breadth` was the
+last-caught and most-visible case** (a stale name visibly shifts a market-wide fraction), **not the only one.**
+
+**Empirically confirmed** by a production-marshaled head-to-head (absent symbol *omitted* from the minute batch,
+not NaN-fed; epoch advances) — present()-gated vs the old `isfinite(latest())` source, on the same history:
+`macd` EMA12 of the absent symbol = **200.99** gated (correct presence-decay) vs **201.19** buggy; its
+`intraday_seasonality` since-open count = **2.0** gated vs **3.0** buggy (a phantom bar from the carried volume).
+Pinned by `test_macd_omitted_symbol_holds_ema_exact_value` + `test_intraday_omitted_symbol_does_not_count_exact`
+(CP, independently reproduced).
 
 **Commit history (accurate):** `f3ff4bc` added `window.present()` to the engine and switched the four gated
 groups that were then in play — `macd` / `intraday_seasonality` / `swing` / `prior_day`. `1198b82` caught the
