@@ -105,9 +105,19 @@ is **75–96%** of the step. `price_volume`: `9.94ms = 0.16ms fold + 8.97ms pola
 `167ms = 0.98ms fold + 152ms polars (91%)`. Removing the per-minute polars takes that **167ms → ~1ms (≈170×)**.
 And the pieces are not speculative — `PointRing` (#440, `resolve_points` → O(1) numpy), the `matrix_at`-ring (#454,
 numpy materialize), and `emit_numpy` (#448, numpy assemble) **already** eliminate individual phases of exactly this
-tax; the container generalizes those into one fully polars-free hot path. So the design's value claim sharpens to
-its final form: **fewer mechanisms AND a polars-free hot path — that combination, not fold-conversion alone, is the
-actual path to `<300ms`.**
+tax; the container generalizes those into one fully polars-free hot path.
+
+**And it is now demonstrated end-to-end on the hardest real group, not just decomposed.** A throwaway fully-numpy
+`price_volume` step (numpy bar-marshal + numpy points + `emit_numpy` assemble, **zero** per-minute polars in the
+compute) measured **2.0ms** at reference scale — `0.16ms` of it compute (numpy derive `0.020` + fold `0.14`),
+genuinely polars-free — and its read surface is **value byte-identical to backfill** at FR=0 **and** FR=1,
+conditioning cells included (`test_fp_incremental_emit.py` 6+6 passed on `price_volume` — the representative group
+exercising sum / std / corr-denom / r² / mean_y / OLS — plus the #451 demolition gate's `price_volume` +
+co-resident = 39 passed, which exercises the corr-denom straddle on the degenerate flat-`Σxx≈0` cell). So the
+value claim is no longer a projection: **a real group's fully-numpy hot path is 2.0ms (≈7× off its 14ms
+incremental step), compute 0.16ms polars-free, byte-identical to backfill including the conditioning that parked
+it.** The design's value claim therefore stands in its final, *demonstrated* form: **fewer mechanisms AND a
+polars-free hot path — that combination, not fold-conversion alone, is the actual path to `<300ms`.**
 
 1. **ONE abstraction to hold state.**
 2. **No more implementations than we actually need** — the honest minimum, not artificial unification.
@@ -432,13 +442,15 @@ declares its own condition — windowed-sum = window filled, EMA = warmup span, 
    armed/incremental-safe, un-parked by the same `rebase_time_axis` fix as its corr-denom twin `return_dynamics`;
    the parked set is the **five** above, not six.)
 
-   **Two distinct proofs, do not conflate them.** The 122 → 14ms spike proves the *fold half* (O(1) arithmetic +
-   the conditioning, value-identical). It does **not** yet prove the polars-free half: phase-profiling that same
-   14ms (FR=1) minute shows it is `0.16ms numpy fold + 8.97ms polars tax (90%)` — i.e. the 8.5× came from killing
-   the whole-buffer *batch*, but the residual still pays the per-minute polars tax the GREEN groups also pay.
-   Eliminating that tax (the polars-free hot path, the `167 → ~1ms / 170×` finding) is the *second* proof, and it
-   is what takes price_volume's 14ms toward ~1ms. The migration must land **both**: the O(1) fold (proven here)
-   **and** the numpy read surface (the tax deletion).
+   **Two distinct proofs, both now demonstrated.** The 122 → 14ms spike proves the *fold half* (O(1) arithmetic +
+   the conditioning, value-identical). That 14ms was still `0.16ms numpy fold + 8.97ms polars tax (90%)` — the
+   8.5× came from killing the whole-buffer *batch*, but the residual still paid the per-minute polars tax the
+   GREEN groups also pay. The *second* proof — eliminating that tax — is now also in hand: the fully-numpy
+   `price_volume` step (zero per-minute polars) measured **2.0ms** (compute `0.16ms` polars-free) and is **byte-
+   identical to backfill** at FR=0+FR=1 including the conditioning cells (the `test_fp_incremental_emit` 6+6 and
+   the #451 co-resident 39-pass). So both halves are demonstrated on the hardest real group: the migration must
+   land **both** — the O(1) fold **and** the numpy read surface (the tax deletion) — and price_volume shows both
+   are achievable value-identically.
 
    There is one known shared-engine hazard — two groups that share the same engine, where a numerical quirk in one
    (`price_volume`) could corrupt the other (`return_dynamics`); the value gate catches it. It lives *entirely
