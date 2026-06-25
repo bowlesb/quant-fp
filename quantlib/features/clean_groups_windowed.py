@@ -66,6 +66,33 @@ def _windowed_cov(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
     return np.where(n >= 2.0, cov, np.nan)
 
 
+def _windowed_corr(x_mat: np.ndarray, y_mat: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window Pearson correlation of ``x`` and ``y`` per symbol over bars where BOTH finite —
+    matching the legacy ``corr_`` reduction: r = (n·Σxy−Σx·Σy)/sqrt((n·Σx²−(Σx)²)(n·Σy²−(Σy)²)), NaN where n<2
+    or either variance is non-positive."""
+    xw = _trailing_window(x_mat, w)
+    yw = _trailing_window(y_mat, w)
+    mask = np.isfinite(xw) & np.isfinite(yw)
+    n = mask.sum(axis=1).astype(np.float64)
+    xf = np.where(mask, xw, 0.0)
+    yf = np.where(mask, yw, 0.0)
+    sx, sy = xf.sum(axis=1), yf.sum(axis=1)
+    sxx, syy, sxy = (xf * xf).sum(axis=1), (yf * yf).sum(axis=1), (xf * yf).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = n * sxy - sx * sy
+        var_x = n * sxx - sx * sx
+        var_y = n * syy - sy * sy
+        corr = cov / np.sqrt(var_x * var_y)
+    return np.where((n >= 2.0) & (var_x > 0.0) & (var_y > 0.0), corr, np.nan)
+
+
+def _windowed_sum(values: np.ndarray, w: int) -> np.ndarray:
+    """Trailing ``w``-window sum of ``values`` ignoring NaN (NaN bars contribute 0; an all-NaN window sums to
+    0) — matching the legacy ``sum_`` reduction over present bars."""
+    win = _trailing_window(values, w)
+    return np.where(np.isfinite(win), win, 0.0).sum(axis=1)
+
+
 def _masked_std(values: np.ndarray, w: int) -> np.ndarray:
     """Trailing ``w``-window SAMPLE std (ddof=1, matching the legacy ``std_`` reduction) of ``values`` ignoring
     NaN. NaN where fewer than 2 present bars (the count>1 guard). std = sqrt((Σx² − (Σx)²/n)/(n−1))."""
@@ -90,6 +117,72 @@ def _returns(close: np.ndarray) -> np.ndarray:
 
 
 _FOUR_LN2 = 2.772588722239781
+
+
+class PriceVolumeClean:
+    """PRICE_VOLUME: per window — vwap_deviation (close/vwap−1), up/down_volume_ratio, volume_delta,
+    buying_pressure (volume-weighted money-flow), pv_correlation (return-vs-volume corr), obv_slope (OLS slope
+    of on-balance-volume on time, normalized by mean window volume). Legacy: ``PriceVolumeGroup`` — the keystone
+    windowed group, 7 features × 10 windows. Built on the shared sum/corr/ols-slope kernels."""
+
+    name = "price_volume"
+    input_cols = ("high", "low", "close", "volume")
+    _WINDOWS: tuple[int, ...] = (3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
+    feature_names = tuple(
+        f"{prefix}_{w}m"
+        for w in _WINDOWS
+        for prefix in (
+            "vwap_deviation",
+            "up_volume_ratio",
+            "down_volume_ratio",
+            "volume_delta",
+            "buying_pressure",
+            "pv_correlation",
+            "obv_slope",
+        )
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        high = window.trailing("high")
+        low = window.trailing("low")
+        close = window.trailing("close")
+        volume = window.trailing("volume")
+        latest_close = window.latest("close")
+        n_sym = close.shape[0]
+        # per-bar one-minute return (first column NaN, no prior bar)
+        ret = _returns(close)
+        # money-flow multiplier (2c−h−l)/(h−l), 0 when range is 0; weighted by volume
+        rng = high - low
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mfm = np.where(rng > 0.0, (2.0 * close - high - low) / rng, 0.0)
+        mfv = mfm * volume
+        cv = close * volume
+        up_vol = np.where(ret > 0.0, volume, 0.0)
+        dn_vol = np.where(ret < 0.0, volume, 0.0)
+        # signed volume + on-balance-volume cumulative across the trailing buffer (NaN ret -> 0 signed)
+        signed = np.where(ret > 0.0, volume, np.where(ret < 0.0, -volume, 0.0))
+        signed = np.where(np.isfinite(signed), signed, 0.0)
+        obv = np.cumsum(signed, axis=1)
+        # frame-relative time axis (origin-invariant; the slope is unaffected by the offset)
+        time_axis = np.broadcast_to(np.arange(close.shape[1], dtype=np.float64), close.shape)
+        out: dict[str, np.ndarray] = {}
+        for w in self._WINDOWS:
+            vol_w = _windowed_sum(volume, w)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                vwap = _windowed_sum(cv, w) / vol_w
+                out[f"vwap_deviation_{w}m"] = np.where(vol_w > 0.0, latest_close / vwap - 1.0, np.nan)
+                up_w = _windowed_sum(up_vol, w)
+                dn_w = _windowed_sum(dn_vol, w)
+                out[f"up_volume_ratio_{w}m"] = np.where(vol_w > 0.0, up_w / vol_w, np.nan)
+                out[f"down_volume_ratio_{w}m"] = np.where(vol_w > 0.0, dn_w / vol_w, np.nan)
+                out[f"volume_delta_{w}m"] = np.where(vol_w > 0.0, (up_w - dn_w) / vol_w, np.nan)
+                out[f"buying_pressure_{w}m"] = np.where(vol_w > 0.0, _windowed_sum(mfv, w) / vol_w, np.nan)
+            out[f"pv_correlation_{w}m"] = _windowed_corr(ret, volume, w)
+            mean_vol, _ = _masked_mean(volume, w)
+            slope = _windowed_ols_slope(time_axis, obv, w)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                out[f"obv_slope_{w}m"] = np.where(mean_vol > 0.0, slope / mean_vol, np.nan)
+        return out
 
 
 class VolatilityClean:
@@ -173,7 +266,8 @@ class QuoteSpreadClean:
     """QUOTE_SPREAD (Layer B): point-in-time last-minute spread/imbalance/depth + trailing means of spread and
     imbalance over each window. ``spread_bps_1m``/``quote_imbalance_1m`` = latest; ``book_depth_1m`` =
     latest(bid_size+ask_size); ``spread_bps_{w}m``/``quote_imbalance_{w}m`` = trailing means. nan_policy=sparse
-    (absent quote minute -> NaN, which the masked mean / latest already yield). Legacy: ``QuoteSpreadGroup``."""
+    (absent quote minute -> NaN, which the masked mean / latest already yield). Legacy: ``QuoteSpreadGroup``.
+    """
 
     name = "quote_spread"
     input_cols = ("mean_spread_bps", "quote_imbalance", "mean_bid_size", "mean_ask_size")
