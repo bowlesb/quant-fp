@@ -24,6 +24,7 @@ from quantlib.features.clean_engine import CleanEngine
 from quantlib.features.clean_groups_example import (
     BreadthClean,
     CandlestickClean,
+    IntradaySeasonalityClean,
     MacdClean,
     RealizedRangeClean,
     TrendQualityClean,
@@ -824,28 +825,31 @@ def test_swing_omitted_symbol_leg_state_holds() -> None:
             f"B.{fname} diverged on omit (present leak in the swing leg)"
 
 
-@pytest.mark.skip(reason="intraday_seasonality re-ported to ToD-baseline (absret_vs_tod/volume_vs_tod, needs data/intraday_seasonality_v1.parquet) — old volume_vs_session_mean tests need rewrite against the new interface (#61 follow-up)")
 def test_cumulative_duplicate_minute_does_not_double_count() -> None:
-    """The cumulative kind is where the duplicate-minute footgun bites: intraday_seasonality's running count
-    must increment ONCE per distinct minute, not per delivery. FIXED by the engine's C4 absorbed-minute
-    watermark (5d5f564): a re-delivered minute_epoch (<= watermark) is a no-op — no re-append, no group
-    compute — so the cnt stays 1. The dedup guard is at the ENGINE level (owns it once for every carried-state
-    kind), separate from presence — exactly as scoped."""
+    """REWRITTEN (#64) for the ToD-baseline port: the cumulative kind is where the duplicate-minute footgun
+    bites — intraday_seasonality's running since-open COUNT (state['iss_cnt'], the cum-mean denominator) must
+    increment ONCE per distinct RTH minute, not per delivery. FIXED by the engine's C4 absorbed-minute
+    watermark: a re-delivered minute_epoch (<= watermark) is a no-op (no re-append, no group compute) so the
+    cnt stays 1. Epoch is an RTH minute (day1 9:30 ET = 1767623400) so the group actually folds (NULL/no-op
+    outside RTH)."""
 
     def _vbar(vol, epoch):
         return {
             "symbol": np.array(["A"]),
+            "open": np.array([100.0]),
+            "close": np.array([101.0]),
             "volume": np.array([vol]),
             "minute_epoch": np.array([epoch], dtype=np.int64),
         }
 
+    rth_930 = 1767623400  # 2026-01-05 09:30 ET
     engine = CleanEngine([IntradaySeasonalityClean()], ["A"], WINDOW)
-    engine.step(_vbar(1000.0, 60))
-    engine.step(_vbar(1000.0, 60))  # SAME minute re-delivered
-    cnt = engine._group_state["intraday_seasonality"]["cnt"][0]
+    engine.step(_vbar(1000.0, rth_930))
+    engine.step(_vbar(1000.0, rth_930))  # SAME minute re-delivered
+    cnt = engine._group_state["intraday_seasonality"]["iss_cnt"][0]
     assert cnt == pytest.approx(
         1.0
-    ), "duplicate minute double-counted the cumulative cnt (needs epoch dedup)"
+    ), "duplicate minute double-counted the since-open cnt (needs epoch dedup)"
 
 
 # --------------------------------------------------------------------------------------------------------- #
@@ -853,34 +857,32 @@ def test_cumulative_duplicate_minute_does_not_double_count() -> None:
 # --------------------------------------------------------------------------------------------------------- #
 
 
-@pytest.mark.skip(reason="intraday_seasonality re-ported to ToD-baseline (absret_vs_tod/volume_vs_tod, needs data/intraday_seasonality_v1.parquet) — old volume_vs_session_mean tests need rewrite against the new interface (#61 follow-up)")
 def test_intraday_seasonality_session_reset_two_days() -> None:
-    """CUMULATIVE/reset: the since-open running mean is correct mid-session AND resets at the day boundary —
-    session 2 starts fresh (ratio back to base), not carried across. (The cnt double-count on a DUPLICATE
-    minute is a separate footgun, covered by test_cumulative_duplicate_minute_does_not_double_count.)"""
+    """REWRITTEN (#64) for the ToD-baseline port: the since-open running mean volume (state iss_sum/iss_cnt,
+    the volume_vs_tod denominator) accumulates across RTH minutes within an ET session AND RESETS at the
+    ET-date boundary — session 2 starts fresh (iss_cnt back to 1, iss_sum = the new bar's volume), not carried
+    across. (The cnt double-count on a DUPLICATE minute is a separate footgun, covered by
+    test_cumulative_duplicate_minute_does_not_double_count.)"""
 
     def _vbar(vol, epoch):
         return {
             "symbol": np.array(["A"]),
+            "open": np.array([100.0]),
+            "close": np.array([101.0]),
             "volume": np.array([vol]),
             "minute_epoch": np.array([epoch], dtype=np.int64),
         }
 
-    day = 86400
     engine = CleanEngine([IntradaySeasonalityClean()], ["A"], WINDOW)
-    engine.step(_vbar(1000.0, 0))
-    engine.step(_vbar(2000.0, 60))
-    out1 = engine.step(_vbar(3000.0, 120))[
-        "intraday_seasonality"
-    ]  # mean(1000,2000,3000)=2000, 3000/2000=1.5
-    assert out1["volume_vs_session_mean"][0] == pytest.approx(1.5)
-    out2 = engine.step(_vbar(500.0, day))["intraday_seasonality"]  # new session: mean=500, ratio=1.0
-    assert out2["volume_vs_session_mean"][0] == pytest.approx(
-        1.0
-    ), "session did not reset at the day boundary"
-    assert engine._group_state["intraday_seasonality"]["cnt"][0] == pytest.approx(
-        1.0
-    ), "reset did not clear cnt"
+    engine.step(_vbar(1000.0, 1767623400))  # day1 09:30 ET
+    engine.step(_vbar(2000.0, 1767623460))  # day1 09:31 ET
+    engine.step(_vbar(3000.0, 1767623520))  # day1 09:32 ET
+    state = engine._group_state["intraday_seasonality"]
+    assert state["iss_cnt"][0] == pytest.approx(3.0), "since-open cnt over 3 RTH minutes"
+    assert state["iss_sum"][0] == pytest.approx(6000.0), "since-open sum = 1000+2000+3000"
+    engine.step(_vbar(500.0, 1767709800))  # day2 09:30 ET → ET-date boundary reset
+    assert state["iss_cnt"][0] == pytest.approx(1.0), "session did not reset cnt at the ET-date boundary"
+    assert state["iss_sum"][0] == pytest.approx(500.0), "reset did not clear sum (carried across days)"
 
 
 def test_prior_day_compute_once_stable_across_steps() -> None:
@@ -969,22 +971,26 @@ def test_macd_omitted_symbol_holds_ema_exact_value() -> None:
         "fixture must distinguish the present-gated value from the leaked (carried-bar) value"
 
 
-@pytest.mark.skip(reason="intraday_seasonality re-ported to ToD-baseline (absret_vs_tod/volume_vs_tod, needs data/intraday_seasonality_v1.parquet) — old volume_vs_session_mean tests need rewrite against the new interface (#61 follow-up)")
 def test_intraday_omitted_symbol_does_not_count_exact() -> None:
-    """BBB present×2, OMITTED at min3 (carries volume). present()-gated cnt must stay 2 (the head-to-head value;
-    the isfinite(latest) bug gives 3 by counting the carried volume as a phantom bar)."""
+    """REWRITTEN (#64) for the ToD-baseline port: BBB present×2 at distinct RTH minutes, OMITTED at the 3rd
+    (carries its last bar). The since-open running COUNT (iss_cnt) is present()-gated, so it must stay 2 — the
+    head-to-head value; the isfinite(latest) bug would give 3 by counting the carried volume as a phantom bar.
+    RTH epochs so the group folds (day1 09:30/09:31/09:32 ET)."""
     def _vbar(present_map, epoch):
-        return {"symbol": np.array(list(present_map.keys())),
-                "volume": np.array(list(present_map.values()), dtype=np.float64),
+        syms = list(present_map.keys())
+        return {"symbol": np.array(syms, dtype="<U4"),
+                "open": np.array([100.0] * len(syms), dtype=np.float64),
+                "close": np.array([101.0] * len(syms), dtype=np.float64),
+                "volume": np.array([present_map[s] for s in syms], dtype=np.float64),
                 "minute_epoch": np.array([epoch], dtype=np.int64)}
 
     engine = CleanEngine([IntradaySeasonalityClean()], ["BBB"], WINDOW)
-    engine.step(_vbar({"BBB": 1000.0}, 60))
-    engine.step(_vbar({"BBB": 1000.0}, 120))
-    engine.step({"symbol": np.array([], dtype="<U4"), "volume": np.array([]),
-                 "minute_epoch": np.array([180], dtype=np.int64)})  # BBB OMITTED
-    assert engine._group_state["intraday_seasonality"]["cnt"][0] == pytest.approx(2.0), \
-        "cumulative cnt counted an omitted (carried) minute — present() gate not effective"
+    engine.step(_vbar({"BBB": 1000.0}, 1767623400))  # day1 09:30 ET
+    engine.step(_vbar({"BBB": 1000.0}, 1767623460))  # day1 09:31 ET
+    engine.step({"symbol": np.array([], dtype="<U4"), "open": np.array([]), "close": np.array([]),
+                 "volume": np.array([]), "minute_epoch": np.array([1767623520], dtype=np.int64)})  # OMITTED
+    assert engine._group_state["intraday_seasonality"]["iss_cnt"][0] == pytest.approx(2.0), \
+        "since-open cnt counted an omitted (carried) minute — present() gate not effective"
 
 
 # ========================================================================================================= #
@@ -2672,18 +2678,18 @@ def test_engine_change_no_regression_present_gating_co_resident() -> None:
     assert out["calendar"]["is_regular_session"][0] == pytest.approx(1.0)
 
 
-@pytest.mark.skip(reason="intraday_seasonality re-ported to ToD-baseline (absret_vs_tod/volume_vs_tod, needs data/intraday_seasonality_v1.parquet) — old volume_vs_session_mean tests need rewrite against the new interface (#61 follow-up)")
 def test_engine_change_no_regression_watermark_dedup_co_resident() -> None:
-    """REGRESSION: with calendar co-resident, the watermark dedup must STILL no-op a duplicate/stale minute on
-    a carried-state group. intraday_seasonality cnt must stay correct under a duplicate epoch."""
+    """REGRESSION (#64 rewrite to a generic carried-state group): with calendar co-resident, the watermark
+    dedup must STILL no-op a duplicate/stale minute on a carried-state group. macd's recursive EMA accumulators
+    (ema12__num) must be UNCHANGED by a duplicate epoch."""
     syms = ["A"]
     eng = CleanEngine([CalendarClean(), MacdClean()], syms, WINDOW)
-    eng.step({"symbol": np.array(["A"]), "volume": np.array([1000.0]), "minute_epoch": np.array([60], dtype=np.int64)})
-    eng.step({"symbol": np.array(["A"]), "volume": np.array([1000.0]), "minute_epoch": np.array([120], dtype=np.int64)})
-    cnt_before = eng._group_state["macd"]["cnt"][0]
-    eng.step({"symbol": np.array(["A"]), "volume": np.array([1000.0]), "minute_epoch": np.array([120], dtype=np.int64)})  # DUP
-    cnt_after = eng._group_state["macd"]["cnt"][0]
-    assert cnt_after == cnt_before, "duplicate epoch double-counted with calendar co-resident (watermark regressed)"
+    eng.step({"symbol": np.array(["A"]), "close": np.array([100.0]), "minute_epoch": np.array([60], dtype=np.int64)})
+    eng.step({"symbol": np.array(["A"]), "close": np.array([101.0]), "minute_epoch": np.array([120], dtype=np.int64)})
+    num_before = eng._group_state["macd"]["ema12__num"][0]
+    eng.step({"symbol": np.array(["A"]), "close": np.array([999.0]), "minute_epoch": np.array([120], dtype=np.int64)})  # DUP
+    num_after = eng._group_state["macd"]["ema12__num"][0]
+    assert num_after == num_before, "duplicate epoch advanced the EMA with calendar co-resident (watermark regressed)"
 
 
 def test_calendar_value_always_defined_row_emission_is_boundary_concern() -> None:
@@ -2716,11 +2722,10 @@ def test_calendar_value_always_defined_row_emission_is_boundary_concern() -> Non
 # ========================================================================================================= #
 
 
-@pytest.mark.skip(reason="intraday_seasonality re-ported to ToD-baseline (absret_vs_tod/volume_vs_tod, needs data/intraday_seasonality_v1.parquet) — old volume_vs_session_mean tests need rewrite against the new interface (#61 follow-up)")
 def test_emit_drops_absent_rows_uniformly_all_kinds() -> None:
     """emit() NaN's absent symbols' rows for EVERY group — calendar (point-in-time, always-defined value),
-    cross_sectional_rank (cross-sectional), intraday_seasonality (carried). A,B present / C absent → C's row is
-    NaN in all three; present_symbols = [A,B]."""
+    cross_sectional_rank (cross-sectional), macd (carried-state, #64 rewrite). A,B present / C absent → C's row
+    is NaN in all three; present_symbols = [A,B]."""
     import datetime as _dt  # noqa: PLC0415
     from zoneinfo import ZoneInfo  # noqa: PLC0415
 
@@ -2737,7 +2742,7 @@ def test_emit_drops_absent_rows_uniformly_all_kinds() -> None:
     # C (index 2) is NaN in EVERY group's every feature — calendar (would otherwise broadcast), xsec, carried
     assert np.isnan(filtered["calendar"]["minute_of_day_et"][2]), "calendar absent row not dropped by emit()"
     assert np.isnan(filtered["cross_sectional_rank"]["volume_rank_1m"][2])
-    assert np.isnan(filtered["macd"]["volume_vs_session_mean"][2])
+    assert np.isnan(filtered["macd"]["macd_line"][2]), "carried-state absent row not dropped by emit()"
     # A,B (present) keep their values
     assert np.isfinite(filtered["calendar"]["minute_of_day_et"][0])
     assert np.isfinite(filtered["calendar"]["minute_of_day_et"][1])
@@ -2755,22 +2760,22 @@ def test_emit_step_raw_calendar_still_broadcasts() -> None:
     assert raw["minute_of_day_et"][1] == pytest.approx(600.0)  # raw step() still broadcasts to absent B
 
 
-@pytest.mark.skip(reason="intraday_seasonality re-ported to ToD-baseline (absret_vs_tod/volume_vs_tod, needs data/intraday_seasonality_v1.parquet) — old volume_vs_session_mean tests need rewrite against the new interface (#61 follow-up)")
 def test_emit_dedup_uses_cached_present() -> None:
     """A re-delivered (stale-epoch) minute is a no-op in step() AND its emit() uses the CACHED present mask — a
-    duplicate epoch emits the same present-row set, no double-fold, no shifted present."""
+    duplicate epoch emits the same present-row set, no double-fold, no shifted present. #64 rewrite: macd's EMA
+    accumulator (ema12__num) is the carried-state witness."""
     syms = ["A", "B"]
     eng = CleanEngine([MacdClean()], syms, WINDOW)
-    eng.emit({"symbol": np.array(["A", "B"]), "volume": np.array([1000.0, 2000.0]),
+    eng.emit({"symbol": np.array(["A", "B"]), "close": np.array([100.0, 50.0]),
               "minute_epoch": np.array([60], dtype=np.int64)})
-    ps1, _ = eng.emit({"symbol": np.array(["A"]), "volume": np.array([1000.0]),
+    ps1, _ = eng.emit({"symbol": np.array(["A"]), "close": np.array([101.0]),
                        "minute_epoch": np.array([120], dtype=np.int64)})
-    cnt1 = eng._group_state["macd"]["cnt"][0]
-    ps2, _ = eng.emit({"symbol": np.array(["A"]), "volume": np.array([9999.0]),
+    num1 = eng._group_state["macd"]["ema12__num"][0]
+    ps2, _ = eng.emit({"symbol": np.array(["A"]), "close": np.array([999.0]),
                        "minute_epoch": np.array([120], dtype=np.int64)})  # DUP epoch 120
-    cnt2 = eng._group_state["macd"]["cnt"][0]
+    num2 = eng._group_state["macd"]["ema12__num"][0]
     assert ps1 == ps2 == ["A"]              # cached present, same row set
-    assert cnt1 == cnt2                      # no double-fold on the dup
+    assert num1 == num2                      # no double-fold on the dup
 
 
 # ========================================================================================================= #
