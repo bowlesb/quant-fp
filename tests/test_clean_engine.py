@@ -176,6 +176,26 @@ def test_idempotent_on_duplicate_minute() -> None:
     assert float(eng._group_state["macd"]["ema12"][0]) == ema_before
 
 
+def test_swing_idempotent_via_epoch_guard_not_presence() -> None:
+    """Idempotency and presence are TWO concerns. ``present()`` answers "did a bar arrive this minute"; it does
+    NOT make swing idempotent — a duplicate epoch is still present=True. The SEPARATE minute-epoch watermark is
+    what makes swing's leg-state robustly idempotent: a re-delivered OR out-of-order epoch (<= watermark) is a
+    no-op (the engine returns the cached output, never re-running swing's sequential leg fold)."""
+    eng = CleanEngine([ex.SwingClean()], ["A"], 60)
+    for i, c in enumerate([100.0, 101.0, 102.0, 103.0, 104.0]):
+        eng.step({"symbol": np.array(["A"]), "close": np.array([c]), "minute_epoch": np.array([i * 60])})
+    extreme_before = float(eng._group_state["swing"]["extreme"][0])
+    direction_before = float(eng._group_state["swing"]["dir"][0])
+    # 1. re-deliver the SAME last epoch (240) → leg state unchanged
+    eng.step({"symbol": np.array(["A"]), "close": np.array([104.0]), "minute_epoch": np.array([240])})
+    assert float(eng._group_state["swing"]["extreme"][0]) == extreme_before
+    assert float(eng._group_state["swing"]["dir"][0]) == direction_before
+    # 2. a STALE out-of-order epoch (180 <= watermark 240), even with a different close → still a no-op
+    eng.step({"symbol": np.array(["A"]), "close": np.array([90.0]), "minute_epoch": np.array([180])})
+    assert float(eng._group_state["swing"]["extreme"][0]) == extreme_before
+    assert float(eng._group_state["swing"]["dir"][0]) == direction_before
+
+
 def test_seed_replay_carried_state_bit_identical() -> None:
     """VERIFY (not assume) the unification: seeding N minutes via replay builds carried state BIT-IDENTICAL to
     feeding the same N minutes live one-at-a-time — for the EMA accumulator, the cumulative sum, AND the swing
