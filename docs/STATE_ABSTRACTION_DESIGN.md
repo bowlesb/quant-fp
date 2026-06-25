@@ -324,7 +324,7 @@ proved which ones genuinely merge and which genuinely don't:
 | **accumulator-reduce** | one running value per symbol, reset on a key | `CumulativeState` (session min/max/sum/first) + `ExtremaState` (windowed max/min) | at least one bar absorbed since the reset key | #27 |
 | **recursive** | a single decayed value (`v = α·new + (1−α)·v`) | `EMAState` | its warmup span has elapsed | #27 (genuinely forks — no rows to carry) |
 | **state-machine** | a small bounded per-symbol machine | `swing` / `swing_dc` (a ZigZag leg-state machine) | its first leg/pivot has completed | pressure-test C1 |
-| **snapshot** | today's per-(symbol,date) snapshot | `SessionCache` / `DailySnapshotGroup` | the daily snapshot exists for this session | — |
+| **snapshot** (the L2 lever) | today's per-(symbol,date) precomputed snapshot | `SessionCache` / `DailySnapshotGroup` | the daily snapshot exists for this session | Ben's off-hot-path precompute — static/company features loaded once, read O(1)/min — is the L2 twin of his maintained-aggregate L1 |
 
 `EMAState` and `CumulativeState` **do not** collapse into the row-ring — an EMA keeps one number and overwrites
 it; it has no rows to address (verified: `stateful.py:481`, no slot/cursor/count). Forcing them into "a ring of
