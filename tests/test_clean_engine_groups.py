@@ -1872,6 +1872,41 @@ def test_residual_analysis_clean_momentum_sparse_match_legacy_output() -> None:
     assert cm["momentum_quality_flag_30m"][0] == pytest.approx(0.0)
 
 
+def test_candlestick_two_candle_patterns_strict_minute_lag() -> None:
+    """RE-GATE candlestick (#60): the TWO-CANDLE patterns (engulfing/harami) compare against the bar at EXACTLY
+    minute−1 (legacy LagSpec(minutes=1)=base.lagged), NULL when that minute is absent — NOT the prior PRESENT
+    bar. The 7 single-bar geometry feats stay positional (latest OHLC). Earlier this was a false-green: a gappy
+    symbol fired a pattern off a stale prior-present bar where legacy NULLs.
+      - GAP (prior minute absent) → pattern NaN (no exact minute−1 bar).
+      - CONSECUTIVE minutes → pattern fires (engulfing=1.0).
+      - single-bar body_ratio computes on the gapped bar (positional)."""
+    import datetime  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+
+    def _bar(op: float, hi: float, lo: float, cl: float, minute: int) -> dict[str, np.ndarray]:
+        return {"symbol": np.array(["A"]), "open": np.array([op]), "high": np.array([hi]),
+                "low": np.array([lo]), "close": np.array([cl]),
+                "minute_epoch": np.array([int((base + datetime.timedelta(minutes=minute)).timestamp())],
+                                         dtype=np.int64)}
+
+    # GAP: bearish bar at minute 0, bullish bar at minute 5 (minutes 1-4 ABSENT). The exact prior minute (4) is
+    # absent → engulfing NULL, NOT fired off the stale minute-0 bar.
+    gap = CleanEngine([CandlestickClean()], ["A"], 400)
+    gap.step(_bar(105.0, 106.0, 99.0, 100.0, 0))  # bearish
+    out_gap = gap.step(_bar(99.0, 107.0, 98.0, 106.0, 5))["candlestick"]  # bullish, minute 4 absent
+    assert np.isnan(out_gap["pattern_engulfing_bullish"][0]), \
+        "gap: no bar at exactly minute−1 → engulfing NULL (not off the stale prior-present bar)"
+    assert np.isfinite(out_gap["body_ratio"][0]), "single-bar body_ratio still computes on the gapped bar"
+
+    # CONSECUTIVE: bearish minute 0, bullish minute 1 → the prior minute IS present → engulfing fires.
+    seq = CleanEngine([CandlestickClean()], ["A"], 400)
+    seq.step(_bar(105.0, 106.0, 99.0, 100.0, 0))  # bearish
+    out_seq = seq.step(_bar(99.0, 107.0, 98.0, 106.0, 1))["candlestick"]  # bullish, consecutive
+    assert out_seq["pattern_engulfing_bullish"][0] == pytest.approx(1.0), \
+        "consecutive minutes: bullish body engulfs the prior bearish body → fires"
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
