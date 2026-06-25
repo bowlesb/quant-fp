@@ -35,10 +35,11 @@ so plainly because the design below is the same instinct, finished:
 We read `automated-day-trading` and his approach is clear and good — and two of its ideas are *already*
 load-bearing in our design, which is the strongest sign we're on the right track:
 
-- **One uniform entry + flat numpy reads.** A bar is a `MinuteBar`/`BufferModel`
-  (`scode/runner/server/minute_bar.py`) → a fixed ordered `np.ndarray` row; every feature reads from that one
-  flat buffer (`scode/features/feature_vector.py:get_final_feature_vector` calls each family's getter on plain
-  numpy `close`/`volume`/… arrays). That *is* "one way to pass a minute bar to a group." Kept.
+- **One uniform entry + flat numpy reads.** A bar goes through `BufferModel`
+  (`scode/runner/server/minute_bar.py`): `get_ordered()` → `to_buffer_row()` produces a fixed-ordered
+  `np.ndarray` row; every feature reads from that one flat buffer
+  (`scode/features/feature_vector.py:get_final_feature_vector` calls each family's getter on plain numpy
+  `close`/`volume`/… arrays). That *is* "one way to pass a minute bar to a group." Kept.
 
 - **Gaps handled by ONE mask — the idea we independently re-derived.** His getters all take an `interpolate`
   mask: a per-row flag for "was this minute real or filled". Gap/churn handling is **centralized as a mask**, not
