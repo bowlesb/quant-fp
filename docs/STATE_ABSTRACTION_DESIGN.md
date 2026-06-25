@@ -74,6 +74,30 @@ so plainly because the design below is the same instinct, finished:
 We read `automated-day-trading` and his approach is clear and good — and two of its ideas are *already*
 load-bearing in our design, which is the strongest sign we're on the right track:
 
+- **The ring buffer itself — his deliberate state structure (the heart of the design).** Ben's real
+  ring lives in `scode/buffer/tracker.py` (`CircularBufferOnDisk`) and its richer production sibling
+  `scode/buffer/vector_store.pyx` (`VectorStore`, Cython). This is what made "every feature a lookup + a few
+  ops" actually true, and it is **exactly the `row-ring` fold-kind our container declares**:
+  - *Positional ring with a write cursor + wraparound* — `current_position = (current_position + 1) % size`;
+    physical slots, logical (time) order reconstructed as `(last_index + 1 + i) % num_rows`
+    (`tracker.py:add_row`/`to_dataframe`). That is precisely our positional-row-ring (the #26 convergence
+    PointRing + ValueInputRing share this one structure).
+  - *O(1) reads via maintained aggregates, not re-scans (the key idea).* He never re-scans the window to answer a
+    query: he keeps a hidden running `sum` row and `sum-of-squares` row (`tracker.py:add_row` updates each by
+    `+= new − evicted`), so `get_sum`/`get_std` are O(1). `VectorStore` generalizes this to **per-window** dicts
+    (`running_sum`, `running_sum_squares`, `max_val`, `min_val`, `running_ema_vals`) over one buffer. That is our
+    **accumulator-reduce and recursive (EMA) fold-kinds living *on* the ring** — the `(state, fold)` each group
+    declares, his idea, generalized.
+  - *His own warmup/readiness counter.* `num_elements` increments until the buffer fills
+    (`vector_store.pyx:add_value`), and `get_mean`/`get_std` divide by `adjusted_size = min(num_elements, size)`.
+    That **is the readiness primitive** — "am I full yet?" answered per buffer — which our fourth element
+    (`ready`) lifts to a container guarantee and reconciles with PR #165's `populated`.
+  - *Extrema honestly fork.* When the evicted value was the running max/min he must re-scan the window
+    (`_recalculate_min_max`, O(window)) — so min/max do **not** reduce to a pure running-fold. This is direct
+    evidence for our claim that the fold-set is *small but plural*, not one universal accumulator.
+  - *Seed/rebuild from the persisted buffer.* `_load_from_file` reconstructs every aggregate from the saved ring
+    → his lifecycle/rebuild, our `up_to_date` / `rebuild_from_history`.
+
 - **One uniform entry + flat numpy reads.** A bar goes through `BufferModel`
   (`scode/runner/server/minute_bar.py`): `get_ordered()` → `to_buffer_row()` produces a fixed-ordered
   `np.ndarray` row; every feature reads from that one flat buffer
@@ -92,9 +116,12 @@ load-bearing in our design, which is the strongest sign we're on the right track
 **Where his design stops, and what we add (honestly).** His state lives *inside each per-family numpy function*,
 driven by a Spark per-ticker partition (`scode/job/ema_features.py`: `add_feature_wrapper(fn, schema,
 need_columns, agg_cols=("ticker",))`). So volume, EMA, chunk, candlestick each carry their own buffer and their
-own loop — the **per-family duplication is exactly the thing Ben now wants reduced.** He did *not* have one
-shared lifecycle/seed/rebuild, the proof that the positional kinds are one structure, or the explicit "minimum
-fold-set" taxonomy. Those are our generalization — his per-family approach, **consolidated** onto one container
+own loop — the **per-family duplication is exactly the thing Ben now wants reduced.** His ring *did* have a
+per-buffer lifecycle (`_load_from_file` rebuild) and a per-buffer readiness counter (`num_elements`) — but **not
+one shared container-level lifecycle/seed/rebuild across all features and symbols**, not the proof that the
+positional kinds are one structure, and not the explicit "minimum fold-set" taxonomy. Those are our
+generalization: we lift his per-buffer lifecycle + readiness to the *container* and run them once for every
+group, instead of each buffer carrying its own. Our design is his per-family approach, **consolidated** onto one container
 with one churn-mask (his idea), one lifecycle, and the few fold-kinds the data actually needs.
 
 So this is **not** a greenfield invention and **not** a mirror of his repo: it is his per-family numpy approach
