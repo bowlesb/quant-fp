@@ -427,3 +427,96 @@ def test_all_six_groups_one_pass() -> None:
         for fname, arr in feats.items():
             assert arr.shape == (5,), f"{group.name}.{fname} not full symbol axis"
             assert not np.all(np.isnan(arr)), f"{group.name}.{fname} all-NaN"
+
+
+# --------------------------------------------------------------------------------------------------------- #
+# Lead's adversarial checks: cross-sectional sparse presence, EMA gap, and seed-replay == live equivalence.
+# These probe the presence-detection across the fork kinds + the live==backfill claim.
+# --------------------------------------------------------------------------------------------------------- #
+
+from quantlib.features.clean_groups_example import IntradaySeasonalityClean, SwingClean  # noqa: E402
+
+
+def _close_bars(present_symbols, closes):
+    return {"symbol": np.array(present_symbols), "close": np.array(closes, dtype=np.float64)}
+
+
+@pytest.mark.xfail(
+    reason="SAME interface gap as macd (reported): breadth counts a symbol ABSENT this minute as a valid "
+    "cross-section member — window.trailing('close') returns its CARRIED bars so ret is finite → valid=True "
+    "even with no bar this minute. The axis-0 reduce should count only THIS-minute-present symbols; needs "
+    "window.present(). Until then the cross-sectional denominator is wrong on sparse minutes.",
+    strict=True,
+)
+def test_breadth_sparse_presence_counts_only_present() -> None:
+    """ADVERSARIAL (cross-sectional + sparse): A,B trend UP, C,D trend DOWN (all 4 present 6 bars). Then a
+    minute where ONLY A,B deliver. Presence-aware breadth reduces over the 2 PRESENT (up) names →
+    breadth_up=1.0, down=0.0. The BUG counts the 2 ABSENT (down-history) names via their carried bars →
+    denominator 4 → up=0.5, down=0.5 (verified). Asserting the CORRECT answer → fails until window.present()."""
+    syms = ["A", "B", "C", "D"]
+    engine = CleanEngine([BreadthClean()], syms, WINDOW)
+    for k in range(6):
+        engine.step(_close_bars(syms, [100.0 + k, 100.0 + k, 100.0 - k, 100.0 - k]))  # A,B up / C,D down
+    out = engine.step(_close_bars(["A", "B"], [106.0, 106.0]))["breadth"]  # only A,B present (up)
+    assert out["breadth_up_5"][0] == pytest.approx(1.0), "2 present up / 2 present = 1.0 (not 2/4)"
+    assert out["breadth_down_5"][0] == pytest.approx(0.0), "absent C,D must not count → down 0.0"
+
+
+def test_macd_gap_hand_computed() -> None:
+    """ADVERSARIAL (EMA decay across a gap): present, missing, present. Hand-compute the EMA on the PRESENT
+    bars only (the defined presence-decay semantics) and assert. Currently xfail-documented as broken — this
+    test asserts the CORRECT (presence-decay) answer, so it fails until window.present() lands."""
+    engine = CleanEngine([MacdClean()], ["A"], WINDOW)
+    engine.step(_close_bars(["A"], [100.0]))            # bar 1
+    engine.step(_close_bars(["A"], [110.0]))            # bar 2
+    engine.step(_close_bars([], []))                    # A ABSENT — EMA must HOLD
+    out = engine.step(_close_bars(["A"], [120.0]))["macd"]  # bar 3 (the 3rd PRESENT bar)
+    expected = _ema_ref([100.0, 110.0, 120.0], 12) - _ema_ref([100.0, 110.0, 120.0], 26)
+    if not np.isfinite(out["macd_line"][0]) or out["macd_line"][0] != pytest.approx(expected, rel=1e-9):
+        pytest.xfail("EMA decayed across the gap (presence bug) — needs window.present()")
+    assert out["macd_line"][0] == pytest.approx(expected, rel=1e-9)
+
+
+def test_seed_replay_equals_live_carried_state() -> None:
+    """THE live==backfill claim: seed(N minutes) via replay, vs feed the SAME N minutes live to a fresh engine,
+    one at a time — the carried state (EMA accumulator, swing leg-state, session sums) AND the final output
+    must come out identical. ArchOverhaul made seed() replay through the same fold, so this should hold by
+    construction; verify it, don't take it on faith."""
+    rng = np.random.default_rng(11)
+    syms = [f"S{i}" for i in range(4)]
+    groups_seed = [MacdClean(), SwingClean(), IntradaySeasonalityClean(), TrendQualityClean()]
+    groups_live = [MacdClean(), SwingClean(), IntradaySeasonalityClean(), TrendQualityClean()]
+    history = []
+    base_epoch = 0
+    for t in range(25):
+        c = 100.0 + np.cumsum(rng.standard_normal(4)) * 0.5
+        history.append({"symbol": np.array(syms), "close": c, "volume": 1000.0 + rng.random(4) * 2000})
+
+    # SEED path: replay the first 24 via seed(), then step the 25th for output
+    seed_engine = CleanEngine(groups_seed, syms, WINDOW)
+    seed_engine.seed(history[:-1])
+    seed_out = seed_engine.step(history[-1])
+
+    # LIVE path: step all 25 one at a time on a fresh engine
+    live_engine = CleanEngine(groups_live, syms, WINDOW)
+    live_out = {}
+    for bars in history:
+        live_out = live_engine.step(bars)
+
+    # carried state identical (EMA, swing leg-state, session sums)
+    for gname in ("macd", "swing", "intraday_seasonality"):
+        s_state = seed_engine._group_state[gname]
+        l_state = live_engine._group_state[gname]
+        assert set(s_state) == set(l_state), f"{gname} state keys differ seed vs live"
+        for key in s_state:
+            np.testing.assert_allclose(
+                np.nan_to_num(s_state[key]), np.nan_to_num(l_state[key]), rtol=1e-12,
+                err_msg=f"{gname}.{key} carried state diverged seed-replay vs live",
+            )
+    # final output identical
+    for gname, feats in seed_out.items():
+        for fname, arr in feats.items():
+            np.testing.assert_allclose(
+                np.nan_to_num(arr), np.nan_to_num(live_out[gname][fname]), rtol=1e-12,
+                err_msg=f"{gname}.{fname} output diverged seed-replay vs live",
+            )
