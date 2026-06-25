@@ -74,12 +74,18 @@ These are NOT correctness-of-math (that's gated per group) — they're the wirin
    (the engine carries its own buffer). The bar columns a group reads come from its `input_cols`; the union over
    all groups is the engine's `cols`.
 
-4. **Session population (#69, the sibling blocker).** The daily-snapshot + event-tape groups read
-   `window.session` (daily_close/high/open/volume/vwap matrices; news/edgar CSR tapes). Nothing populates these
-   live yet — `set_session` is called only by tests. DELIVERABLE (tracked as #69): a per-session builder that
-   loads the daily matrices (from the held `daily` snapshot) + the event tapes (from /store/news + filings DB)
-   into the `(a)` [-1]=today convention, called at the session boundary alongside the engine rebuild. Until #69,
-   those groups emit their NaN defaults live (honest, not wrong) — so clean can go live for the
+4. **Session population (#69, the sibling blocker) — a TRANSFORM, not net-new wiring.** The daily-snapshot +
+   event-tape groups read `window.session`. Nothing populates these live yet — `set_session` is called only by
+   tests. BUT the SOURCE already exists and is already loaded session-scoped: `real_capture.py:149-163` builds
+   `snapshots` ONCE at session startup — `snapshots["daily"] = backfill_daily(day, symbols)` (split-adjusted daily
+   bars `(symbol,date,o,h,l,c,v,vwap)`, trailing 370 calendar days ENDING AT `day` → today's daily bar IS
+   included = the `(a)` [-1]=today source confirmed at the data layer), plus `load_news_features(day)` /
+   `load_filings(day)` / `load_reference` / `load_universe`, all flowing into `process_bars(... snapshots)` today.
+   So #69 is NOT a new data path — it is a per-session PIVOT of the already-held polars frames into the clean
+   engine's numpy session layout (the `(n_sym, n_days)` daily matrices + the news/edgar CSR `at/off/payload`
+   arrays), then `engine.set_session(...)` at the rebuild-per-session boundary (gap 2). The matrix/CSR layout +
+   the `(a)` convention + the parity math are DONE and gated; #69 is ~one pivot function from the held frames.
+   Until #69 lands, the session groups emit NaN defaults live (honest, not wrong) — so clean can go live for the
    non-session groups FIRST and the session groups light up when #69 lands.
 
 5. **Enriched derived bar columns (the real input-contract dependency).** VERIFIED by sweeping every clean
