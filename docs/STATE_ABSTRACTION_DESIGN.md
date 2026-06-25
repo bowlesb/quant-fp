@@ -476,6 +476,36 @@ declares its own condition — windowed-sum = window filled, EMA = warmup span, 
 Each step re-runs #451 before the next; green means values survived, red means stop and fix. No feature output
 changes at any step, and the fingerprint is unchanged throughout.
 
+## Consolidation endpoint: backfill = replay through the live path (one compute path; rolling-window form → oracle)
+
+This is the deepest consolidation the design points at — the strategic *endpoint*, not the demo scope. Today each
+feature is generated in **two forms**: a rolling-window `compute()` for backfill (a whole-frame polars pass over
+history) and a `compute_latest()` for the live minute. Two forms means a whole class of bugs — the live-vs-backfill
+divergence we spend trust machinery (WDPC) catching. The endpoint removes the second form:
+
+**Backfill becomes replay.** Seed the carried buffer at day start, then **replay** the day's minutes one at a time
+through the **same carried-state fold the live path uses**. One computation serves both. The live-vs-backfill
+divergence class *disappears by construction* — it cannot diverge if it is literally the same code — and backfill
+gets much faster: O(1)-per-minute replay instead of a whole-frame rolling polars pass.
+
+**Why it's sound.** The invariant we have been proving all along — `seed(H); fold(m) == seed(H+m)` (the #451 value
+gate) — *is* "replay == batch." So replay-backfill == live == rolling-window-backfill by that same property. The
+rolling-window `compute()` form is **not deleted** — it is **demoted to the #451 test oracle**, kept only as the
+reference the carried path is validated against. Production — live *and* backfill — runs the one replay path.
+
+**Honest edges (verify per feature; this is "I suspect so," not "proven universal").**
+- *Warmup / seeding at the day boundary* = the readiness / `is_initialized` element already in the design: replay
+  seeds from history exactly like live warm-start.
+- *Sequencing*: replay is sequential per symbol-buffer but parallelizes across shards — backfill becomes N parallel
+  replay streams, not one giant frame.
+- *Per-feature verification*: the carried-fold class (most groups) clearly supports this, but some feature could
+  carry a subtlety — so each feature's switch to replay-backfill is verified, not assumed universal.
+
+**The tie-in (why the demo is the first brick, not a detour).** The price_volume step-1 #451 gate *already* checks
+"carried fold == rolling-window backfill." That check **is** the proof that this one feature could switch its
+backfill to replay. So the single-feature demonstration is the first concrete brick of this unification — every
+group we bring onto the carried path, value-gated, is a group whose backfill could then become replay.
+
 ## How we'll know it worked — and how latency work gets easy afterward
 
 The point of this isn't a number going down; it's, in Ben's words, *"consolidation, good design, reducing
