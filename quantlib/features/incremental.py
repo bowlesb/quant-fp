@@ -45,10 +45,64 @@ from quantlib.features.declarative import (
     emit_rust_unified,
     resolve_points,
 )
+from quantlib.features.metrics import record_point_ring_parity
 from quantlib.features.point_ring import PointRing, point_frame_from_ring, point_specs
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
+
+_POINT_RING_ABS_TOL = 1e-12  # __pt_ columns are EXACT carries, not aggregates -> absolute tol, not relative
+
+
+def _record_point_ring_parity(ring_frame: pl.DataFrame, truth_frame: pl.DataFrame) -> None:
+    """The FP_POINT_RING_PARITY shadow comparison (monitoring-only): compare the ring's ``__pt_`` columns to
+    the whole-buffer ``resolve_points`` truth and record the worst absolute divergence + a breach flag.
+
+    The ring is a SUPERSET of symbols (the fixed session index); ``resolve_points`` emits only the present
+    symbols. Compare on the symbol INTERSECTION: a symbol in the ring but not the truth is expected coverage
+    (``only_ring``), but a symbol in the truth but NOT the ring (``only_truth>0``) is a real breach (the ring
+    dropped a symbol it should carry). Per common-symbol ``__pt_`` cell: (both NaN) OR ``abs(a-b) <= 1e-12``
+    absolute — these are exact carries, not aggregates, so the tolerance is absolute, not relative. Any failing
+    cell, or ``only_truth>0``, is a breach. Never raises (a shadow must never crash capture); on any structural
+    mismatch it records a breach with +inf so it surfaces rather than silently passing."""
+    point_cols = [c for c in truth_frame.columns if c.startswith("__pt_")]
+    if not point_cols:
+        record_point_ring_parity(0.0, breached=False)
+        return
+    truth = truth_frame.sort("symbol")
+    ring = ring_frame.sort("symbol")
+    truth_syms = set(truth["symbol"].to_list())
+    ring_syms = set(ring["symbol"].to_list())
+    only_truth = truth_syms - ring_syms  # symbols the truth has that the ring dropped -> a real breach
+    common = sorted(truth_syms & ring_syms)
+    if not common:
+        record_point_ring_parity(float("inf"), breached=True)
+        return
+    truth_c = truth.filter(pl.col("symbol").is_in(common)).sort("symbol")
+    ring_c = ring.filter(pl.col("symbol").is_in(common)).sort("symbol")
+    max_abs_diff = 0.0
+    breached = bool(only_truth)
+    for col in point_cols:
+        if col not in ring_c.columns:
+            breached = True
+            max_abs_diff = float("inf")
+            continue
+        a = truth_c[col].to_numpy().astype(np.float64)
+        b = ring_c[col].to_numpy().astype(np.float64)
+        both_nan = np.isnan(a) & np.isnan(b)
+        diff = np.abs(a - b)
+        # a NaN-vs-finite cell is a divergence: diff is NaN there -> treat as a breach with +inf.
+        nan_mismatch = np.isnan(a) ^ np.isnan(b)
+        if nan_mismatch.any():
+            breached = True
+            max_abs_diff = float("inf")
+        finite = diff[~both_nan & ~nan_mismatch]
+        if finite.size:
+            col_max = float(finite.max())
+            max_abs_diff = max(max_abs_diff, col_max)
+            if col_max > _POINT_RING_ABS_TOL:
+                breached = True
+    record_point_ring_parity(max_abs_diff, breached=breached)
 
 
 class IncrementUnderfilled(Exception):
@@ -464,6 +518,13 @@ class IncrementalEngine:
         # to ring, and ``_latest_frame`` keeps the resolve_points path (which returns an empty __pt_ frame).
         self._use_point_ring = bool(self.point_specs)
         self.point_ring: PointRing | None = None
+        # FP_POINT_RING_PARITY: MONITORING-ONLY self-check (NOT a gate), default OFF, mirrors
+        # FP_INCREMENTAL_PARITY. When the ring is armed AND this is set, also run the whole-buffer
+        # ``resolve_points`` each minute and record the ring-vs-truth __pt_ divergence to Prometheus
+        # (``feature_point_ring_breach_total`` + a max-abs-diff gauge). The SERVED output is still the ring's —
+        # this never alters values; the FP_POINT_RING=0 revert on a sustained breach is an ops action off the
+        # metric, not something this does to the emit path. Only meaningful when the ring is actually armed.
+        self._point_ring_parity = self._use_point_ring and os.environ.get("FP_POINT_RING_PARITY") == "1"
 
     def _collect_stateful_specs(self) -> dict[str, dict[str, StatefulRegressor]]:
         specs: dict[str, dict[str, StatefulRegressor]] = {}
@@ -793,7 +854,12 @@ class IncrementalEngine:
         per-minute whole-buffer ``resolve_points`` pass. Byte-identical (tests/test_fp_point_ring.py)."""
         if self.point_ring is not None:
             assert self.symbols is not None
-            return point_frame_from_ring(self.groups, self.point_ring, self.symbols, latest)
+            ring_frame = point_frame_from_ring(self.groups, self.point_ring, self.symbols, latest)
+            if self._point_ring_parity:
+                # MONITORING-ONLY shadow: compare the ring's __pt_ columns to the whole-buffer truth and record
+                # the divergence. The served value is STILL ``ring_frame`` — this never alters it.
+                _record_point_ring_parity(ring_frame, resolve_points(self.groups, frame, latest))
+            return ring_frame
         return resolve_points(self.groups, frame, latest)  # points over the whole buffer (lag-safe)
 
     def step_numpy(self, frame: pl.DataFrame) -> dict[str, pl.DataFrame]:
