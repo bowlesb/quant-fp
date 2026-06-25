@@ -227,9 +227,10 @@ The order (lowest-risk first, each green before the next, confirmed against the 
    channel + watermark + the existing `RunningState` lifecycle. Port `PointRing` + `ValueInputRing` onto it first
    — convergence already proven (#26), two consumers, lowest risk.
 2. **WindowedSum payload onto the spine** (the big one). Re-point the incremental reductions; carry the Class-A/B
-   conditioning. The one shared-engine hazard (the straddle where `price_volume` can perturb `return_dynamics`)
-   lives *entirely inside this step* — both groups are windowed-sum — so there's no co-residency constraint that
-   crosses steps; this step just migrates its groups together and stays co-resident-gated by #451 internally.
+   conditioning. There is one known shared-engine hazard — two groups that share the same engine, where a
+   numerical quirk in one (`price_volume`) could corrupt the other (`return_dynamics`); the value gate catches it.
+   It lives *entirely inside this step* (both are windowed-sum groups), so there's no co-residency constraint that
+   crosses steps — this step just migrates its groups together and stays co-resident-gated by #451 internally.
 3. **EMA / Lag / Extrema / Cumulative payloads.** Port the `StatefulEngine` kinds and **delete the stable-set
    assert + the `_prepared_latest` wrapper** — the two churn riders (fill-null, presence-gated decay) bake into
    the container fold here.
