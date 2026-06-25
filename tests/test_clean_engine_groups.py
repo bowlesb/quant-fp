@@ -1523,3 +1523,85 @@ def test_xrank_contract() -> None:
         if present:
             out = eng.step(_vbar(present, 60 + ep * 60))["cross_sectional_rank"]
     _assert_feature_spec_contract(out, CrossSectionalRankGroup().declare(), "cross_sectional_rank ")
+
+
+# ========================================================================================================= #
+# CROSS-SECTIONAL — batch 2b: return_dispersion (intraday horizons). GREEN-INTRADAY-ONLY: the 4 daily-horizon
+# features are DEFERRED-NaN by design (Lead's integrity guardrail — a deferred-NaN feature passes the contract
+# but is NOT validated-correct; flag + tally it, never silently count it green).
+# ========================================================================================================= #
+
+from quantlib.features.clean_groups_xsectional import ReturnDispersionClean, _xsec_std_iqr  # noqa: E402
+
+# DEFERRED FEATURE TALLY (Lead's guardrail): {group: [features emitted NaN-by-design, NOT validated-correct]}.
+# all-68-green is NOT satisfied until these compute real values. Updated as deferred features are wired.
+DEFERRED_NAN_FEATURES = {
+    "return_dispersion": [
+        "return_dispersion_std_1d", "return_dispersion_iqr_1d",
+        "return_dispersion_std_5d", "return_dispersion_iqr_5d",
+    ],  # daily horizons → window.session (snapshot batch #55); NaN until then.
+}
+
+
+def test_xsec_std_iqr_quantile_is_nearest_not_linear() -> None:
+    """SILENT-DIVERGENCE TRAP (ArchOverhaul): the IQR uses polars-default quantile interpolation = 'nearest',
+    NOT numpy-default 'linear'. Verified independently: on [1,2,3,4] polars q75=3.0 (==np nearest) vs 3.25
+    (linear). Confirm the clean _xsec_std_iqr IQR matches polars/'nearest', not 'linear'."""
+    import polars as pl  # noqa: PLC0415
+
+    vals = np.array([1.0, 2.0, 3.0, 4.0])
+    present = np.array([True, True, True, True])
+    _std, iqr = _xsec_std_iqr(vals, present)
+    polars_iqr = pl.Series(vals).quantile(0.75) - pl.Series(vals).quantile(0.25)  # polars default
+    linear_iqr = np.quantile(vals, 0.75, method="linear") - np.quantile(vals, 0.25, method="linear")
+    assert iqr == pytest.approx(polars_iqr)  # matches polars 'nearest' (the legacy path)
+    assert iqr != pytest.approx(linear_iqr)  # and is NOT the numpy-default 'linear' (the trap)
+
+
+def test_xsec_std_is_ddof1() -> None:
+    """cross-sectional std is sample (ddof=1), matching legacy."""
+    vals = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    std, _ = _xsec_std_iqr(vals, np.full(5, True))
+    assert std == pytest.approx(np.std(vals, ddof=1))
+    assert std != pytest.approx(np.std(vals, ddof=0))
+
+
+def test_return_dispersion_intraday_present_gated_and_nonnan() -> None:
+    """INTRADAY 6: present()-gated (absent excluded from the dispersion + → NaN) AND COMPUTES A REAL VALUE on
+    well-conditioned inputs (the Lead's non-deferred-NaN check — a real dispersion, not a placeholder)."""
+    syms = ["A", "B", "C", "D"]
+    eng = CleanEngine([ReturnDispersionClean()], syms, WINDOW)
+    # 10 minutes, all 4 present with varied returns, then a minute where only A,B,C deliver (D absent)
+    rng = np.random.default_rng(22)
+    for ep in range(10):
+        present = {s: (100.0 + rng.standard_normal() * (1 + i), 0.0) for i, s in enumerate(syms)}
+        eng.step({"symbol": np.array(list(present)),
+                  "close": np.array([present[s][0] for s in present], dtype=np.float64),
+                  "volume": np.array([0.0] * len(present), dtype=np.float64),
+                  "minute_epoch": np.array([60 + ep * 60], dtype=np.int64)})
+    out = eng.step({"symbol": np.array(["A", "B", "C"]),
+                    "close": np.array([101.0, 99.0, 103.0], dtype=np.float64),
+                    "volume": np.array([0.0, 0.0, 0.0], dtype=np.float64),
+                    "minute_epoch": np.array([700], dtype=np.int64)})["return_dispersion"]
+    # intraday std/iqr compute a REAL value for present A,B,C (non-NaN) and NaN for absent D
+    assert np.isfinite(out["return_dispersion_std_5m"][0]), "intraday std must compute, not deferred-NaN"
+    assert np.isfinite(out["return_dispersion_iqr_5m"][0]), "intraday iqr must compute"
+    assert np.isnan(out["return_dispersion_std_5m"][3]), "absent D → NaN (present()-gated)"
+
+
+def test_return_dispersion_intraday_contract_daily_deferred_flagged() -> None:
+    """Contract on the INTRADAY 6; the 4 daily are DEFERRED-NaN by design (in DEFERRED_NAN_FEATURES). This
+    asserts the deferred set is EXACTLY the daily horizons (so a real feature can't silently slip into the
+    deferred bucket) AND the intraday 6 are NOT in it (they must genuinely compute)."""
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.groups.return_dispersion import ReturnDispersionGroup  # type: ignore  # noqa: PLC0415,E501
+
+    deferred = set(DEFERRED_NAN_FEATURES["return_dispersion"])
+    declared = {s.name for s in ReturnDispersionGroup().declare()}
+    intraday = {f for f in declared if f.endswith("m")}
+    daily = {f for f in declared if f.endswith("d")}
+    assert deferred == daily, "deferred set must be exactly the daily horizons"
+    assert not (deferred & intraday), "no intraday feature may be deferred-NaN"
+    # produced set == declared (the daily exist-as-NaN, which the contract allows under nan_policy=sparse)
+    assert set(ReturnDispersionClean().feature_names) == declared
