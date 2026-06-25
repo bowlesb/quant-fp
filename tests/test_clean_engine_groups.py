@@ -1711,6 +1711,69 @@ def test_liquidity_quote_spread_sparse_matches_legacy() -> None:
     assert lout["amihud_illiq_15m"][0] == pytest.approx(df2.tail(1)["am15"][0], rel=1e-6), "amihud_illiq_15m sparse"
 
 
+def test_momentum_family_sparse_matches_legacy() -> None:
+    """GATE the FRESH time-window ports momentum / efficiency / return_dynamics (#60, 8a232b0) on the SPARSE
+    axis vs legacy BATCH on a gappy symbol (70 min):
+      - momentum.up_ratio_15m = mean(up-bar, 15m time window)
+      - efficiency.efficiency_ratio_15m = |close[T]−close.shift(15)| / Σ|step|(15m) — a HYBRID: POSITIONAL
+        shift(w) numerator (w-th prior ROW) + TIME-window Σ|step| denominator (verified at source).
+      - return_dynamics.autocorr_1_15m = corr(ret_t, ret_{t−1}) over the 15m window (value-OLS, paired-finite).
+    """
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_windowed import (  # noqa: PLC0415
+        EfficiencyClean,
+        MomentumClean,
+        ReturnDynamicsClean,
+    )
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    rng = np.random.default_rng(41)
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
+    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
+    t_last = mins[-1]
+
+    def _feed(group: object) -> dict[str, np.ndarray]:
+        eng = CleanEngine([group], ["A"], 400)
+        out: dict[str, np.ndarray] = {}
+        for i in range(len(offsets)):
+            out = eng.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
+                            "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})[group.name]  # type: ignore[attr-defined]
+        return out
+
+    df = pl.DataFrame({"minute": mins, "close": closes}).sort("minute")
+    df = df.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"),
+                         (pl.col("close") - pl.col("close").shift(1)).abs().alias("step"))
+    df = df.with_columns(pl.when(pl.col("ret") > 0).then(1.0).otherwise(0.0).alias("up"),
+                         pl.col("ret").shift(1).alias("lret"))
+
+    # momentum.up_ratio_15m
+    win = df.filter((pl.col("minute") > t_last - datetime.timedelta(minutes=15)) & (pl.col("minute") <= t_last))
+    leg_up = win["up"].drop_nulls().mean()
+    assert _feed(MomentumClean())["up_ratio_15m"][0] == pytest.approx(leg_up, rel=1e-6), "momentum.up_ratio_15m sparse"
+
+    # efficiency.efficiency_ratio_15m: HYBRID positional-shift(15) net / time-window Σ|step|
+    path = win["step"].drop_nulls().sum()
+    net = abs(closes[-1] - closes[-1 - 15])  # positional shift(15): the 15th prior present ROW
+    assert _feed(EfficiencyClean())["efficiency_ratio_15m"][0] == pytest.approx(net / path, rel=1e-6), \
+        "efficiency_ratio_15m sparse (positional-net / time-path hybrid)"
+
+    # return_dynamics.autocorr_1_15m: corr(ret, lagged ret) over the time window
+    pw = win.drop_nulls(["ret", "lret"])
+    x = pw["lret"].to_numpy()
+    y = pw["ret"].to_numpy()
+    n = len(x)
+    cov = n * (x * y).sum() - x.sum() * y.sum()
+    var_x = n * (x * x).sum() - x.sum() ** 2
+    var_y = n * (y * y).sum() - y.sum() ** 2
+    leg_ac = cov / np.sqrt(var_x * var_y)
+    assert _feed(ReturnDynamicsClean())["autocorr_1_15m"][0] == pytest.approx(leg_ac, rel=1e-5), \
+        "return_dynamics.autocorr_1_15m sparse (value-OLS)"
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
