@@ -19,6 +19,10 @@ from __future__ import annotations
 import numpy as np
 
 from quantlib.features.clean_engine import Window
+from quantlib.features.clean_groups_xsectional import _average_rank
+
+_ADV_WINDOW = 20
+_ADV_MIN_DAYS = 10
 
 
 def _daily_window(mat: np.ndarray, w: int) -> np.ndarray:
@@ -161,3 +165,34 @@ class DailyBetaClean:
             "daily_corr_60d": np.where(defined_corr, np.clip(corr, -1.0, 1.0), np.nan),
             "daily_idio_vol_60d": np.where(defined_corr, idio, np.nan),
         }
+
+
+class LiquidityRankClean:
+    """DAILY-SNAPSHOT: the slow persistent liquidity TIER. adv_dollar_log_20d = log1p of the trailing-20-day
+    mean dollar volume (close·volume), min 10 days; liquidity_rank = the symbol's cross-sectional PERCENTILE
+    (rank(method='average')/count, 1=most liquid) of that ADV within the day's universe. Reads
+    ``window.session['daily_close'/'daily_volume']``. Legacy: ``LiquidityRankGroup`` (DailySnapshotGroup)."""
+
+    name = "liquidity_rank"
+    input_cols = ()
+    feature_names = ("adv_dollar_log_20d", "liquidity_rank")
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        daily_close = window.session.get("daily_close")
+        daily_volume = window.session.get("daily_volume")
+        if daily_close is None or daily_volume is None:
+            return {name: np.full(n, np.nan) for name in self.feature_names}
+        dvol = daily_close * daily_volume  # (n_sym, n_days)
+        win = _daily_window(dvol, _ADV_WINDOW)
+        mask = np.isfinite(win)
+        n_days = mask.sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            adv = np.where(n_days >= _ADV_MIN_DAYS, np.where(mask, win, 0.0).sum(axis=1) / n_days, np.nan)
+            adv_log = np.log1p(adv)
+        # cross-sectional percentile of adv over the universe (symbols with a valid adv): rank/count.
+        ranks = _average_rank(adv)
+        count = np.isfinite(adv).sum()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            liquidity_rank = ranks / count if count > 0 else np.full(n, np.nan)
+        return {"adv_dollar_log_20d": adv_log, "liquidity_rank": liquidity_rank}
