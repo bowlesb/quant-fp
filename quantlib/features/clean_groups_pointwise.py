@@ -115,3 +115,71 @@ class CalendarEventsClean:
             "is_last_week": 1.0 if day >= 22 else 0.0,
         }
         return {name: np.full(n, value) for name, value in vals.items()}
+
+
+_SECTORS: tuple[str, ...] = (
+    "technology",
+    "healthcare",
+    "financial_services",
+    "consumer_cyclical",
+    "consumer_defensive",
+    "industrials",
+    "energy",
+    "basic_materials",
+    "real_estate",
+    "utilities",
+    "communication_services",
+)
+
+
+class SectorOneHotClean:
+    """REFERENCE: one-hot of each symbol's GICS-aligned sector, broadcast across the day. sector_is_{sector}
+    for the 11 canonical buckets + sector_is_unknown (unmapped). Reads the per-symbol normalized sector NAME
+    from ``window.static['sector_name']`` (a static reference array, constant intraday). Legacy:
+    ``SectorOneHotGroup``."""
+
+    name = "sector"
+    input_cols = ()
+    feature_names = tuple(f"sector_is_{sector}" for sector in _SECTORS) + ("sector_is_unknown",)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        sector_name = window.static.get("sector_name")
+        if sector_name is None:
+            # no sector map → everything unknown (the legacy null-sector → unknown bucket).
+            out: dict[str, np.ndarray] = {f"sector_is_{s}": np.zeros(n) for s in _SECTORS}
+            out["sector_is_unknown"] = np.ones(n)
+            return out
+        names = np.asarray(sector_name)
+        out = {f"sector_is_{s}": (names == s).astype(np.float64) for s in _SECTORS}
+        # unknown = the symbol's sector is not one of the canonical buckets (unmapped/unclassified).
+        is_known = np.isin(names, _SECTORS)
+        out["sector_is_unknown"] = (~is_known).astype(np.float64)
+        return out
+
+
+_ASSET_FLAGS: tuple[tuple[str, str], ...] = (
+    ("is_shortable", "shortable"),
+    ("is_easy_to_borrow", "easy_to_borrow"),
+    ("is_marginable", "marginable"),
+    ("is_fractionable", "fractionable"),
+)
+
+
+class AssetFlagsClean:
+    """REFERENCE: per-symbol tradability/borrow flags broadcast across the day — is_shortable,
+    is_easy_to_borrow, is_marginable, is_fractionable. Reads each flag from ``window.static[<flag column>]``
+    (per-symbol 0/1, constant intraday). NaN where the static flag is missing (sparse). Legacy:
+    ``AssetFlagsGroup``."""
+
+    name = "asset_flags"
+    input_cols = ()
+    feature_names = tuple(feature for feature, _ in _ASSET_FLAGS)
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        out: dict[str, np.ndarray] = {}
+        for feature, column in _ASSET_FLAGS:
+            flag = window.static.get(column)
+            out[feature] = np.full(n, np.nan) if flag is None else np.asarray(flag, dtype=np.float64)
+        return out
