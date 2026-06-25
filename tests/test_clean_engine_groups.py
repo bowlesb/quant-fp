@@ -1529,6 +1529,65 @@ def test_trend_quality_sparse_time_ols_matches_legacy() -> None:
     assert of["price_r2_15m"][0] == pytest.approx(0.0), "flat price → r2 0 (perfectly-explained zero-trend, not NaN)"
 
 
+def test_reduction_groups_sparse_time_window_matches_legacy() -> None:
+    """RE-GATE the re-ported reduction groups (#60 false-green fixes) on the SPARSE axis, one window-exercising
+    feature each, head-to-head vs legacy BATCH time-windows on a gappy symbol (spans 70 min). These were dense-
+    only false-greens (positional window); now trailing_time-masked.
+      - volatility.realized_vol_{5,15,30}m = legacy rolling_std_by(ret, Wm) (ddof=1)
+      - realized_range.realized_range_10m = legacy rolling_mean_by((high-low)/close, 10m)
+      - vwap_deviation.vwap_deviation_15m = close / (Σ(close·vol,15m)/Σ(vol,15m)) − 1
+    """
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_example import RealizedRangeClean, VwapDeviationClean  # noqa: PLC0415
+    from quantlib.features.clean_groups_windowed import VolatilityClean  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    rng = np.random.default_rng(31)
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
+    highs = closes + np.abs(rng.standard_normal(len(offsets))) * 0.4 + 0.2
+    lows = closes - np.abs(rng.standard_normal(len(offsets))) * 0.4 - 0.2
+    vols = (rng.random(len(offsets)) * 1e5 + 1e4).round()
+    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
+    col_map = {"high": highs, "low": lows, "close": closes, "volume": vols.astype(float)}
+
+    def _feed(group: object) -> dict[str, np.ndarray]:
+        eng = CleanEngine([group], ["A"], 400)
+        out: dict[str, np.ndarray] = {}
+        for i in range(len(offsets)):
+            bar = {"symbol": np.array(["A"]), "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)}
+            for c in group.input_cols:  # type: ignore[attr-defined]
+                bar[c] = np.array([col_map[c][i]], dtype=np.float64)
+            out = eng.step(bar)[group.name]  # type: ignore[attr-defined]
+        return out
+
+    df = pl.DataFrame({"minute": mins, "close": closes, "high": highs, "low": lows,
+                       "volume": vols.astype(float)}).sort("minute")
+    df = df.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"),
+                         ((pl.col("high") - pl.col("low")) / pl.col("close")).alias("hlr"),
+                         (pl.col("close") * pl.col("volume")).alias("cv"))
+    for w in (5, 15, 30):
+        df = df.with_columns(pl.col("ret").rolling_std_by("minute", window_size=f"{w}m").alias(f"rv{w}"))
+    df = df.with_columns(pl.col("hlr").rolling_mean_by("minute", window_size="10m").alias("rr10"),
+                         pl.col("cv").rolling_sum_by("minute", window_size="15m").alias("scv"),
+                         pl.col("volume").rolling_sum_by("minute", window_size="15m").alias("sv"))
+    last = df.tail(1)
+
+    vol_out = _feed(VolatilityClean())
+    for w in (5, 15, 30):
+        assert vol_out[f"realized_vol_{w}m"][0] == pytest.approx(last[f"rv{w}"][0], rel=1e-7), (
+            f"volatility.realized_vol_{w}m sparse != legacy rolling_std_by"
+        )
+    rr_out = _feed(RealizedRangeClean())
+    assert rr_out["realized_range_10m"][0] == pytest.approx(last["rr10"][0], rel=1e-7), "realized_range_10m sparse"
+    vd_out = _feed(VwapDeviationClean())
+    leg_vwap = closes[-1] / (last["scv"][0] / last["sv"][0]) - 1.0
+    assert vd_out["vwap_deviation_15m"][0] == pytest.approx(leg_vwap, rel=1e-7), "vwap_deviation_15m sparse"
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
