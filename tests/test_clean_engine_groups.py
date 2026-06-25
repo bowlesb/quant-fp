@@ -1892,6 +1892,74 @@ def test_sector_beta_sparse_time_window_matches_legacy() -> None:
     assert out["sector_corr_30m"][0] == pytest.approx(legacy_corr, rel=1e-7), "sparse 30m corr != legacy time-OLS"
 
 
+def test_technical_sparse_time_window_matches_legacy() -> None:
+    """GATE the re-ported technical (RSI/Bollinger/sma_dist now use trailing_time, #60) on the SPARSE axis.
+    On a gappy symbol the 14m RSI / 20m Bollinger / 5m sma_dist must use the TIME window (legacy
+    rolling_mean_by/rolling_std_by over minute), not the last-N positional bars. macd is recursive
+    (present-decay, separately validated) — confirmed finite here. Non-vacuous RSI (mixed up/down)."""
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_stateful import TechnicalClean  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]  # spans 70m
+    rng = np.random.default_rng(13)
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.5)
+    minutes = [base + datetime.timedelta(minutes=o) for o in offsets]
+    df = pl.DataFrame({"minute": minutes, "close": closes}).sort("minute").with_columns(
+        pl.col("close").shift(1).alias("_prev"))
+    diff = pl.col("close") - pl.col("_prev")
+    gain = pl.when(diff > 0).then(diff).otherwise(0.0)
+    loss = pl.when(diff < 0).then(-diff).otherwise(0.0)
+    ag = gain.rolling_mean_by("minute", window_size="14m")
+    al = loss.rolling_mean_by("minute", window_size="14m")
+    total = ag + al
+    rsi = pl.when(total > 0).then((100.0 * ag / total).clip(0.0, 100.0)).otherwise(None)
+    df = df.with_columns(rsi.alias("rsi"),
+                         pl.col("close").rolling_mean_by("minute", window_size="20m").alias("sma20"),
+                         pl.col("close").rolling_std_by("minute", window_size="20m").alias("std20"),
+                         pl.col("close").rolling_mean_by("minute", window_size="5m").alias("sma5"))
+    last = df.tail(1)
+    cl = closes[-1]
+    rsi_leg, sma20_leg, std20_leg, sma5_leg = last["rsi"][0], last["sma20"][0], last["std20"][0], last["sma5"][0]
+
+    eng = CleanEngine([TechnicalClean()], ["A"], 400)
+    out = {}
+    for o, c in zip(offsets, closes):
+        out = eng.step({"symbol": np.array(["A"]), "close": np.array([c]),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
+                                                 dtype=np.int64)})["technical"]
+    assert rsi_leg > 0.0, "fixture must yield a non-vacuous RSI"
+    assert out["rsi_14m"][0] == pytest.approx(rsi_leg), "sparse 14m RSI != legacy rolling_mean_by"
+    assert out["bb_position_20m"][0] == pytest.approx((cl - sma20_leg) / (2.0 * std20_leg)), "sparse bb_position"
+    assert out["sma_dist_5m"][0] == pytest.approx(cl / sma5_leg - 1.0), "sparse 5m sma_dist != legacy"
+    assert np.isfinite(out["macd_line"][0]), "macd (recursive, present-decay) computes"
+
+
+def test_technical_contract() -> None:
+    """produced == declared for technical with legacy valid_range/nan_policy (rsi∈[0,100], bb_width≥0,
+    sma_dist∈[-1,5])."""
+    import datetime  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    sys.path.insert(0, "/home/ben/quant-fp")
+    from quantlib.features.clean_groups_stateful import TechnicalClean  # noqa: PLC0415
+    from quantlib.features.groups.technical import TechnicalGroup  # type: ignore  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    rng = np.random.default_rng(21)
+    eng = CleanEngine([TechnicalClean()], ["A"], 400)
+    out = {}
+    for t in range(60):
+        c = 100.0 + np.cumsum(rng.standard_normal(1))[0]
+        out = eng.step({"symbol": np.array(["A"]), "close": np.array([c]),
+                        "minute_epoch": np.array([int((base + datetime.timedelta(minutes=t)).timestamp())],
+                                                 dtype=np.int64)})["technical"]
+    _assert_feature_spec_contract(out, TechnicalGroup().declare(), "technical ")
+
+
 # ========================================================================================================= #
 # CROSS-SECTIONAL — batch 2d: sector_return (TWO present() gates: DENOMINATOR (absent not in sector mean) AND
 # OUTPUT (absent symbol's own row → NaN). Both must hold.
