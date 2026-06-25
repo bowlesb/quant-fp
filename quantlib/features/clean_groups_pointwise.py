@@ -73,3 +73,45 @@ class RoundLevelsClean:
             "dist_to_half_dollar": dist_half,
             "is_at_round_dollar": (dist_dollar < _NEAR_DOLLAR_THRESHOLD).astype(np.float64),
         }
+
+
+_QUARTER_END_MONTHS = (3, 6, 9, 12)
+
+
+class CalendarEventsClean:
+    """Point-in-time CALENDAR-event features from the minute's ET date (symbol-independent, broadcast):
+    day_of_month_norm (day/31), week_of_month ((day−1)//7 + 1), is_opex_day (3rd Friday = Friday & day∈[15,21]),
+    is_triple_witching (opex in a quarter-end month), is_quarter_end_month (Mar/Jun/Sep/Dec), is_first_week
+    (day≤7), is_last_week (day≥22). Pure deterministic functions of window.minute_epoch in ET. Legacy:
+    ``CalendarEventsGroup``."""
+
+    name = "calendar_events"
+    input_cols = ()
+    feature_names = (
+        "day_of_month_norm",
+        "week_of_month",
+        "is_opex_day",
+        "is_triple_witching",
+        "is_quarter_end_month",
+        "is_first_week",
+        "is_last_week",
+    )
+
+    def compute(self, window: Window) -> dict[str, np.ndarray]:
+        n = window.n
+        et = dt.datetime.fromtimestamp(window.minute_epoch, _ET)
+        day = et.day
+        month = et.month
+        is_friday = et.isoweekday() == 5  # ISO Mon=1..Sun=7 → Friday=5 (== polars weekday()==5)
+        is_opex = is_friday and 15 <= day <= 21
+        is_qend = month in _QUARTER_END_MONTHS
+        vals = {
+            "day_of_month_norm": float(day) / 31.0,
+            "week_of_month": float((day - 1) // 7 + 1),
+            "is_opex_day": 1.0 if is_opex else 0.0,
+            "is_triple_witching": 1.0 if (is_opex and is_qend) else 0.0,
+            "is_quarter_end_month": 1.0 if is_qend else 0.0,
+            "is_first_week": 1.0 if day <= 7 else 0.0,
+            "is_last_week": 1.0 if day >= 22 else 0.0,
+        }
+        return {name: np.full(n, value) for name, value in vals.items()}
