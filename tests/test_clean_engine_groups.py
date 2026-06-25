@@ -2356,41 +2356,29 @@ def test_sector_beta_sparse_minute_aligned_matches_legacy() -> None:
 
 
 def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
-    """RESOLVED #62 re-gate (Lead's mixed-sparsity-within-sector ask): a 4-MEMBER sector with A-gappy +
-    B/C/D-dense, so legacy gives a NON-NULL sector_beta (the earlier 2-member fixture NULLs and masked the
-    residual). Clean == legacy EXACTLY for dense symbol B at EVERY minute. The independently-pinned true legacy
-    SectorBetaGroup.compute() for B gives a DISTINCT value per minute across the gappy-presence boundary (A is
-    gappy on EVEN offsets → PRESENT at 58, ABSENT at 57/59): sector_beta_15m = 0.955201@57, 0.959045@58,
-    0.965204@59. We capture the clean engine AT EACH of those minutes and assert it matches — proving clean
-    TRACKS legacy across the boundary, not just at one hand-picked minute.
+    """RESOLVED #62 — FULL per-(minute,symbol) cell diff vs real legacy SectorBetaGroup.compute() (the Lead's
+    decisive gate, replacing the hand-picked-minute spot-check that caused my off-by-one). A 4-MEMBER sector
+    with A-gappy (even offsets only) + B/C/D-dense, so legacy gives a NON-NULL sector_beta. The golden
+    (tests/sector_beta_4member_golden.json, 157 cells, every warmed minute × every present symbol × all 6
+    feats) was captured from the REAL legacy compute() on the shared closes (tests/sector_beta_4member_in.json).
 
-    PRODUCTION-CONSTRUCTION CONFIRMED (Lead's symmetry check): legacy LIVE runs compute_latest() (not the
-    backfill compute()), which emits ONE row at the ANCHOR/last minute (59) = 0.965204 — IDENTICAL to compute()
-    @min59 and to the clean engine's FINAL emit. So the clean port matches production-live at the
-    production-emitted minute; the 0.959045@min58 value is the BATCH value at a non-final minute, also correct.
-    (See /tmp/sb_prod_construction.py: compute_latest B@min59 == 0.965204 == clean final emit.)
-
-    (My earlier "0/6 divergence" was a harness off-by-one — I compared clean's FINAL emit @min59 (0.965204)
-    against a legacy golden pinned @min58 (0.959045). Both numbers are CORRECT legacy at their own minute; the
-    per-minute cell diff below makes that explicit and would catch a real divergence at any of the three.
-    Fixes c251212 minute-aligned mean + a02e7cb strict-1m OLS legs are correct. Lead lesson: gate
-    per-(minute,symbol) cell, never a single hand-picked-minute spot-check where the two engines' last row
-    lands on different minutes. Legacy truth: /tmp/sb_legacy_multimin.py.)"""
+    THE DECISIVE CHECK is the PRESENCE-FLIP minutes (Lead): A is PRESENT@min58, ABSENT@min59. If clean carried
+    A's stale even-minute bar into B/C/D's sector mean @min59 (legacy excludes it), THAT is the real
+    gappy-poisons-dense bug and shows as a non-zero diff at a flip minute. The full diff is clean cell-for-cell
+    (max ~4.4e-16) — INCLUDING @min59 where A is correctly EXCLUDED — so there is no poisoning; my earlier
+    "0/6" was purely a spot-check at the wrong minute (clean's final emit @min59 vs a legacy golden pinned
+    @min58; both are correct legacy at their own minute). Production-construction note: legacy LIVE
+    compute_latest() emits at the ANCHOR minute = the clean engine's final emit, so the streaming clean output
+    matches production-live. (Harness /tmp/sb_flipcheck.py.)"""
     import datetime  # noqa: PLC0415
+    import json  # noqa: PLC0415
 
     base = datetime.datetime(2026, 6, 1, 9, 30)
     syms = ["A", "B", "C", "D"]
     offsets = {"A": list(range(0, 60, 2)), "B": list(range(0, 60)),
                "C": list(range(0, 60)), "D": list(range(0, 60))}
-    rng = np.random.default_rng(9)  # MUST match /tmp/sb_nonnull.py
-    base_ret = rng.standard_normal(60) * 0.003
-    closes = {}
-    for s in syms:
-        offs = offsets[s]
-        c = [100.0 if s in ("A", "B") else 50.0]
-        for o in offs[1:]:
-            c.append(c[-1] * (1 + base_ret[o] + rng.standard_normal() * 0.001))
-        closes[s] = np.array(c)
+    closes = json.load(open(os.path.join(os.path.dirname(__file__), "sector_beta_4member_in.json")))
+    golden = json.load(open(os.path.join(os.path.dirname(__file__), "sector_beta_4member_golden.json")))
 
     eng = CleanEngine([SectorBetaClean()], syms, 400)
     eng.static = {"sector": np.array([0, 0, 0, 0])}
@@ -2398,33 +2386,28 @@ def test_sector_beta_4member_mixed_sparsity_matches_legacy() -> None:
     for s in syms:
         for j, o in enumerate(offsets[s]):
             events.setdefault(o, {})[s] = float(closes[s][j])
-    captured: dict[int, dict[str, np.ndarray]] = {}
+    captured: dict[str, dict[str, float]] = {}
     for o in sorted(events):
         pm = events[o]
         out = eng.step({"symbol": np.array(list(pm)), "close": np.array(list(pm.values()), dtype=np.float64),
                         "minute_epoch": np.array([int((base + datetime.timedelta(minutes=o)).timestamp())],
                                                  dtype=np.int64)})["sector_beta"]
-        if o in (57, 58, 59):  # capture across the gappy-presence boundary (A absent@57/59, present@58)
-            captured[o] = {k: v.copy() for k, v in out.items()}
-    b = syms.index("B")  # B is dense — its sector_beta is well-defined in legacy
-    # PER-MINUTE cell diff vs the independently-pinned true legacy SectorBetaGroup.compute() output for B.
-    # min59 (0.9652040) is the ANCHOR/last minute = what legacy LIVE compute_latest() emits AND the clean
-    # engine's final emit (production-construction equivalence, Lead's symmetry check).
-    legacy_beta_15m_by_minute = {57: 0.9552009, 58: 0.9590448, 59: 0.9652040}
-    for minute, expected in legacy_beta_15m_by_minute.items():
-        got = captured[minute]["sector_beta_15m"][b]
-        assert got == pytest.approx(expected, rel=1e-5), (
-            f"sector_beta_15m[B]@min{minute}: clean {got} vs legacy {expected}"
-        )
-    legacy_at_58 = {  # full feature set @ minute 58 (legacy compute() OUTPUT, /tmp/sb_nonnull.py)
-        "sector_beta_15m": 0.9590448101695276, "sector_corr_15m": 0.9358274462036749,
-        "sector_beta_30m": 0.9195091239980999, "sector_corr_30m": 0.9369723493584321,
-        "sector_beta_60m": 1.061111724464088, "sector_corr_60m": 0.9673437248898764,
-    }
-    for k, v in legacy_at_58.items():
-        assert captured[58][k][b] == pytest.approx(v, rel=1e-5), (
-            f"sector_beta.{k}[B]@min58: clean {captured[58][k][b]} vs legacy {v}"
-        )
+        for s in syms:
+            si = syms.index(s)
+            captured[f"{s}@{o}"] = {k: float(out[k][si]) for k in out}
+
+    # FULL per-(minute, symbol) cell diff over every legacy-present cell (the durable anchor; would catch a
+    # gappy-poisons-dense divergence at a presence-flip minute, e.g. A absent@59 must be excluded from B's mean).
+    assert "A@58" in golden and "A@59" not in golden, "fixture must straddle the A presence-flip (present@58, absent@59)"
+    for cell_key, feats in golden.items():
+        for fname, gv in feats.items():
+            cv = captured[cell_key][fname]
+            if gv is None:
+                assert np.isnan(cv), f"sector_beta {cell_key}.{fname}: legacy NULL, clean {cv}"
+            else:
+                assert cv == pytest.approx(gv, rel=1e-5, abs=1e-9), (
+                    f"sector_beta {cell_key}.{fname}: legacy {gv} clean {cv}"
+                )
 
 def test_technical_sparse_matches_legacy_compute_golden() -> None:
     """RE-ANCHORED (#66, in-line-re-derivation audit): diff clean technical cell-for-cell vs a golden from the
@@ -3451,6 +3434,8 @@ _LEGACY_GROUP_OF = {
     "multi_day_vwap": ("multi_day_vwap", "MultiDayVwapGroup"),
     "overnight_beta": ("overnight_beta", "OvernightBetaGroup"),
     "liquidity_rank": ("liquidity_rank", "LiquidityRankGroup"),
+    "news_sentiment": ("news_sentiment", "NewsSentimentGroup"),
+    "edgar_filing_frequency": ("edgar_filing_frequency", "EdgarFilingFrequencyGroup"),
     "runner_state": ("runner_state", "RunnerStateGroup"),
     "dumper_state": ("dumper_state", "DumperStateGroup"),
     "gap_fill_state": ("gap_fill_state", "GapFillStateGroup"),
@@ -3488,11 +3473,12 @@ def _clean_group_instance(name):  # type: ignore[no-untyped-def]
     import quantlib.features.clean_groups_daily as cd  # noqa: PLC0415
     import quantlib.features.clean_groups_example as ce  # noqa: PLC0415
     import quantlib.features.clean_groups_pointwise as cp  # noqa: PLC0415
+    import quantlib.features.clean_groups_reference as cr  # noqa: PLC0415
     import quantlib.features.clean_groups_stateful as cs  # noqa: PLC0415
     import quantlib.features.clean_groups_windowed as cw  # noqa: PLC0415
     import quantlib.features.clean_groups_xsectional as cx  # noqa: PLC0415
 
-    for mod in (cw, ce, cx, cd, cs, cp):
+    for mod in (cw, ce, cx, cd, cs, cp, cr):
         for attr in dir(mod):
             obj = getattr(mod, attr)
             if isinstance(obj, type) and getattr(obj, "name", None) == name and hasattr(obj, "feature_names"):
@@ -3538,12 +3524,13 @@ def test_completeness_gate_covers_every_clean_group() -> None:
     import quantlib.features.clean_groups_daily as cd  # noqa: PLC0415
     import quantlib.features.clean_groups_example as ce  # noqa: PLC0415
     import quantlib.features.clean_groups_pointwise as cp  # noqa: PLC0415
+    import quantlib.features.clean_groups_reference as cr  # noqa: PLC0415
     import quantlib.features.clean_groups_stateful as cs  # noqa: PLC0415
     import quantlib.features.clean_groups_windowed as cw  # noqa: PLC0415
     import quantlib.features.clean_groups_xsectional as cx  # noqa: PLC0415
 
     all_clean: set[str] = set()
-    for mod in (cw, ce, cx, cd, cs, cp):
+    for mod in (cw, ce, cx, cd, cs, cp, cr):
         for attr in dir(mod):
             obj = getattr(mod, attr)
             if isinstance(obj, type) and hasattr(obj, "name") and hasattr(obj, "feature_names") \
