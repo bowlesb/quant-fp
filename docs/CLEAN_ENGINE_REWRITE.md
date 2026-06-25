@@ -13,7 +13,8 @@ Three things, instead of the 90-file machinery sprawl:
    - `RingBuffer`: per-symbol circular buffer of the last `window` bar columns. O(1) append; a trailing-window
      read is a roll. Absent symbols don't advance their cursor, so a gap reads the last *present* bars — the
      positional window a feature wants, gap-safe by construction.
-   - `Window`: the one read surface — `trailing(col)` / `latest(col)` / `count()`.
+   - `Window`: the one read surface — `trailing(col)` / `latest(col)` / `count()` / `present()` (the real
+     current-minute delivery mask) + the carried-state accessors (`state` / `static` / `session`).
    - `CleanEngine`: `seed(history)` + `step(minute_bars)`. **One path.** The live step and the backfill are the
      **same replay** (`seed(H); fold(m) == seed(H+m)` by construction) — so there is no second "fast vs
      backfill" form and **no parity gate between them**. (This is the backfill=replay endpoint from the design
@@ -105,9 +106,12 @@ one spine — no fork into separate engines.
 
 **The three hard kinds — the generalization test — all FIT (verified):**
 - **Cross-sectional** (`breadth`): needs the WHOLE symbol cross-section. **FITS** — `compute(window)` already
-  sees the full `(n_symbols, window)` matrices, so the reduce is a numpy reduce over axis 0. Verified: 3 of 5
-  up → `breadth_up = 0.6`, 1 of 5 down → `0.2`. The interface DOES expose the full symbol axis. *(sector_beta /
-  cross_sectional_rank are the same shape — symbol-axis reduce / rank — + `window.static['sector']`.)*
+  sees the full `(n_symbols, window)` matrices, so the reduce is a numpy reduce over axis 0. The denominator
+  gates on `window.present()` (an absent symbol's trailing window is finite from its CARRIED bars, so
+  `isfinite()` alone over-counts it — the one real absence bug, found + fixed): an adversarial sparse rep (2
+  present-up / 2 absent carried-down) reads `breadth_up = 1.0`, not `2/4 = 0.5`. The interface DOES expose the
+  full symbol axis. *(sector_beta / cross_sectional_rank are the same shape — symbol-axis reduce / rank — +
+  `window.static['sector']`.)*
 - **Recursive-EMA** (`macd`): a carried SCALAR decayed value, not a ring of rows. **FITS** — via
   `window.state` (the engine's per-group carried dict). Verified: a +10 jump off flat → `macd_line = +0.80`
   (ema12 reacts faster, the carried scalar lags); decay is on bar-PRESENCE (an absent symbol HOLDS its EMA),
@@ -123,10 +127,21 @@ one spine — no fork into separate engines.
 **Plus** `intraday_seasonality` (cumulative session-reset) and `prior_day` (daily-snapshot) — the remaining two
 kinds — also ported + verified, via `window.state` + `minute_epoch` and `window.session` respectively.
 
-**So: 9 groups across all 6 structurally-distinct kinds, each verified correct end-to-end.** The interface
-generalizes — one `compute(window)` + four carried-state hooks (`state` / `static` / `session` /
-`minute_epoch`) over the one spine. The remaining ~59 groups are instances of these six shapes; each is ported
-+ correctness-checked individually (not assumed) as the port proceeds — _<count as it lands>_.
+**So: 9 groups across all 6 structurally-distinct kinds — one interface, FIVE accessors, no fork.** The
+interface generalizes — one `compute(window)` reads through five accessors over the one spine:
+1. **trailing/latest** (the ring — the per-symbol trailing window),
+2. **state** (the group's own carried per-symbol EMA / cumulative sum / swing leg-state, engine-owned),
+3. **static** (per-symbol labels for the cross-sectional reduces — sector id, etc.),
+4. **session** (the daily-snapshot memo, set once per session),
+5. **present()** (the real current-minute delivery mask — the one correct presence source).
+
+No kind needed a second engine or a forked step. The remaining ~59 groups are instances of these six shapes;
+each is ported + correctness-checked individually (not assumed) as the port proceeds — _<count as it lands>_.
+
+**Two engine-level concerns owned ONCE (not per-group):** *presence* (`window.present()` — did a bar arrive
+this minute; a presence-gated read must NOT infer presence from `isfinite(latest())`, which returns the carried
+value on an absent minute) and *idempotency* (a minute-epoch watermark — a re-delivered/stale minute is a
+no-op, so carried state never double-advances). These are orthogonal; the engine owns each once for every kind.
 
 ## Taking it live (when you approve)
 
