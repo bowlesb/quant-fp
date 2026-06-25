@@ -78,15 +78,21 @@ class RingBuffer:
         self._buf = np.full((self.n, self.window, len(self.cols)), np.nan, dtype=np.float64)
         self._write = np.zeros(self.n, dtype=np.int64)  # next slot to write, per symbol
         self._count = np.zeros(self.n, dtype=np.int64)  # filled minutes so far, per symbol (caps at window)
+        # the minute-epoch stamped at each slot (parallel to _buf) — lets ``trailing_time`` read a Δminute
+        # window (the legacy ``rolling_*_by("minute")`` semantics) instead of a positional N-bar window, which
+        # drifts to hours-of-stale on sparse symbols.
+        self._minute = np.full((self.n, self.window), -1, dtype=np.int64)
 
-    def append(self, rows: np.ndarray, present_pos: np.ndarray) -> None:
+    def append(self, rows: np.ndarray, present_pos: np.ndarray, minute_epoch: int = 0) -> None:
         """Write this minute's bars: ``rows`` is ``(n_present, n_cols)`` for the present symbols at index
         positions ``present_pos``. Each present symbol advances its own cursor by one (mod window); absent
-        symbols are untouched (their cursor/count hold, so their window keeps its last present bars)."""
+        symbols are untouched (their cursor/count hold, so their window keeps its last present bars). The
+        minute-epoch is stamped at each written slot for ``trailing_time``."""
         if present_pos.size == 0:
             return
         slots = self._write[present_pos]
         self._buf[present_pos, slots, :] = rows
+        self._minute[present_pos, slots] = minute_epoch
         self._write[present_pos] = (slots + 1) % self.window
         self._count[present_pos] = np.minimum(self._count[present_pos] + 1, self.window)
 
@@ -98,6 +104,24 @@ class RingBuffer:
         # roll each symbol so the column after its write cursor (the oldest) is first, newest is last.
         idx = (self._write[:, None] + np.arange(self.window)[None, :]) % self.window
         return np.take_along_axis(plane, idx, axis=1)
+
+    def _rolled_minute(self) -> np.ndarray:
+        """The ``(n_symbols, window)`` minute-epoch matrix rolled oldest→newest (same order as ``trailing``)."""
+        idx = (self._write[:, None] + np.arange(self.window)[None, :]) % self.window
+        return np.take_along_axis(self._minute, idx, axis=1)
+
+    def trailing_time(self, col: str, minutes: int, now_epoch: int) -> np.ndarray:
+        """The TIME-windowed trailing matrix for ``col`` — same rolled oldest→newest layout as ``trailing``, but
+        a bar is kept ONLY if it falls within the last ``minutes`` minutes of ``now_epoch`` (``now_epoch −
+        bar_minute < minutes·60``); bars outside the time window (or empty slots) are NaN. This matches the
+        legacy ``rolling_*_by("minute", f"{minutes}m")`` semantics — a sparse symbol gets the bars from the last
+        N minutes, not the last N positional slots (which would reach hours back). ``now_epoch`` is the current
+        minute's epoch (the window's right edge)."""
+        vals = self.trailing(col)
+        mins = self._rolled_minute()
+        with np.errstate(invalid="ignore"):
+            in_window = (mins >= 0) & ((now_epoch - mins) < minutes * 60)
+        return np.where(in_window, vals, np.nan)
 
     def latest(self, col: str) -> np.ndarray:
         """The ``(n_symbols,)`` current (newest) bar value for ``col``. NaN for a symbol with no bars yet."""
@@ -154,6 +178,13 @@ class Window:
     def trailing(self, col: str) -> np.ndarray:
         return self._ring.trailing(col)
 
+    def trailing_time(self, col: str, minutes: int) -> np.ndarray:
+        """The TIME-windowed trailing matrix for ``col`` — only bars within the last ``minutes`` minutes of THIS
+        minute (the legacy ``rolling_*_by("minute")`` semantics), the rest NaN. Used by the time-windowed groups
+        (technical/sector_beta/price_levels/...) so a sparse symbol's window is bounded by TIME, not slot count.
+        """
+        return self._ring.trailing_time(col, minutes, self.minute_epoch)
+
     def latest(self, col: str) -> np.ndarray:
         return self._ring.latest(col)
 
@@ -207,6 +238,7 @@ class CleanEngine:
             {}
         )  # cached output, returned on a stale re-delivery
         self._present = np.zeros(len(self.symbols), dtype=bool)  # last minute's delivery mask (for emit())
+        self._step_minute = 0  # synthetic monotonic minute clock for the no-epoch test path (trailing_time)
 
     def set_session(self, session: dict[str, np.ndarray]) -> None:
         """Set the per-session snapshot memo (prior-day levels, etc.) — called once at each session boundary.
@@ -264,8 +296,12 @@ class CleanEngine:
         # simple/test path — folds every step.)
         if minute_epoch and minute_epoch <= self._watermark:
             return self._last_out
+        # the stamp for trailing_time: the real minute_epoch when supplied, else a synthetic monotonic
+        # per-step minute clock (the simple/test path) so a Δminute window is still well-defined.
+        self._step_minute += 60
+        stamp = minute_epoch if minute_epoch else self._step_minute
         rows, pos = self._marshal(minute_bars)
-        self.ring.append(rows, pos)
+        self.ring.append(rows, pos, stamp)
         if minute_epoch:
             self._watermark = minute_epoch
         present = np.zeros(self.ring.n, dtype=bool)  # the REAL delivery mask for this minute
@@ -277,7 +313,7 @@ class CleanEngine:
                 self.ring,
                 self._group_state[group.name],
                 self.static,
-                minute_epoch,
+                stamp,  # the real minute_epoch when supplied, else the synthetic step-minute clock
                 self.session,
                 present,
             )
