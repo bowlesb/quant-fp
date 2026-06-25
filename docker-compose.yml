@@ -233,9 +233,12 @@ services:
       UNDERREP_MONGO_URL: "mongodb://quant-mongo:27017"
       # DAILY refresh — slow by design (box load + a full-universe walk). Build, write to Mongo, wait 24h.
       UNDERREP_INTERVAL_SECONDS: "86400"
-      # Off-peak guard: hold the first build a short while after a (re)start so it never fires the walk during a
-      # peak/contended window. 0 = build on boot; raise to push the first walk to a quiet stretch.
-      UNDERREP_STARTUP_DELAY_SECONDS: "0"
+      # Off-peak guard: with NO explicit UNDERREP_STARTUP_DELAY_SECONDS, the worker computes the wait until the
+      # next UNDERREP_OFFPEAK_HOUR_UTC so the FIRST full-universe walk lands AFTER the US close (20:00Z / 16:00
+      # ET), never during the live session — regardless of when the container (re)starts. Daily cadence proceeds
+      # from there. Set UNDERREP_STARTUP_DELAY_SECONDS: "0" to override and build immediately (e.g. a manual
+      # off-hours deploy).
+      UNDERREP_OFFPEAK_HOUR_UTC: "20"
     volumes:
       # Feature store, READ-ONLY: the worker reads partition dates + per-date symbol sets. RO so it can never
       # write the store the feature pipeline owns.

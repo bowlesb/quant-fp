@@ -139,6 +139,42 @@ def test_read_report_unreachable_mongo_returns_none(monkeypatch: pytest.MonkeyPa
     assert uc.read_meta() is None
 
 
+def _epoch_at(hour: int, minute: int = 0) -> float:
+    """A UTC epoch for 2026-06-25 at the given hour:minute (for deterministic off-peak-delay tests)."""
+    import calendar
+
+    return float(calendar.timegm((2026, 6, 25, hour, minute, 0, 0, 0, 0)))
+
+
+def test_seconds_until_offpeak_before_target() -> None:
+    # 14:00Z, target 20:00Z -> 6h.
+    assert uc.seconds_until_offpeak(_epoch_at(14), offpeak_hour_utc=20) == 6 * 3600
+
+
+def test_seconds_until_offpeak_after_target_rolls_to_tomorrow() -> None:
+    # 22:00Z, target 20:00Z already passed today -> 22h to tomorrow's 20:00Z.
+    assert uc.seconds_until_offpeak(_epoch_at(22), offpeak_hour_utc=20) == 22 * 3600
+
+
+def test_seconds_until_offpeak_exactly_on_hour_is_zero() -> None:
+    assert uc.seconds_until_offpeak(_epoch_at(20, 0), offpeak_hour_utc=20) == 0
+
+
+def test_startup_delay_explicit_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An explicit env delay wins over the computed off-peak wait (e.g. "0" for a manual off-hours deploy).
+    monkeypatch.setattr(uc, "_EXPLICIT_STARTUP_DELAY", "0")
+    assert uc.startup_delay_seconds(_epoch_at(14)) == 0
+    monkeypatch.setattr(uc, "_EXPLICIT_STARTUP_DELAY", "300")
+    assert uc.startup_delay_seconds(_epoch_at(14)) == 300
+
+
+def test_startup_delay_defaults_to_offpeak_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no explicit delay, the first-build wait is the computed time to the next off-peak hour (default 20Z).
+    monkeypatch.setattr(uc, "_EXPLICIT_STARTUP_DELAY", None)
+    assert uc.startup_delay_seconds(_epoch_at(14)) == 6 * 3600
+    assert uc.startup_delay_seconds(_epoch_at(20)) == 0
+
+
 def test_route_returns_200_with_report(monkeypatch: pytest.MonkeyPatch) -> None:
     import app as dashboard_app  # noqa: E402  (dashboard dir on path)
     from fastapi.testclient import TestClient

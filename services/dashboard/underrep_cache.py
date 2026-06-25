@@ -64,10 +64,35 @@ META_DOC_ID = "meta"
 # minutes). The wait is AFTER the build so a slow build never piles up.
 INTERVAL_SECONDS = int(os.environ.get("UNDERREP_INTERVAL_SECONDS", str(24 * 60 * 60)))
 
-# Optional one-time delay before the FIRST build, so a container (re)start during a peak/contended window does
-# not immediately fire the full-universe walk. Default 0 (build on boot); set e.g. to push the first walk to a
-# quiet hour. Bounded reads keep even a peak-time build light, but this is a cheap extra guard.
-STARTUP_DELAY_SECONDS = int(os.environ.get("UNDERREP_STARTUP_DELAY_SECONDS", "0"))
+# The FIRST full-universe walk must land OFF-PEAK — never during the live session on a loaded box. By default
+# the worker sleeps until the next UNDERREP_OFFPEAK_HOUR_UTC (US-market close ~20:00Z / 16:00 ET), so a
+# container (re)start at any time of day defers the first walk to after close. Daily cadence proceeds from
+# there. UNDERREP_STARTUP_DELAY_SECONDS overrides with an EXPLICIT fixed delay (e.g. "0" to build immediately,
+# for a manual off-hours deploy). Computing the delay from the clock (not a hardcoded seconds value) keeps it
+# correct regardless of WHEN the container starts — a fixed value would only be right relative to start time.
+OFFPEAK_HOUR_UTC = int(os.environ.get("UNDERREP_OFFPEAK_HOUR_UTC", "20"))
+_EXPLICIT_STARTUP_DELAY = os.environ.get("UNDERREP_STARTUP_DELAY_SECONDS")
+
+
+def seconds_until_offpeak(now_epoch: float, offpeak_hour_utc: int = OFFPEAK_HOUR_UTC) -> int:
+    """Seconds from ``now_epoch`` (UTC) until the next ``offpeak_hour_utc``:00 UTC. 0 if already exactly on the
+    hour boundary; otherwise the wait to today's boundary, or tomorrow's if it has already passed today."""
+    now = time.gmtime(now_epoch)
+    seconds_into_day = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
+    target = offpeak_hour_utc * 3600
+    delta = target - seconds_into_day
+    if delta < 0:
+        delta += 24 * 3600
+    return delta
+
+
+def startup_delay_seconds(now_epoch: float | None = None) -> int:
+    """The delay before the FIRST build: an explicit UNDERREP_STARTUP_DELAY_SECONDS if set, else the computed
+    wait until the next off-peak hour (so the first walk never fires during the live session)."""
+    if _EXPLICIT_STARTUP_DELAY is not None:
+        return int(_EXPLICIT_STARTUP_DELAY)
+    return seconds_until_offpeak(time.time() if now_epoch is None else now_epoch)
+
 
 _CONNECT_TIMEOUT_MS = 3000
 _SERVER_SELECT_TIMEOUT_MS = 3000
@@ -155,23 +180,25 @@ def read_meta(url: str = UNDERREP_MONGO_URL) -> dict[str, object] | None:
 def run_forever(
     root: str = STORE_ROOT,
     interval_seconds: int = INTERVAL_SECONDS,
-    startup_delay_seconds: int = STARTUP_DELAY_SECONDS,
+    delay_seconds: int | None = None,
     url: str = UNDERREP_MONGO_URL,
 ) -> None:
-    """The worker's permanent loop: optionally wait an off-peak startup delay, then build the report, write it
-    to Mongo, wait ``interval_seconds`` (default DAILY), and repeat — forever. The wait is AFTER the build so a
-    slow build never piles up. A failed loop is logged and the loop continues (the last-good document keeps
-    serving); it does not crash the worker. Designed for a ``restart: unless-stopped`` container."""
+    """The worker's permanent loop: hold a startup delay so the FIRST walk lands off-peak (the computed wait to
+    the next off-peak hour, or an explicit override), then build the report, write it to Mongo, wait
+    ``interval_seconds`` (default DAILY), and repeat — forever. The wait is AFTER the build so a slow build
+    never piles up. A failed loop is logged and the loop continues (the last-good document keeps serving); it
+    does not crash the worker. Designed for a ``restart: unless-stopped`` container."""
+    delay = startup_delay_seconds() if delay_seconds is None else delay_seconds
     logger.info(
         "underrep worker starting: store=%s interval=%ss startup_delay=%ss mongo=%s",
         root,
         interval_seconds,
-        startup_delay_seconds,
+        delay,
         url,
     )
-    if startup_delay_seconds > 0:
-        logger.info("underrep: holding %ss before the first build (off-peak guard)", startup_delay_seconds)
-        time.sleep(startup_delay_seconds)
+    if delay > 0:
+        logger.info("underrep: holding %ss before the first build (off-peak guard)", delay)
+        time.sleep(delay)
     while True:
         try:
             summary = write_report(root=root, url=url)
