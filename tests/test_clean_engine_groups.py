@@ -1654,6 +1654,54 @@ def test_ohlcvol_rangeexp_distribution_sparse_matches_legacy() -> None:
     assert dist["ret_skew_10m"][0] == pytest.approx(hand_skew, rel=1e-5), "distribution.ret_skew_10m sparse"
 
 
+def test_liquidity_quote_spread_sparse_matches_legacy() -> None:
+    """RE-GATE liquidity + quote_spread (#60 re-ports, enriched trade/quote inputs) on the SPARSE axis vs
+    legacy BATCH time-windows on a gappy symbol (70 min):
+      - quote_spread.spread_bps_15m = rolling_mean_by(mean_spread_bps, 15m)
+      - liquidity.amihud_illiq_15m = rolling_mean_by(|ret|/(close·volume), 15m)
+    """
+    import datetime  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.clean_groups_windowed import LiquidityClean, QuoteSpreadClean  # noqa: PLC0415
+
+    base = datetime.datetime(2026, 6, 1, 9, 30)
+    offsets = [0, 2, 4, 7, 11, 13, 18, 22, 27, 31, 34, 38, 41, 45, 49, 52, 56, 60, 63, 67, 70]
+    rng = np.random.default_rng(31)
+    mins = [base + datetime.timedelta(minutes=o) for o in offsets]
+    spread = 10.0 + rng.random(len(offsets)) * 5
+    imb = rng.standard_normal(len(offsets)) * 0.2
+    bid = 1000.0 + rng.random(len(offsets)) * 500
+    ask = 1000.0 + rng.random(len(offsets)) * 500
+    closes = 100.0 + np.cumsum(rng.standard_normal(len(offsets)) * 0.4)
+    vols = (rng.random(len(offsets)) * 1e5 + 1e4).round()
+    sv = rng.standard_normal(len(offsets)) * vols
+
+    qs = CleanEngine([QuoteSpreadClean()], ["A"], 400)
+    qout = {}
+    for i in range(len(offsets)):
+        qout = qs.step({"symbol": np.array(["A"]), "mean_spread_bps": np.array([spread[i]]),
+                        "quote_imbalance": np.array([imb[i]]), "mean_bid_size": np.array([bid[i]]),
+                        "mean_ask_size": np.array([ask[i]]),
+                        "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})["quote_spread"]
+    df = pl.DataFrame({"minute": mins, "sp": spread}).sort("minute")
+    df = df.with_columns(pl.col("sp").rolling_mean_by("minute", window_size="15m").alias("sp15"))
+    assert qout["spread_bps_15m"][0] == pytest.approx(df.tail(1)["sp15"][0], rel=1e-7), "spread_bps_15m sparse"
+
+    liq = CleanEngine([LiquidityClean()], ["A"], 400)
+    lout = {}
+    for i in range(len(offsets)):
+        lout = liq.step({"symbol": np.array(["A"]), "close": np.array([closes[i]]),
+                         "volume": np.array([vols[i]]), "signed_volume": np.array([sv[i]]),
+                         "minute_epoch": np.array([int(mins[i].timestamp())], dtype=np.int64)})["liquidity"]
+    df2 = pl.DataFrame({"minute": mins, "close": closes, "volume": vols.astype(float)}).sort("minute")
+    df2 = df2.with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).abs().alias("aret"),
+                           (pl.col("close") * pl.col("volume")).alias("dv"))
+    df2 = df2.with_columns((pl.col("aret") / pl.col("dv")).rolling_mean_by("minute", window_size="15m").alias("am15"))
+    assert lout["amihud_illiq_15m"][0] == pytest.approx(df2.tail(1)["am15"][0], rel=1e-6), "amihud_illiq_15m sparse"
+
+
 # ========================================================================================================= #
 # CORR/OLS-DENOM near-zero-variance boundary — the corr-denom footgun that historically gated incremental_safe
 # (the b·sxx variance-guard, #402/#122/#131). LEGACY corr_/slope_/r2_ reject when denom_x <= 1e-9·(b·sxx)
