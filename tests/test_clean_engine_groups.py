@@ -3644,6 +3644,92 @@ def test_full_session_canary_live_matches_batch_capture_replay() -> None:
     assert compared > 10000, f"canary must compare a substantial cell count (got {compared})"
 
 
+# Known live-vs-legacy gaps the direct-legacy third leg currently tolerates (drop as each is fixed → the entry
+# becoming clean fails the gate, forcing the removal — same self-policing as the warmup sweep). EMPTY now: the
+# #81 qqq_row gap is FIXED (build_static_labels sets static['qqq_row']=QQQ, so clean's nasdaq_return_* compute
+# == legacy) — those features are now a HARD live==legacy assertion below.
+_DIRECT_LEGACY_KNOWN_GAP_PREFIXES: tuple[str, ...] = ()
+
+
+def test_live_clean_engine_matches_legacy_compute_direct_xsec() -> None:
+    """#76 PRIMARY oracle THIRD LEG — clean-LIVE (process_bars) vs LEGACY compute() DIRECTLY (the value-truth).
+    The capture-replay PRIMARY is BLIND to input-marshal/wiring bugs: it captures the live emit input + replays
+    it both sides, so a wrong-input bug agrees on both (it went GREEN while #80's whole-buffer dup-symbol marshal
+    was live). This leg does NOT reuse the captured input — it diffs the live store output against legacy
+    compute() on the SAME bars, so a marshal/wiring bug shows up as a real divergence. Confounds CONTROLLED:
+    canary_fixture.make_minute_bars is RNG-nondeterministic (advances per call), so capture the consumed bars
+    ONCE and feed both the live run AND the legacy frame the identical list; use the fixture's REAL mixed-sector
+    reference. Gates the cross-symbol/index groups (sector_beta + market_context) — where marshal/static bugs
+    bite. sector_beta = 54/54 EXACT (validates the #80 marshal fix). market_context = all cells EXCEPT the
+    nasdaq_return_* (the #81 qqq_row gap, tolerated in _DIRECT_LEGACY_KNOWN_GAP_PREFIXES until fixed — when #81
+    lands, those become finite==legacy and the gate forces dropping the prefix)."""
+    import datetime as dt  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    from quantlib.features.base import BatchContext  # type: ignore  # noqa: PLC0415
+    from quantlib.features.capture import CaptureState, process_bars  # noqa: PLC0415
+    from quantlib.features.groups.market_context import MarketContextGroup  # type: ignore  # noqa: PLC0415
+    from quantlib.features.groups.sector_beta import SectorBetaGroup  # type: ignore  # noqa: PLC0415
+    from quantlib.features.reduction_anchor import attach_reduction_anchors  # noqa: PLC0415
+
+    from tests.canary_fixture import DAY, SYMBOLS, make_minute_bars, make_snapshots  # noqa: PLC0415
+
+    n_min = 12
+    snapshots = make_snapshots()
+    consumed = [make_minute_bars(mi) for mi in range(n_min)]  # capture ONCE (the fixture RNG is non-deterministic)
+
+    os.environ["FP_CLEAN_ENGINE"] = "1"
+    try:
+        live = CaptureState()
+        for mi in range(n_min):
+            process_bars(live, consumed[mi], "/tmp/cl3", "mock", DAY.isoformat(), 120,
+                         snapshots=snapshots, accumulate=True, write=False)
+    finally:
+        os.environ.pop("FP_CLEAN_ENGINE", None)
+
+    base = dt.datetime(DAY.year, DAY.month, DAY.day, 14, 30, tzinfo=dt.timezone.utc)
+    rows = [{"symbol": b["S"], "minute": base + dt.timedelta(minutes=mi), "close": b["c"]}
+            for mi in range(n_min) for b in consumed[mi]]
+    minute_agg = pl.DataFrame(rows).with_columns(pl.col("minute").cast(pl.Datetime("us", "UTC"))).sort(
+        ["symbol", "minute"])
+    reference = snapshots["reference"].select(["symbol", "sector"])  # the REAL mixed-sector grouping
+    frames = attach_reduction_anchors({"minute_agg": minute_agg, "reference": reference})
+    ctx = BatchContext(frames=frames)
+    last_min = base + dt.timedelta(minutes=n_min - 1)
+
+    matched_known_gap = []
+    for gname, legacy_group in (("sector_beta", SectorBetaGroup()), ("market_context", MarketContextGroup())):
+        legacy = legacy_group.compute(ctx).with_columns(
+            pl.col("minute").dt.replace_time_zone("UTC")).filter(pl.col("minute") == last_min)
+        live_g = live.accumulated[gname].with_columns(
+            pl.col("minute").dt.replace_time_zone("UTC")).filter(pl.col("minute") == last_min)
+        feats = [c for c in legacy.columns if c not in ("symbol", "minute")]
+        joined = live_g.join(legacy, on=["symbol", "minute"], how="inner", suffix="_leg")
+        assert joined.height > 0, f"{gname}: no overlapping rows to diff live vs legacy"
+        for row in joined.iter_rows(named=True):
+            for fname in feats:
+                lv = np.nan if row[fname] is None else float(row[fname])
+                gv = np.nan if row[fname + "_leg"] is None else float(row[fname + "_leg"])
+                agrees = (np.isnan(lv) and np.isnan(gv)) or (
+                    np.isfinite(lv) and np.isfinite(gv) and np.isclose(lv, gv, rtol=1e-5, atol=1e-9))
+                if fname.startswith(_DIRECT_LEGACY_KNOWN_GAP_PREFIXES):
+                    # the #81 gap = clean NaN where legacy is finite. It's "fixed" only when clean goes FINITE
+                    # and matches legacy (both-NaN cells = just an undefined window, not the gap being closed).
+                    if agrees and np.isfinite(lv) and np.isfinite(gv):
+                        matched_known_gap.append(fname)
+                    continue
+                assert agrees, (
+                    f"{gname}.{fname} ({row['symbol']}): live {lv} != legacy {gv} (real live-vs-value-truth "
+                    f"divergence — a marshal/wiring bug the capture-replay would mask)"
+                )
+    assert not matched_known_gap, (
+        f"the #81 qqq_row gap is fixed for {sorted(set(matched_known_gap))} — remove its prefix from "
+        f"_DIRECT_LEGACY_KNOWN_GAP_PREFIXES so the nasdaq features become a hard live==legacy assertion"
+    )
+
+
 def test_news_sentiment_lookahead_boundary_matches_legacy_compute() -> None:
     """#75 LAYER B — the NON-NEGOTIABLE LOOK-AHEAD gate (Lead: a leak = future info in a live feature). Drive
     clean NewsSentimentClean over a minute grid STRADDLING an article's available_at (T), with the session built
