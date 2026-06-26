@@ -31,7 +31,10 @@ from quantlib.features.clean_groups_pointwise import _ASSET_FLAGS
 from quantlib.features.clean_groups_reference import _EDGAR_FORM_CODE
 
 _DAILY_COLS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "vwap")
-_MARKET_TICKER = "SPY"
+_MARKET_TICKER = "SPY"  # static['spy_row'] = SPY's index — the market index for market_context / market_beta
+_NASDAQ_TICKER = (
+    "QQQ"  # static['qqq_row'] = QQQ's index — the nasdaq index for market_context's nasdaq_* feats
+)
 _SECTOR_UNKNOWN = -1
 
 
@@ -142,8 +145,13 @@ def build_static_labels(reference: pl.DataFrame, symbols: list[str]) -> dict[str
         "sector": sector_code,
         "sector_name": sector_name,
         "cluster_id": cluster,
-        "spy_row": np.array([index[_MARKET_TICKER]]) if _MARKET_TICKER in index else np.array([-1]),
     }
+    # The index rows market_context / market_beta read (static['spy_row'] = SPY, static['qqq_row'] = QQQ). OMIT
+    # the key when the index ticker isn't in the universe — the groups check ``is None`` and NaN that index's
+    # features (a sentinel like -1 would be read as a real row = the last symbol, a silent wrong-index bug).
+    for ticker, key in ((_MARKET_TICKER, "spy_row"), (_NASDAQ_TICKER, "qqq_row")):
+        if ticker in index:
+            static[key] = np.array([index[ticker]])
     static.update(flags)
     return static
 
