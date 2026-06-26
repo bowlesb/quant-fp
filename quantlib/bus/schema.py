@@ -12,12 +12,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 from dataclasses import dataclass
 from functools import lru_cache
 
 import quantlib.features.groups  # noqa: F401  (import populates REGISTRY via @register side effects)
 from quantlib.features.registry import REGISTRY
+
+# The engine-version tag folded into the fingerprint ONLY when the clean engine is armed (FP_CLEAN_ENGINE=1).
+# The clean engine produces DIFFERENT feature VALUES for the same (group, feature, version) — but the
+# fingerprint is value-blind (schema-only), so without this tag an armed engine would emit the OLD fingerprint
+# and a downstream consumer would silently read new values under the old contract (and the store would mix
+# old/new rows in one v= partition). The tag = a clean fingerprint break = a new v= partition + a recal signal.
+# It is FLAG-CONDITIONAL by design: flag OFF → payload unchanged → fingerprint identical to the OLD engine's, so
+# a rollback (flag off) reproduces the exact old fingerprint (the byte-identical-rollback invariant). One global
+# tag — NOT per-group version bumps — because the change is "the engine changed", not 64 feature redefinitions.
+_CLEAN_ENGINE_VERSION_TAG = "engine=clean1"
+
+
+def _clean_engine_armed() -> bool:
+    """``FP_CLEAN_ENGINE=1`` — same predicate as ``capture.clean_engine_enabled`` (read the env var directly here
+    to avoid importing the capture module into the schema layer). When armed, the fingerprint folds in the
+    engine-version tag so the contract reflects the value change."""
+    return os.environ.get("FP_CLEAN_ENGINE") == "1"
 
 
 @dataclass(frozen=True)
@@ -45,6 +63,11 @@ class BusSchema:
     @staticmethod
     def _compute_fingerprint(fields: list[BusField]) -> int:
         payload = "\n".join(f"{field.group}:{field.name}:{field.version}" for field in fields)
+        # When the clean engine is armed, prepend the engine-version tag so the fingerprint reflects the value
+        # change. Flag OFF leaves the payload byte-for-byte identical → the OLD fingerprint is reproduced exactly
+        # (rollback-safe). Same blake2b algorithm both ways; only the payload's first line differs when armed.
+        if _clean_engine_armed():
+            payload = f"{_CLEAN_ENGINE_VERSION_TAG}\n{payload}"
         digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest()
         return struct.unpack("<Q", digest)[0]
 

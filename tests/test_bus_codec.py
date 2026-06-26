@@ -2,6 +2,7 @@
 trust. Covers round-trip fidelity, NaN/absent handling, the µs-exact minute, zero-copy decode, schema
 fingerprint mismatch detection, nested group.feature access, and the registry-built full schema.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -114,6 +115,29 @@ def test_schema_from_registry_is_deterministic_and_complete() -> None:
     assert schema_a.n_features > 100  # the real platform has hundreds of features
     assert schema_a.fingerprint == schema_b.fingerprint  # stable across builds
     assert default_schema().fingerprint == schema_a.fingerprint
+
+
+def test_fingerprint_is_clean_engine_flag_conditional(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The clean-engine fingerprint break is FP_CLEAN_ENGINE-conditional (the deploy invariant): flag OFF
+    reproduces the OLD fingerprint EXACTLY (so a rollback to the old engine reuses the same store/bus contract),
+    flag ON folds in the engine-version tag → a new, stable, distinct fingerprint (a clean v= partition + recal
+    signal). Pinned to the exact pre-arm value so a future change to the OLD schema fails loudly here."""
+    _OLD_FINGERPRINT = 0x204F9EE42521B36F  # the pre-clean-engine bus/store fingerprint (frozen contract)
+
+    monkeypatch.delenv("FP_CLEAN_ENGINE", raising=False)
+    flag_off = BusSchema.from_registry().fingerprint
+    assert (
+        flag_off == _OLD_FINGERPRINT
+    ), f"flag-OFF fingerprint drifted: {flag_off:#018x} != {_OLD_FINGERPRINT:#018x}"
+
+    monkeypatch.setenv("FP_CLEAN_ENGINE", "1")
+    flag_on = BusSchema.from_registry().fingerprint
+    assert flag_on != _OLD_FINGERPRINT, "flag-ON fingerprint did not break from the OLD engine's"
+    assert flag_on == BusSchema.from_registry().fingerprint, "flag-ON fingerprint not stable across builds"
+
+    # and OFF again restores the old fingerprint (the rollback path is reversible, not one-way).
+    monkeypatch.delenv("FP_CLEAN_ENGINE", raising=False)
+    assert BusSchema.from_registry().fingerprint == _OLD_FINGERPRINT
 
 
 def test_full_schema_round_trip() -> None:
