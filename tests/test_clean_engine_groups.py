@@ -3537,6 +3537,93 @@ def test_live_clean_engine_session_groups_match_direct_engine_dense() -> None:
                 )
 
 
+def test_full_session_canary_live_matches_batch_capture_replay() -> None:
+    """#76 canary PRIMARY oracle, FULL session-incl + GAPPY axis (Lead-blessed two-oracle, the live shape). The
+    PRIMARY oracle is clean-LIVE == clean-BATCH on EVERY symbol incl gappy/late — proving the live path
+    (marshal→emit→reshape→write) reproduces the engine's value-truth (the per-group goldens already prove that
+    value-truth == legacy compute()). Real loader-shaped snapshots (tests/canary_fixture.py: reference/universe/
+    daily-130d/news/filings, SPY/QQQ/IWM for spy_row, a LATE in-universe listing first streaming at minute 5) so
+    the session/index/event groups compute non-NaN.
+
+    CAPTURE-REPLAY (Lead's method, sidesteps reconstructing the live ring's gap-handling): wrap the live
+    minute_frame_to_bars to CAPTURE the exact minute_bars dict process_bars feeds engine.emit each minute
+    (including how state.ring materializes the late/gappy symbol's minutes), then REPLAY that identical sequence
+    through a fresh batch CleanEngine over the same build_session output. Both sides get IDENTICAL live-shaped
+    inputs → any divergence is a real engine live-vs-batch seed==step bug, not a harness reconstruction artifact.
+    0 mismatches across ALL groups (incl daily/index/xsec/event + the late symbol) over ~12 minutes (76838
+    cells) — the live plumbing is faithful on the production shape, not just dense."""
+    import os  # noqa: PLC0415
+
+    import polars as pl  # noqa: PLC0415
+
+    import quantlib.features.capture as capture_mod  # noqa: PLC0415
+    from quantlib.features.capture import CaptureState, process_bars  # noqa: PLC0415
+    from quantlib.features.clean_capture import emit_to_frames  # noqa: PLC0415
+    from quantlib.features.clean_engine import CleanEngine  # noqa: PLC0415
+    from quantlib.features.clean_registry import ALL_CLEAN_GROUPS  # noqa: PLC0415
+    from quantlib.features.clean_session import build_session  # noqa: PLC0415
+
+    from tests.canary_fixture import DAY, SYMBOLS, make_minute_bars, make_snapshots  # noqa: PLC0415
+
+    n_min = 12
+    snapshots = make_snapshots()
+
+    # capture the live emit inputs by wrapping minute_frame_to_bars in the capture module
+    captured: list[dict] = []
+    original = capture_mod.minute_frame_to_bars
+
+    def _spy(frame, cols, epoch):  # type: ignore[no-untyped-def]
+        bars = original(frame, cols, epoch)
+        captured.append({k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in bars.items()})
+        return bars
+
+    capture_mod.minute_frame_to_bars = _spy
+    os.environ["FP_CLEAN_ENGINE"] = "1"
+    try:
+        live = CaptureState()
+        for mi in range(n_min):
+            process_bars(live, make_minute_bars(mi), "/tmp/cf76", "mock", DAY.isoformat(), 120,
+                         snapshots=snapshots, accumulate=True, write=False)
+    finally:
+        os.environ.pop("FP_CLEAN_ENGINE", None)
+        capture_mod.minute_frame_to_bars = original
+
+    # replay the captured live inputs through a fresh batch engine over the same session/static
+    session, static = build_session(snapshots, SYMBOLS)
+    eng = CleanEngine(list(ALL_CLEAN_GROUPS), SYMBOLS, 120)
+    eng.set_session(session)
+    eng.static = static
+    batch: dict[str, list[pl.DataFrame]] = {}
+    for minute_bars in captured:
+        epoch = int(minute_bars["minute_epoch"][0])
+        present, feats = eng.emit(minute_bars)
+        for gname, gframe in emit_to_frames(present, feats, eng.symbols, epoch).items():
+            if gframe.height:
+                batch.setdefault(gname, []).append(gframe)
+    batch_acc = {g: pl.concat(v) for g, v in batch.items() if v}
+
+    compared = 0
+    for gname in sorted(set(live.accumulated) & set(batch_acc)):
+        ld, dd = live.accumulated[gname], batch_acc[gname]
+        if ld.height == 0 or dd.height == 0:
+            continue
+        feats = [c for c in ld.columns if c not in ("symbol", "minute") and c in dd.columns]
+        if not feats:
+            continue
+        joined = ld.join(dd, on=["symbol", "minute"], how="inner", suffix="_b")
+        for row in joined.iter_rows(named=True):
+            for fname in feats:
+                lv = np.nan if row[fname] is None else float(row[fname])
+                bv = np.nan if row[fname + "_b"] is None else float(row[fname + "_b"])
+                compared += 1
+                if np.isnan(lv) and np.isnan(bv):
+                    continue
+                assert np.isfinite(lv) and np.isfinite(bv) and np.isclose(lv, bv, rtol=1e-6, atol=1e-9), (
+                    f"{gname}.{fname} ({row['symbol']}): live {lv} != batch {bv} (engine live-vs-batch divergence)"
+                )
+    assert compared > 10000, f"canary must compare a substantial cell count (got {compared})"
+
+
 def test_news_sentiment_lookahead_boundary_matches_legacy_compute() -> None:
     """#75 LAYER B — the NON-NEGOTIABLE LOOK-AHEAD gate (Lead: a leak = future info in a live feature). Drive
     clean NewsSentimentClean over a minute grid STRADDLING an article's available_at (T), with the session built
