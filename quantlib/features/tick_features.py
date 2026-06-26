@@ -34,6 +34,15 @@ _ATOMIC_GROUPS = (
 )
 _N_SIZE_BINS = 6
 
+# The 21 per-minute primitive columns this module emits — the WINDOWED scalars (_hhi / _gap_fano / 6 size bins)
+# the windowed tick groups reduce, + the ATOMIC groups' final per-minute features. These are the derived bar
+# columns the clean tick groups read; the enrich step (tick_capture) carries them on each bar.
+TICK_PRIMITIVE_COLUMNS: tuple[str, ...] = (
+    ("_hhi", "_gap_fano")
+    + tuple(f"_sz_c{bin_index}" for bin_index in range(_N_SIZE_BINS))
+    + tuple(spec.name for group in _ATOMIC_GROUPS for spec in group.declare())
+)
+
 
 def _windowed_primitives(trades: pl.DataFrame) -> pl.DataFrame:
     """The per-(symbol, minute) WINDOWED primitives — the within-minute scalars the windowed clean groups reduce:
