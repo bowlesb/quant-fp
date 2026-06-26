@@ -3563,7 +3563,7 @@ def test_full_session_canary_live_matches_batch_capture_replay() -> None:
     from quantlib.features.clean_registry import ALL_CLEAN_GROUPS  # noqa: PLC0415
     from quantlib.features.clean_session import build_session  # noqa: PLC0415
 
-    from tests.canary_fixture import DAY, SYMBOLS, make_minute_bars, make_snapshots  # noqa: PLC0415
+    from canary_fixture import DAY, SYMBOLS, make_minute_bars, make_snapshots  # noqa: PLC0415
 
     n_min = 12
     snapshots = make_snapshots()
@@ -3674,7 +3674,7 @@ def test_live_clean_engine_matches_legacy_compute_direct_xsec() -> None:
     from quantlib.features.groups.sector_beta import SectorBetaGroup  # type: ignore  # noqa: PLC0415
     from quantlib.features.reduction_anchor import attach_reduction_anchors  # noqa: PLC0415
 
-    from tests.canary_fixture import DAY, SYMBOLS, make_minute_bars, make_snapshots  # noqa: PLC0415
+    from canary_fixture import DAY, SYMBOLS, make_minute_bars, make_snapshots  # noqa: PLC0415
 
     n_min = 12
     snapshots = make_snapshots()
