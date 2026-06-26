@@ -5,6 +5,7 @@ SAME code for mock and real: the URL selects the feed (a local mock vs the real 
 the store root's mode marker ('mock'|'real') guarantees simulated data never lands in the real
 store. This is the FP2 live path and the Monday capture service.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +17,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from datetime import datetime
+from typing import cast
 
 import polars as pl
 import websockets
@@ -23,6 +25,10 @@ import websockets
 from quantlib.features import metrics, store
 from quantlib.features.base import BatchContext
 from quantlib.features.bus_hook import BusHook, bus_publish_enabled
+from quantlib.features.clean_capture import emit_to_frames, minute_frame_to_bars
+from quantlib.features.clean_engine import CleanEngine
+from quantlib.features.clean_registry import ALL_CLEAN_GROUPS, ALL_CLEAN_INPUT_COLS, CLEAN_VERSION_OF
+from quantlib.features.clean_session import build_session
 from quantlib.features.compare import runnable
 from quantlib.features.declarative import ReductionGroup, compute_reduction_batch
 from quantlib.features.incremental import IncrementalEngine
@@ -113,6 +119,64 @@ def _incremental_config() -> tuple[bool, bool]:
         os.environ.get("FP_INCREMENTAL_PARITY") == "1",
         os.environ.get("FP_INCREMENTAL_SLICE") != "0",
     )
+
+
+def clean_engine_enabled() -> bool:
+    """``FP_CLEAN_ENGINE=1`` — route the per-minute compute through the clean ``CleanEngine`` instead of the OLD
+    path (``compute_latest`` + the per-bucket ``IncrementalEngine``). DEFAULT OFF: unset → ``process_bars`` is
+    byte-identical to today (zero deploy risk). The clean engine is built ONCE per session from the startup
+    symbol set (provably fixed within a session — the live stream subscribes to exactly those symbols) and
+    rolls the SAME store rows the OLD path writes. Roll back = unset the flag (no data migration)."""
+    return os.environ.get("FP_CLEAN_ENGINE") == "1"
+
+
+def _session_symbols(snapshots: dict[str, pl.DataFrame], frame: pl.DataFrame) -> list[str]:
+    """The FIXED session symbol set the clean engine's index is built over — the union of the held snapshots'
+    symbols (``daily``/``reference``/``universe`` all carry the whole session universe) plus this minute's
+    symbols as a floor (so a first-minute build before any snapshot is non-empty). Sorted for determinism. The
+    set is fixed within a session (subscription-bounded), so building once is safe."""
+    symbols: set[str] = set(frame["symbol"].to_list())
+    for name in ("daily", "reference", "universe"):
+        if name in snapshots and "symbol" in snapshots[name].columns:
+            symbols.update(snapshots[name]["symbol"].to_list())
+    return sorted(symbols)
+
+
+def _build_clean_engine(state: "CaptureState", frame: pl.DataFrame, window: int) -> CleanEngine:
+    """Build (once per session) the clean engine over the fixed session symbol set + populate its session/static
+    from the held snapshots (``build_session``). Held on ``state.clean_engine`` for the session."""
+    symbols = _session_symbols(state.snapshots, frame)
+    # CleanEngine derives its bar-column set from the groups' input_cols internally (== ALL_CLEAN_INPUT_COLS,
+    # which the marshal uses to produce the matching minute dict).
+    engine = CleanEngine(list(ALL_CLEAN_GROUPS), symbols, window)
+    session, static = build_session(state.snapshots, symbols)
+    engine.set_session(session)
+    engine.static = static
+    return engine
+
+
+def _clean_outputs(
+    state: "CaptureState", frame: pl.DataFrame, window: int, minute_epoch: int
+) -> list[tuple]:
+    """The clean-engine per-minute compute: build/hold the engine, marshal THIS minute's bars into its numpy
+    input, ``emit`` (fold + present-filtered read), and reshape to the per-group ``(symbol, minute, *features)``
+    frames the write loop consumes. Returns the same ``(group, out, ms)`` tuples the OLD path produces (timing is
+    one bulk measurement split across groups — the engine computes all groups in one pass)."""
+    if state.clean_engine is None:
+        state.clean_engine = _build_clean_engine(state, frame, window)
+    engine = state.clean_engine
+    compute_start = time.perf_counter()
+    # ``frame`` is the WHOLE materialized trailing buffer (every minute in the ring); the engine carries its own
+    # ring, so it must be folded ONLY THIS minute's bars — one row per present symbol. Marshaling the whole
+    # buffer would feed duplicate/stale symbols (each symbol once per buffered minute), corrupting the per-minute
+    # present-set the cross-sectional groups reduce over. Filter to the latest minute first.
+    latest_minute = frame.select(pl.col("minute").max()).item()
+    this_minute = frame.filter(pl.col("minute") == latest_minute)
+    minute_bars = minute_frame_to_bars(this_minute, ALL_CLEAN_INPUT_COLS, minute_epoch)
+    present_symbols, features = engine.emit(minute_bars)
+    group_frames = emit_to_frames(present_symbols, features, engine.symbols, minute_epoch)
+    per_ms = (time.perf_counter() - compute_start) * 1000.0 / max(len(group_frames), 1)
+    return [(group, group_frames[group.name], per_ms) for group in ALL_CLEAN_GROUPS]
 
 
 def _engine_for(state: "CaptureState", reduce_input: str, batch_groups: list) -> IncrementalEngine:
@@ -240,20 +304,35 @@ class CaptureState:
     """Rolling buffer + accumulated per-group output. Shared across any connection adapter."""
 
     def __init__(self) -> None:
-        self.ring: MinuteRing | None = None  # trailing-window bars as a ring of per-minute frames (O(new) append)
+        self.ring: MinuteRing | None = (
+            None  # trailing-window bars as a ring of per-minute frames (O(new) append)
+        )
         self.accumulated: dict[str, pl.DataFrame] = {}  # one DEDUPED frame per group
         self.minutes = 0
         self.group_timings: dict[str, float] = {}  # last per-group compute ms (first-class live timing)
-        self.last_write_ms = 0.0  # time spent WRITING last minute — excluded from the bet-relevant compute latency
-        self.writer: StoreWriter | None = None  # set by a live worker -> writes go async, off the compute path
-        self.engines: dict[str, IncrementalEngine] = {}  # one incremental engine per reduce_input bucket (safe groups)
-        self.bus_hook: BusHook | None = None  # set lazily when FP_BUS=1 (real mode) -> publishes vectors off-path
+        self.last_write_ms = (
+            0.0  # time spent WRITING last minute — excluded from the bet-relevant compute latency
+        )
+        self.writer: StoreWriter | None = (
+            None  # set by a live worker -> writes go async, off the compute path
+        )
+        self.engines: dict[str, IncrementalEngine] = (
+            {}
+        )  # one incremental engine per reduce_input bucket (safe groups)
+        self.bus_hook: BusHook | None = (
+            None  # set lazily when FP_BUS=1 (real mode) -> publishes vectors off-path
+        )
         # Set by the warm-start path (``warm_start_ring``) so the FIRST incremental engine seed runs the
         # universal ``assert_ready`` (FULL / legit-not-yet-full / FAILED) + internal invariants against the
         # rehydrated buffer — catching a present-but-not-absorbed fill loudly at init. The populated invariant
         # holds at all times regardless; this just picks the warm-start seed as a convenient call site.
         self.assert_ready_on_seed = False
         self.snapshots: dict[str, pl.DataFrame] = {}  # reference frames (daily, …) held for engine reseed
+        # The clean engine, built ONCE per session from the startup symbol set (provably fixed within a session —
+        # the live stream is subscribed to exactly those symbols) when FP_CLEAN_ENGINE=1; None otherwise. Its
+        # session/static are populated from ``snapshots`` via ``clean_session.build_session``. Replaces the OLD
+        # compute path (compute_latest + the IncrementalEngine buckets) with one ``emit()`` per minute.
+        self.clean_engine: CleanEngine | None = None
 
     @property
     def buffer(self) -> pl.DataFrame | None:
@@ -278,15 +357,29 @@ def _bars_to_frame(bars: list[dict]) -> pl.DataFrame:
     has_ticks = any(column in bar for bar in bars for column in TICK_COLUMNS)
     if has_ticks:
         rows = [
-            {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
-             "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"]),
-             **{column: bar[column] if column in bar else None for column in TICK_COLUMNS}}
+            {
+                "symbol": bar["S"],
+                "minute": datetime.fromisoformat(bar["t"]),
+                "open": float(bar["o"]),
+                "close": float(bar["c"]),
+                "high": float(bar["h"]),
+                "low": float(bar["l"]),
+                "volume": float(bar["v"]),
+                **{column: bar[column] if column in bar else None for column in TICK_COLUMNS},
+            }
             for bar in bars
         ]
         return pl.DataFrame(rows, schema={**BARS_SCHEMA, **TICK_SCHEMA})
     rows = [
-        {"symbol": bar["S"], "minute": datetime.fromisoformat(bar["t"]), "open": float(bar["o"]),
-         "close": float(bar["c"]), "high": float(bar["h"]), "low": float(bar["l"]), "volume": float(bar["v"])}
+        {
+            "symbol": bar["S"],
+            "minute": datetime.fromisoformat(bar["t"]),
+            "open": float(bar["o"]),
+            "close": float(bar["c"]),
+            "high": float(bar["h"]),
+            "low": float(bar["l"]),
+            "volume": float(bar["v"]),
+        }
         for bar in bars
     ]
     return pl.DataFrame(rows, schema=BARS_SCHEMA)
@@ -358,7 +451,7 @@ def process_bars(
         # identical to the folded step history (parity-critical for a hot-swap reseed of the volume engine).
         state.snapshots = snapshots
     frame = state.ring.materialize()
-    latest = frame["minute"].max()
+    latest = cast(datetime, frame["minute"].max())
     target_day = day or str(latest.date())
     frames = {"minute_agg": frame, **(snapshots or {}), **(extra_frames or {})}
     # Attach the per-symbol reduction anchors (volume centering) onto minute_agg from the held ``daily``
@@ -369,6 +462,21 @@ def process_bars(
     frames = attach_reduction_anchors(frames)
     frame = frames["minute_agg"]
     ctx = BatchContext(frames=frames)
+    outputs: list[tuple] = []
+    if clean_engine_enabled():
+        # CLEAN-ENGINE PATH (FP_CLEAN_ENGINE=1): one ``emit()`` over the held per-session engine replaces the OLD
+        # ``compute_latest`` + ``IncrementalEngine`` buckets below. Same ``(group, out, ms)`` tuples → the write
+        # loop is unchanged. ``exclude_groups``/``only_groups`` still apply (the gather phase excludes the xsec
+        # groups per shard); the clean engine computes all groups, so filter its outputs here to match.
+        minute_epoch = int(latest.timestamp())
+        outputs = [
+            (group, out, ms)
+            for group, out, ms in _clean_outputs(state, frame, window, minute_epoch)
+            if group.name not in exclude_groups and (only_groups is None or group.name in only_groups)
+        ]
+        return _write_outputs(
+            state, outputs, root, target_day, mode, shard, latest, accumulate, write, drop_output_symbols
+        )
     selected = [
         group
         for group in runnable(frames)
@@ -376,7 +484,6 @@ def process_bars(
     ]
     # Declarative reduction groups sharing an input run in ONE batched marshal+kernel pass (one symbol-code
     # + numpy copy for all of them); every other group runs individually. Both yield (group, out, ms).
-    outputs: list[tuple] = []
     batchable: dict[str, list] = defaultdict(list)
     for group in selected:
         if isinstance(group, ReductionGroup):
@@ -418,6 +525,33 @@ def process_bars(
         for group in batch_groups:
             outputs.append((group, batched[group.name], per_ms))
 
+    return _write_outputs(
+        state, outputs, root, target_day, mode, shard, latest, accumulate, write, drop_output_symbols
+    )
+
+
+def _group_version(group: object, group_name: str) -> str:
+    """The store ``version`` for a group's rows: a legacy group carries its own ``version``; a clean
+    ``EngineGroup`` (no version attribute) resolves to its legacy parent's version via ``CLEAN_VERSION_OF`` so
+    both engines write the SAME store path."""
+    return str(getattr(group, "version", None) or CLEAN_VERSION_OF[group_name])
+
+
+def _write_outputs(
+    state: "CaptureState",
+    outputs: list[tuple],
+    root: str,
+    target_day: str,
+    mode: str,
+    shard: int | None,
+    latest: object,
+    accumulate: bool,
+    write: bool,
+    drop_output_symbols: frozenset[str],
+) -> None:
+    """The shared write/bus/timing tail — UNCHANGED across the OLD and clean compute paths (both produce the same
+    ``(group, out, ms)`` tuples). Persists one ``(symbol, minute)`` row per present symbol per group, records the
+    per-group timing, optionally accumulates / publishes to the bus."""
     write_start = time.perf_counter()
     publish_outputs: list[tuple[str, pl.DataFrame]] = []
     bus_on = mode == "real" and bus_publish_enabled()
@@ -432,14 +566,23 @@ def process_bars(
         if accumulate:
             prior = state.accumulated.get(group.name)
             state.accumulated[group.name] = (
-                out if prior is None else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
+                out
+                if prior is None
+                else pl.concat([prior, out]).unique(subset=["symbol", "minute"], keep="last")
             )
         if write:
             # Append THIS minute only (minute-keyed file) — O(1) per tick, idempotent on re-delivery.
             # Off the critical path when a StoreWriter is set (live workers): submit + move on to next minute.
             write_kwargs = dict(
-                root=root, group=group.name, version=group.version, source=store.source_for_mode(mode),
-                day=target_day, frame=out, mode=mode, shard=shard, minute=latest,
+                root=root,
+                group=group.name,
+                version=_group_version(group, group.name),
+                source=store.source_for_mode(mode),
+                day=target_day,
+                frame=out,
+                mode=mode,
+                shard=shard,
+                minute=latest,
             )
             if state.writer is not None:
                 state.writer.submit(**write_kwargs)
@@ -451,7 +594,9 @@ def process_bars(
         if state.bus_hook is None:
             state.bus_hook = BusHook()
         state.bus_hook.submit(latest, publish_outputs)
-    metrics.record_group_timings(state.group_timings)  # -> Prometheus histogram, graphed per-group in Grafana
+    metrics.record_group_timings(
+        state.group_timings
+    )  # -> Prometheus histogram, graphed per-group in Grafana
     state.minutes += 1
 
 
@@ -519,7 +664,9 @@ async def capture(
 
 def main() -> None:
     if len(sys.argv) < 5:
-        raise SystemExit("usage: python -m quantlib.features.capture <url> <sym,sym> <root> <mock|real> [day]")
+        raise SystemExit(
+            "usage: python -m quantlib.features.capture <url> <sym,sym> <root> <mock|real> [day]"
+        )
     url, symbols, root, mode = sys.argv[1], sys.argv[2].split(","), sys.argv[3], sys.argv[4]
     day = sys.argv[5] if len(sys.argv) > 5 else None
     count = asyncio.run(capture(url, symbols, root, mode, day=day))
