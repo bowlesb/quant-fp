@@ -32,9 +32,27 @@ def minute_frame_to_bars(
     (1,) int64}``. ``cols`` is the engine's column set (the union of every group's ``input_cols``); a column the
     frame lacks is filled NaN (honest absence). ``frame`` is THIS minute's rows only (one per present symbol) —
     NOT the trailing buffer, which the engine carries itself. ``minute_epoch`` is epoch-seconds for the watermark
-    + the time-window stamps."""
+    + the time-window stamps.
+
+    STRUCTURAL INPUT GATE (guards the #80 class — a whole-buffer frame here feeds the engine duplicate/stale
+    symbols and silently corrupts the cross-sectional present-set; a value-diff canary can be BLIND to it, so
+    assert the contract directly): the frame must be ONE minute's bars — exactly one row per symbol (no duplicate
+    symbols), and a single distinct ``minute`` when the column is present. Cheap, fires loudly on a marshal
+    regression rather than corrupting features silently."""
     symbols = frame["symbol"].to_numpy()
     n = len(symbols)
+    n_distinct = len(set(symbols.tolist()))
+    if n != n_distinct:
+        raise ValueError(
+            f"minute_frame_to_bars got a non-this-minute frame: {n} rows but {n_distinct} distinct symbols "
+            f"(duplicate symbols = whole-buffer marshal, the #80 bug). Filter the frame to the latest minute "
+            f"before marshaling."
+        )
+    if "minute" in frame.columns and frame["minute"].n_unique() > 1:
+        raise ValueError(
+            f"minute_frame_to_bars got {frame['minute'].n_unique()} distinct minutes; expected exactly one (the "
+            f"trailing buffer must NOT be marshaled — the engine carries its own ring)."
+        )
     minute_bars: dict[str, np.ndarray] = {
         "symbol": symbols,
         "minute_epoch": np.array([minute_epoch], dtype=np.int64),
