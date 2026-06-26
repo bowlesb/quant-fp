@@ -3376,18 +3376,15 @@ def test_live_late_streamed_symbol_does_not_crash_clean_engine() -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="#78 coverage gap: the late symbol is currently SKIPPED (skip-not-crash), "
-                                       "so clean DROPS ZZZ while OLD emits it — a silent missing-feature gap. The "
-                                       "correct fix builds ring.index from the SUBSCRIBED list so clean EMITS ZZZ "
-                                       "== OLD (coverage parity). A skip-only fix must FAIL this; only the "
-                                       "subscribed-index fix flips it green.")
-def test_live_late_streamed_symbol_emits_coverage_parity_with_old() -> None:
-    """#76 canary condition-B — COVERAGE half (Lead's strengthening: skip-not-crash ALONE is the lazy fix; it
-    silently drops the late symbol where OLD computes it). The correct fix builds the engine index from the
-    SUBSCRIBED symbol list so a late-streaming symbol is in ring.index and clean EMITS its warm-up row like OLD.
-    This asserts coverage PARITY: clean emits ZZZ at min 8 AND its row matches the OLD path's ZZZ row cell-for-
-    cell (a representative windowed group). xfail-strict until the subscribed-index fix lands — a skip-only fix
-    leaves ZZZ absent and FAILS here, so it can't be rubber-stamped green."""
+def test_live_universe_member_late_streamer_emits_coverage_parity_with_old() -> None:
+    """#76 canary condition-B — COVERAGE half (Lead correction: distinguish by UNIVERSE-MEMBERSHIP, not
+    lateness). A UNIVERSE-MEMBER symbol (in snapshots['universe']) that first trades AFTER minute 0 MUST emit ==
+    OLD: _session_symbols unions snapshots['universe'] at the min-0 build, so a universe member is in ring.index
+    regardless of WHEN it first trades → clean EMITS it the minute it streams, like OLD. (A NON-universe symbol
+    is correctly SKIPPED — gated separately by the crash-safety test; demanding IT emit would over-constrain.)
+    This passes under the EXISTING universe-union + skip-not-crash fix — no subscribed-list-index change needed.
+    Warms 8 minutes over {AAA,BBB,CCC} (WWW in-universe but not yet trading), then WWW first streams at min 8;
+    asserts clean emits WWW's warm-up row AND it matches OLD's WWW row cell-for-cell (a windowed group)."""
     import datetime as dt  # noqa: PLC0415
     import os  # noqa: PLC0415
 
@@ -3396,6 +3393,7 @@ def test_live_late_streamed_symbol_emits_coverage_parity_with_old() -> None:
     from quantlib.features.capture import CaptureState, process_bars  # noqa: PLC0415
 
     base = dt.datetime(2026, 6, 18, 14, 0, tzinfo=dt.timezone.utc)
+    universe = pl.DataFrame([{"symbol": s} for s in ("AAA", "BBB", "CCC", "WWW")])  # WWW is a member
 
     def _bars(minute: dt.datetime, extra: str | None = None) -> list[dict]:
         syms = ["AAA", "BBB", "CCC"] + ([extra] if extra else [])
@@ -3407,35 +3405,43 @@ def test_live_late_streamed_symbol_emits_coverage_parity_with_old() -> None:
                          "l": close * 0.998, "v": 900.0, "t": minute.isoformat()})
         return rows
 
+    def _run(flag: bool) -> CaptureState:
+        if flag:
+            os.environ["FP_CLEAN_ENGINE"] = "1"
+        else:
+            os.environ.pop("FP_CLEAN_ENGINE", None)
+        try:
+            state = CaptureState()
+            for mi in range(8):  # WWW is in the universe but not yet trading
+                process_bars(state, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cc78u", "mock",
+                             "2026-06-18", 120, snapshots={"universe": universe}, accumulate=True, write=False)
+            # min 8: WWW (a universe member) first streams → must emit, since it's in ring.index by the union
+            process_bars(state, _bars(base + dt.timedelta(minutes=8), extra="WWW"), "/tmp/cc78u", "mock",
+                         "2026-06-18", 120, snapshots={"universe": universe}, accumulate=True, write=False)
+        finally:
+            os.environ.pop("FP_CLEAN_ENGINE", None)
+        return state
+
     min8 = base + dt.timedelta(minutes=8)
-    clean_state = _run_late_symbol_clean(base)
-    # OLD path over the identical stream
-    os.environ.pop("FP_CLEAN_ENGINE", None)
-    old_state = CaptureState()
-    for mi in range(8):
-        process_bars(old_state, _bars(base + dt.timedelta(minutes=mi)), "/tmp/cc78old", "mock",
-                     "2026-06-18", 120, accumulate=True, write=False)
-    process_bars(old_state, _bars(min8, extra="ZZZ"), "/tmp/cc78old", "mock",
-                 "2026-06-18", 120, accumulate=True, write=False)
+    clean_state, old_state = _run(True), _run(False)
 
-    def _zzz(state: CaptureState, group: str) -> pl.DataFrame:
-        d = state.accumulated[group]
-        return d.with_columns(pl.col("minute").dt.replace_time_zone("UTC")).filter(
-            (pl.col("symbol") == "ZZZ") & (pl.col("minute") == min8))
+    def _www(state: CaptureState) -> pl.DataFrame:
+        return state.accumulated["price_volume"].with_columns(
+            pl.col("minute").dt.replace_time_zone("UTC")).filter(
+            (pl.col("symbol") == "WWW") & (pl.col("minute") == min8))
 
-    clean_zzz = _zzz(clean_state, "price_volume")
-    old_zzz = _zzz(old_state, "price_volume")
-    assert clean_zzz.height >= 1, "clean must EMIT the late symbol ZZZ (subscribed-index coverage), not skip it"
-    crow = clean_zzz.tail(1).to_dicts()[0]
-    orow = old_zzz.tail(1).to_dicts()[0]
-    for fname in [c for c in old_zzz.columns if c not in ("symbol", "minute")]:
+    clean_www, old_www = _www(clean_state), _www(old_state)
+    assert clean_www.height >= 1, "universe-member WWW must EMIT the minute it first streams (universe-union index)"
+    assert old_www.height >= 1, "OLD must emit WWW (the parity baseline)"
+    crow, orow = clean_www.tail(1).to_dicts()[0], old_www.tail(1).to_dicts()[0]
+    for fname in [c for c in old_www.columns if c not in ("symbol", "minute")]:
         ov, cv = orow.get(fname), crow.get(fname)
         ofin = ov is not None and np.isfinite(float(ov))
         cfin = cv is not None and np.isfinite(float(cv))
         if not ofin and not cfin:
             continue
         assert ofin and cfin and np.isclose(float(ov), float(cv), rtol=1e-6, atol=1e-9), (
-            f"late-symbol ZZZ coverage parity: price_volume.{fname} OLD {ov} clean {cv}"
+            f"universe-member late-streamer coverage parity: price_volume.{fname} OLD {ov} clean {cv}"
         )
 
 
@@ -4196,6 +4202,15 @@ _LEGACY_GROUP_OF = {
     "swing": ("swing", "SwingGroup"),
     "volume": ("volume", "VolumeGroup"),
     "intraday_seasonality": ("intraday_seasonality", "IntradaySeasonalityGroup"),
+    # tick-tape (#63): the 8 trade-tape groups, now registered in ALL_CLEAN_GROUPS (#79 enrich-then-register).
+    "print_hhi": ("print_hhi", "PrintHHIGroup"),
+    "size_entropy": ("size_entropy", "SizeEntropyGroup"),
+    "subminute_gap_fano": ("subminute_gap_fano", "SubminuteGapFanoGroup"),
+    "inter_arrival": ("inter_arrival", "InterArrivalGroup"),
+    "large_print_burst": ("large_print_burst", "LargePrintBurstGroup"),
+    "microstructure_burst": ("microstructure_burst", "MicrostructureBurstGroup"),
+    "tick_runlength": ("tick_runlength", "TickRunLengthGroup"),
+    "trade_size_dist": ("trade_size_dist", "TradeSizeDistGroup"),
 }
 
 # Known stubs (06-25 sweep): clean feature-set ⊊ legacy. xfail-tracked until ArchOverhaul fills them.
@@ -4208,10 +4223,11 @@ def _clean_group_instance(name):  # type: ignore[no-untyped-def]
     import quantlib.features.clean_groups_pointwise as cp  # noqa: PLC0415
     import quantlib.features.clean_groups_reference as cr  # noqa: PLC0415
     import quantlib.features.clean_groups_stateful as cs  # noqa: PLC0415
+    import quantlib.features.clean_groups_tick as ct  # noqa: PLC0415
     import quantlib.features.clean_groups_windowed as cw  # noqa: PLC0415
     import quantlib.features.clean_groups_xsectional as cx  # noqa: PLC0415
 
-    for mod in (cw, ce, cx, cd, cs, cp, cr):
+    for mod in (cw, ce, cx, cd, cs, cp, cr, ct):
         for attr in dir(mod):
             obj = getattr(mod, attr)
             if isinstance(obj, type) and getattr(obj, "name", None) == name and hasattr(obj, "feature_names"):
