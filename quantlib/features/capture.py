@@ -166,7 +166,13 @@ def _clean_outputs(
         state.clean_engine = _build_clean_engine(state, frame, window)
     engine = state.clean_engine
     compute_start = time.perf_counter()
-    minute_bars = minute_frame_to_bars(frame, ALL_CLEAN_INPUT_COLS, minute_epoch)
+    # ``frame`` is the WHOLE materialized trailing buffer (every minute in the ring); the engine carries its own
+    # ring, so it must be folded ONLY THIS minute's bars — one row per present symbol. Marshaling the whole
+    # buffer would feed duplicate/stale symbols (each symbol once per buffered minute), corrupting the per-minute
+    # present-set the cross-sectional groups reduce over. Filter to the latest minute first.
+    latest_minute = frame.select(pl.col("minute").max()).item()
+    this_minute = frame.filter(pl.col("minute") == latest_minute)
+    minute_bars = minute_frame_to_bars(this_minute, ALL_CLEAN_INPUT_COLS, minute_epoch)
     present_symbols, features = engine.emit(minute_bars)
     group_frames = emit_to_frames(present_symbols, features, engine.symbols, minute_epoch)
     per_ms = (time.perf_counter() - compute_start) * 1000.0 / max(len(group_frames), 1)
