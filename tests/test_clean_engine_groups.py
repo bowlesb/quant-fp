@@ -3578,6 +3578,16 @@ def test_full_session_canary_live_matches_batch_capture_replay() -> None:
         return bars
 
     capture_mod.minute_frame_to_bars = _spy
+    # CALLSITE assertion (#76 item 1): spy build_session so we prove process_bars actually CALLS it at the
+    # per-session rebuild (the live wiring exists) — not just that the builder works in isolation.
+    build_session_calls = [0]
+    original_build = capture_mod.build_session
+
+    def _build_spy(snaps, syms):  # type: ignore[no-untyped-def]
+        build_session_calls[0] += 1
+        return original_build(snaps, syms)
+
+    capture_mod.build_session = _build_spy
     os.environ["FP_CLEAN_ENGINE"] = "1"
     try:
         live = CaptureState()
@@ -3587,6 +3597,16 @@ def test_full_session_canary_live_matches_batch_capture_replay() -> None:
     finally:
         os.environ.pop("FP_CLEAN_ENGINE", None)
         capture_mod.minute_frame_to_bars = original
+        capture_mod.build_session = original_build
+
+    # the live path called build_session EXACTLY ONCE (built once per session, then held — not rebuilt every
+    # minute), and populated the engine's session with the real matrices/CSR.
+    assert build_session_calls[0] == 1, (
+        f"process_bars must call build_session exactly once per session at the rebuild (got {build_session_calls[0]})"
+    )
+    assert live.clean_engine is not None and all(
+        key in live.clean_engine.session for key in ("daily_close", "news_at", "edgar_at")
+    ), "the live build_session call must populate the session (daily_close/news_at/edgar_at)"
 
     # replay the captured live inputs through a fresh batch engine over the same session/static
     session, static = build_session(snapshots, SYMBOLS)
