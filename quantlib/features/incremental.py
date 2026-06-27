@@ -46,7 +46,12 @@ from quantlib.features.declarative import (
 from quantlib.features.metrics import record_point_ring_parity
 from quantlib.features.point_ring import PointRing, point_frame_from_ring, point_specs
 from quantlib.features.slice_derive import lag_specs, rewrite_global, rust_slice_derive
-from quantlib.features.state_spine import obv_increment, price_volume_safe_cols, spine_active
+from quantlib.features.state_spine import (
+    clean_momentum_safe_cols,
+    obv_increment,
+    price_volume_safe_cols,
+    spine_active,
+)
 
 _OLS_KEYS = ("b", "x", "y", "xy", "xx", "yy")
 
@@ -721,96 +726,121 @@ class IncrementalEngine:
             matrix[:, col_index] = column
         return matrix
 
-    def _matrix_at_spine(self, frame: pl.DataFrame, minute: object) -> np.ndarray:
-        """FP_STATE_SPINE: the (n_symbols, n_value_cols) value matrix for ``price_volume`` at the LIVE latest
-        ``minute``, built entirely in numpy — no per-minute polars derive, no ``_reindex`` join.
-
-        The live frame is delivered minute-major (capture does NOT sort it), so we order it ``[symbol, minute]``
-        here with a numpy lexsort (polars-free) to make each symbol's rows contiguous and minute-ascending. We
-        then read the per-symbol LATEST row (its block's last) and PRIOR close (the block's second-to-last —
-        ``close.shift(1).over("symbol")`` positionally) as numpy arrays,
-        aligned to the fixed session index, then:
-          * ``price_volume_safe_cols`` derives the safe value columns (vol/cv/mfv/up/dn + presence + the pv-corr
-            OLS pairs with the y=vol−anchor centering) — cell-for-cell the safe half of ``_derived_row``;
-          * the OBV-slope OLS pairs are rebuilt from the engine's EXISTING carried ``obv_running`` + rolled
-            ``ref_epoch`` (the same already-numpy, already-#451-proven path ``_stateful_matrix`` runs), advanced by
-            ``obv_increment`` — so only the increment's SOURCE moves to numpy; the carried OBV math is unchanged.
-        """
+    def _spine_current_bars(
+        self, frame: pl.DataFrame, minute_epoch: int, cols: tuple[str, ...]
+    ) -> tuple[dict[str, np.ndarray], np.ndarray]:
+        """Read ONLY the current minute's bars (one row per present symbol) and scatter the requested input
+        ``cols`` into the fixed symbol index by numpy position. Returns ({col: (n_sym,) array, NaN where absent},
+        present-mask). NO sort and NO whole-buffer read — ``minute == latest`` is a boolean row-mask (not a
+        sort/pivot/join) and the scatter is numpy fancy-indexing. Shared by every group's spine derive; the
+        historical context (prior close, carried sums/OLS state) lives in carried state, not the buffer."""
         symbols = self.symbols or []
         n_sym = len(symbols)
         sym_pos = {sym: i for i, sym in enumerate(symbols)}
-
-        # Read ONLY the current minute's bars — one row per present symbol — and scatter them into the fixed
-        # symbol index by numpy position. NO sort and NO whole-buffer read: the historical context the derive
-        # needs (each symbol's PRIOR close) comes from carried state (``spine_prior_close``), not from re-reading
-        # the buffer. ``minute == latest`` is a boolean row-mask (not a sort/pivot/join — the ops Ben named), and
-        # the scatter is numpy fancy-indexing. This is the spine's whole point: derive = current bar + carried
-        # state, so the per-minute path has zero sort.
-        minute_epoch = int(minute.timestamp())  # type: ignore[attr-defined]
         sym_all = frame["symbol"].to_numpy()
         min_all = frame["minute"].dt.epoch("s").to_numpy().astype(np.int64)
-        at_t = min_all == minute_epoch  # the current minute's rows (the only ones the live step folds)
+        at_t = min_all == minute_epoch
         cur_syms = sym_all[at_t]
         pos = np.array([sym_pos.get(s, -1) for s in cur_syms], dtype=np.int64)
         if (pos < 0).any():
             raise SymbolSetExpanded([str(s) for s in cur_syms[pos < 0][:5]])  # new ticker -> caller re-seeds
-
-        close = np.full(n_sym, np.nan)
-        high = np.full(n_sym, np.nan)
-        low = np.full(n_sym, np.nan)
-        volume = np.full(n_sym, np.nan)
-        anchor_volume = np.full(n_sym, np.nan)
         present = np.zeros(n_sym, dtype=bool)
-        close[pos] = frame["close"].to_numpy().astype(np.float64)[at_t]
-        high[pos] = frame["high"].to_numpy().astype(np.float64)[at_t]
-        low[pos] = frame["low"].to_numpy().astype(np.float64)[at_t]
-        volume[pos] = frame["volume"].to_numpy().astype(np.float64)[at_t]
-        anchor_volume[pos] = frame["__anchor_volume"].to_numpy().astype(np.float64)[at_t]
         present[pos] = True
+        out: dict[str, np.ndarray] = {}
+        for col in cols:
+            arr = np.full(n_sym, np.nan)
+            arr[pos] = frame[col].to_numpy().astype(np.float64)[at_t]
+            out[col] = arr
+        return out, present
 
-        # PRIOR close = carried state (last minute's close per symbol), NOT a buffer re-read. Seeded once at
-        # ``seed`` (off the hot path); NaN for a symbol not yet seen (a first appearance -> ret null, exactly as
-        # ``close.shift(1).over("symbol")`` leaves it). After this minute's derive we roll it forward to the
-        # current close (below), so next minute reads it as the prior.
-        if self.spine_prior_close is None:
-            self.spine_prior_close = np.full(n_sym, np.nan)
-        prior_close = self.spine_prior_close
-
-        y_anchored = bool(self.reg_y_anchor)  # FP_RUST_REDUCE on -> pv y is centered on the volume anchor
-        safe = price_volume_safe_cols(
-            close, high, low, volume, anchor_volume, prior_close, present, y_anchored=y_anchored
-        )
-        matrix = np.zeros((n_sym, len(self.value_cols)), dtype=np.float64)
-        for col, column in safe.items():
-            matrix[:, self.col_index[col]] = np.nan_to_num(column, nan=0.0)
-
-        # OBV-slope OLS pairs from the carried state (== _stateful_matrix's cumulative+time block, numpy already).
+    def _spine_time_ols(
+        self,
+        matrix: np.ndarray,
+        ns: str,
+        minute_epoch: int,
+        y: np.ndarray,
+        present: np.ndarray,
+    ) -> None:
+        """Write a time-OLS regression's 6 paired columns (b/x/y/xy/xx/yy) into ``matrix`` from the carried rolled
+        ``ref_epoch`` (x = (minute−origin)/60) and a NON-stateful ``y`` (the current-bar regressand). == the
+        ``_stateful_matrix`` time-x / non-stateful-y block, numpy-already; pairs only present, finite cells.
+        """
         assert self.ref_epoch is not None
-        time_x = np.full(n_sym, (minute_epoch - self.ref_epoch) / 60.0, dtype=np.float64)
-        inc = obv_increment(close, prior_close, volume, present)
-        for ns in self.stateful_ns:
-            running = self.obv_running.setdefault(ns, np.zeros(n_sym, dtype=np.float64))
-            running += inc
-            y = running.copy()
-            both = np.isfinite(time_x) & np.isfinite(y) & present
-            x_paired = np.where(both, time_x, 0.0)
-            y_paired = np.where(both, y, 0.0)
-            pairs = {
-                "b": both.astype(np.float64),
-                "x": x_paired,
-                "y": y_paired,
-                "xy": x_paired * y_paired,
-                "xx": x_paired * x_paired,
-                "yy": y_paired * y_paired,
-            }
-            for key, column in pairs.items():
-                matrix[:, self.col_index[f"__rd_{ns}_{key}"]] = column
+        time_x = np.full(len(present), (minute_epoch - self.ref_epoch) / 60.0, dtype=np.float64)
+        both = np.isfinite(time_x) & np.isfinite(y) & present
+        x_paired = np.where(both, time_x, 0.0)
+        y_paired = np.where(both, y, 0.0)
+        pairs = {
+            "b": both.astype(np.float64),
+            "x": x_paired,
+            "y": y_paired,
+            "xy": x_paired * y_paired,
+            "xx": x_paired * x_paired,
+            "yy": y_paired * y_paired,
+        }
+        for key, column in pairs.items():
+            matrix[:, self.col_index[f"__rd_{ns}_{key}"]] = column
 
-        # Roll the carried prior close forward: this minute's close becomes next minute's prior (per present
-        # symbol; an absent symbol keeps its last-seen close, so a gap still reads the last PRESENT bar as the
-        # positional shift(1), matching backfill). One per-symbol scatter — no buffer read.
-        self.spine_prior_close[present] = close[present]
-        return matrix
+    def _matrix_at_spine(self, frame: pl.DataFrame, minute: object) -> np.ndarray:
+        """FP_STATE_SPINE: the (n_symbols, n_value_cols) value matrix at the LIVE latest ``minute``, built
+        entirely in numpy — no per-minute polars derive, no sort, no ``_reindex`` join. Dispatches to the
+        migrated group's derive (the engine's group set is exactly one of ``SPINE_GROUP_SETS``).
+
+        Common to every group: read the current minute's bars + scatter by symbol position (``_spine_current_bars``)
+        and read historical context from CARRIED state, never the buffer. Per group: the reduced/OLS derive.
+        """
+        n_sym = len(self.symbols or [])
+        minute_epoch = int(minute.timestamp())  # type: ignore[attr-defined]
+        group = self.groups[0].name
+        matrix = np.zeros((n_sym, len(self.value_cols)), dtype=np.float64)
+
+        if group == "price_volume":
+            bars, present = self._spine_current_bars(
+                frame, minute_epoch, ("close", "high", "low", "volume", "__anchor_volume")
+            )
+            close = bars["close"]
+            # PRIOR close = carried state (last minute's close per symbol), seeded once at seed(); NaN for a
+            # first appearance (-> ret null, as shift(1) leaves it). Rolled forward at the end.
+            if self.spine_prior_close is None:
+                self.spine_prior_close = np.full(n_sym, np.nan)
+            prior_close = self.spine_prior_close
+            y_anchored = bool(self.reg_y_anchor)  # FP_RUST_REDUCE -> pv y centered on the volume anchor
+            safe = price_volume_safe_cols(
+                close,
+                bars["high"],
+                bars["low"],
+                bars["volume"],
+                bars["__anchor_volume"],
+                prior_close,
+                present,
+                y_anchored=y_anchored,
+            )
+            for col, column in safe.items():
+                matrix[:, self.col_index[col]] = np.nan_to_num(column, nan=0.0)
+            # OBV-slope time-OLS: y = the carried obv_running (advanced by the numpy-sourced increment).
+            inc = obv_increment(close, prior_close, bars["volume"], present)
+            for ns in self.stateful_ns:
+                running = self.obv_running.setdefault(ns, np.zeros(n_sym, dtype=np.float64))
+                running += inc
+                self._spine_time_ols(matrix, ns, minute_epoch, running.copy(), present)
+            self.spine_prior_close[present] = close[present]
+            return matrix
+
+        if group == "clean_momentum":
+            bars, present = self._spine_current_bars(frame, minute_epoch, ("close", "__anchor_close"))
+            close = bars["close"]
+            centered = bool(self.reg_y_anchor)  # FP_RUST_REDUCE -> cm_close centered on the close anchor
+            safe = clean_momentum_safe_cols(close, bars["__anchor_close"], present, centered=centered)
+            for col, column in safe.items():
+                matrix[:, self.col_index[col]] = np.nan_to_num(column, nan=0.0)
+            # cm_clean time-OLS: x = carried time, y = current-bar close (NON-stateful). Centered on the close
+            # anchor under FP_RUST_REDUCE, matching _ols_derived's y-centering (OLS translation-invariant in y).
+            cm_y = (close - bars["__anchor_close"]) if centered else close
+            for ns in self.stateful_ns:
+                self._spine_time_ols(matrix, ns, minute_epoch, cm_y, present)
+            return matrix
+
+        raise AssertionError(f"spine path entered for un-migrated group set: {group}")
 
     def _reindex_to_index(self, row: pl.DataFrame) -> tuple[pl.DataFrame, np.ndarray]:
         """Align a present-symbols-only derived ``row`` to the fixed session index (``self.symbols``, sorted).

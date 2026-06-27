@@ -34,20 +34,29 @@ import numpy as np
 # declarative._USE_RUST_REDUCE so a test toggling the env var drives both states in lockstep.
 USE_STATE_SPINE = bool(os.environ.get("FP_STATE_SPINE")) and os.environ.get("FP_STATE_SPINE") != "0"
 
-# The one group wired onto the numpy derive in step 1. Kept explicit (not "all groups") so the flag is a
-# single-feature demonstration, not a broad migration — the engine only takes the numpy path when its groups
-# are exactly this set.
+# The groups wired onto the numpy derive, each as its OWN single-group set. The engine takes the numpy path only
+# when its groups are EXACTLY one of these sets — so a group rides the spine standalone (its own gated engine),
+# and any other composition falls through to today's polars derive. Widened deliberately, ONE group at a time,
+# each value-gated (#451 byte-identical) before it is added here.
+#   step 1: price_volume (#458/#459)
+#   step 2: clean_momentum
+SPINE_GROUP_SETS: tuple[frozenset[str], ...] = (
+    frozenset({"price_volume"}),
+    frozenset({"clean_momentum"}),
+)
+
+# Back-compat alias (step 1 referenced SPINE_GROUPS); kept so external readers of the step-1 name still resolve.
 SPINE_GROUPS: frozenset[str] = frozenset({"price_volume"})
 
 
 def spine_active(group_names: frozenset[str] | set[str]) -> bool:
-    """True when the flag is on AND the engine's groups are exactly the step-1 scope (``price_volume`` alone).
+    """True when the flag is on AND the engine's groups are EXACTLY one migrated single-group set.
 
-    A conservative gate: the numpy derive is only entered for the single demonstrated feature. Any other group
-    composition falls through to today's polars ``_derived_row`` — so arming the flag in an engine that also
-    holds other groups is a no-op, not a silent wrong path. Widened deliberately, group by group, only as each
-    is value-gated onto the carried path."""
-    return USE_STATE_SPINE and frozenset(group_names) == SPINE_GROUPS
+    A conservative gate: the numpy derive is entered only for an engine holding exactly one already-migrated
+    group (price_volume, or clean_momentum). Any other composition (a mixed engine, an un-migrated group) falls
+    through to today's polars ``_derived_row`` — so arming the flag is never a silent wrong path. Widened one
+    group at a time, each #451-value-gated before being added to ``SPINE_GROUP_SETS``."""
+    return USE_STATE_SPINE and frozenset(group_names) in SPINE_GROUP_SETS
 
 
 def price_volume_safe_cols(
@@ -118,6 +127,44 @@ def price_volume_safe_cols(
         "__rd_0_pv_xx": x_paired * x_paired,
         "__rd_0_pv_yy": y_paired * y_paired,
     }
+
+
+def clean_momentum_safe_cols(
+    close: np.ndarray,
+    anchor_close: np.ndarray,
+    present: np.ndarray,
+    *,
+    centered: bool,
+) -> dict[str, np.ndarray]:
+    """Numpy derive of ``clean_momentum``'s SAFE (non-regression) value columns at the latest minute — the
+    polars-free equivalent of the reduced-col half of ``_derived_row`` for this group.
+
+    ``clean_momentum`` reduces ``cm_close`` (mean, std) + ``cm_one`` (sum) and regresses ``cm_clean`` (time-OLS:
+    x=time STATEFUL → rides the engine's carried ``ref_epoch``; y=close NON-stateful). The OLS pairs are built by
+    the caller from the carried time x + the current-bar close y (analogous to the obv block but with a
+    non-stateful y); this function produces ONLY the reduced cols:
+      * ``cm_close`` base + presence ``__p`` + raw square ``__sq`` (for mean/std)
+      * under ``centered`` (FP_RUST_REDUCE): the additive centered power sums ``__c = close − anchor_close`` and
+        ``__csq = (close − anchor_close)²`` (the shift-invariant, conditioned variance path the std/r2/resid-std
+        read — the close y-anchor that closes clean_momentum's 620× near-perfect-fit breach)
+      * ``cm_one = 1.0`` (the count base; sum-only, so no presence/square)
+
+    An ABSENT symbol (``present`` False) has no bar → null base (the matrix is pre-zeroed; presence=0), matching
+    the batch (no row, no contribution)."""
+    cm_close = np.where(present, close, np.nan)
+    cols: dict[str, np.ndarray] = {
+        "__b0_cm_close": cm_close,
+        "__b0_cm_close__p": np.where(np.isfinite(cm_close), 1.0, 0.0),
+        "__b0_cm_close__sq": cm_close * cm_close,
+        "__b0_cm_one": np.where(present, 1.0, np.nan),
+    }
+    if centered:
+        vc = (
+            cm_close - anchor_close
+        )  # null stays null (anchor is a finite per-symbol const; absent → cm_close NaN)
+        cols["__b0_cm_close__c"] = vc
+        cols["__b0_cm_close__csq"] = vc * vc
+    return cols
 
 
 def obv_increment(
